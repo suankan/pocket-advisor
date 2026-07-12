@@ -39,26 +39,38 @@ def test_overlay_applies():
 
 def test_unknown_key_aborts():
     print("unknown key aborts:")
-    p = write_yaml("privilege:\n  privleged_folders: [x]\n")  # typo
+    p = write_yaml("privilege:\n  document_folder: [x]\n")  # typo (missing 's')
     try:
         config.load_yaml_overlay(p)
         check("aborts on typo", False)
     except SystemExit as e:
-        check("aborts on typo", "privilege.privleged_folders" in str(e))
+        check("aborts on typo", "privilege.document_folder" in str(e))
     finally:
         p.unlink()
 
 
 def test_list_to_set():
     print("list -> set conversion:")
-    before = config.PRIVILEGED_FOLDERS
-    p = write_yaml("privilege:\n  privileged_folders: [a, b]\n")
+    before = config.DOCUMENT_FOLDERS
+    p = write_yaml("privilege:\n  document_folders: [a, b]\n")
     try:
         config.load_yaml_overlay(p)
-        check("converted to set", config.PRIVILEGED_FOLDERS == {"a", "b"})
+        check("converted to set", config.DOCUMENT_FOLDERS == {"a", "b"})
     finally:
-        config.PRIVILEGED_FOLDERS = before
+        config.DOCUMENT_FOLDERS = before
         p.unlink()
+
+
+def test_is_privileged_path():
+    print("is_privileged_path convention:")
+    check("top-level privileged/ wrapper",
+          config.is_privileged_path("privileged/example-law-firm.example/x.eml"))
+    check("privileged/ nested deeper",
+          config.is_privileged_path("mail/privileged/sub/x.eml"))
+    check("not privileged: no privileged/ ancestor",
+          not config.is_privileged_path("example-law-firm.example/x.eml"))
+    check("filename itself named 'privileged' does not count",
+          not config.is_privileged_path("docs/privileged"))
 
 
 def test_derived_path_recomputed():
@@ -103,6 +115,7 @@ def main():
     test_overlay_applies()
     test_unknown_key_aborts()
     test_list_to_set()
+    test_is_privileged_path()
     test_derived_path_recomputed()
     test_workspace_dir_derives_eval_paths()
     test_missing_file_is_a_noop()

@@ -45,7 +45,12 @@ def classify_document(path: Path):
 def iter_source_files():
     """Only the configured drop folders — never the email folders or
     stray files at the ingestion-sources root. Also used by
-    verify_integrity.py so both walks apply identical filters."""
+    verify_integrity.py so both walks apply identical filters.
+
+    Yields (path, folder) pairs — folder is the matching
+    config.DOCUMENT_FOLDERS entry (possibly multi-segment, e.g.
+    "privileged/additional-documents"), needed by callers to strip the
+    right number of leading path parts."""
     for folder in sorted(config.DOCUMENT_FOLDERS):
         root = config.INGESTION_SOURCES / folder
         if not root.exists():
@@ -57,7 +62,7 @@ def iter_source_files():
                 continue
             if path.suffix.lower() == ".eml":
                 continue  # parse_eml.py's domain
-            yield path
+            yield path, folder
 
 
 def process_document(conn, doc_id, email_id, copy_path, filename):
@@ -129,11 +134,20 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
              " text — verify")
 
 
-def insert_document(conn, path: Path, rel_path: Path, sha, raw: bytes):
+def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes):
     now = now_iso()
-    # Relative path under the drop folder: parent folders carry essential
+    # Path segments belonging to the configured drop folder itself
+    # (which may include a leading PRIVILEGED_DIR_NAME wrapper, e.g.
+    # "privileged/additional-documents") are convention/config, not
+    # content — only what's underneath carries essential subject
     # context (whose disclosure a generically-named payslip belongs to).
-    subject = " / ".join(rel_path.parts[1:])
+    folder_depth = len(Path(folder).parts)
+    subject = " / ".join(rel_path.parts[folder_depth:])
+    # Logical folder name for provenance, PRIVILEGED_DIR_NAME wrapper
+    # stripped — mirrors parse_eml.upsert_email's source_folder.
+    folder_parts = Path(folder).parts
+    source_folder = (folder_parts[1] if folder_parts[0] == config.PRIVILEGED_DIR_NAME
+                      else folder_parts[0])
     # "@pocket-lawyer" is a frozen namespace token, NOT branding — see
     # the matching comment in parse_eml.py. Do not rebrand.
     mid = f"<doc-{sha}@pocket-lawyer>"
@@ -148,7 +162,7 @@ def insert_document(conn, path: Path, rel_path: Path, sha, raw: bytes):
         """INSERT INTO documents (email_id, source_path, source_folder,
            filename, sha256, size_bytes, ingested_at)
            VALUES (?,?,?,?,?,?,?)""",
-        (email_id, str(rel_path), rel_path.parts[0], path.name, sha, len(raw), now))
+        (email_id, str(rel_path), source_folder, path.name, sha, len(raw), now))
     doc_id = doc_cur.lastrowid
 
     copy_path = (config.DOCUMENTS_EXTRACTED_DIR /
@@ -173,15 +187,16 @@ def insert_document(conn, path: Path, rel_path: Path, sha, raw: bytes):
 
 def recompute_privilege(conn):
     """Same semantics as parse_eml.recompute_privilege: full rescan of
-    all document rows against the CURRENT PRIVILEGED_FOLDERS set every
-    run, so adding a folder to the set later retroactively upgrades
+    all document rows every run, so a drop-folder moved under
+    config.PRIVILEGED_DIR_NAME later retroactively upgrades
     already-ingested documents. Auto flag goes 0->1 only."""
-    conn.execute(
-        """UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id IN (
-             SELECT email_id FROM documents WHERE source_folder IN ({})
-           )""".format(",".join("?" * len(config.PRIVILEGED_FOLDERS))),
-        tuple(config.PRIVILEGED_FOLDERS),
-    )
+    rows = conn.execute("SELECT email_id, source_path FROM documents").fetchall()
+    ids = {r["email_id"] for r in rows if config.is_privileged_path(r["source_path"])}
+    if ids:
+        conn.executemany(
+            "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
+            [(i,) for i in ids],
+        )
 
 
 def run():
@@ -195,7 +210,7 @@ def run():
     stats = {"new": 0, "skipped": 0, "duplicate_content": 0,
              "errors": 0, "custody_alarm": 0}
 
-    for path in iter_source_files():
+    for path, folder in iter_source_files():
         rel = path.relative_to(config.INGESTION_SOURCES)
         raw = path.read_bytes()
         sha = utils_hash.sha256_bytes(raw)
@@ -222,7 +237,7 @@ def run():
             continue
 
         try:
-            insert_document(conn, path, rel, sha, raw)
+            insert_document(conn, path, rel, folder, sha, raw)
             stats["new"] += 1
             known_shas[sha] = str(rel)
             conn.commit()

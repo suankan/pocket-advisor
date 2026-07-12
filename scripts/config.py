@@ -56,19 +56,33 @@ EMBED_MODEL_PATH = MODELS_DIR / EMBED_MODEL_FILE
 EMBED_DIM = 1024
 EMBED_CTX = 8192
 
-# Privilege: any email with a physical copy in a folder listed here is
-# attorney-client privileged. OR'd across copies; auto flag only ever
-# goes 0 -> 1. Manual privilege_override column always wins.
-# SAFETY-SEMANTICS, case-specific — empty by default; real folder names
-# come from config.yaml (gitignored), never hardcoded here.
-PRIVILEGED_FOLDERS = set()
+# Privilege: any email or document whose path under INGESTION_SOURCES
+# passes through a directory named exactly PRIVILEGED_DIR_NAME is
+# attorney-client privileged (e.g. ingestion-sources/privileged/
+# example-law-firm.example/...). OR'd across copies; auto flag only ever goes
+# 0 -> 1. Manual privilege_override column always wins. This is a
+# filesystem CONVENTION, not case-specific data — "privileged" is a
+# platform-level word, safe to hardcode, so config.yaml never needs to
+# carry real folder names to express privilege. See is_privileged_path
+# below and docs/specs/config-yaml.md.
+PRIVILEGED_DIR_NAME = "privileged"
+
+
+def is_privileged_path(rel_path) -> bool:
+    """rel_path: a path relative to INGESTION_SOURCES (str or Path).
+    True iff PRIVILEGED_DIR_NAME appears as an ANCESTOR directory
+    (any depth, not the filename itself) — so both
+    privileged/<folder>/x.eml and <folder>/privileged/x.eml qualify."""
+    from pathlib import PurePath
+    return PRIVILEGED_DIR_NAME in PurePath(rel_path).parts[:-1]
+
 
 # Standalone-document ingestion (non-.eml files dropped by the user).
-# Each entry is a top-level folder name directly under
-# INGESTION_SOURCES — same extensible-set convention as
-# PRIVILEGED_FOLDERS. To add a *privileged* document drop-folder,
-# add its name here AND to PRIVILEGED_FOLDERS (before ingesting).
-# Also case-specific — see config.yaml.
+# Each entry is a folder path relative to INGESTION_SOURCES (usually
+# one segment, e.g. "additional-documents"; nest it under
+# PRIVILEGED_DIR_NAME, e.g. "privileged/additional-documents", to make
+# that whole drop-folder privileged — no separate bookkeeping needed).
+# Case-specific — see config.yaml.
 DOCUMENT_FOLDERS = set()
 
 TEXT_DOCUMENTS_DIR = OUTPUT_DIR / "text" / "documents"
@@ -143,10 +157,9 @@ EVAL_RESULTS_DIR = EVAL_DIR / "results"
 #
 # Dotted yaml path -> (module attribute name, type converter). Anything
 # in config.yaml not in this map aborts loudly at import time — a typo
-# in privilege.privileged_folders must never silently do nothing.
+# in a safety-semantics key must never silently do nothing.
 YAML_KEYS = {
     "workspace.dir": ("WORKSPACE_DIR", lambda v: PROJECT_ROOT / v),
-    "privilege.privileged_folders": ("PRIVILEGED_FOLDERS", set),
     "privilege.document_folders": ("DOCUMENT_FOLDERS", set),
     "query.fts_candidates": ("FTS_CANDIDATES", int),
     "query.vec_candidates": ("VEC_CANDIDATES", int),

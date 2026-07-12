@@ -38,7 +38,7 @@ def run():
     # identical filters to ingestion, guaranteed by sharing the walk
     from ingest_documents import iter_source_files
     on_disk_docs = {str(p.relative_to(config.INGESTION_SOURCES)): p
-                    for p in iter_source_files()}
+                    for p, _folder in iter_source_files()}
 
     email_problems, email_unrecorded = check(recorded_emails, on_disk_emails, "email")
     doc_problems, doc_unrecorded = check(recorded_docs, on_disk_docs, "document")

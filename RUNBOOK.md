@@ -8,12 +8,13 @@ brew install python@3.12 tesseract tesseract-lang poppler
 venv/bin/pip install -r scripts/requirements.txt   # llama-cpp-python compiles ~minutes
 venv/bin/python scripts/fetch_model.py             # bge-m3 GGUF, ~600MB, one-time download
 venv/bin/python scripts/db.py init
-cp config.yaml.example config.yaml   # then edit privilege.privileged_folders etc.
+cp config.yaml.example config.yaml   # then edit workspace.dir etc.
 ```
 
 ## Configuring pocket-advisor
 
-`config.yaml` (gitignored — carries privilege folder names) overlays
+`config.yaml` (gitignored by default, though it carries no
+case-identifying values — see privilege convention below) overlays
 onto `scripts/config.py`'s defaults. See `config.yaml.example` for the
 full schema and comments. Unknown keys abort loudly at import time
 (typo protection). Three classes of knob:
@@ -32,17 +33,22 @@ full schema and comments. Unknown keys abort loudly at import time
   embed` acknowledges the change (updates `vectors.meta.json`) so the
   warning fires once per actual change, not on every subsequent run;
   `query.py`'s warning persists until that acknowledgment happens.
-- **safety-semantics** (`privilege.*`): `privileged_folders` drives
-  what's excluded from retrieval by default (AGENTS.md hard rule 2).
-  The auto-privilege flag only ratchets 0->1 — removing a folder here
-  never un-privileges anything already ingested.
+- **safety-semantics** (`privilege.*`): privilege is a FILESYSTEM
+  CONVENTION, not a config key — nest a folder under an
+  `ingestion-sources/privileged/` directory (any depth) to make
+  everything under it privileged (AGENTS.md hard rule 2). The
+  auto-privilege flag only ratchets 0->1 — moving content back out
+  never un-privileges anything already ingested. `document_folders`
+  (which folders under `ingestion-sources/` are scanned for standalone,
+  non-.eml documents — orthogonal to privilege) is still a config key.
 
 ## Adding new emails
 
 1. Export from Thunderbird as .eml into the matching folder under
    `ingestion-sources/` (or a new folder per correspondent — if the new
-   folder is privileged correspondence, add it to `PRIVILEGED_FOLDERS`
-   in `scripts/config.py` FIRST).
+   folder is privileged correspondence, create/place it under
+   `ingestion-sources/privileged/` FIRST, e.g.
+   `ingestion-sources/privileged/<correspondent>/`).
 2. `venv/bin/python scripts/ingest.py all`
    Idempotent: existing files are skipped, duplicates merged, only new
    content is extracted/embedded.
@@ -53,10 +59,12 @@ full schema and comments. Unknown keys abort loudly at import time
 1. Drop files anywhere under `ingestion-sources/additional-documents/`
    (subfolders are fine and encouraged — the relative path becomes the
    document's searchable title, so `disclosure/Payslips/x.pdf`
-   carries its context). To add a NEW top-level drop folder, add its
-   name to `DOCUMENT_FOLDERS` in `scripts/config.py`; if its contents
-   are privileged, ALSO add it to `PRIVILEGED_FOLDERS` — BEFORE
-   ingesting.
+   carries its context). To add a NEW drop folder, add its path
+   (relative to `ingestion-sources/`) to `document_folders` in
+   `config.yaml`; if its contents are privileged, nest it under
+   `ingestion-sources/privileged/` and reference that path, e.g.
+   `privileged/additional-documents` — BEFORE ingesting. No separate
+   privilege list to keep in sync.
 2. `venv/bin/python scripts/ingest.py all` (or just the `documents`
    stage). Idempotent: unchanged files are skipped; changed content on
    a known path is a chain-of-custody alarm; identical content at two

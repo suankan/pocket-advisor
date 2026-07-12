@@ -113,7 +113,12 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size):
         flag(conn, rel_path, "parse", "warning", "missing Message-ID, synthetic id assigned")
         has_issue = 1
 
-    source_folder = rel_path.parts[0]
+    # Logical folder name for provenance: the PRIVILEGED_DIR_NAME
+    # wrapper (if any) is stripped since it's a convention marker, not
+    # part of the real folder identity — see config.is_privileged_path.
+    parts = rel_path.parts
+    source_folder = (parts[1] if parts[0] == config.PRIVILEGED_DIR_NAME
+                      else parts[0])
     row = conn.execute("SELECT id FROM emails WHERE message_id = ?", (mid,)).fetchone()
 
     if row:
@@ -183,14 +188,18 @@ def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, p
 
 
 def recompute_privilege(conn):
-    """OR across all physical copies. Auto flag goes 0->1 only;
+    """OR across all physical copies, full rescan every run (so a file
+    later moved under config.PRIVILEGED_DIR_NAME retroactively upgrades
+    its already-ingested email). Auto flag goes 0->1 only;
     privilege_override (manual) always wins at query time."""
-    conn.execute(
-        """UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id IN (
-             SELECT DISTINCT email_id FROM email_files WHERE source_folder IN ({})
-           )""".format(",".join("?" * len(config.PRIVILEGED_FOLDERS))),
-        tuple(config.PRIVILEGED_FOLDERS),
-    )
+    rows = conn.execute(
+        "SELECT DISTINCT email_id, source_path FROM email_files").fetchall()
+    ids = {r["email_id"] for r in rows if config.is_privileged_path(r["source_path"])}
+    if ids:
+        conn.executemany(
+            "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
+            [(i,) for i in ids],
+        )
 
 
 def run():

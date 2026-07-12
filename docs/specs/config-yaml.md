@@ -164,3 +164,37 @@ venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label
 venv/bin/python scripts/eval.py compare eval/results/*post-translit*.json eval/results/*post-configyaml*.json
 git status --short   # config.yaml must NOT appear; config.yaml.example must
 ```
+
+## Addendum 2026-07-12: `privileged_folders` key removed, replaced by a filesystem convention
+
+The gap this spec ledgered at the top ("`config.yaml` ... will carry
+`PRIVILEGED_FOLDERS`, a case-identifying value") is now closed
+differently than originally planned: instead of moving the real
+folder-name list from `config.py` into `config.yaml` (which still
+would have made `config.yaml` carry case-identifying content, just in
+a different file), privilege is now expressed as a filesystem
+convention — content is privileged iff its path under
+`ingestion-sources/` passes through a directory literally named
+`privileged` (`config.PRIVILEGED_DIR_NAME`, `config.is_privileged_path`).
+
+- `privilege.privileged_folders` is REMOVED from `YAML_KEYS` — setting
+  it in `config.yaml` now aborts as an unknown key.
+- `privilege.document_folders` is unchanged (still identifies which
+  folders are scanned for standalone documents — orthogonal to
+  privilege). A document drop-folder is made privileged by nesting it
+  under `privileged/` and listing that nested path, e.g.
+  `privileged/additional-documents`.
+- `config.py`'s `PRIVILEGED_FOLDERS` constant and both
+  `recompute_privilege()` functions (`parse_eml.py`,
+  `ingest_documents.py`) are replaced by a path check against
+  `source_path`, run every ingest as before (idempotent full rescan,
+  ratchets 0->1 only).
+- Net effect: `config.yaml` no longer carries any case-identifying
+  value at all — real correspondent/firm folder names never need to
+  appear in it, closing the gap this spec's "Two-layer discipline"
+  section flagged as a known, ledgered gap.
+- Existing ingested workspaces migrate by physically moving the real
+  privileged folder(s) under `ingestion-sources/privileged/` (a
+  one-time, user-directed filesystem move — AGENTS.md hard rule 1
+  forbids scripts/agents from writing/renaming under
+  `ingestion-sources/` on their own).

@@ -28,7 +28,6 @@ config.TEXT_DOCUMENTS_DIR = config.OUTPUT_DIR / "text" / "documents"
 config.DOCUMENTS_EXTRACTED_DIR = config.OUTPUT_DIR / "documents_extracted"
 config.OCR_REVIEW_DIR = config.OUTPUT_DIR / "ocr_review"
 config.DOCUMENT_FOLDERS = {"docs"}
-config.PRIVILEGED_FOLDERS = {"privileged-placeholder"}  # not "docs" initially
 
 import db                # noqa: E402  (after monkeypatch, reads config at call time)
 import doc_dates         # noqa: E402
@@ -176,15 +175,37 @@ def main():
     check("tamper detected, not re-ingested",
           stats["custody_alarm"] == 1 and stats["new"] == 0, str(stats))
 
-    print("== privilege retroactivity ==")
+    print("== privileged/ folder convention ==")
     row = q1("SELECT COUNT(*) c FROM emails WHERE source_kind='document'"
              " AND is_privileged=1")
-    check("not privileged before folder added", row["c"] == 0, str(row["c"]))
-    config.PRIVILEGED_FOLDERS = {"privileged-placeholder", "docs"}
+    check("nothing privileged yet ('docs' has no privileged/ ancestor)",
+          row["c"] == 0, str(row["c"]))
+
+    # Nest a new drop folder under config.PRIVILEGED_DIR_NAME — the
+    # convention this test is about: no separate privilege list, just
+    # physical placement under ingestion-sources/privileged/...
+    make_xlsx(config.INGESTION_SOURCES / "privileged" / "solicitor-docs" / "advice.xlsx",
+              ["Statement date: 01/01/2026", "privileged advice"])
+    config.DOCUMENT_FOLDERS = {"docs", "privileged/solicitor-docs"}
     ingest_documents.run()
+
+    row = q1("SELECT e.is_privileged, d.source_folder FROM documents d"
+             " JOIN emails e ON e.id=d.email_id WHERE d.filename='advice.xlsx'")
+    check("document under privileged/ is privileged",
+          row["is_privileged"] == 1, dict(row).__repr__())
+    check("source_folder strips the privileged/ wrapper",
+          row["source_folder"] == "solicitor-docs", dict(row).__repr__())
+
     row = q1("SELECT COUNT(*) c FROM emails WHERE source_kind='document'"
-             " AND is_privileged=0")
-    check("all documents upgraded retroactively", row["c"] == 0, str(row["c"]))
+             " AND is_privileged=1")
+    check("only the privileged/ document is flagged", row["c"] == 1, str(row["c"]))
+
+    # recompute_privilege rescans every run — idempotent, still ratchets
+    # 0->1 only, never flips a real privileged doc back down.
+    ingest_documents.run()
+    row = q1("SELECT is_privileged FROM emails e JOIN documents d ON d.email_id=e.id"
+             " WHERE d.filename='advice.xlsx'")
+    check("still privileged after a second run", row["is_privileged"] == 1, dict(row))
 
     shutil.rmtree(TMP)
     print(f"\n{'ALL PASS' if not FAILURES else f'{len(FAILURES)} FAILURE(S): {FAILURES}'}")

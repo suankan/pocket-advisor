@@ -127,7 +127,9 @@ text (keyword-anchored header scan, then dateline, then full-text, then
 filename, then mtime) by `scripts/doc_dates.py`, with the winning
 source recorded in `documents.doc_date_source` and surfaced by query.py
 as `date_source`. Privilege is folder-driven via the same
-`PRIVILEGED_FOLDERS` set, recomputed every run (retroactive 0→1).
+`ingestion-sources/privileged/` convention as emails (`config.
+is_privileged_path`), recomputed every run (retroactive 0→1) — see
+`docs/specs/config-yaml.md` addendum 2026-07-12.
 Failed/unsupported documents keep `emails.body_text_path` NULL, which
 makes them inert to chunking/retrieval with no downstream filters.
 Self-test: `scripts/test_ingest_documents.py` (temp fixture; never

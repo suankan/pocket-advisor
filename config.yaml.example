@@ -1,9 +1,10 @@
-# Workspace configuration. Copy this to config.yaml (gitignored) and
-# fill in real values — config.yaml carries privilege folder names,
-# which are case-specific content per docs/ROADMAP.md's two-layer rule.
-# Every key is optional; anything omitted falls back to the default in
-# scripts/config.py. Unknown keys abort loudly (typo protection —
-# privilege.privileged_folders is safety-critical).
+# Platform-layer configuration — fully agnostic of any user/workspace
+# content (docs/ROADMAP.md tenet 10). Copy this to config.yaml
+# (gitignored, but no longer required to be — it carries no
+# case-identifying values by design; see privilege convention below)
+# and fill in real values. Every key is optional; anything omitted
+# falls back to the default in scripts/config.py. Unknown keys abort
+# loudly (typo protection).
 #
 # Three-class knob discipline (docs/ROADMAP.md):
 #   - query / ingestion.ocr / ingestion.thread_fallback_window_days /
@@ -13,10 +14,9 @@
 #     `ingest.py embed`. Chunking changes only WARN — there is no
 #     automated re-chunk pipeline; a chunking mismatch needs manual
 #     attention (see docs/specs/config-yaml.md).
-#   - privilege: SAFETY-SEMANTICS. privileged_folders drives what gets
-#     excluded from retrieval by default (AGENTS.md hard rule 2) — the
-#     auto-flag only ever ratchets 0->1, so removing a folder here does
-#     not un-privilege anything already ingested.
+#   - privilege: SAFETY-SEMANTICS, expressed as a filesystem
+#     CONVENTION rather than a config key (see below) — the auto-flag
+#     only ever ratchets 0->1.
 
 workspace:
   # Active workspace directory, relative to the repo root. Workspaces
@@ -27,18 +27,23 @@ workspace:
   dir: workspaces/my-matter
 
 privilege:
-  # Any email with a physical copy under one of these top-level
-  # ingestion-sources/ folder names is attorney-client privileged.
-  # OR'd across copies (an email present in both a privileged and a
-  # non-privileged folder is privileged); the auto-computed flag only
-  # ever goes 0 -> 1, never back. A manual privilege_override in the DB
-  # always wins over this auto-computed value.
-  privileged_folders: [example-law-firm.example]
-  # Top-level ingestion-sources/ folders scanned for standalone
+  # PRIVILEGE ITSELF IS NOT A CONFIG KEY. To make content privileged,
+  # nest its real ingestion-sources/ folder under a directory literally
+  # named "privileged" (any depth), e.g.
+  #   ingestion-sources/privileged/example-law-firm.example/
+  # Any email or document under such a path is attorney-client
+  # privileged, OR'd across copies; the auto-computed flag only ever
+  # goes 0 -> 1, never back. A manual privilege_override in the DB
+  # always wins. This keeps config.yaml agnostic of real folder names
+  # (no law firm name, no correspondent folder ever needs to appear
+  # here) — see scripts/config.py's is_privileged_path.
+  #
+  # Folders (relative to ingestion-sources/) scanned for standalone
   # documents (non-.eml files: PDFs, images, docx, xlsx dropped by the
   # user rather than exported from an email client). To make a
-  # document drop-folder privileged, add its name here AND to
-  # privileged_folders above, before ingesting.
+  # document drop-folder privileged, nest it under privileged/ (as
+  # above) and list its path here, e.g.
+  # "privileged/additional-documents" — no separate privilege list.
   document_folders: [additional-documents]
 
 query:

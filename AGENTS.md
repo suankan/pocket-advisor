@@ -30,10 +30,13 @@ hints) in the workspace's `corpora/` directory.
    Those are evidence originals under chain-of-custody (SHA-256
    manifest in the DB). Open read-only. A changed hash is treated as
    tampering, not as an update.
-2. **Privilege**: emails with a copy in a folder listed in
-   `config.yaml → privilege.privileged_folders` are privileged
-   (`emails.is_privileged=1`; `privilege_override` column, if set,
-   always wins). Privileged content is EXCLUDED from retrieval by
+2. **Privilege**: emails/documents with a copy physically nested under
+   an `ingestion-sources/` directory literally named `privileged`
+   (any depth, e.g. `ingestion-sources/privileged/<folder>/...`) are
+   privileged (`emails.is_privileged=1`; `privilege_override` column,
+   if set, always wins). This is a filesystem convention, not a
+   config key — `config.yaml` never carries real folder names for
+   privilege. Privileged content is EXCLUDED from retrieval by
    default. Nothing that originated in a privileged channel — advice,
    strategy, assessments, or the existence/content of the
    communication — may appear in any outward-facing draft, quoted or

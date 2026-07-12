@@ -187,7 +187,10 @@ per-workspace golden sets before it is called an improvement.
 workspaces/<name>/
   WORKSPACE.md          # workspace agent entrypoint: parties & roles,
                         # privilege policy, matter rules, active goals
-  config.yaml           # workspace config (incl. privileged folders)
+  config.yaml           # workspace config (privilege is a filesystem
+                        # convention — ingestion-sources/privileged/ —
+                        # not a config value; this file carries no
+                        # case-identifying data)
   corpora/<corpus>/
     CORPUS.md           # REQUIRED per corpus: provenance, parties,
                         # privilege mapping, what it evidences,
@@ -255,6 +258,7 @@ revisit the row — replace, don't layer around.
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
 | Messenger screenshots OCR'd as flat text, no speaker/message attribution | Screenshots become load-bearing evidence (who-said-what disputes) | Message-boundary parsing + speaker/timestamp fields on extracted messages |
 | Privilege = single folder-set per corpus, one law firm | Multi-workspace collection sharing | Per-collection privilege/confidentiality policy evaluated on every query path |
+| ~~`config.yaml → privilege.privileged_folders` held real, case-identifying folder names~~ DONE 2026-07-12: privilege is now a filesystem convention (`ingestion-sources/privileged/<folder>/...`, `config.is_privileged_path`) — `config.yaml` no longer carries any case-identifying value. See `docs/specs/config-yaml.md` addendum. | — | — |
 | ~~Committed platform files carry case content~~ DONE 2026-07-12 (Phase 1d): platform docs scrubbed to engine-only; case content lives under gitignored `workspaces/`; DoD grep clean incl. code comments and test fixtures (5 leaks found there by the grep itself) | — | — |
 | ~~STATUS.md is one mixed session log~~ DONE 2026-07-12: engine changelog (docs/STATUS.md) vs private workspace journal; pre-split history moved verbatim to the journal | — | — |
 | ~~au-family-law skill fuses playbook with matter facts~~ DONE 2026-07-12: skill is generic/distributable; identities in WORKSPACE.md | — | — |

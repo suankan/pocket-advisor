@@ -1,0 +1,144 @@
+# Workspace configuration. Copy this to config.yaml (gitignored) and
+# fill in real values — config.yaml carries privilege folder names,
+# which are case-specific content per docs/ROADMAP.md's two-layer rule.
+# Every key is optional; anything omitted falls back to the default in
+# scripts/config.py. Unknown keys abort loudly (typo protection —
+# privilege.privileged_folders is safety-critical).
+#
+# Three-class knob discipline (docs/ROADMAP.md):
+#   - query / ingestion.ocr / ingestion.thread_fallback_window_days /
+#     ingestion.doc_date_header_window_chars: FREE, change anytime.
+#   - ingestion.chunking / models.embed_*: INDEX-INVALIDATING. Model
+#     changes trigger an automatic wipe + full re-embed on next
+#     `ingest.py embed`. Chunking changes only WARN — there is no
+#     automated re-chunk pipeline; a chunking mismatch needs manual
+#     attention (see docs/specs/config-yaml.md).
+#   - privilege: SAFETY-SEMANTICS. privileged_folders drives what gets
+#     excluded from retrieval by default (AGENTS.md hard rule 2) — the
+#     auto-flag only ever ratchets 0->1, so removing a folder here does
+#     not un-privilege anything already ingested.
+
+workspace:
+  # Active workspace directory, relative to the repo root. Workspaces
+  # (under workspaces/, gitignored) hold everything case-specific:
+  # WORKSPACE.md (the case's agent entrypoint), per-corpus CORPUS.md
+  # specs, chronology, journal, case learnings, and eval/ (golden sets
+  # + results). See AGENTS.md "Workspaces".
+  dir: workspaces/my-matter
+
+privilege:
+  # Any email with a physical copy under one of these top-level
+  # ingestion-sources/ folder names is attorney-client privileged.
+  # OR'd across copies (an email present in both a privileged and a
+  # non-privileged folder is privileged); the auto-computed flag only
+  # ever goes 0 -> 1, never back. A manual privilege_override in the DB
+  # always wins over this auto-computed value.
+  privileged_folders: [example-law-firm.example]
+  # Top-level ingestion-sources/ folders scanned for standalone
+  # documents (non-.eml files: PDFs, images, docx, xlsx dropped by the
+  # user rather than exported from an email client). To make a
+  # document drop-folder privileged, add its name here AND to
+  # privileged_folders above, before ingesting.
+  document_folders: [additional-documents]
+
+query:
+  # How many candidates the BM25/FTS5 keyword-search leg pulls before
+  # fusion. Higher = more lexical recall considered, more CPU/latency.
+  fts_candidates: 50
+  # How many candidates the dense vector/embedding-search leg pulls
+  # before fusion. Higher = more semantic recall considered.
+  vec_candidates: 50
+  # Reciprocal Rank Fusion constant: combined_score = sum(1/(rrf_k +
+  # rank + 1)) across the FTS and vector rankings. Higher flattens the
+  # weighting given to top-ranked vs lower-ranked candidates within
+  # each leg; lower makes top ranks dominate more strongly.
+  rrf_k: 60
+  # Number of results query.py returns by default (overridable per
+  # call with --top-k).
+  default_top_k: 15
+  # Whether the cross-encoder reranker re-scores the fused RRF
+  # candidate list before the top-k cut. See docs/specs/reranker.md
+  # for the measured accuracy/latency tradeoff; false falls back to
+  # plain RRF ordering.
+  rerank_enabled: true
+  # How many characters of each candidate's (whitespace-collapsed)
+  # text are fed to the reranker. Reranker cost scales ~linearly with
+  # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
+  # 300 chars) — it's a latency/thoroughness dial, not an accuracy
+  # guarantee either way; see docs/specs/reranker.md.
+  rerank_text_chars: 600
+
+ingestion:
+  chunking:
+    # Target chunk size in characters. Splitting prefers a paragraph
+    # break, then any newline, within the last 40% of the target
+    # length, so chunks rarely cut mid-sentence. INDEX-INVALIDATING:
+    # changing this only affects newly-created chunks — existing
+    # chunks keep their original size (no automated re-chunk
+    # pipeline); ingest.py embed / query.py will WARN when config no
+    # longer matches what the index was actually built with.
+    chars: 1500
+    # Character overlap between adjacent chunks of the same source
+    # document, so content near a chunk boundary isn't only ever
+    # visible in one chunk. Same INDEX-INVALIDATING caveat as above.
+    overlap: 200
+  ocr:
+    # Tesseract language flags, e.g. "eng+rus" for a bilingual corpus.
+    # Missing a language here makes OCR on that script fail silently
+    # into plausible-looking garbage — no error, just wrong text.
+    langs: eng+rus
+    # Mean OCR word-confidence (0-100) below which extracted text is
+    # flagged ocr_flagged_low_conf and copied to output/ocr_review/ for
+    # human verification against the original image.
+    low_confidence: 60.0
+    # DPI used when rasterizing scanned PDF pages before OCR. Higher
+    # improves OCR accuracy on small text at the cost of processing
+    # time and disk space for the intermediate images.
+    pdf_dpi: 300
+    # Image attachments at or below this size (bytes) are treated as
+    # signature/logo images and skipped entirely (not OCR'd, not
+    # indexed) rather than wasting OCR time on non-content images.
+    small_image_bytes: 20000
+    # If pdftotext's native (non-OCR) extraction yields fewer than
+    # this many non-whitespace characters, the PDF is treated as a
+    # scanned image and OCR'd instead of trusting the (near-empty)
+    # native text layer.
+    pdf_native_text_min_chars: 40
+  # For emails whose headers lack In-Reply-To/References (so they
+  # can't be threaded via Message-ID chains), the fallback heuristic
+  # links emails sharing a normalized subject and at least one
+  # participant within this many days of each other.
+  thread_fallback_window_days: 60
+  # How many characters of a standalone document's extracted text are
+  # searched for a header/letterhead date (statement period, pay date,
+  # dateline) before falling back to a full-text scan, then filename,
+  # then file mtime. Generous by default because pdftotext -layout
+  # pads lines with long space runs, pushing real header content
+  # further into the character count than it looks.
+  doc_date_header_window_chars: 6000
+
+models:
+  # Which embedding engine to use. "llama_cpp" (GGUF via
+  # llama-cpp-python, the default) or "mlx" (Apple-Silicon MLX via
+  # mlx-embeddings — requires `pip install -r
+  # scripts/requirements-mlx.txt` first). INDEX-INVALIDATING: switching
+  # backend or model triggers an automatic wipe + full re-embed on the
+  # next `ingest.py embed`, since vectors from different
+  # backends/models are numerically incomparable; query.py refuses to
+  # search a mismatched index rather than return silently-wrong results.
+  embed_backend: llama_cpp   # llama_cpp | mlx
+  # HuggingFace repo for the GGUF embedding model (used when
+  # embed_backend is llama_cpp). INDEX-INVALIDATING.
+  embed_model_repo: gpustack/bge-m3-GGUF
+  # Exact GGUF filename within that repo. INDEX-INVALIDATING.
+  embed_model_file: bge-m3-Q8_0.gguf
+  # HuggingFace repo for the MLX embedding model variant (used only
+  # when embed_backend is mlx). INDEX-INVALIDATING.
+  mlx_embed_model_repo: mlx-community/bge-m3-mlx-fp16
+  # HuggingFace repo for the cross-encoder reranker GGUF model. NOT
+  # index-invalidating — reranking is a transient per-query operation
+  # with no persisted index, so changing this takes effect on the very
+  # next query with no rebuild needed.
+  rerank_model_repo: gpustack/bge-reranker-v2-m3-GGUF
+  # Exact GGUF filename within that repo. Not index-invalidating.
+  rerank_model_file: bge-reranker-v2-m3-Q8_0.gguf

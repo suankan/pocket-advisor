@@ -1,0 +1,3 @@
+# Optional: Apple-Silicon MLX embedding backend (config.EMBED_BACKEND
+# = "mlx"). Not needed for the default llama_cpp backend.
+mlx-embeddings

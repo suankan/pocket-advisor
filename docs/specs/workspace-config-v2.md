@@ -205,11 +205,11 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 - [x] Blob index: collection roots from registry; PK `(source_id, sha256)`  
 - [x] Query mount pre-filter  
 - [x] Tests: v2 loader cases in `test_workspace_config.py`  
-- [x] Paths: engine → `workspaces/state/` (flat text/extracts; per-collection `cache/<id>/` later)  
+- [x] Paths: engine → `workspaces/state/`  
 - [x] FS move: evidence → `workspaces/corpora/…` (collection-id folder names)  
-- [x] AGENTS.md: cite `state/text/…`; no bulk browse of state as library  
+- [x] AGENTS.md: cite cache text paths from query; no bulk browse of `state/cache`  
 - [x] Live yaml v2 with `corpora/<id>` paths  
-- [ ] Optional: re-home extracts under `state/cache/<collection_id>/`
+- [x] Extracts under `state/cache/<collection_id>/{text,extracted}/`
 
 ---
 
@@ -220,6 +220,6 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 - [x] User agreed: corpora read-only; `state/cache/<collection_id>/`  
 - [x] User agreed: drop `retrieval:` and `kind:` from registry  
 - [x] Concerns table + non-goals recorded  
-- [ ] Code implements checklist above  
+- [x] Core layout + loader + mount filter + per-collection cache implemented  
+  (Phase B items rename still separate: `schema-items-membership.md`)
 
-**Do not implement opportunistically during case work** — schedule as a scoped engine slice.  

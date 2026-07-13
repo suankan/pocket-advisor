@@ -36,7 +36,10 @@ def insert_child_attachment(conn, email_id, parent_id, name, ctype, payload):
         (email_id, parent_id, name, name, ctype, len(payload), sha),
     )
     att_id = cur.lastrowid
-    copy_path = config.ATTACHMENTS_EXTRACTED_DIR / f"{att_id}__{utils_mime.sanitize_filename(name)}"
+    sid = _source_id_for_email(conn, email_id)
+    out_dir = config.extracted_attachments_dir(sid)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copy_path = out_dir / f"{att_id}__{utils_mime.sanitize_filename(name)}"
     disk_sha = utils_hash.write_and_verify(copy_path, payload)
     conn.execute(
         "UPDATE attachments SET extracted_copy_path=?, extracted_copy_sha256=? WHERE id=?",
@@ -98,10 +101,19 @@ def classify(row):
     return "unsupported"
 
 
+def _source_id_for_email(conn, email_id):
+    row = conn.execute(
+        "SELECT source_id FROM email_files WHERE email_id=? ORDER BY id LIMIT 1",
+        (email_id,),
+    ).fetchone()
+    return row["source_id"] if row else None
+
+
 def process(conn, row):
     kind = classify(row)
     path = config.PROJECT_ROOT / row["extracted_copy_path"]
     text, method, conf = None, None, None
+    sid = _source_id_for_email(conn, row["email_id"])
 
     if kind == "image_small":
         conn.execute(
@@ -133,8 +145,9 @@ def process(conn, row):
     text, low_conf_flag = apply_low_confidence_flag(text, conf, path)
     low_conf = int(low_conf_flag)
 
-    text_path = config.TEXT_ATTACHMENTS_DIR / f"{row['id']}.txt"
-    text_path.parent.mkdir(parents=True, exist_ok=True)
+    text_dir = config.text_attachments_dir(sid)
+    text_dir.mkdir(parents=True, exist_ok=True)
+    text_path = text_dir / f"{row['id']}.txt"
     text_path.write_text(text or "", encoding="utf-8")
 
     conn.execute(
@@ -146,6 +159,7 @@ def process(conn, row):
 
 
 def run():
+    config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     config.OCR_REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
     stats = {"ok": 0, "skipped": 0, "errors": 0, "low_confidence": 0}

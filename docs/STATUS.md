@@ -246,9 +246,11 @@ Example: **`docs/specs/workspace-config-v2.example.yaml`**
   active mounts (`query.allowed_chunk_ids`)
 - blob_index rebuild walks each collection once (v2)
 - **Path hygiene:** evidence at `workspaces/corpora/<collection>/`;
-  engine at `workspaces/state/`; matter folders md/eval only; DB paths
-  rewritten to `workspaces/state/…`. Per-collection `state/cache/<id>/`
-  still future (flat text/extracts under state/ for now).
+  engine at `workspaces/state/`; matter folders md/eval only.
+- **Per-collection cache SHIPPED:**
+  `state/cache/<collection_id>/{text,extracted}/…` for body text and
+  binary extracts; legacy flat `state/text` and `*_extracted` migrated
+  and emptied. New ingest writes only under `cache/<collection_id>/`.
 
 ## 2026-07-13 — DB schema items + membership (**DESIGN LOCKED**)
 
@@ -269,7 +271,7 @@ Example: **`docs/specs/workspace-config-v2.example.yaml`**
 ## Known open items (engine)
 
 - **workspace-config v2** — loader + mounts + query filter +
-  `corpora/` + `state/` layout shipped; per-collection cache dirs TBD.
+  `corpora/` + `state/` + `state/cache/<collection_id>/` shipped.
 - **schema items + membership** — Phase A shipped; Phase B/C open
   (`docs/specs/schema-items-membership.md`).
 - Visual (page-image) retrieval channel: designed, not started —

@@ -168,10 +168,12 @@ venv/bin/python scripts/verify_integrity.py
 Answer workflow for case questions: prefer starting the query daemon for
 the session, then run `query.py` (often twice with rephrasings — English
 rephrasings, synonyms, added keywords), read the full email bodies of
-top hits from `workspaces/state/text/emails/<id>.txt` (never rely on
-snippets alone for anything consequential; do not bulk-browse
-`state/` as a library — use query mount results), pull the whole
-thread when history matters (`--thread N`), then answer with citations.
+top hits from
+`workspaces/state/cache/<collection_id>/text/emails/<id>.txt` (path
+from query/DB — never rely on snippets alone for anything
+consequential; do not bulk-browse `state/cache/` as a library), pull
+the whole thread when history matters (`--thread N`), then answer with
+citations.
 **Query in English even when the corpus is majority non-English —
 never translate the question into the corpus's language.** The
 embedding backend is verified cross-lingual (docs/LEARNINGS.md); an

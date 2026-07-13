@@ -30,7 +30,10 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="pa_schema_a_"))
     try:
         config.PROJECT_ROOT = tmp
-        config.OUTPUT_DIR = tmp / "output"
+        config.WORKSPACES_DIR = tmp / "workspaces"
+        config.STATE_DIR = tmp / "workspaces" / "state"
+        config.OUTPUT_DIR = config.STATE_DIR
+        config.CACHE_DIR = config.STATE_DIR / "cache"
         config.DB_PATH = config.OUTPUT_DIR / "test.db"
         config.TEXT_DOCUMENTS_DIR = config.OUTPUT_DIR / "text" / "documents"
         config.DOCUMENTS_EXTRACTED_DIR = config.OUTPUT_DIR / "documents_extracted"
@@ -39,6 +42,7 @@ def main():
         config.INGESTION_SOURCES = tmp / "corpora"
         config.DOCUMENT_FOLDERS = {"coll-a", "coll-b"}
         config.OUTPUT_DIR.mkdir(parents=True)
+        config.CACHE_DIR.mkdir(parents=True)
         config.LOGS_DIR.mkdir(parents=True)
         config.DOCUMENTS_EXTRACTED_DIR.mkdir(parents=True)
         config.TEXT_DOCUMENTS_DIR.mkdir(parents=True)

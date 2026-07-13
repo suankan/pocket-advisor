@@ -105,8 +105,12 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
 
     text, low_conf = extraction.apply_low_confidence_flag(text, conf, copy_path)
 
-    text_path = config.TEXT_DOCUMENTS_DIR / f"{email_id}.txt"
-    text_path.parent.mkdir(parents=True, exist_ok=True)
+    sid_row = conn.execute(
+        "SELECT source_id FROM documents WHERE id=?", (doc_id,)).fetchone()
+    sid = sid_row["source_id"] if sid_row else None
+    text_dir = config.text_documents_dir(sid)
+    text_dir.mkdir(parents=True, exist_ok=True)
+    text_path = text_dir / f"{email_id}.txt"
     text_path.write_text(text or "", encoding="utf-8")
 
     mtime_date = datetime.fromtimestamp(
@@ -207,8 +211,9 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
         conn, email_id, path, rel_path, folder, sha, raw,
         workspace_id=workspace_id, source_id=source_id, privileged=privileged)
 
-    copy_path = (config.DOCUMENTS_EXTRACTED_DIR /
-                 f"{email_id}__{utils_mime.sanitize_filename(path.name)}")
+    out_dir = config.extracted_documents_dir(source_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copy_path = out_dir / f"{email_id}__{utils_mime.sanitize_filename(path.name)}"
     # written from the SAME bytes that were hashed — no re-read window
     disk_sha = utils_hash.write_and_verify(copy_path, raw)
     conn.execute(
@@ -270,8 +275,7 @@ def recompute_privilege(conn):
 
 def run():
     import workspace_config as wc
-    config.TEXT_DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    config.DOCUMENTS_EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
+    config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
     db.migrate(conn)
     known_src_sha = {(r["source_id"], r["sha256"])

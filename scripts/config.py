@@ -30,6 +30,10 @@ INGESTION_SOURCES = WORKSPACES_DIR / "corpora"
 STATE_DIR = WORKSPACES_DIR / "state"
 OUTPUT_DIR = STATE_DIR
 DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
+# Per-collection engine cache (not agent free-browse):
+#   state/cache/<collection_id>/{text,extracted}/…
+CACHE_DIR = OUTPUT_DIR / "cache"
+# Legacy flat dirs (pre-cache layout) — kept as fallbacks for reads/migrate
 TEXT_EMAILS_DIR = OUTPUT_DIR / "text" / "emails"
 TEXT_ATTACHMENTS_DIR = OUTPUT_DIR / "text" / "attachments"
 ATTACHMENTS_EXTRACTED_DIR = OUTPUT_DIR / "attachments_extracted"
@@ -41,6 +45,43 @@ VECTORS_DIR = OUTPUT_DIR / "vectors"
 VECTORS_NPY = VECTORS_DIR / "vectors.npy"
 VECTORS_IDS_NPY = VECTORS_DIR / "vectors_ids.npy"
 VECTORS_META_JSON = VECTORS_DIR / "vectors.meta.json"
+
+
+def _safe_collection_id(source_id: str | None) -> str:
+    """Filesystem-safe collection folder name under state/cache/."""
+    if not source_id:
+        return "_unknown"
+    return str(source_id).replace("/", "__").replace("\\", "__")
+
+
+def collection_cache_dir(source_id: str | None = None) -> Path:
+    """state/cache/<collection_id>/ — engine-only per-collection cache root."""
+    return Path(globals().get("CACHE_DIR", STATE_DIR / "cache")) / _safe_collection_id(
+        source_id)
+
+
+def text_emails_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "text" / "emails"
+
+
+def text_attachments_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "text" / "attachments"
+
+
+def text_documents_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "text" / "documents"
+
+
+def extracted_attachments_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "extracted" / "attachments"
+
+
+def extracted_documents_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "extracted" / "documents"
+
+
+def ocr_review_dir(source_id: str | None = None) -> Path:
+    return collection_cache_dir(source_id) / "ocr_review"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -307,7 +348,9 @@ def _apply_workspace_paths():
     globals()["STATE_DIR"] = state
     globals()["OUTPUT_DIR"] = state  # alias — prefer STATE_DIR in new code
     _out = state
+    globals()["CACHE_DIR"] = _out / "cache"
     globals()["DB_PATH"] = _out / "pocket_advisor.db"
+    # Legacy flat paths (reads/migrate); new writes use collection_cache_dir()
     globals()["TEXT_EMAILS_DIR"] = _out / "text" / "emails"
     globals()["TEXT_ATTACHMENTS_DIR"] = _out / "text" / "attachments"
     globals()["ATTACHMENTS_EXTRACTED_DIR"] = _out / "attachments_extracted"

@@ -143,14 +143,16 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
         )
         email_id = cur.lastrowid
 
-        body_path = config.TEXT_EMAILS_DIR / f"{email_id}.txt"
+        body_dir = config.text_emails_dir(source_id)
+        body_path = body_dir / f"{email_id}.txt"
         body_path.parent.mkdir(parents=True, exist_ok=True)
         body_path.write_text(body, encoding="utf-8")
         conn.execute("UPDATE emails SET body_text_path = ? WHERE id = ?",
                      (str(body_path.relative_to(config.PROJECT_ROOT)), email_id))
 
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
-            insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload)
+            insert_attachment(conn, email_id, rel_path, decoded_name, raw_name,
+                              ctype, payload, source_id=source_id)
 
     # Pathless identity: (source_id, sha256) — collection + content
     # (workspace_id is optional metadata; schema-items-membership Phase A).
@@ -164,7 +166,8 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
     return email_id
 
 
-def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload):
+def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload,
+                      source_id=None):
     payload_sha = utils_hash.sha256_bytes(payload)
     cur = conn.execute(
         """INSERT INTO attachments (email_id, filename, filename_raw, content_type,
@@ -173,7 +176,9 @@ def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, p
     )
     att_id = cur.lastrowid
     safe = utils_mime.sanitize_filename(decoded_name)
-    copy_path = config.ATTACHMENTS_EXTRACTED_DIR / f"{att_id}__{safe}"
+    out_dir = config.extracted_attachments_dir(source_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copy_path = out_dir / f"{att_id}__{safe}"
     disk_sha = utils_hash.write_and_verify(copy_path, payload)
     if disk_sha != payload_sha:
         flag(conn, rel_path, "parse", "error",

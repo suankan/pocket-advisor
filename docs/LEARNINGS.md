@@ -178,4 +178,11 @@ generalizable core, the genericized version goes here.
   each question is still an independent ranking call with no generative
   chat context (docs/specs/warm-eval.md). Use `--mode cold` only when
   you need CLI cold-start cost fidelity.
+- **Interactive multi-query sessions need a warm daemon, not only warm
+  eval.** Each shell `query.py` is a new process (cold load) unless
+  `query_daemon.py serve` is running; then `query.py` auto-routes over
+  a local Unix socket (docs/specs/query-daemon.md). Restart the daemon
+  after re-embed or model config changes. Warm residency is weights
+  only — no cross-query chat contamination.
+
 

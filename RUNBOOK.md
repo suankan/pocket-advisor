@@ -87,12 +87,36 @@ is. Extracted text lives in `output/text/documents/<id>.txt`.
 ```bash
 venv/bin/python scripts/query.py "question text" \
     [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--thread N] \
-    [--include-privileged] [--top-k 15] [--json]
+    [--include-privileged] [--top-k 15] [--json] \
+    [--no-daemon] [--require-daemon]
 ```
 
 Privileged emails excluded unless `--include-privileged`. Full bodies
 are in `output/text/emails/<id>.txt`; attachment text in
 `output/text/attachments/<id>.txt`.
+
+### Session-warm query daemon (recommended for multi-query work)
+
+Each cold `query.py` reloads embed + rerank models (~seconds). For an
+agent or interactive session with many searches, keep them warm:
+
+```bash
+# terminal 1 (or background with nohup / &)
+venv/bin/python scripts/query_daemon.py serve
+# optional: --idle-sec 0  (never auto-exit; default idle from config is 1800s)
+
+# terminal 2 — auto-uses daemon when socket is live
+venv/bin/python scripts/query.py "question" --json
+# stderr: query: via daemon (warm)
+
+venv/bin/python scripts/query_daemon.py status
+venv/bin/python scripts/query_daemon.py stop
+```
+
+Socket: `output/query_daemon.sock` (mode 0600, local only). Restart the
+daemon after `ingest.py embed` or model config changes. See
+`docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
+`query.daemon_idle_sec` in `config.yaml`.
 
 ## Choosing the embedding backend (Jina MLX vs bge-m3 llama.cpp vs bge-m3 MLX)
 

@@ -72,6 +72,11 @@ query:
   # 300 chars) — it's a latency/thoroughness dial, not an accuracy
   # guarantee either way; see docs/specs/reranker.md.
   rerank_text_chars: 600
+  # Session-warm query daemon (docs/specs/query-daemon.md): when
+  # `query_daemon.py serve` is running, query.py sends searches over a
+  # local Unix socket so embed/rerank weights stay loaded. FREE knobs.
+  daemon_auto: true          # use daemon when socket is live
+  daemon_idle_sec: 1800      # daemon exits after N idle seconds; 0=never
 
 ingestion:
   chunking:

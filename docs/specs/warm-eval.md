@@ -27,11 +27,12 @@ identical and only the **weights stay resident**.
 - **Not** a warm generative LLM chat session. Eval still scores
   retrieval ranks only (`hit@k`, MRR). No answer text is generated; no
   prior question’s content is injected into the next.
-- **Not** a long-lived socket daemon (ROADMAP still has that as a
-  separate interim for interactive UI). Warm eval is **one process for
-  the duration of `eval.py run`**.
-- **Not** changing default interactive `query.py` UX (still one-shot
-  load per CLI call unless a future daemon lands).
+- **Not** a long-lived socket daemon for interactive use — that is
+  `docs/specs/query-daemon.md` (`query_daemon.py`). Warm eval is
+  **one process for the duration of `eval.py run`** only (no socket).
+- Interactive multi-query sessions should use the **query daemon**,
+  not eval’s in-process path.
+
 
 ## Design
 

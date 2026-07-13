@@ -144,19 +144,28 @@ hints) in the workspace's `corpora/` directory.
 # into the email folders / other files into a document folder first)
 venv/bin/python scripts/ingest.py all
 
+# optional: keep embed+rerank warm for a multi-query agent/user session
+# (docs/specs/query-daemon.md). query.py auto-uses it when running.
+venv/bin/python scripts/query_daemon.py serve    # foreground; or background
+# venv/bin/python scripts/query_daemon.py status|stop
+
 # answer a question from the corpus (privileged excluded by default)
+# uses warm daemon when live; --no-daemon forces cold; --require-daemon
+# fails if daemon is down (good for sessions that expect warm)
 venv/bin/python scripts/query.py "the question" [--json] [--after 2026-01-01]
                                  [--include-privileged] [--thread N]
+                                 [--no-daemon] [--require-daemon]
 
 # verify evidence integrity (run before anything sensitive)
 venv/bin/python scripts/verify_integrity.py
 ```
 
-Answer workflow for case questions: run `query.py` (often twice with
-rephrasings — English rephrasings, synonyms, added keywords), read the
-full email bodies of top hits from `output/text/emails/<id>.txt` (never
-rely on snippets alone for anything consequential), pull the whole
-thread when history matters (`--thread N`), then answer with citations.
+Answer workflow for case questions: prefer starting the query daemon for
+the session, then run `query.py` (often twice with rephrasings — English
+rephrasings, synonyms, added keywords), read the full email bodies of
+top hits from `output/text/emails/<id>.txt` (never rely on snippets
+alone for anything consequential), pull the whole thread when history
+matters (`--thread N`), then answer with citations.
 **Query in English even when the corpus is majority non-English —
 never translate the question into the corpus's language.** The
 embedding backend is verified cross-lingual (docs/LEARNINGS.md); an

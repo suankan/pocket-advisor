@@ -134,43 +134,20 @@ def run_query_cold(question, top_k, include_privileged=False):
 
 
 class WarmQuerySession:
-    """Load embed + rerank weights and the vector matrix once; each
-    `search` is an independent ranking call with no chat history
-    (docs/specs/warm-eval.md)."""
+    """Thin wrapper around query.WarmResources for eval warm mode
+    (docs/specs/warm-eval.md). Same residency idea as query_daemon."""
 
     def __init__(self):
-        import embedding_backends
         import query as querymod
-        import rerank_backends
-
-        print("eval: warm mode — loading vector index + models once…",
-              flush=True)
-        t0 = time.time()
-        self.conn = db.connect()
-        db.migrate(self.conn)
-        self.vector_matrix, self.vector_ids = querymod.load_vector_index()
-        self.embed_backend = embedding_backends.get_backend()
-        self.rerank_backend = (rerank_backends.get_backend()
-                               if config.RERANK_ENABLED else None)
-        self._query = querymod
-        print(f"eval: warm resources ready in {time.time() - t0:.1f}s",
-              flush=True)
+        self._warm = querymod.WarmResources(
+            log=lambda m: print(f"eval: {m}", flush=True))
 
     def search(self, question, top_k, include_privileged=False):
-        return self._query.run_search(
-            question,
-            top_k=top_k,
-            include_privileged=include_privileged,
-            conn=self.conn,
-            embed_backend=self.embed_backend,
-            rerank_backend=self.rerank_backend,
-            vector_matrix=self.vector_matrix,
-            vector_ids=self.vector_ids,
-            close_conn=False,
-        )
+        return self._warm.search(
+            question, top_k=top_k, include_privileged=include_privileged)
 
     def close(self):
-        self.conn.close()
+        self._warm.close()
 
 
 def _git(args):

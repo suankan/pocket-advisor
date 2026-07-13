@@ -3,6 +3,7 @@ with Reciprocal Rank Fusion, filtered by metadata.
 
     query.py "question" [--after/--before YYYY-MM-DD]
              [--thread N] [--include-privileged] [--top-k N] [--json]
+             [--no-daemon] [--require-daemon]
 
 PRIVILEGED EMAILS ARE EXCLUDED BY DEFAULT. Pass --include-privileged to
 see them; the privilege flag is always shown on every result either
@@ -11,12 +12,16 @@ way, so the caller can never unknowingly quote privileged material.
 Every result carries message_id, date, sender, subject and source path:
 answers built on these results must cite them.
 
-Library entrypoint for warm eval: `run_search(...)` (docs/specs/warm-eval.md).
+Library: `run_search(...)` / `WarmResources` (warm-eval + query-daemon).
+If the session daemon is up (docs/specs/query-daemon.md), this CLI
+sends the search over the local Unix socket (warm); otherwise cold.
 """
 import argparse
 import json
 import re
+import socket
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -313,6 +318,148 @@ def run_search(question, *, top_k=None, include_privileged=False,
     return out
 
 
+class WarmResources:
+    """Load embed + rerank + vectors once; each search is independent
+    (no chat history). Used by query_daemon and eval warm mode.
+    docs/specs/query-daemon.md, docs/specs/warm-eval.md."""
+
+    def __init__(self, log=print):
+        import rerank_backends
+
+        log("warm: loading vector index + embed/rerank models…")
+        t0 = time.time()
+        self.conn = db.connect()
+        db.migrate(self.conn)
+        self.vector_matrix, self.vector_ids = load_vector_index()
+        self.embed_backend = embedding_backends.get_backend()
+        self.rerank_backend = (rerank_backends.get_backend()
+                               if config.RERANK_ENABLED else None)
+        log(f"warm: ready in {time.time() - t0:.1f}s "
+            f"(embed={config.EMBED_BACKEND}, "
+            f"rerank={config.RERANK_BACKEND if config.RERANK_ENABLED else 'off'})")
+
+    def search(self, question, *, top_k=None, include_privileged=False,
+               after=None, before=None, thread=None, no_thread_context=False):
+        return run_search(
+            question,
+            top_k=top_k,
+            include_privileged=include_privileged,
+            after=after,
+            before=before,
+            thread=thread,
+            no_thread_context=no_thread_context,
+            conn=self.conn,
+            embed_backend=self.embed_backend,
+            rerank_backend=self.rerank_backend,
+            vector_matrix=self.vector_matrix,
+            vector_ids=self.vector_ids,
+            close_conn=False,
+        )
+
+    def fingerprint(self):
+        meta = {}
+        if config.VECTORS_META_JSON.exists():
+            meta = json.loads(config.VECTORS_META_JSON.read_text())
+        return {
+            "embed": embedding_backends.current_fingerprint(),
+            "rerank_backend": config.RERANK_BACKEND if config.RERANK_ENABLED else None,
+            "rerank_enabled": config.RERANK_ENABLED,
+            "index": meta,
+        }
+
+    def close(self):
+        self.conn.close()
+
+
+def daemon_socket_path():
+    return config.QUERY_DAEMON_SOCKET
+
+
+def daemon_available():
+    """True if the Unix socket exists and accepts a connection."""
+    path = daemon_socket_path()
+    if not path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            s.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def daemon_request(payload, timeout=600):
+    """Send one NDJSON request to the query daemon; return parsed response."""
+    path = daemon_socket_path()
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(str(path))
+        s.sendall(data)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+    if not buf:
+        raise ConnectionError("daemon closed without response")
+    line = buf.split(b"\n", 1)[0].decode("utf-8")
+    return json.loads(line)
+
+
+def search_via_daemon(question, *, top_k=None, include_privileged=False,
+                      after=None, before=None, thread=None,
+                      no_thread_context=False):
+    resp = daemon_request({
+        "op": "search",
+        "question": question,
+        "top_k": config.DEFAULT_TOP_K if top_k is None else top_k,
+        "include_privileged": bool(include_privileged),
+        "after": after,
+        "before": before,
+        "thread": thread,
+        "no_thread_context": bool(no_thread_context),
+    })
+    if not resp.get("ok"):
+        raise RuntimeError(resp.get("error") or "daemon search failed")
+    return resp["result"]
+
+
+def format_results(out, as_json=False):
+    if as_json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+    for w in out["warnings"]:
+        print(f"⚠ {w}")
+    for i, r in enumerate(out["results"], 1):
+        flags = []
+        if r["source_kind"] == "document":
+            flags.append("DOCUMENT")
+        if r["privileged"]:
+            flags.append("PRIVILEGED")
+        if r["low_confidence_ocr"]:
+            flags.append("LOW-CONF-OCR")
+        print(f"\n[{i}] {r['date']}  {r['from']}  {' '.join(flags)}")
+        print(f"    Subject: {r['subject']}")
+        print(f"    Message-ID: {r['message_id']}")
+        print(f"    Matched in: {r['matched_in']}   Thread: {r['thread_id']}"
+              f" ({r['thread_link_method']})")
+        if r["source_kind"] == "document":
+            print(f"    Doc date source: {r['date_source']}"
+                  f" ({r['date_detail'] or 'n/a'})")
+        print(f"    Source: {r['source_path']}")
+        snippet = " ".join(r["snippet"].split())
+        print(f"    {snippet[:400]}")
+    context = out["thread_context"]
+    if context:
+        print(f"\n--- same-thread context ({len(context)} emails) ---")
+        for c in context:
+            p = " [PRIVILEGED]" if c["privileged"] else ""
+            print(f"  {c['date']}  {c['from_addr']}  {c['subject']}{p}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("question")
@@ -323,48 +470,62 @@ def main():
     ap.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
     ap.add_argument("--no-thread-context", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-daemon", action="store_true",
+                    help="force cold local search (ignore running daemon)")
+    ap.add_argument("--require-daemon", action="store_true",
+                    help="fail if the warm query daemon is not reachable")
     args = ap.parse_args()
 
-    out = run_search(
-        args.question,
-        top_k=args.top_k,
-        include_privileged=args.include_privileged,
-        after=args.after,
-        before=args.before,
-        thread=args.thread,
-        no_thread_context=args.no_thread_context,
-    )
-    if args.json:
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+    use_daemon = False
+    if args.require_daemon and args.no_daemon:
+        raise SystemExit("query: --require-daemon and --no-daemon conflict")
+    if args.require_daemon:
+        if not daemon_available():
+            raise SystemExit(
+                "query: --require-daemon but daemon is not reachable. "
+                "Start: venv/bin/python scripts/query_daemon.py serve")
+        use_daemon = True
+    elif not args.no_daemon and config.QUERY_DAEMON_AUTO and daemon_available():
+        use_daemon = True
+
+    if use_daemon:
+        print("query: via daemon (warm)", file=sys.stderr)
+        try:
+            out = search_via_daemon(
+                args.question,
+                top_k=args.top_k,
+                include_privileged=args.include_privileged,
+                after=args.after,
+                before=args.before,
+                thread=args.thread,
+                no_thread_context=args.no_thread_context,
+            )
+        except (OSError, ConnectionError, RuntimeError, json.JSONDecodeError) as e:
+            if args.require_daemon:
+                raise SystemExit(f"query: daemon error: {e}") from e
+            print(f"query: daemon failed ({e}); falling back to cold",
+                  file=sys.stderr)
+            out = run_search(
+                args.question,
+                top_k=args.top_k,
+                include_privileged=args.include_privileged,
+                after=args.after,
+                before=args.before,
+                thread=args.thread,
+                no_thread_context=args.no_thread_context,
+            )
     else:
-        for w in out["warnings"]:
-            print(f"⚠ {w}")
-        for i, r in enumerate(out["results"], 1):
-            flags = []
-            if r["source_kind"] == "document":
-                flags.append("DOCUMENT")
-            if r["privileged"]:
-                flags.append("PRIVILEGED")
-            if r["low_confidence_ocr"]:
-                flags.append("LOW-CONF-OCR")
-            print(f"\n[{i}] {r['date']}  {r['from']}  {' '.join(flags)}")
-            print(f"    Subject: {r['subject']}")
-            print(f"    Message-ID: {r['message_id']}")
-            print(f"    Matched in: {r['matched_in']}   Thread: {r['thread_id']}"
-                  f" ({r['thread_link_method']})")
-            if r["source_kind"] == "document":
-                print(f"    Doc date source: {r['date_source']}"
-                      f" ({r['date_detail'] or 'n/a'})")
-            print(f"    Source: {r['source_path']}")
-            snippet = " ".join(r["snippet"].split())
-            print(f"    {snippet[:400]}")
-        context = out["thread_context"]
-        if context:
-            print(f"\n--- same-thread context ({len(context)} emails) ---")
-            for c in context:
-                p = " [PRIVILEGED]" if c["privileged"] else ""
-                print(f"  {c['date']}  {c['from_addr']}  {c['subject']}{p}")
+        out = run_search(
+            args.question,
+            top_k=args.top_k,
+            include_privileged=args.include_privileged,
+            after=args.after,
+            before=args.before,
+            thread=args.thread,
+            no_thread_context=args.no_thread_context,
+        )
+    format_results(out, as_json=args.json)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() or 0)

@@ -153,12 +153,22 @@ preserves the engine-relevant milestones.
   subprocess `query.py` per question. Not a generative LLM session —
   no cross-question context. Unit tests: `scripts/test_eval.py`.
 
+## 2026-07-13 — session-warm query daemon
+
+- Spec: docs/specs/query-daemon.md. `scripts/query_daemon.py`
+  serve|status|stop; Unix socket `output/query_daemon.sock` (0600);
+  `query.WarmResources` shared with eval; `query.py` auto-uses daemon
+  when live (`--no-daemon` / `--require-daemon`). Config:
+  `query.daemon_auto`, `query.daemon_idle_sec`. Unit tests:
+  `scripts/test_query_daemon.py` (protocol, no model load). Restart
+  daemon after re-embed / model config change.
+
 ## Known open items (engine)
 
 - Visual (page-image) retrieval channel: designed, not started —
   docs/specs/visual-retrieval.md. First step is a smoke test of the
   cross-modal alignment claim it depends on.
-- Reranker cost is now ~12s/query mean cold CLI (was ~18s) — still
-  CLI-only speed; warm eval amortizes load across the golden set;
-  interactive daemon still ledgered for a future UI.
+- Per-query **rerank inference** still ~several–10s even when models
+  are warm (load amortized by daemon/eval); interactive sub-second UX
+  would need different tradeoffs (e.g. optional no-rerank path).
 

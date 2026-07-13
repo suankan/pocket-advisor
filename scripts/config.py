@@ -161,6 +161,14 @@ RERANK_CTX = 2048
 # assumed (docs/specs/reranker.md).
 RERANK_TEXT_CHARS = 600
 
+# Session-warm query daemon (docs/specs/query-daemon.md): keeps embed +
+# rerank + vectors loaded so interactive/agent multi-query sessions
+# skip per-call cold start. Unix socket under output/ only (local).
+QUERY_DAEMON_SOCKET = OUTPUT_DIR / "query_daemon.sock"
+QUERY_DAEMON_PID_FILE = OUTPUT_DIR / "query_daemon.pid"
+QUERY_DAEMON_AUTO = True          # query.py uses daemon when socket live
+QUERY_DAEMON_IDLE_SEC = 1800      # idle exit; 0 = run until stop
+
 # Active workspace directory (docs/specs/instruction-layer-split.md).
 # Workspaces live under workspaces/ (gitignored — they ARE the case
 # data layer). The real name comes from config.yaml (workspace.dir);
@@ -189,6 +197,8 @@ YAML_KEYS = {
     "query.default_top_k": ("DEFAULT_TOP_K", int),
     "query.rerank_enabled": ("RERANK_ENABLED", bool),
     "query.rerank_text_chars": ("RERANK_TEXT_CHARS", int),
+    "query.daemon_auto": ("QUERY_DAEMON_AUTO", bool),
+    "query.daemon_idle_sec": ("QUERY_DAEMON_IDLE_SEC", int),
     "ingestion.chunking.chars": ("CHUNK_CHARS", int),
     "ingestion.chunking.overlap": ("CHUNK_OVERLAP", int),
     "ingestion.ocr.langs": ("OCR_LANGS", str),

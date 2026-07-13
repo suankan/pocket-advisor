@@ -33,10 +33,10 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents | — |
 | **Measure + accuracy** — eval, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 eval/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm eval, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
-| **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | 2026-07-13 user-data root…v2 cache; **R-05** mount `purposes` + `query --purpose` | R-06 ocr_review path |
-| **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs; synthetic mid from content sha | — |
-| **Structured numbers** — transactions SQL, row citations | **Done (heuristic)** | **R-04** `transactions` + extractor + unit test | R-04b richer parsers when finance forces |
-| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** smoke PASS; rasterize/embed/query leg behind `IMG_LEG_ENABLED` | enable + `ingest.py images` on real corpus |
+| **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
+| **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
+| **Structured numbers** — transactions SQL, row citations | **Done (heuristic only)** | **R-04** table + regex extractor (live rows may be 0 until run / until R-04b) | **R-04b** real bank parsers |
+| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** pipeline + smoke PASS; `IMG_MAX_SIDE` full-page fix | **R-03b** visual eval; finish live embed index |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |

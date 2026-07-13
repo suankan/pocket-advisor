@@ -19,12 +19,23 @@ map; open work is `R-nn`.
 
 ## 2026-07-13
 
-### R-03 visual pipeline complete (opt-in) · SHIPPED
+### Privileged retrieval default ON · SHIPPED
+
+`query.include_privileged_by_default: true`. Own-solicitor often carries
+opposing-counsel forwards/attachments; exclude is opt-in
+(`--exclude-privileged`). Results still flag privilege. Eval defaults
+to include-privileged too (opt out per golden entry). Commits: `77a827b`,
+`5ca43ff`.
+
+### R-03 visual pipeline (opt-in) · SHIPPED
 
 Alignment smoke **PASS**. Full path: `embed_images.py` (pdftoppm + omni
 embed + `img_vectors.npy`), query third RRF leg with `("chunk"|"img", id)`
-keys, `ingest.py images`. Default `IMG_LEG_ENABLED=false` — enable in
-config after installing `requirements-visual.txt`.
+keys, `ingest.py images`. Enable `models.img_leg_enabled: true` after
+`requirements-visual.txt`. Full-page embed needs long-side downscale
+(`IMG_MAX_SIDE`) + `truncation=False` (token-count fix). Follow-on:
+**R-03b** visual eval / RRF weights. Spec:
+[visual-retrieval.md](specs/visual-retrieval.md).
 
 ### R-01 Schema B — items + memberships · SHIPPED
 
@@ -34,22 +45,17 @@ Renamed spine: `emails`→`items`, `email_files`∪`documents` memberships
 Tests: `scripts/test_schema_items.py`. Spec:
 [schema-items-membership.md](specs/schema-items-membership.md).
 
-### R-02 Schema C polish (partial) · SHIPPED
+### R-02 Schema C polish · SHIPPED
 
 Missing Message-ID → `synthetic-{content_sha}@pocket-lawyer` (content-
 based, not path). RUNBOOK vacuum/size notes. `source_folder` retained
 for labels.
 
-### R-03 Visual channel (partial) · SHIPPED
+### R-04 Structured transactions (heuristic) · SHIPPED
 
-`page_images` table (item_id), `IMG_*` config, `requirements-visual.txt`,
-`scripts/smoke_visual_alignment.py` (SKIP until torch). Full query leg
-still off (`IMG_LEG_ENABLED=false`). Spec: [visual-retrieval.md](specs/visual-retrieval.md).
-
-### R-04 Structured transactions (minimal) · SHIPPED
-
-`transactions` table + heuristic line extractor
-(`scripts/extract_transactions.py`, `ingest.py transactions`). Spec:
+`transactions` table + line regex extractor
+(`scripts/extract_transactions.py`, `ingest.py transactions`, unit test).
+**Not** full bank-statement SQL conversion — that is **R-04b**. Spec:
 [structured-transactions.md](specs/structured-transactions.md).
 
 ### R-05 Purpose-scoped mounts · SHIPPED

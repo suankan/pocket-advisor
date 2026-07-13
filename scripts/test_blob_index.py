@@ -11,10 +11,12 @@ import config
 
 TMP = Path(tempfile.mkdtemp(prefix="pocket_advisor_blob_test_"))
 config.PROJECT_ROOT = TMP
+config.WORKSPACES_DIR = TMP / "workspaces"
 config.WORKSPACE_DIR = TMP / "workspaces" / "test-ws"
 config.INGESTION_SOURCES = config.WORKSPACE_DIR / "corpora"
 config.OUTPUT_DIR = config.WORKSPACE_DIR / "output"
 config.DB_PATH = config.OUTPUT_DIR / "test.db"
+config.ACTIVE_WORKSPACE_ID = "test-ws"
 
 import db          # noqa: E402
 import blob_index  # noqa: E402

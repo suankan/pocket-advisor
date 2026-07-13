@@ -183,6 +183,18 @@ preserves the engine-relevant milestones.
   `skills/au-family-law.md` removed. Productisation may later ship
   copy-in templates.
 
+## 2026-07-13 — workspace-config.yaml registry (user sources)
+
+- Spec + example: docs/specs/workspace-config.md,
+  workspace-config.example.yaml. Single gitignored registry under
+  `workspaces/workspace-config.yaml` with `active: true` and
+  `sources[]` (id, description, path, kind, privileged). Platform
+  config only has `workspaces.dir`. Ingest walks configured sources;
+  privilege from `privileged: bool`. DB columns `workspace_id` /
+  `source_id` on email_files + documents (migrated for family-law).
+  blob_index uses registry source ids. CORPUS.md superseded by
+  source.description (files may remain on disk unused).
+
 ## 2026-07-13 — regenerable source_blob_index (sha→path cache)
 
 - Spec: docs/specs/source-blob-index.md. Table `source_blob_index`

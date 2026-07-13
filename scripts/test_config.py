@@ -87,15 +87,21 @@ def test_derived_path_recomputed():
 
 
 def test_workspace_dir_derives_eval_paths():
-    print("workspace.dir derives EVAL_* paths:")
-    before = (config.WORKSPACE_DIR, config.EVAL_DIR,
-              config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR)
-    p = write_yaml("workspace:\n  dir: workspaces/test-ws\n")
+    print("workspace paths derive output/eval:")
+    before = (config.WORKSPACE_DIR, config.WORKSPACES_DIR, config.EVAL_DIR,
+              config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR,
+              config.INGESTION_SOURCES, config.OUTPUT_DIR, config.DB_PATH,
+              getattr(config, "ACTIVE_WORKSPACE_ID", None))
+    # Prefer workspaces.dir; active workspace comes from registry when present.
+    p = write_yaml("workspaces:\n  dir: workspaces\n")
     try:
         config.load_yaml_overlay(p)
-        check("WORKSPACE_DIR overridden",
-              config.WORKSPACE_DIR == config.PROJECT_ROOT / "workspaces/test-ws")
-        check("EVAL_RESULTS_DIR derived",
+        check("WORKSPACES_DIR set",
+              config.WORKSPACES_DIR == config.PROJECT_ROOT / "workspaces")
+        # With a live workspace-config.yaml, active workspace wins.
+        check("WORKSPACE_DIR under workspaces/",
+              "workspaces" in config.WORKSPACE_DIR.parts)
+        check("EVAL_RESULTS_DIR under workspace",
               config.EVAL_RESULTS_DIR == config.WORKSPACE_DIR / "eval" / "results")
         check("INGESTION_SOURCES under workspace corpora",
               config.INGESTION_SOURCES == config.WORKSPACE_DIR / "corpora")
@@ -104,8 +110,10 @@ def test_workspace_dir_derives_eval_paths():
         check("DB_PATH under workspace output",
               config.DB_PATH == config.WORKSPACE_DIR / "output" / "pocket_advisor.db")
     finally:
-        (config.WORKSPACE_DIR, config.EVAL_DIR,
-         config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR) = before
+        (config.WORKSPACE_DIR, config.WORKSPACES_DIR, config.EVAL_DIR,
+         config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR,
+         config.INGESTION_SOURCES, config.OUTPUT_DIR, config.DB_PATH,
+         config.ACTIVE_WORKSPACE_ID) = before
         p.unlink()
 
 

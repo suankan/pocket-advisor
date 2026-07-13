@@ -216,6 +216,10 @@ def migrate(conn):
     ensure_column(conn, "emails", "source_kind",
                   "source_kind TEXT NOT NULL DEFAULT 'email'")
     ensure_column(conn, "chunks", "translit_shadow", "translit_shadow TEXT")
+    ensure_column(conn, "email_files", "workspace_id", "workspace_id TEXT")
+    ensure_column(conn, "email_files", "source_id", "source_id TEXT")
+    ensure_column(conn, "documents", "workspace_id", "workspace_id TEXT")
+    ensure_column(conn, "documents", "source_id", "source_id TEXT")
     _ensure_chunks_fts_shadow_column(conn)
     conn.commit()
 

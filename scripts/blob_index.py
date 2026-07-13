@@ -70,40 +70,16 @@ def provisional_sources(workspace_id: str | None = None) -> list[SourceRoot]:
 
 
 def list_sources() -> list[SourceRoot]:
-    """Prefer workspace-config when present; else provisional discovery."""
-    # Hook for future workspace-config.yaml registry loader.
-    cfg = config.WORKSPACE_DIR.parent / "workspace-config.yaml"
-    if cfg.exists():
-        return _sources_from_workspace_config(cfg)
+    """Prefer workspace-config registry; else provisional corpora discovery."""
+    reg = Path(config.WORKSPACES_DIR) / "workspace-config.yaml"
+    if reg.is_file():
+        import workspace_config as wc
+        out: list[SourceRoot] = []
+        for ws in wc.load_registry(reg, config.WORKSPACES_DIR).workspaces:
+            for src in ws.sources:
+                out.append(SourceRoot(ws.id, src.id, src.root))
+        return out
     return provisional_sources()
-
-
-def _sources_from_workspace_config(cfg_path: Path) -> list[SourceRoot]:
-    """Minimal reader: workspaces[].id/path + sources[].id/path."""
-    import yaml
-    data = yaml.safe_load(cfg_path.read_text()) or {}
-    workspaces_dir = cfg_path.parent
-    out: list[SourceRoot] = []
-    for ws in data.get("workspaces") or []:
-        ws_id = ws.get("id") or ws.get("workspace_id")
-        ws_rel = ws.get("path") or ws_id
-        if not ws_id or not ws_rel:
-            continue
-        ws_root = (workspaces_dir / ws_rel).resolve()
-        for src in ws.get("sources") or []:
-            sid = src.get("id")
-            spath = src.get("path")
-            if not sid or not spath:
-                continue
-            root = (ws_root / spath).resolve()
-            # path may be relative to workspaces.dir in some sketches —
-            # if not under ws_root, try workspaces_dir / spath
-            if not root.exists():
-                alt = (workspaces_dir / spath).resolve()
-                if alt.exists():
-                    root = alt
-            out.append(SourceRoot(str(ws_id), str(sid), root))
-    return out
 
 
 def _iter_files(source_root: Path):

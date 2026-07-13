@@ -44,21 +44,24 @@ full schema and comments. Unknown keys abort loudly at import time
   relative to `corpora/` scanned for standalone non-.eml docs) is
   still a config key.
 
-## User-data layout (single folder)
+## User-data layout + workspace-config
 
-All case/user data for the active matter lives under
-`workspaces/<name>/` (gitignored as a whole — docs/specs/workspace-user-data.md):
+Platform `config.yaml` only sets `workspaces.dir` (default `workspaces`).
+**Active matter and evidence sources** are declared in the gitignored
+user registry (docs/specs/workspace-config.md):
 
 ```
-workspaces/<name>/
-  corpora/          # evidence (.eml, PDFs, …) + CORPUS.md per corpus
-  output/           # DB, vectors, extracted text, logs, daemon socket
-  WORKSPACE.md, chronology.md, journal.md, eval/, …
+workspaces/workspace-config.yaml   # all workspaces, active: true, sources[]
+workspaces/<path>/
+  output/              # DB, vectors, text, logs, daemon socket
+  WORKSPACE.md, au-family-law.md, chronology, eval/, …
+  … evidence folders listed in sources[].path (any layout you choose)
 ```
 
-`config.yaml → workspace.dir` selects the tree. Scripts set
-`INGESTION_SOURCES = …/corpora` and `OUTPUT_DIR = …/output`.
-
+Schema reference (committed): `docs/specs/workspace-config.example.yaml`.
+Copy to `workspaces/workspace-config.yaml` and edit. Each source has
+`id`, `description`, `path` (relative to that workspace), `kind`
+(`email_eml`|`documents`), `privileged` (bool).
 ## Adding new emails
 
 1. Export from Thunderbird as .eml into the matching folder under

@@ -134,20 +134,12 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
              " text — verify")
 
 
-def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes):
+def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes,
+                    workspace_id=None, source_id=None):
     now = now_iso()
-    # Path segments belonging to the configured drop folder itself
-    # (which may include a leading PRIVILEGED_DIR_NAME wrapper, e.g.
-    # "privileged/additional-documents") are convention/config, not
-    # content — only what's underneath carries essential subject
-    # context (whose disclosure a generically-named payslip belongs to).
-    folder_depth = len(Path(folder).parts)
-    subject = " / ".join(rel_path.parts[folder_depth:])
-    # Logical folder name for provenance, PRIVILEGED_DIR_NAME wrapper
-    # stripped — mirrors parse_eml.upsert_email's source_folder.
-    folder_parts = Path(folder).parts
-    source_folder = (folder_parts[1] if folder_parts[0] == config.PRIVILEGED_DIR_NAME
-                      else folder_parts[0])
+    # Subject: path under the source root (user-visible context).
+    subject = " / ".join(rel_path.parts) if rel_path.parts else path.name
+    source_folder = source_id or folder or path.parent.name
     # "@pocket-lawyer" is a frozen namespace token, NOT branding — see
     # the matching comment in parse_eml.py. Do not rebrand.
     mid = f"<doc-{sha}@pocket-lawyer>"
@@ -160,9 +152,10 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
 
     doc_cur = conn.execute(
         """INSERT INTO documents (email_id, source_path, source_folder,
-           filename, sha256, size_bytes, ingested_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        (email_id, str(rel_path), source_folder, path.name, sha, len(raw), now))
+           filename, sha256, size_bytes, ingested_at, workspace_id, source_id)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (email_id, str(rel_path), source_folder, path.name, sha, len(raw), now,
+         workspace_id, source_id))
     doc_id = doc_cur.lastrowid
 
     copy_path = (config.DOCUMENTS_EXTRACTED_DIR /
@@ -186,12 +179,21 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
 
 
 def recompute_privilege(conn):
-    """Same semantics as parse_eml.recompute_privilege: full rescan of
-    all document rows every run, so a drop-folder moved under
-    config.PRIVILEGED_DIR_NAME later retroactively upgrades
-    already-ingested documents. Auto flag goes 0->1 only."""
-    rows = conn.execute("SELECT email_id, source_path FROM documents").fetchall()
-    ids = {r["email_id"] for r in rows if config.is_privileged_path(r["source_path"])}
+    """Prefer workspace-config source.privileged; path heuristic fallback."""
+    import workspace_config as wc
+    priv_sources = set()
+    try:
+        priv_sources = {s.id for s in wc.active_sources() if s.privileged}
+    except SystemExit:
+        pass
+    rows = conn.execute(
+        "SELECT email_id, source_path, source_id FROM documents").fetchall()
+    ids = set()
+    for r in rows:
+        if r["source_id"] and r["source_id"] in priv_sources:
+            ids.add(r["email_id"])
+        elif r["source_path"] and config.is_privileged_path(r["source_path"]):
+            ids.add(r["email_id"])
     if ids:
         conn.executemany(
             "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
@@ -200,36 +202,69 @@ def recompute_privilege(conn):
 
 
 def run():
+    import workspace_config as wc
     config.TEXT_DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
     config.DOCUMENTS_EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
+    db.migrate(conn)
     known = {r["source_path"]: r["sha256"]
              for r in conn.execute("SELECT source_path, sha256 FROM documents")}
     known_shas = {r["sha256"]: r["source_path"] for r in conn.execute(
         "SELECT sha256, source_path FROM documents")}
+    known_src_sha = {(r["source_id"], r["sha256"])
+                     for r in conn.execute(
+                         "SELECT source_id, sha256 FROM documents"
+                         " WHERE source_id IS NOT NULL")}
     stats = {"new": 0, "skipped": 0, "duplicate_content": 0,
              "errors": 0, "custody_alarm": 0}
 
-    for path, folder in iter_source_files():
-        rel = path.relative_to(config.INGESTION_SOURCES)
+    try:
+        doc_sources = wc.active_sources("documents")
+        ws_id = wc.active_workspace().id
+    except SystemExit:
+        doc_sources = []
+        ws_id = getattr(config, "ACTIVE_WORKSPACE_ID", config.WORKSPACE_DIR.name)
+
+    jobs = []  # (path, rel, folder, source_id)
+    if doc_sources:
+        for source in doc_sources:
+            if not source.root.is_dir():
+                flag(conn, source.root, "ingest_document", "warning",
+                     f"document source {source.id} root missing: {source.root}")
+                continue
+            for path in source.root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.name in config.IGNORED_FILENAMES or path.name.startswith("."):
+                    continue
+                if path.suffix.lower() in config.DOCUMENT_SKIP_UNSUPPORTED_EXTS:
+                    # still ingest as skipped_unsupported via insert path
+                    pass
+                rel = path.relative_to(source.root)
+                jobs.append((path, rel, source.id, source.id))
+    else:
+        for path, folder in iter_source_files():
+            rel = path.relative_to(config.INGESTION_SOURCES)
+            jobs.append((path, rel, folder, "legacy"))
+
+    for path, rel, folder, sid in jobs:
         raw = path.read_bytes()
         sha = utils_hash.sha256_bytes(raw)
+        key = str(rel)
 
-        if str(rel) in known:
-            if known[str(rel)] == sha:
-                stats["skipped"] += 1
-            else:
-                stats["custody_alarm"] += 1
-                flag(conn, rel, "ingest_document", "error",
-                     "CHAIN-OF-CUSTODY ALARM: file content changed since"
-                     f" ingestion (recorded {known[str(rel)][:12]}…, now"
-                     f" {sha[:12]}…). NOT re-ingested.")
+        if (sid, sha) in known_src_sha or (
+                key in known and known[key] == sha):
+            stats["skipped"] += 1
+            continue
+        if key in known and known[key] != sha:
+            stats["custody_alarm"] += 1
+            flag(conn, rel, "ingest_document", "error",
+                 "CHAIN-OF-CUSTODY ALARM: file content changed since"
+                 f" ingestion (recorded {known[key][:12]}…, now"
+                 f" {sha[:12]}…). NOT re-ingested.")
             continue
 
         if sha in known_shas:
-            # Same content at a new path: would collide with the
-            # content-derived UNIQUE message_id. Flagged (every run,
-            # until the redundant copy is removed) and skipped.
             stats["duplicate_content"] += 1
             flag(conn, rel, "ingest_document", "warning",
                  f"duplicate content of already-ingested {known_shas[sha]}"
@@ -237,11 +272,14 @@ def run():
             continue
 
         try:
-            insert_document(conn, path, rel, folder, sha, raw)
+            insert_document(conn, path, rel, folder, sha, raw,
+                            workspace_id=ws_id, source_id=sid)
             stats["new"] += 1
-            known_shas[sha] = str(rel)
+            known_shas[sha] = key
+            known_src_sha.add((sid, sha))
+            known[key] = sha
             conn.commit()
-        except Exception as e:  # never abort the batch on one bad file
+        except Exception as e:
             conn.rollback()
             stats["errors"] += 1
             flag(conn, rel, "ingest_document", "error",

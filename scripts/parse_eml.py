@@ -101,7 +101,8 @@ def iter_attachments(msg):
         yield decoded, raw_filename, part.get_content_type(), payload
 
 
-def upsert_email(conn, msg, source_path, rel_path, sha, size):
+def upsert_email(conn, msg, source_path, rel_path, sha, size,
+                 workspace_id=None, source_id=None):
     mid = utils_mime.normalize_message_id(msg.get("Message-ID"))
     has_issue = 0
     if not mid:
@@ -113,12 +114,8 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size):
         flag(conn, rel_path, "parse", "warning", "missing Message-ID, synthetic id assigned")
         has_issue = 1
 
-    # Logical folder name for provenance: the PRIVILEGED_DIR_NAME
-    # wrapper (if any) is stripped since it's a convention marker, not
-    # part of the real folder identity — see config.is_privileged_path.
-    parts = rel_path.parts
-    source_folder = (parts[1] if parts[0] == config.PRIVILEGED_DIR_NAME
-                      else parts[0])
+    # Provenance label: prefer configured source_id; else first path part.
+    source_folder = source_id or (rel_path.parts[0] if rel_path.parts else "")
     row = conn.execute("SELECT id FROM emails WHERE message_id = ?", (mid,)).fetchone()
 
     if row:
@@ -155,10 +152,13 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size):
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
             insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload)
 
+    # source_path stores relpath_within_source (not global corpora layout).
     conn.execute(
         """INSERT INTO email_files (email_id, source_path, source_folder, sha256,
-           file_size_bytes, ingested_at) VALUES (?,?,?,?,?,?)""",
-        (email_id, str(rel_path), source_folder, sha, size, now_iso()),
+           file_size_bytes, ingested_at, workspace_id, source_id)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (email_id, str(rel_path), source_folder, sha, size, now_iso(),
+         workspace_id, source_id),
     )
     return email_id
 
@@ -188,13 +188,22 @@ def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, p
 
 
 def recompute_privilege(conn):
-    """OR across all physical copies, full rescan every run (so a file
-    later moved under config.PRIVILEGED_DIR_NAME retroactively upgrades
-    its already-ingested email). Auto flag goes 0->1 only;
-    privilege_override (manual) always wins at query time."""
+    """OR across physical copies. Prefer workspace-config source.privileged;
+    fall back to path heuristic for unmigrated rows. Auto flag 0->1 only."""
+    import workspace_config as wc
+    priv_sources = set()
+    try:
+        priv_sources = {s.id for s in wc.active_sources() if s.privileged}
+    except SystemExit:
+        pass
     rows = conn.execute(
-        "SELECT DISTINCT email_id, source_path FROM email_files").fetchall()
-    ids = {r["email_id"] for r in rows if config.is_privileged_path(r["source_path"])}
+        "SELECT DISTINCT email_id, source_path, source_id FROM email_files").fetchall()
+    ids = set()
+    for r in rows:
+        if r["source_id"] and r["source_id"] in priv_sources:
+            ids.add(r["email_id"])
+        elif r["source_path"] and config.is_privileged_path(r["source_path"]):
+            ids.add(r["email_id"])
     if ids:
         conn.executemany(
             "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
@@ -203,42 +212,71 @@ def recompute_privilege(conn):
 
 
 def run():
+    import workspace_config as wc
     conn = db.connect()
-    known = {r["source_path"]: r["sha256"]
-             for r in conn.execute("SELECT source_path, sha256 FROM email_files")}
+    db.migrate(conn)
+    known_path = {r["source_path"]: r["sha256"]
+                  for r in conn.execute("SELECT source_path, sha256 FROM email_files")}
+    known_sha = {(r["source_id"], r["sha256"])
+                 for r in conn.execute(
+                     "SELECT source_id, sha256 FROM email_files"
+                     " WHERE source_id IS NOT NULL")}
     stats = {"new": 0, "skipped": 0, "dup_message_id": 0, "errors": 0, "custody_alarm": 0}
 
-    files = sorted(config.INGESTION_SOURCES.rglob("*.eml"))
-    for path in files:
-        rel = path.relative_to(config.INGESTION_SOURCES)
-        raw = path.read_bytes()
-        sha = utils_hash.sha256_bytes(raw)
+    try:
+        email_sources = wc.active_sources("email_eml")
+        ws_id = wc.active_workspace().id
+    except SystemExit:
+        email_sources = []
+        ws_id = getattr(config, "ACTIVE_WORKSPACE_ID", config.WORKSPACE_DIR.name)
+    if not email_sources:
+        # Legacy: entire corpora bag as one synthetic source
+        from blob_index import SourceRoot
+        email_sources = [SourceRoot(ws_id, "legacy", config.INGESTION_SOURCES)]
 
-        if str(rel) in known:
-            if known[str(rel)] == sha:
+    for source in email_sources:
+        if not source.root.is_dir():
+            flag(conn, source.root, "parse", "warning",
+                 f"email source {source.source_id if hasattr(source, 'source_id') else source.id} "
+                 f"root missing: {source.root}")
+            continue
+        sid = getattr(source, "source_id", None) or source.id
+        for path in sorted(source.root.rglob("*.eml")):
+            rel = path.relative_to(source.root)
+            raw = path.read_bytes()
+            sha = utils_hash.sha256_bytes(raw)
+            key = str(rel)
+
+            if (sid, sha) in known_sha or (
+                    key in known_path and known_path[key] == sha):
                 stats["skipped"] += 1
-            else:
+                continue
+            if key in known_path and known_path[key] != sha:
                 stats["custody_alarm"] += 1
                 flag(conn, rel, "parse", "error",
                      "CHAIN-OF-CUSTODY ALARM: file content changed since ingestion "
-                     f"(recorded {known[str(rel)][:12]}…, now {sha[:12]}…). NOT re-ingested.")
-            continue
+                     f"(recorded {known_path[key][:12]}…, now {sha[:12]}…). "
+                     "NOT re-ingested.")
+                continue
 
-        try:
-            msg = email.message_from_bytes(raw, policy=email.policy.default)
-            before = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
-            upsert_email(conn, msg, path, rel, sha, len(raw))
-            after = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
-            if after == before:
-                stats["dup_message_id"] += 1
-            else:
-                stats["new"] += 1
-            conn.commit()
-        except Exception as e:  # never abort the batch on one bad file
-            conn.rollback()
-            stats["errors"] += 1
-            flag(conn, rel, "parse", "error", f"{type(e).__name__}: {e}")
-            conn.commit()
+            try:
+                msg = email.message_from_bytes(raw, policy=email.policy.default)
+                before = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
+                upsert_email(conn, msg, path, rel, sha, len(raw),
+                             workspace_id=ws_id, source_id=sid)
+                after = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
+                if after == before:
+                    stats["dup_message_id"] += 1
+                else:
+                    stats["new"] += 1
+                known_sha.add((sid, sha))
+                known_path[key] = sha
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                stats["errors"] += 1
+                flag(conn, rel, "parse", "error", f"{type(e).__name__}: {e}")
+                conn.commit()
 
     recompute_privilege(conn)
     conn.commit()

@@ -12,13 +12,17 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Active workspace (docs/specs/workspace-user-data.md, Phase 2 scaled
-# down). ALL user/case data lives under this tree so gitignore is one
-# line (`workspaces/`). Real name comes from config.yaml workspace.dir.
-WORKSPACE_DIR = PROJECT_ROOT / "workspaces" / "default"
+# Directory that holds all workspaces (docs/specs/workspace-config.md).
+# Active matter comes from workspaces/workspace-config.yaml (gitignored).
+WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
 
-# Evidence originals — READ ONLY. Under the workspace (was repo-root
-# ingestion-sources/). No script may open these paths in write mode.
+# Active workspace root — set from registry after platform yaml load.
+# Fallback default until registry is loaded.
+WORKSPACE_DIR = WORKSPACES_DIR / "default"
+
+# Evidence originals — READ ONLY. Prefer per-source roots from
+# workspace-config; INGESTION_SOURCES remains the default corpora/
+# bag for legacy walks and tests.
 INGESTION_SOURCES = WORKSPACE_DIR / "corpora"
 
 # Derived data (DB, text extracts, vectors, logs, daemon socket) —
@@ -188,6 +192,9 @@ EVAL_RESULTS_DIR = EVAL_DIR / "results"
 # in config.yaml not in this map aborts loudly at import time — a typo
 # in a safety-semantics key must never silently do nothing.
 YAML_KEYS = {
+    # Preferred: only the parent directory for all workspaces.
+    "workspaces.dir": ("WORKSPACES_DIR", lambda v: PROJECT_ROOT / v),
+    # Legacy single-workspace pointer (still accepted during migration).
     "workspace.dir": ("WORKSPACE_DIR", lambda v: PROJECT_ROOT / v),
     "privilege.document_folders": ("DOCUMENT_FOLDERS", set),
     "query.fts_candidates": ("FTS_CANDIDATES", int),
@@ -252,9 +259,41 @@ def load_yaml_overlay(path):
     # Recompute paths derived from an overridden value.
     globals()["EMBED_MODEL_PATH"] = MODELS_DIR / globals()["EMBED_MODEL_FILE"]
     globals()["RERANK_MODEL_PATH"] = MODELS_DIR / globals()["RERANK_MODEL_FILE"]
-    # User-data root: corpora + output + eval all under WORKSPACE_DIR
-    # (docs/specs/workspace-user-data.md).
-    _ws = globals()["WORKSPACE_DIR"]
+    _apply_workspace_paths()
+
+
+def _apply_workspace_paths():
+    """Set WORKSPACE_DIR/OUTPUT_* from workspace-config active entry, or
+    legacy WORKSPACE_DIR / corpora layout.
+
+    Parses the registry with PyYAML only (no import of workspace_config)
+    to avoid circular imports at package load time.
+    """
+    import yaml
+    ws_dir = Path(globals().get("WORKSPACES_DIR", PROJECT_ROOT / "workspaces"))
+    globals()["WORKSPACES_DIR"] = ws_dir
+    reg_file = ws_dir / "workspace-config.yaml"
+    _ws = None
+    active_id = None
+    if reg_file.is_file():
+        try:
+            data = yaml.safe_load(reg_file.read_text()) or {}
+            for raw in data.get("workspaces") or []:
+                if not isinstance(raw, dict) or not raw.get("active"):
+                    continue
+                ws_id = raw.get("id") or raw.get("workspace_id")
+                ws_rel = raw.get("path") or ws_id
+                if ws_id and ws_rel:
+                    _ws = (ws_dir / ws_rel).resolve()
+                    active_id = ws_id
+                    break
+        except Exception:
+            _ws = None
+    if _ws is None:
+        _ws = Path(globals().get("WORKSPACE_DIR", ws_dir / "default"))
+        active_id = _ws.name
+    globals()["WORKSPACE_DIR"] = _ws
+    globals()["ACTIVE_WORKSPACE_ID"] = active_id
     globals()["INGESTION_SOURCES"] = _ws / "corpora"
     globals()["OUTPUT_DIR"] = _ws / "output"
     _out = globals()["OUTPUT_DIR"]
@@ -278,6 +317,10 @@ def load_yaml_overlay(path):
     globals()["EVAL_RESULTS_DIR"] = _ws / "eval" / "results"
 
 
+ACTIVE_WORKSPACE_ID = WORKSPACE_DIR.name
+
 _USER_CONFIG = PROJECT_ROOT / "config.yaml"
 if _USER_CONFIG.exists():
     load_yaml_overlay(_USER_CONFIG)
+else:
+    _apply_workspace_paths()

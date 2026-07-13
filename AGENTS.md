@@ -12,21 +12,16 @@ case-specific instructions live in the workspace layer (below).
 Everything user/case-facing (parties, privilege, matter rules,
 chronology, journal, golden sets, **domain skill playbooks**, evidence
 `corpora/`, derived `output/`) lives under `workspaces/<name>/`
-(gitignored in full). The active workspace is set by
-`config.yaml → workspace.dir`.
+(gitignored in full). Platform `config.yaml` sets `workspaces.dir` only;
+the **active** matter and evidence **sources** are in the user registry
+`{workspaces.dir}/workspace-config.yaml` (also gitignored). See
+docs/specs/workspace-config.md.
 
-**Loading order for case work**: this file → the active workspace's
-`WORKSPACE.md` → `corpora/<name>/CORPUS.md` for each corpus you touch
-→ domain skill file(s) **in that workspace** (e.g.
-`workspaces/family-law/au-family-law.md` — named in WORKSPACE.md).
-Do not answer case questions or draft case documents on platform
+**Loading order for case work**: this file → workspace-config.yaml
+(sources, privilege flags, descriptions) → the active workspace's
+`WORKSPACE.md` → domain skill file(s) in that workspace (e.g.
+`au-family-law.md`). Do not answer case questions on platform
 instructions alone.
-
-Every corpus a user adds must be accompanied by a `CORPUS.md`
-(provenance, parties, privilege status, what it evidences, retrieval
-hints) in the workspace's `corpora/` directory. Domain skills are
-user-owned playbooks in the workspace root (not under platform
-`skills/`).
 
 ## Hard rules — never violate
 

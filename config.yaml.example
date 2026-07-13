@@ -18,23 +18,21 @@
 #     CONVENTION rather than a config key (see below) — the auto-flag
 #     only ever ratchets 0->1.
 
-workspace:
-  # Active workspace directory, relative to the repo root. This is the
-  # ENTIRE user-data root (gitignored via workspaces/):
-  #   corpora/   — evidence (.eml, PDFs, …) + CORPUS.md
-  #   output/    — DB, vectors, extracts, logs, daemon socket
-  #   WORKSPACE.md, chronology, journal, eval/, …
-  # See docs/specs/workspace-user-data.md and AGENTS.md "Workspaces".
-  dir: workspaces/my-matter
+workspaces:
+  # Parent directory for all matters (relative to repo root). Active
+  # workspace + evidence sources are declared in the gitignored user
+  # registry: {dir}/workspace-config.yaml
+  # See docs/specs/workspace-config.md and workspace-config.example.yaml.
+  dir: workspaces
+
+# Optional legacy (ignored when workspace-config.yaml is present):
+# workspace:
+#   dir: workspaces/my-matter
 
 privilege:
-  # PRIVILEGE ITSELF IS NOT A CONFIG KEY. Nest under corpora/privileged/
-  # (any depth), e.g. workspaces/my-matter/corpora/privileged/firm.example/
-  # Auto flag only 0->1; privilege_override in DB always wins.
-  # See scripts/config.py is_privileged_path.
-  #
-  # Folders relative to corpora/ scanned for standalone non-.eml docs.
-  # Privileged drop-folder: nest under privileged/ and list that path.
+  # document_folders is legacy; prefer workspace-config sources with
+  # kind: documents. Privilege is sources[].privileged (bool) in the
+  # registry, not a folder-name convention.
   document_folders: [additional-documents]
 
 query:

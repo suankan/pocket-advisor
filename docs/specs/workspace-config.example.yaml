@@ -1,0 +1,63 @@
+# Example user registry — copy to:
+#   {workspaces.dir}/workspace-config.yaml
+# (gitignored under workspaces/). Platform config only sets workspaces.dir.
+#
+# schema_version is required. Unknown keys abort load.
+# Exactly one workspace must have active: true.
+# Source paths are relative to that workspace's path directory.
+# kind: email_eml | documents
+# privileged: boolean (explicit; not inferred from folder names)
+
+schema_version: 1
+
+workspaces:
+  - id: family-law
+    active: true
+    path: family-law
+    title: "Family law matter"
+    sources:
+      - id: suan-svetlana
+        description: >
+          Spousal email correspondence (Suan ↔ Svetlana). Majority Russian.
+          Separation, parenting, finances, property negotiation record.
+        path: corpora/jane@example.com
+        kind: email_eml
+        privileged: false
+
+      - id: suan-solicitor
+        description: >
+          Own-solicitor channel (attorney-client privileged). Advice and
+          strategy — not for outward-facing drafts.
+        path: corpora/privileged/setonfamily.law
+        kind: email_eml
+        privileged: true
+
+      - id: svetlana-solicitor
+        description: >
+          Opposing-counsel correspondence (Shore Lawyers). Outward-facing
+          formal record; allegations are instructed positions, not findings.
+        path: corpora/shorelawyers.com.au
+        kind: email_eml
+        privileged: false
+
+      - id: svetlana-financial-disclosure
+        description: >
+          Wife's financial disclosure PDF package (bank statements, loans,
+          payslips, super, crypto, etc.) for property settlement.
+        path: "corpora/additional-documents/265642, Kan - Wife's Financial Disclosure 05.06.2026"
+        kind: documents
+        privileged: false
+
+      - id: suan-financial-disclosure
+        description: >
+          Suan's financial disclosure PDF package for property settlement
+          and related analysis.
+        path: corpora/additional-documents/suan_financial_disclosure
+        kind: documents
+        privileged: false
+
+  # - id: another-matter
+  #   active: false
+  #   path: another-matter
+  #   title: "…"
+  #   sources: []

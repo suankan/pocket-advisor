@@ -183,6 +183,15 @@ preserves the engine-relevant milestones.
   `skills/au-family-law.md` removed. Productisation may later ship
   copy-in templates.
 
+## 2026-07-13 — pathless evidence identity
+
+- `email_files` / `documents` no longer store filesystem paths.
+  Identity is `(workspace_id, source_id, sha256)`. Open/locate via
+  `source_blob_index` + `get_workspace_item`. `verify_integrity` is
+  hash-set based (renames inside a source no longer fail). Query
+  results expose `source_id` / `source_ref` instead of paths. Derived
+  `output/` extract paths unchanged (engine-owned).
+
 ## 2026-07-13 — workspace-config.yaml registry (user sources)
 
 - Spec + example: docs/specs/workspace-config.md,

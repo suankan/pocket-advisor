@@ -1,58 +1,81 @@
-"""Chain-of-custody verification: re-hash every original under
-workspace corpora/ (both .eml emails and standalone documents) and
-compare against the recorded manifests.
+"""Chain-of-custody verification via content hashes (path-agnostic).
 
-Run before anything sensitive (privilege log, exporting material).
-Exit 0 = clean; exit 1 = drift detected (details printed).
+Rebuilds the regenerable source_blob_index, then checks every recorded
+(workspace_id, source_id, sha256) is present on disk under that source
+with a matching hash. File renames inside a source do not fail.
+
+Run before anything sensitive. Exit 0 = clean; exit 1 = drift.
 """
 import sys
 
+import blob_index
 import config
 import db
 import utils_hash
 
 
-def check(recorded, on_disk, label):
-    problems = []
-    for rel, sha in recorded.items():
-        p = on_disk.get(rel)
-        if p is None:
-            problems.append(f"MISSING {label}: {rel} (recorded but no longer on disk)")
-        elif utils_hash.sha256_file(p) != sha:
-            problems.append(f"MODIFIED {label}: {rel} (hash differs from ingestion record)")
-    unrecorded = set(on_disk) - set(recorded)
-    return problems, unrecorded
-
-
 def run():
     conn = db.connect()
     db.migrate(conn)
-    recorded_emails = {r["source_path"]: r["sha256"]
-                       for r in conn.execute("SELECT source_path, sha256 FROM email_files")}
-    recorded_docs = {r["source_path"]: r["sha256"]
-                     for r in conn.execute("SELECT source_path, sha256 FROM documents")}
+
+    # Refresh sha→path cache from disk (regenerable; not identity).
+    blob_index.rebuild_all(conn)
+
+    recorded_emails = conn.execute(
+        """SELECT workspace_id, source_id, sha256 FROM email_files
+           WHERE source_id IS NOT NULL AND sha256 IS NOT NULL""").fetchall()
+    recorded_docs = conn.execute(
+        """SELECT workspace_id, source_id, sha256, filename FROM documents
+           WHERE source_id IS NOT NULL AND sha256 IS NOT NULL""").fetchall()
     conn.close()
 
-    on_disk_emails = {str(p.relative_to(config.INGESTION_SOURCES)): p
-                      for p in config.INGESTION_SOURCES.rglob("*.eml")}
-    # identical filters to ingestion, guaranteed by sharing the walk
-    from ingest_documents import iter_source_files
-    on_disk_docs = {str(p.relative_to(config.INGESTION_SOURCES)): p
-                    for p, _folder in iter_source_files()}
+    problems = []
+    # Disk hashes by (workspace_id, source_id)
+    on_disk = {}  # (ws, src) -> set(sha)
+    for s in blob_index.list_sources():
+        key = (s.workspace_id, s.source_id)
+        shas = set()
+        if s.root.is_dir():
+            for path in s.root.rglob("*"):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                if path.name in config.IGNORED_FILENAMES:
+                    continue
+                try:
+                    shas.add(utils_hash.sha256_file(path))
+                except OSError:
+                    continue
+        on_disk[key] = shas
 
-    email_problems, email_unrecorded = check(recorded_emails, on_disk_emails, "email")
-    doc_problems, doc_unrecorded = check(recorded_docs, on_disk_docs, "document")
-    problems = email_problems + doc_problems
-    unrecorded = email_unrecorded | doc_unrecorded
+    def check_rows(rows, label):
+        for r in rows:
+            key = (r["workspace_id"], r["source_id"])
+            sha = r["sha256"]
+            disk = on_disk.get(key, set())
+            if sha not in disk:
+                tag = r["filename"] if "filename" in r.keys() else sha[:12]
+                problems.append(
+                    f"MISSING {label}: source={r['source_id']} sha={sha[:12]}… ({tag})")
 
-    print(f"verify_integrity: emails {len(recorded_emails)} recorded /"
-          f" {len(on_disk_emails)} on disk; documents {len(recorded_docs)}"
-          f" recorded / {len(on_disk_docs)} on disk;"
-          f" {len(problems)} problems, {len(unrecorded)} not yet ingested")
+    check_rows(recorded_emails, "email")
+    check_rows(recorded_docs, "document")
+
+    recorded_set = {(r["workspace_id"], r["source_id"], r["sha256"])
+                    for r in list(recorded_emails) + list(recorded_docs)}
+    unrecorded = 0
+    for (ws, sid), shas in on_disk.items():
+        # only count files for sources we care about (emails vs docs by kind)
+        for sha in shas:
+            if (ws, sid, sha) not in recorded_set:
+                unrecorded += 1
+
+    print(f"verify_integrity: emails {len(recorded_emails)} recorded;"
+          f" documents {len(recorded_docs)} recorded;"
+          f" {len(problems)} problems, {unrecorded} on-disk blobs not in DB")
     for msg in problems:
         print(f"  !! {msg}")
     if unrecorded:
-        print(f"  (not-yet-ingested files are not an error; run ingest.py)")
+        print("  (not-yet-ingested blobs are not an error; run ingest.py)")
     return 1 if problems else 0
 
 

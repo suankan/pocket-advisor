@@ -35,11 +35,13 @@ CREATE TABLE IF NOT EXISTS emails (
 CREATE TABLE IF NOT EXISTS email_files (
     id              INTEGER PRIMARY KEY,
     email_id        INTEGER NOT NULL REFERENCES emails(id),
-    source_path     TEXT UNIQUE NOT NULL,
-    source_folder   TEXT NOT NULL,
+    workspace_id    TEXT,
+    source_id       TEXT,
+    source_folder   TEXT NOT NULL DEFAULT '',
     sha256          TEXT NOT NULL,
     file_size_bytes INTEGER,
-    ingested_at     TEXT NOT NULL
+    ingested_at     TEXT NOT NULL,
+    UNIQUE (workspace_id, source_id, sha256)
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -86,8 +88,9 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE TABLE IF NOT EXISTS documents (
     id                    INTEGER PRIMARY KEY,
     email_id              INTEGER UNIQUE NOT NULL REFERENCES emails(id),
-    source_path           TEXT UNIQUE NOT NULL,
-    source_folder         TEXT NOT NULL,
+    workspace_id          TEXT,
+    source_id             TEXT,
+    source_folder         TEXT NOT NULL DEFAULT '',
     filename              TEXT NOT NULL,
     sha256                TEXT NOT NULL,
     size_bytes            INTEGER,
@@ -105,7 +108,8 @@ CREATE TABLE IF NOT EXISTS documents (
     doc_date_raw          TEXT,
     has_parse_issue       INTEGER NOT NULL DEFAULT 0,
     ingested_at           TEXT NOT NULL,
-    processed_at          TEXT
+    processed_at          TEXT,
+    UNIQUE (workspace_id, source_id, sha256)
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_email ON documents(email_id);
@@ -209,6 +213,89 @@ def _ensure_chunks_fts_shadow_column(conn):
     conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
 
 
+def _table_has_column(conn, table, column):
+    return any(r["name"] == column
+               for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _migrate_pathless_evidence(conn):
+    """Drop filesystem paths as identity; keep (workspace_id, source_id, sha256).
+
+    Idempotent: only rewrites tables that still have source_path.
+    """
+    if _table_has_column(conn, "email_files", "source_path"):
+        conn.executescript("""
+            CREATE TABLE email_files_new (
+                id              INTEGER PRIMARY KEY,
+                email_id        INTEGER NOT NULL REFERENCES emails(id),
+                workspace_id    TEXT,
+                source_id       TEXT,
+                source_folder   TEXT NOT NULL DEFAULT '',
+                sha256          TEXT NOT NULL,
+                file_size_bytes INTEGER,
+                ingested_at     TEXT NOT NULL,
+                UNIQUE (workspace_id, source_id, sha256)
+            );
+            INSERT OR IGNORE INTO email_files_new
+                (id, email_id, workspace_id, source_id, source_folder,
+                 sha256, file_size_bytes, ingested_at)
+            SELECT id, email_id, workspace_id, source_id,
+                   COALESCE(source_id, source_folder, ''),
+                   sha256, file_size_bytes, ingested_at
+            FROM email_files;
+            DROP TABLE email_files;
+            ALTER TABLE email_files_new RENAME TO email_files;
+        """)
+    if _table_has_column(conn, "documents", "source_path"):
+        conn.executescript("""
+            CREATE TABLE documents_new (
+                id                    INTEGER PRIMARY KEY,
+                email_id              INTEGER UNIQUE NOT NULL REFERENCES emails(id),
+                workspace_id          TEXT,
+                source_id             TEXT,
+                source_folder         TEXT NOT NULL DEFAULT '',
+                filename              TEXT NOT NULL,
+                sha256                TEXT NOT NULL,
+                size_bytes            INTEGER,
+                extracted_copy_path   TEXT,
+                extracted_copy_sha256 TEXT,
+                extraction_method     TEXT,
+                extracted_text_path   TEXT,
+                ocr_confidence        REAL,
+                ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
+                is_skipped            INTEGER NOT NULL DEFAULT 0,
+                skip_reason           TEXT,
+                doc_date              TEXT,
+                doc_date_source       TEXT,
+                doc_date_detail       TEXT,
+                doc_date_raw          TEXT,
+                has_parse_issue       INTEGER NOT NULL DEFAULT 0,
+                ingested_at           TEXT NOT NULL,
+                processed_at          TEXT,
+                UNIQUE (workspace_id, source_id, sha256)
+            );
+            INSERT OR IGNORE INTO documents_new
+                (id, email_id, workspace_id, source_id, source_folder, filename,
+                 sha256, size_bytes, extracted_copy_path, extracted_copy_sha256,
+                 extraction_method, extracted_text_path, ocr_confidence,
+                 ocr_flagged_low_conf, is_skipped, skip_reason, doc_date,
+                 doc_date_source, doc_date_detail, doc_date_raw, has_parse_issue,
+                 ingested_at, processed_at)
+            SELECT id, email_id, workspace_id, source_id,
+                   COALESCE(source_id, source_folder, ''), filename,
+                   sha256, size_bytes, extracted_copy_path, extracted_copy_sha256,
+                   extraction_method, extracted_text_path, ocr_confidence,
+                   ocr_flagged_low_conf, is_skipped, skip_reason, doc_date,
+                   doc_date_source, doc_date_detail, doc_date_raw, has_parse_issue,
+                   ingested_at, processed_at
+            FROM documents;
+            DROP TABLE documents;
+            ALTER TABLE documents_new RENAME TO documents;
+            CREATE INDEX IF NOT EXISTS idx_documents_email ON documents(email_id);
+            CREATE INDEX IF NOT EXISTS idx_documents_sha ON documents(sha256);
+        """)
+
+
 def migrate(conn):
     """Apply schema + guarded column additions. Idempotent and silent —
     safe to call from any entrypoint (ingest stages, query.py)."""
@@ -220,6 +307,7 @@ def migrate(conn):
     ensure_column(conn, "email_files", "source_id", "source_id TEXT")
     ensure_column(conn, "documents", "workspace_id", "workspace_id TEXT")
     ensure_column(conn, "documents", "source_id", "source_id TEXT")
+    _migrate_pathless_evidence(conn)
     _ensure_chunks_fts_shadow_column(conn)
     conn.commit()
 

@@ -135,7 +135,7 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
 
 
 def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes,
-                    workspace_id=None, source_id=None):
+                    workspace_id=None, source_id=None, privileged=False):
     now = now_iso()
     # Subject: path under the source root (user-visible context).
     subject = " / ".join(rel_path.parts) if rel_path.parts else path.name
@@ -145,16 +145,17 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
     mid = f"<doc-{sha}@pocket-lawyer>"
     cur = conn.execute(
         """INSERT INTO emails (message_id, subject, subject_normalized,
-           source_kind, body_source, has_parse_issue, ingested_at)
-           VALUES (?,?,?, 'document', 'document_extracted', 0, ?)""",
-        (mid, subject, utils_mime.normalize_subject(subject), now))
+           source_kind, body_source, has_parse_issue, is_privileged, ingested_at)
+           VALUES (?,?,?, 'document', 'document_extracted', 0, ?, ?)""",
+        (mid, subject, utils_mime.normalize_subject(subject),
+         1 if privileged else 0, now))
     email_id = cur.lastrowid
 
     doc_cur = conn.execute(
-        """INSERT INTO documents (email_id, source_path, source_folder,
+        """INSERT INTO documents (email_id, source_folder,
            filename, sha256, size_bytes, ingested_at, workspace_id, source_id)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (email_id, str(rel_path), source_folder, path.name, sha, len(raw), now,
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (email_id, source_folder or source_id or "", path.name, sha, len(raw), now,
          workspace_id, source_id))
     doc_id = doc_cur.lastrowid
 
@@ -187,13 +188,9 @@ def recompute_privilege(conn):
     except SystemExit:
         pass
     rows = conn.execute(
-        "SELECT email_id, source_path, source_id FROM documents").fetchall()
-    ids = set()
-    for r in rows:
-        if r["source_id"] and r["source_id"] in priv_sources:
-            ids.add(r["email_id"])
-        elif r["source_path"] and config.is_privileged_path(r["source_path"]):
-            ids.add(r["email_id"])
+        "SELECT email_id, source_id FROM documents").fetchall()
+    ids = {r["email_id"] for r in rows
+           if r["source_id"] and r["source_id"] in priv_sources}
     if ids:
         conn.executemany(
             "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
@@ -207,14 +204,12 @@ def run():
     config.DOCUMENTS_EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
     db.migrate(conn)
-    known = {r["source_path"]: r["sha256"]
-             for r in conn.execute("SELECT source_path, sha256 FROM documents")}
-    known_shas = {r["sha256"]: r["source_path"] for r in conn.execute(
-        "SELECT sha256, source_path FROM documents")}
     known_src_sha = {(r["source_id"], r["sha256"])
                      for r in conn.execute(
                          "SELECT source_id, sha256 FROM documents"
                          " WHERE source_id IS NOT NULL")}
+    known_global_sha = {r["sha256"] for r in conn.execute(
+        "SELECT sha256 FROM documents")}
     stats = {"new": 0, "skipped": 0, "duplicate_content": 0,
              "errors": 0, "custody_alarm": 0}
 
@@ -237,47 +232,34 @@ def run():
                     continue
                 if path.name in config.IGNORED_FILENAMES or path.name.startswith("."):
                     continue
-                if path.suffix.lower() in config.DOCUMENT_SKIP_UNSUPPORTED_EXTS:
-                    # still ingest as skipped_unsupported via insert path
-                    pass
                 rel = path.relative_to(source.root)
-                jobs.append((path, rel, source.id, source.id))
+                jobs.append((path, rel, source.id, source.id, source.privileged))
     else:
         for path, folder in iter_source_files():
             rel = path.relative_to(config.INGESTION_SOURCES)
-            jobs.append((path, rel, folder, "legacy"))
+            priv = config.PRIVILEGED_DIR_NAME in path.parts
+            jobs.append((path, rel, folder, "legacy", priv))
 
-    for path, rel, folder, sid in jobs:
+    for path, rel, folder, sid, priv in jobs:
         raw = path.read_bytes()
         sha = utils_hash.sha256_bytes(raw)
-        key = str(rel)
 
-        if (sid, sha) in known_src_sha or (
-                key in known and known[key] == sha):
+        if (sid, sha) in known_src_sha:
             stats["skipped"] += 1
             continue
-        if key in known and known[key] != sha:
-            stats["custody_alarm"] += 1
-            flag(conn, rel, "ingest_document", "error",
-                 "CHAIN-OF-CUSTODY ALARM: file content changed since"
-                 f" ingestion (recorded {known[key][:12]}…, now"
-                 f" {sha[:12]}…). NOT re-ingested.")
-            continue
-
-        if sha in known_shas:
+        if sha in known_global_sha:
             stats["duplicate_content"] += 1
             flag(conn, rel, "ingest_document", "warning",
-                 f"duplicate content of already-ingested {known_shas[sha]}"
-                 " — not indexed twice; remove the redundant copy")
+                 f"duplicate content sha {sha[:12]}… already ingested"
+                 " — not indexed twice")
             continue
 
         try:
             insert_document(conn, path, rel, folder, sha, raw,
-                            workspace_id=ws_id, source_id=sid)
+                            workspace_id=ws_id, source_id=sid, privileged=priv)
             stats["new"] += 1
-            known_shas[sha] = key
             known_src_sha.add((sid, sha))
-            known[key] = sha
+            known_global_sha.add(sha)
             conn.commit()
         except Exception as e:
             conn.rollback()

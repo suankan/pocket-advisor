@@ -17,9 +17,9 @@ source tree.
 
 ## Non-goals
 
-- Replacing `email_files.source_path` / `documents.source_path` in this
-  change set (full pathless migration is a follow-on).
-- Storing path as the **identity** of a document (forbidden).
+- Storing path as the **identity** of a document (forbidden) — evidence
+  rows use `(workspace_id, source_id, sha256)` only; this table alone
+  holds regenerable paths.
 - Cross-source global hash uniqueness without `source_id` (same bytes in
   two sources remain two memberships).
 

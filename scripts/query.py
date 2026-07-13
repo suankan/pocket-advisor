@@ -175,7 +175,9 @@ def fetch_results(conn, chunk_ids, args):
                       a.filename AS attachment_name,
                       a.ocr_flagged_low_conf AS att_low_conf,
                       d.filename AS doc_filename,
-                      d.source_path AS doc_source_path,
+                      d.source_id AS doc_source_id,
+                      d.sha256 AS doc_sha256,
+                      d.workspace_id AS doc_workspace_id,
                       d.doc_date_source, d.doc_date_detail,
                       d.ocr_flagged_low_conf AS doc_low_conf
                FROM chunks c
@@ -201,16 +203,19 @@ def fetch_results(conn, chunk_ids, args):
         if is_document:
             matched_in = f"document: {row['doc_filename']}"
             low_conf = bool(row["doc_low_conf"])
-            src_path = row["doc_source_path"]
+            source_id = row["doc_source_id"]
             date_source = row["doc_date_source"]
+            cite_ref = f"source:{source_id}" if source_id else row["doc_filename"]
         else:
             matched_in = ("attachment: " + (row["attachment_name"] or "?")) \
                 if row["source_type"] == "attachment" else "email body"
             low_conf = bool(row["att_low_conf"])
             src = conn.execute(
-                "SELECT source_path FROM email_files WHERE email_id=? LIMIT 1",
+                """SELECT source_id, workspace_id, sha256 FROM email_files
+                   WHERE email_id=? LIMIT 1""",
                 (row["email_id"],)).fetchone()
-            src_path = src["source_path"] if src else None
+            source_id = src["source_id"] if src else None
+            cite_ref = f"source:{source_id}" if source_id else None
             date_source = "email_header"
 
         results.append({
@@ -222,6 +227,7 @@ def fetch_results(conn, chunk_ids, args):
             "from_addr": row["from_addr"],
             "subject": row["subject"],
             "source_kind": row["source_kind"],
+            "source_id": source_id,
             "privileged": effective_privileged(row),
             "thread_id": row["thread_id"],
             "thread_link_method": row["thread_link_method"],
@@ -229,7 +235,7 @@ def fetch_results(conn, chunk_ids, args):
             "date_detail": row["doc_date_detail"] if is_document else None,
             "low_confidence_ocr": low_conf,
             "snippet": row["text"][:600],
-            "source_path": src_path,
+            "source_ref": cite_ref,
         })
         if len(results) >= args.top_k:
             break
@@ -449,7 +455,7 @@ def format_results(out, as_json=False):
         if r["source_kind"] == "document":
             print(f"    Doc date source: {r['date_source']}"
                   f" ({r['date_detail'] or 'n/a'})")
-        print(f"    Source: {r['source_path']}")
+        print(f"    Source: {r.get('source_ref') or r.get('source_id') or '—'}")
         snippet = " ".join(r["snippet"].split())
         print(f"    {snippet[:400]}")
     context = out["thread_context"]

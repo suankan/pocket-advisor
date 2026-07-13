@@ -152,12 +152,12 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
             insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload)
 
-    # source_path stores relpath_within_source (not global corpora layout).
+    # Pathless identity: (workspace_id, source_id, sha256) only.
     conn.execute(
-        """INSERT INTO email_files (email_id, source_path, source_folder, sha256,
+        """INSERT INTO email_files (email_id, source_folder, sha256,
            file_size_bytes, ingested_at, workspace_id, source_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (email_id, str(rel_path), source_folder, sha, size, now_iso(),
+           VALUES (?,?,?,?,?,?,?)""",
+        (email_id, source_folder or source_id or "", sha, size, now_iso(),
          workspace_id, source_id),
     )
     return email_id
@@ -197,13 +197,9 @@ def recompute_privilege(conn):
     except SystemExit:
         pass
     rows = conn.execute(
-        "SELECT DISTINCT email_id, source_path, source_id FROM email_files").fetchall()
-    ids = set()
-    for r in rows:
-        if r["source_id"] and r["source_id"] in priv_sources:
-            ids.add(r["email_id"])
-        elif r["source_path"] and config.is_privileged_path(r["source_path"]):
-            ids.add(r["email_id"])
+        "SELECT DISTINCT email_id, source_id FROM email_files").fetchall()
+    ids = {r["email_id"] for r in rows
+           if r["source_id"] and r["source_id"] in priv_sources}
     if ids:
         conn.executemany(
             "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
@@ -215,12 +211,10 @@ def run():
     import workspace_config as wc
     conn = db.connect()
     db.migrate(conn)
-    known_path = {r["source_path"]: r["sha256"]
-                  for r in conn.execute("SELECT source_path, sha256 FROM email_files")}
     known_sha = {(r["source_id"], r["sha256"])
                  for r in conn.execute(
                      "SELECT source_id, sha256 FROM email_files"
-                     " WHERE source_id IS NOT NULL")}
+                     " WHERE source_id IS NOT NULL AND sha256 IS NOT NULL")}
     stats = {"new": 0, "skipped": 0, "dup_message_id": 0, "errors": 0, "custody_alarm": 0}
 
     try:
@@ -230,14 +224,13 @@ def run():
         email_sources = []
         ws_id = getattr(config, "ACTIVE_WORKSPACE_ID", config.WORKSPACE_DIR.name)
     if not email_sources:
-        # Legacy: entire corpora bag as one synthetic source
         from blob_index import SourceRoot
         email_sources = [SourceRoot(ws_id, "legacy", config.INGESTION_SOURCES)]
 
     for source in email_sources:
         if not source.root.is_dir():
             flag(conn, source.root, "parse", "warning",
-                 f"email source {source.source_id if hasattr(source, 'source_id') else source.id} "
+                 f"email source {getattr(source, 'source_id', None) or source.id} "
                  f"root missing: {source.root}")
             continue
         sid = getattr(source, "source_id", None) or source.id
@@ -245,18 +238,9 @@ def run():
             rel = path.relative_to(source.root)
             raw = path.read_bytes()
             sha = utils_hash.sha256_bytes(raw)
-            key = str(rel)
 
-            if (sid, sha) in known_sha or (
-                    key in known_path and known_path[key] == sha):
+            if (sid, sha) in known_sha:
                 stats["skipped"] += 1
-                continue
-            if key in known_path and known_path[key] != sha:
-                stats["custody_alarm"] += 1
-                flag(conn, rel, "parse", "error",
-                     "CHAIN-OF-CUSTODY ALARM: file content changed since ingestion "
-                     f"(recorded {known_path[key][:12]}…, now {sha[:12]}…). "
-                     "NOT re-ingested.")
                 continue
 
             try:
@@ -270,7 +254,6 @@ def run():
                 else:
                     stats["new"] += 1
                 known_sha.add((sid, sha))
-                known_path[key] = sha
                 conn.commit()
             except Exception as e:
                 conn.rollback()

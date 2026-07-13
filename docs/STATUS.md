@@ -245,11 +245,10 @@ Example: **`docs/specs/workspace-config-v2.example.yaml`**
 - Query **mount pre-filter**: chunks only if membership `source_id` ∈
   active mounts (`query.allowed_chunk_ids`)
 - blob_index rebuild walks each collection once (v2)
-- Live registry may use v2 with transitional paths
-  `family-law/corpora/…` (no FS move required yet)
-
-**Still open from v2 checklist:** `state/` path rename, corpora/ FS
-move, AGENTS bulk-cache rules, full Phase B items rename.
+- **Path hygiene:** evidence at `workspaces/corpora/<collection>/`;
+  engine at `workspaces/state/`; matter folders md/eval only; DB paths
+  rewritten to `workspaces/state/…`. Per-collection `state/cache/<id>/`
+  still future (flat text/extracts under state/ for now).
 
 ## 2026-07-13 — DB schema items + membership (**DESIGN LOCKED**)
 
@@ -261,7 +260,7 @@ move, AGENTS bulk-cache rules, full Phase B items rename.
     `documents.email_id` no longer UNIQUE (multi-membership); document
     ingest links same-sha under a new source_id without re-extract;
     blob_index PK `(source_id, sha256)`; `test_schema_phase_a.py`.
-    Mount **query filter** still deferred to workspace-config v2.
+    Query mount filter shipped with v2 loader.
   - Phase B: rename/unify (`items`, `item_memberships`, item_id FKs)
   - Phase C: polish (synthetic mid, drop legacy cols)
 - Add-ons (transactions, page_images, agent gated open) hang off item id;
@@ -269,10 +268,10 @@ move, AGENTS bulk-cache rules, full Phase B items rename.
 
 ## Known open items (engine)
 
-- **workspace-config v2** — loader + mounts + query filter shipped;
-  path layout (`state/`, top-level `corpora/`) still optional migrate.
-- **schema items + membership** — Phase A partial shipped; Phase B/C
-  + mount filter still open (`docs/specs/schema-items-membership.md`).
+- **workspace-config v2** — loader + mounts + query filter +
+  `corpora/` + `state/` layout shipped; per-collection cache dirs TBD.
+- **schema items + membership** — Phase A shipped; Phase B/C open
+  (`docs/specs/schema-items-membership.md`).
 - Visual (page-image) retrieval channel: designed, not started —
   docs/specs/visual-retrieval.md. First step is a smoke test of the
   cross-modal alignment claim it depends on.

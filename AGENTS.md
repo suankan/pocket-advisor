@@ -9,34 +9,30 @@ case-specific instructions live in the workspace layer (below).
 
 ## Workspaces — where the case layer lives
 
-Everything user/case-facing (parties, privilege, matter rules,
-chronology, journal, golden sets, **domain skill playbooks**, evidence
-`corpora/`, derived `output/`) lives under `workspaces/<name>/`
-(gitignored in full). Platform `config.yaml` sets `workspaces.dir` only;
-the **active** matter and evidence **sources** are in the user registry
-`{workspaces.dir}/workspace-config.yaml` (also gitignored). See
-docs/specs/workspace-config.md.
+Everything user/case-facing lives under `workspaces/` (gitignored):
+**`corpora/`** (read-only evidence collections), **`state/`** (shared
+engine DB/vectors/text), **`workspace-config.yaml`** (collections +
+workspace mounts), and per-matter **`workspaces/<id>/`** (WORKSPACE.md,
+skills, journal, chronology, eval). Platform `config.yaml` only sets
+`workspaces.dir` + engine knobs. See docs/specs/workspace-config-v2.md.
 
 **Loading order for case work**: this file →
-`workspaces/workspace-config.yaml` (active workspace, sources,
-`privileged` flags, per-source **description**) → the active
+`workspaces/workspace-config.yaml` (active workspace, mounted
+collections, `privileged` flags, **description**) → the active
 workspace's `WORKSPACE.md` → domain skill file(s) in that workspace
 (e.g. `au-family-law.md`). Do not answer case questions on platform
-instructions alone. Optional leftover `CORPUS.md` files are not the
-source of truth once a registry description exists.
+instructions alone.
 
 ## Hard rules — never violate
 
-1. **NEVER write, rename, or delete evidence under configured source
-   roots** (active workspace's sources in workspace-config.yaml;
-   typically under `workspaces/<name>/…`). Those are originals under
-   chain-of-custody: durable identity is
-   `(workspace_id, source_id, sha256)` in the DB, not a path. Open
+1. **NEVER write, rename, or delete evidence under collection roots**
+   (`workspaces/corpora/…` / paths in workspace-config collections).
+   Those are originals under chain-of-custody: durable identity is
+   `(source_id, sha256)` ≈ `(collection_id, sha256)`, not a path. Open
    read-only. A changed hash is treated as tampering, not as an
    update. Locate blobs via `source_blob_index` /
-   `scripts/blob_index.py` after moves inside a source. All user/case
-   data lives under `workspaces/<name>/` (docs/specs/
-   workspace-user-data.md, source-blob-index.md).
+   `scripts/blob_index.py` after moves inside a source. Engine derived
+   data is under `workspaces/state/` (regenerable).
 2. **Privilege**: a source is privileged when **either**
    (a) its registry entry has `privileged: true`, **or** (b) a physical
    copy sits under a directory segment literally named `privileged`
@@ -132,10 +128,10 @@ source of truth once a registry description exists.
   `workspaces.dir` + engine knobs only (not active matter / sources)
 - `workspaces/workspace-config.yaml` (gitignored) — active workspace +
   sources registry (docs/specs/workspace-config.md)
-- `workspaces/<name>/` (gitignored) — **entire user-data root**:
-  evidence per `sources[].path`, `output/` (DB/vectors/text/daemon
-  socket), WORKSPACE.md, domain skill(s) e.g. `au-family-law.md`,
-  chronology, journal, LEARNINGS, eval/
+- `workspaces/` (gitignored) — user data: `corpora/` (read-only facts),
+  `state/` (shared engine DB/vectors/text), `workspace-config.yaml`,
+  and per-matter folders `workspaces/<id>/` (WORKSPACE.md, skills,
+  journal, chronology, eval — not bulk evidence)
 - `scripts/` — the pipeline (see RUNBOOK.md)
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
   present in this repo at all — gitignored, never committed, and not
@@ -172,8 +168,9 @@ venv/bin/python scripts/verify_integrity.py
 Answer workflow for case questions: prefer starting the query daemon for
 the session, then run `query.py` (often twice with rephrasings — English
 rephrasings, synonyms, added keywords), read the full email bodies of
-top hits from `workspaces/<name>/output/text/emails/<id>.txt` (never
-rely on snippets alone for anything consequential), pull the whole
+top hits from `workspaces/state/text/emails/<id>.txt` (never rely on
+snippets alone for anything consequential; do not bulk-browse
+`state/` as a library — use query mount results), pull the whole
 thread when history matters (`--thread N`), then answer with citations.
 **Query in English even when the corpus is majority non-English —
 never translate the question into the corpus's language.** The

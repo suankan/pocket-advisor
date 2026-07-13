@@ -205,10 +205,11 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 - [x] Blob index: collection roots from registry; PK `(source_id, sha256)`  
 - [x] Query mount pre-filter  
 - [x] Tests: v2 loader cases in `test_workspace_config.py`  
-- [ ] Paths: `OUTPUT_DIR` → `workspaces/state/` (+ `cache/<collection_id>/…`)  
-- [ ] Optional FS move: `family-law/corpora/…` → `corpora/…`  
-- [ ] AGENTS.md hard rules: corpora read-only; no bulk `state/cache` browse  
-- [ ] Live yaml always v2 with preferred `corpora/<id>` paths (optional)  
+- [x] Paths: engine → `workspaces/state/` (flat text/extracts; per-collection `cache/<id>/` later)  
+- [x] FS move: evidence → `workspaces/corpora/…` (collection-id folder names)  
+- [x] AGENTS.md: cite `state/text/…`; no bulk browse of state as library  
+- [x] Live yaml v2 with `corpora/<id>` paths  
+- [ ] Optional: re-home extracts under `state/cache/<collection_id>/`
 
 ---
 

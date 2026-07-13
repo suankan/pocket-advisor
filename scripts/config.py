@@ -20,14 +20,15 @@ WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
 # Fallback default until registry is loaded.
 WORKSPACE_DIR = WORKSPACES_DIR / "default"
 
-# Evidence originals — READ ONLY. Prefer per-source roots from
-# workspace-config; INGESTION_SOURCES remains the default corpora/
-# bag for legacy walks and tests.
-INGESTION_SOURCES = WORKSPACE_DIR / "corpora"
+# Evidence originals — READ ONLY. Prefer per-collection roots from
+# workspace-config; INGESTION_SOURCES is the shared corpora/ bag
+# (workspaces/corpora) for legacy walks and tests.
+INGESTION_SOURCES = WORKSPACES_DIR / "corpora"
 
-# Derived data (DB, text extracts, vectors, logs, daemon socket) —
-# regenerable; also under the workspace user-data root.
-OUTPUT_DIR = WORKSPACE_DIR / "output"
+# Shared engine derived data (one DB for all workspaces) — regenerable.
+# Named **state** (not output); OUTPUT_DIR kept as alias for older code.
+STATE_DIR = WORKSPACES_DIR / "state"
+OUTPUT_DIR = STATE_DIR
 DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
 TEXT_EMAILS_DIR = OUTPUT_DIR / "text" / "emails"
 TEXT_ATTACHMENTS_DIR = OUTPUT_DIR / "text" / "attachments"
@@ -263,8 +264,11 @@ def load_yaml_overlay(path):
 
 
 def _apply_workspace_paths():
-    """Set WORKSPACE_DIR/OUTPUT_* from workspace-config active entry, or
-    legacy WORKSPACE_DIR / corpora layout.
+    """Set WORKSPACE_DIR (matter layer) + shared STATE/corpora paths.
+
+    - Matter folder: active workspace.path under workspaces.dir (md, eval).
+    - Evidence: workspaces/corpora (shared; collection roots from registry).
+    - Engine: workspaces/state (one DB/vectors/text for all workspaces).
 
     Parses the registry with PyYAML only (no import of workspace_config)
     to avoid circular imports at package load time.
@@ -294,9 +298,15 @@ def _apply_workspace_paths():
         active_id = _ws.name
     globals()["WORKSPACE_DIR"] = _ws
     globals()["ACTIVE_WORKSPACE_ID"] = active_id
-    globals()["INGESTION_SOURCES"] = _ws / "corpora"
-    globals()["OUTPUT_DIR"] = _ws / "output"
-    _out = globals()["OUTPUT_DIR"]
+    # Shared facts + engine state (not under matter folder)
+    globals()["INGESTION_SOURCES"] = ws_dir / "corpora"
+    state = ws_dir / "state"
+    # Legacy fallback if migrate not done yet
+    if not state.is_dir() and (_ws / "output").is_dir():
+        state = _ws / "output"
+    globals()["STATE_DIR"] = state
+    globals()["OUTPUT_DIR"] = state  # alias — prefer STATE_DIR in new code
+    _out = state
     globals()["DB_PATH"] = _out / "pocket_advisor.db"
     globals()["TEXT_EMAILS_DIR"] = _out / "text" / "emails"
     globals()["TEXT_ATTACHMENTS_DIR"] = _out / "text" / "attachments"

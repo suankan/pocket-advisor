@@ -16,6 +16,7 @@ collections:
     description: >
       Spousal email correspondence. Majority Russian. Separation, parenting,
       finances, property negotiation record.
+    # Relative to workspaces.dir — shared facts store (read-only)
     path: corpora/suan-svetlana
     privileged: false
 

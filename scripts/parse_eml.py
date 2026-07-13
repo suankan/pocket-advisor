@@ -152,7 +152,8 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
             insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload)
 
-    # Pathless identity: (workspace_id, source_id, sha256) only.
+    # Pathless identity: (source_id, sha256) — collection + content
+    # (workspace_id is optional metadata; schema-items-membership Phase A).
     conn.execute(
         """INSERT INTO email_files (email_id, source_folder, sha256,
            file_size_bytes, ingested_at, workspace_id, source_id)

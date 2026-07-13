@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS email_files (
     sha256          TEXT NOT NULL,
     file_size_bytes INTEGER,
     ingested_at     TEXT NOT NULL,
-    UNIQUE (workspace_id, source_id, sha256)
+    -- Phase A identity: collection (source_id) + content hash only
+    -- (docs/specs/schema-items-membership.md). workspace_id is metadata.
+    UNIQUE (source_id, sha256)
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -87,7 +89,9 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE TABLE IF NOT EXISTS documents (
     id                    INTEGER PRIMARY KEY,
-    email_id              INTEGER UNIQUE NOT NULL REFERENCES emails(id),
+    -- Not UNIQUE: same content may have multi-collection memberships
+    -- sharing one emails row (schema-items-membership Phase A).
+    email_id              INTEGER NOT NULL REFERENCES emails(id),
     workspace_id          TEXT,
     source_id             TEXT,
     source_folder         TEXT NOT NULL DEFAULT '',
@@ -109,7 +113,7 @@ CREATE TABLE IF NOT EXISTS documents (
     has_parse_issue       INTEGER NOT NULL DEFAULT 0,
     ingested_at           TEXT NOT NULL,
     processed_at          TEXT,
-    UNIQUE (workspace_id, source_id, sha256)
+    UNIQUE (source_id, sha256)
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_email ON documents(email_id);
@@ -134,17 +138,17 @@ CREATE INDEX IF NOT EXISTS idx_chunks_email ON chunks(email_id);
 -- Regenerable sha256→path cache (docs/specs/source-blob-index.md).
 -- NOT custody identity: drop and rebuild anytime from disk + config.
 CREATE TABLE IF NOT EXISTS source_blob_index (
-    workspace_id          TEXT NOT NULL,
+    workspace_id          TEXT,
     source_id             TEXT NOT NULL,
     sha256                TEXT NOT NULL,
     relpath_within_source TEXT NOT NULL,
     size_bytes            INTEGER,
     mtime_ns              INTEGER,
     indexed_at            TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, source_id, sha256)
+    PRIMARY KEY (source_id, sha256)
 );
 CREATE INDEX IF NOT EXISTS idx_source_blob_source
-    ON source_blob_index(workspace_id, source_id);
+    ON source_blob_index(source_id);
 """
 
 # chunks_fts is 2-column (text + translit_shadow, see
@@ -219,7 +223,7 @@ def _table_has_column(conn, table, column):
 
 
 def _migrate_pathless_evidence(conn):
-    """Drop filesystem paths as identity; keep (workspace_id, source_id, sha256).
+    """Drop filesystem paths as identity; keep (source_id, sha256) after Phase A.
 
     Idempotent: only rewrites tables that still have source_path.
     """
@@ -234,7 +238,7 @@ def _migrate_pathless_evidence(conn):
                 sha256          TEXT NOT NULL,
                 file_size_bytes INTEGER,
                 ingested_at     TEXT NOT NULL,
-                UNIQUE (workspace_id, source_id, sha256)
+                UNIQUE (source_id, sha256)
             );
             INSERT OR IGNORE INTO email_files_new
                 (id, email_id, workspace_id, source_id, source_folder,
@@ -250,7 +254,7 @@ def _migrate_pathless_evidence(conn):
         conn.executescript("""
             CREATE TABLE documents_new (
                 id                    INTEGER PRIMARY KEY,
-                email_id              INTEGER UNIQUE NOT NULL REFERENCES emails(id),
+                email_id              INTEGER NOT NULL REFERENCES emails(id),
                 workspace_id          TEXT,
                 source_id             TEXT,
                 source_folder         TEXT NOT NULL DEFAULT '',
@@ -272,7 +276,7 @@ def _migrate_pathless_evidence(conn):
                 has_parse_issue       INTEGER NOT NULL DEFAULT 0,
                 ingested_at           TEXT NOT NULL,
                 processed_at          TEXT,
-                UNIQUE (workspace_id, source_id, sha256)
+                UNIQUE (source_id, sha256)
             );
             INSERT OR IGNORE INTO documents_new
                 (id, email_id, workspace_id, source_id, source_folder, filename,
@@ -296,6 +300,149 @@ def _migrate_pathless_evidence(conn):
         """)
 
 
+def _table_sql(conn, table: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return (row["sql"] or "") if row else ""
+
+
+def _unique_column_sets(conn, table: str) -> list[list[str]]:
+    """Return column lists for each unique index/constraint on table."""
+    out = []
+    for idx in conn.execute(f"PRAGMA index_list({table})"):
+        if not idx["unique"]:
+            continue
+        cols = [r["name"] for r in conn.execute(
+            f"PRAGMA index_info('{idx['name']}')")]
+        if cols:
+            out.append(cols)
+    return out
+
+
+def _migrate_collection_identity_phase_a(conn):
+    """Phase A (schema-items-membership): custody key = (source_id, sha256).
+
+    - Drop workspace_id from UNIQUE / PRIMARY KEY on membership + blob index.
+    - Allow multiple documents rows per email_id (multi-collection membership).
+    Idempotent: no-op when constraints already match.
+    """
+    # --- email_files ---
+    if _table_has_column(conn, "email_files", "id"):
+        uq = _unique_column_sets(conn, "email_files")
+        if ["source_id", "sha256"] not in uq:
+            conn.executescript("""
+                CREATE TABLE email_files_pa (
+                    id              INTEGER PRIMARY KEY,
+                    email_id        INTEGER NOT NULL REFERENCES emails(id),
+                    workspace_id    TEXT,
+                    source_id       TEXT,
+                    source_folder   TEXT NOT NULL DEFAULT '',
+                    sha256          TEXT NOT NULL,
+                    file_size_bytes INTEGER,
+                    ingested_at     TEXT NOT NULL,
+                    UNIQUE (source_id, sha256)
+                );
+                INSERT OR IGNORE INTO email_files_pa
+                    (id, email_id, workspace_id, source_id, source_folder,
+                     sha256, file_size_bytes, ingested_at)
+                SELECT id, email_id, workspace_id, source_id, source_folder,
+                       sha256, file_size_bytes, ingested_at
+                FROM email_files;
+                DROP TABLE email_files;
+                ALTER TABLE email_files_pa RENAME TO email_files;
+            """)
+
+    # --- documents ---
+    if _table_has_column(conn, "documents", "id"):
+        uq = _unique_column_sets(conn, "documents")
+        needs = (
+            ["email_id"] in uq
+            or ["workspace_id", "source_id", "sha256"] in uq
+            or ["source_id", "sha256"] not in uq
+        )
+        if needs:
+            conn.executescript("""
+                CREATE TABLE documents_pa (
+                    id                    INTEGER PRIMARY KEY,
+                    email_id              INTEGER NOT NULL REFERENCES emails(id),
+                    workspace_id          TEXT,
+                    source_id             TEXT,
+                    source_folder         TEXT NOT NULL DEFAULT '',
+                    filename              TEXT NOT NULL,
+                    sha256                TEXT NOT NULL,
+                    size_bytes            INTEGER,
+                    extracted_copy_path   TEXT,
+                    extracted_copy_sha256 TEXT,
+                    extraction_method     TEXT,
+                    extracted_text_path   TEXT,
+                    ocr_confidence        REAL,
+                    ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
+                    is_skipped            INTEGER NOT NULL DEFAULT 0,
+                    skip_reason           TEXT,
+                    doc_date              TEXT,
+                    doc_date_source       TEXT,
+                    doc_date_detail       TEXT,
+                    doc_date_raw          TEXT,
+                    has_parse_issue       INTEGER NOT NULL DEFAULT 0,
+                    ingested_at           TEXT NOT NULL,
+                    processed_at          TEXT,
+                    UNIQUE (source_id, sha256)
+                );
+                INSERT OR IGNORE INTO documents_pa
+                    (id, email_id, workspace_id, source_id, source_folder, filename,
+                     sha256, size_bytes, extracted_copy_path, extracted_copy_sha256,
+                     extraction_method, extracted_text_path, ocr_confidence,
+                     ocr_flagged_low_conf, is_skipped, skip_reason, doc_date,
+                     doc_date_source, doc_date_detail, doc_date_raw, has_parse_issue,
+                     ingested_at, processed_at)
+                SELECT id, email_id, workspace_id, source_id, source_folder, filename,
+                       sha256, size_bytes, extracted_copy_path, extracted_copy_sha256,
+                       extraction_method, extracted_text_path, ocr_confidence,
+                       ocr_flagged_low_conf, is_skipped, skip_reason, doc_date,
+                       doc_date_source, doc_date_detail, doc_date_raw, has_parse_issue,
+                       ingested_at, processed_at
+                FROM documents;
+                DROP TABLE documents;
+                ALTER TABLE documents_pa RENAME TO documents;
+                CREATE INDEX IF NOT EXISTS idx_documents_email ON documents(email_id);
+                CREATE INDEX IF NOT EXISTS idx_documents_sha ON documents(sha256);
+            """)
+
+    # --- source_blob_index ---
+    if _table_has_column(conn, "source_blob_index", "sha256"):
+        uq = _unique_column_sets(conn, "source_blob_index")
+        # PK shows up as unique index
+        if ["source_id", "sha256"] not in uq or [
+            "workspace_id", "source_id", "sha256"
+        ] in uq:
+            flat = " ".join(_table_sql(conn, "source_blob_index").split())
+            if "PRIMARY KEY (source_id, sha256)" not in flat:
+                conn.executescript("""
+                    CREATE TABLE source_blob_index_pa (
+                        workspace_id          TEXT,
+                        source_id             TEXT NOT NULL,
+                        sha256                TEXT NOT NULL,
+                        relpath_within_source TEXT NOT NULL,
+                        size_bytes            INTEGER,
+                        mtime_ns              INTEGER,
+                        indexed_at            TEXT NOT NULL,
+                        PRIMARY KEY (source_id, sha256)
+                    );
+                    INSERT OR IGNORE INTO source_blob_index_pa
+                        (workspace_id, source_id, sha256, relpath_within_source,
+                         size_bytes, mtime_ns, indexed_at)
+                    SELECT workspace_id, source_id, sha256, relpath_within_source,
+                           size_bytes, mtime_ns, indexed_at
+                    FROM source_blob_index;
+                    DROP TABLE source_blob_index;
+                    ALTER TABLE source_blob_index_pa RENAME TO source_blob_index;
+                    CREATE INDEX IF NOT EXISTS idx_source_blob_source
+                        ON source_blob_index(source_id);
+                """)
+
+
 def migrate(conn):
     """Apply schema + guarded column additions. Idempotent and silent —
     safe to call from any entrypoint (ingest stages, query.py)."""
@@ -308,6 +455,7 @@ def migrate(conn):
     ensure_column(conn, "documents", "workspace_id", "workspace_id TEXT")
     ensure_column(conn, "documents", "source_id", "source_id TEXT")
     _migrate_pathless_evidence(conn)
+    _migrate_collection_identity_phase_a(conn)
     _ensure_chunks_fts_shadow_column(conn)
     conn.commit()
 

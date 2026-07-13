@@ -134,12 +134,64 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
              " text — verify")
 
 
+def _link_document_membership(conn, email_id, path: Path, rel_path: Path,
+                              folder: str, sha, raw: bytes, *,
+                              workspace_id=None, source_id=None,
+                              privileged=False, template_doc=None):
+    """Insert a documents membership row for an existing content email_id.
+
+    Used for multi-collection membership (same sha, new source_id): reuses
+    extract paths from template_doc when provided; does not re-extract.
+    """
+    now = now_iso()
+    source_folder = source_id or folder or path.parent.name
+    if template_doc:
+        conn.execute(
+            """INSERT INTO documents (
+                   email_id, source_folder, filename, sha256, size_bytes,
+                   ingested_at, workspace_id, source_id,
+                   extracted_copy_path, extracted_copy_sha256, extraction_method,
+                   extracted_text_path, ocr_confidence, ocr_flagged_low_conf,
+                   is_skipped, skip_reason, doc_date, doc_date_source,
+                   doc_date_detail, doc_date_raw, has_parse_issue, processed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (email_id, source_folder or source_id or "", path.name, sha, len(raw),
+             now, workspace_id, source_id,
+             template_doc["extracted_copy_path"],
+             template_doc["extracted_copy_sha256"],
+             template_doc["extraction_method"],
+             template_doc["extracted_text_path"],
+             template_doc["ocr_confidence"],
+             template_doc["ocr_flagged_low_conf"],
+             template_doc["is_skipped"],
+             template_doc["skip_reason"],
+             template_doc["doc_date"],
+             template_doc["doc_date_source"],
+             template_doc["doc_date_detail"],
+             template_doc["doc_date_raw"],
+             template_doc["has_parse_issue"],
+             template_doc["processed_at"]))
+        if privileged:
+            conn.execute(
+                "UPDATE emails SET is_privileged = 1"
+                " WHERE is_privileged = 0 AND id = ?",
+                (email_id,))
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    doc_cur = conn.execute(
+        """INSERT INTO documents (email_id, source_folder,
+           filename, sha256, size_bytes, ingested_at, workspace_id, source_id)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (email_id, source_folder or source_id or "", path.name, sha, len(raw), now,
+         workspace_id, source_id))
+    return doc_cur.lastrowid
+
+
 def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes,
                     workspace_id=None, source_id=None, privileged=False):
     now = now_iso()
     # Subject: path under the source root (user-visible context).
     subject = " / ".join(rel_path.parts) if rel_path.parts else path.name
-    source_folder = source_id or folder or path.parent.name
     # "@pocket-lawyer" is a frozen namespace token, NOT branding — see
     # the matching comment in parse_eml.py. Do not rebrand.
     mid = f"<doc-{sha}@pocket-lawyer>"
@@ -151,13 +203,9 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
          1 if privileged else 0, now))
     email_id = cur.lastrowid
 
-    doc_cur = conn.execute(
-        """INSERT INTO documents (email_id, source_folder,
-           filename, sha256, size_bytes, ingested_at, workspace_id, source_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (email_id, source_folder or source_id or "", path.name, sha, len(raw), now,
-         workspace_id, source_id))
-    doc_id = doc_cur.lastrowid
+    doc_id = _link_document_membership(
+        conn, email_id, path, rel_path, folder, sha, raw,
+        workspace_id=workspace_id, source_id=source_id, privileged=privileged)
 
     copy_path = (config.DOCUMENTS_EXTRACTED_DIR /
                  f"{email_id}__{utils_mime.sanitize_filename(path.name)}")
@@ -177,6 +225,28 @@ def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: byt
         return
 
     process_document(conn, doc_id, email_id, copy_path, path.name)
+
+
+def link_existing_document(conn, path: Path, rel_path: Path, folder: str,
+                           sha, raw: bytes, *, workspace_id=None, source_id=None,
+                           privileged=False):
+    """Phase A multi-membership: same content sha, new collection (source_id).
+
+    Reuses the existing emails/chunks graph; adds a documents membership row.
+    """
+    mid = f"<doc-{sha}@pocket-lawyer>"
+    erow = conn.execute(
+        "SELECT id FROM emails WHERE message_id = ?", (mid,)).fetchone()
+    if not erow:
+        return False
+    email_id = erow["id"]
+    template = conn.execute(
+        "SELECT * FROM documents WHERE sha256 = ? LIMIT 1", (sha,)).fetchone()
+    _link_document_membership(
+        conn, email_id, path, rel_path, folder, sha, raw,
+        workspace_id=workspace_id, source_id=source_id, privileged=privileged,
+        template_doc=template)
+    return True
 
 
 def recompute_privilege(conn):
@@ -208,10 +278,12 @@ def run():
                      for r in conn.execute(
                          "SELECT source_id, sha256 FROM documents"
                          " WHERE source_id IS NOT NULL")}
-    known_global_sha = {r["sha256"] for r in conn.execute(
-        "SELECT sha256 FROM documents")}
+    # sha -> email_id for multi-membership links
+    sha_to_email = {r["sha256"]: r["email_id"]
+                    for r in conn.execute(
+                        "SELECT sha256, email_id FROM documents")}
     stats = {"new": 0, "skipped": 0, "duplicate_content": 0,
-             "errors": 0, "custody_alarm": 0}
+             "linked_membership": 0, "errors": 0, "custody_alarm": 0}
 
     try:
         doc_sources = wc.active_sources("documents")
@@ -247,11 +319,32 @@ def run():
         if (sid, sha) in known_src_sha:
             stats["skipped"] += 1
             continue
-        if sha in known_global_sha:
-            stats["duplicate_content"] += 1
-            flag(conn, rel, "ingest_document", "warning",
-                 f"duplicate content sha {sha[:12]}… already ingested"
-                 " — not indexed twice")
+        if sha in sha_to_email:
+            # Same bytes under a different collection: multi-membership
+            # (schema-items-membership Phase A) — do not re-extract.
+            try:
+                ok = link_existing_document(
+                    conn, path, rel, folder, sha, raw,
+                    workspace_id=ws_id, source_id=sid, privileged=priv)
+                if ok:
+                    stats["linked_membership"] += 1
+                    known_src_sha.add((sid, sha))
+                    flag(conn, rel, "ingest_document", "info",
+                         f"duplicate content sha {sha[:12]}… linked as"
+                         f" membership under source_id={sid}"
+                         " (shared content graph)")
+                else:
+                    stats["duplicate_content"] += 1
+                    flag(conn, rel, "ingest_document", "warning",
+                         f"duplicate content sha {sha[:12]}… but no emails"
+                         " row found — skipped")
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                stats["errors"] += 1
+                flag(conn, rel, "ingest_document", "error",
+                     f"{type(e).__name__}: {e}")
+                conn.commit()
             continue
 
         try:
@@ -259,7 +352,12 @@ def run():
                             workspace_id=ws_id, source_id=sid, privileged=priv)
             stats["new"] += 1
             known_src_sha.add((sid, sha))
-            known_global_sha.add(sha)
+            # email_id of the row we just made
+            er = conn.execute(
+                "SELECT email_id FROM documents WHERE source_id=? AND sha256=?",
+                (sid, sha)).fetchone()
+            if er:
+                sha_to_email[sha] = er["email_id"]
             conn.commit()
         except Exception as e:
             conn.rollback()

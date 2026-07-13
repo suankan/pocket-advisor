@@ -1,11 +1,11 @@
 # Spec: regenerable sha256 → path cache (`source_blob_index`)
 
 Status: IMPLEMENTED 2026-07-13 (table + rebuild/resolve API +
-**pathless ingest** — evidence rows no longer store filesystem paths
-as identity). Durable identity is `(workspace_id, source_id, sha256)`;
-filesystem paths are **not** custody identity. Paths appear only in
-this **derived** table so `get_workspace_item` stays fast after users
-shuffle files inside a source tree.
+**pathless ingest**). Identity key **Phase A** (schema-items-membership):
+`(source_id, sha256)` ≈ `(collection_id, sha256)` — no longer includes
+`workspace_id`. Filesystem paths are **not** custody identity. Paths
+appear only in this **derived** table so `get_workspace_item` stays
+fast after users shuffle files inside a source tree.
 
 ## Goal
 
@@ -27,18 +27,18 @@ shuffle files inside a source tree.
 
 ```sql
 CREATE TABLE IF NOT EXISTS source_blob_index (
-    workspace_id          TEXT NOT NULL,
-    source_id             TEXT NOT NULL,
+    workspace_id          TEXT,              -- optional metadata
+    source_id             TEXT NOT NULL,     -- collection id
     sha256                TEXT NOT NULL,
     -- Relative to that source's root on disk (regenerable; not identity).
     relpath_within_source TEXT NOT NULL,
     size_bytes            INTEGER,
     mtime_ns              INTEGER,
     indexed_at            TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, source_id, sha256)
+    PRIMARY KEY (source_id, sha256)
 );
 CREATE INDEX IF NOT EXISTS idx_source_blob_source
-    ON source_blob_index(workspace_id, source_id);
+    ON source_blob_index(source_id);
 ```
 
 If two files under one source share a hash, **one** row is kept (first

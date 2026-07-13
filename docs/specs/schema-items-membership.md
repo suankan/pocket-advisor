@@ -157,14 +157,14 @@ Do **not** require full rename before collections v2 can ship.
 
 **Goal:** custody + mounts without renaming everything.
 
-- [ ] Treat `source_id` as `collection_id` in code/docs  
-- [ ] Drop `workspace_id` from membership uniqueness (migrate UNIQUE to `(source_id, sha256)` or rename column)  
-- [ ] Document multi-membership: on global document sha hit, **add membership** if missing (stop “skip with no link”)  
-- [ ] Query: allowed `email_id`s from `email_files` ∪ `documents` where `source_id` ∈ mounts  
-- [ ] blob_index PK toward `(collection_id, sha256)`  
-- [ ] Tests: dual membership same sha; mount filter; integrity  
+- [x] Treat `source_id` as collection identity in code/docs (column name kept)  
+- [x] Drop `workspace_id` from membership uniqueness → **UNIQUE (source_id, sha256)**  
+- [x] Document multi-membership: on global document sha hit, **link membership** if missing (`link_existing_document`)  
+- [ ] Query: allowed `email_id`s from `email_files` ∪ `documents` where `source_id` ∈ mounts (**deferred to workspace-config v2**)  
+- [x] blob_index PK → `(source_id, sha256)`; lookup by source_id + sha  
+- [x] Tests: `scripts/test_schema_phase_a.py`; integrity after migrate  
 
-**Exit:** v2 mounts work on evolved current tables.
+**Exit (partial):** collection-scoped custody + multi-membership ready; mount **filter** ships with v2.
 
 ### Phase B — Naming + polymorphic parent (schema cleanup)
 

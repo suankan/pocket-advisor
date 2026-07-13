@@ -1,9 +1,9 @@
 """Regenerable sha256 → path cache for workspace sources.
 
-Durable evidence identity is (workspace_id, source_id, sha256) — not a
-filesystem path. This module maintains `source_blob_index`, a derived
-table that maps those keys to a path *relative to the source root* so
-open/verify stay fast after users shuffle files inside a source.
+Durable evidence identity is (source_id, sha256) ≈ (collection_id, sha256)
+— not a filesystem path (schema-items-membership Phase A). This module
+maintains `source_blob_index`, mapping those keys to a path *relative
+to the source root* so open/verify stay fast after users shuffle files.
 
     venv/bin/python scripts/blob_index.py rebuild
     venv/bin/python scripts/blob_index.py lookup -w family-law -s ID --sha256 HEX
@@ -101,8 +101,8 @@ def rebuild_source(conn, source: SourceRoot) -> dict:
     """Replace all cache rows for one source by walking its root."""
     now = _now()
     conn.execute(
-        "DELETE FROM source_blob_index WHERE workspace_id=? AND source_id=?",
-        (source.workspace_id, source.source_id))
+        "DELETE FROM source_blob_index WHERE source_id=?",
+        (source.source_id,))
     rows = 0
     dupes = 0
     missing_root = 0
@@ -149,9 +149,12 @@ def rebuild_all(conn=None, sources: list[SourceRoot] | None = None) -> list[dict
     return stats
 
 
-def _find_source(workspace_id: str, source_id: str) -> SourceRoot | None:
+def _find_source(source_id: str, workspace_id: str | None = None) -> SourceRoot | None:
+    """Resolve source root by source_id (collection); workspace_id optional filter."""
     for s in list_sources():
-        if s.workspace_id == workspace_id and s.source_id == source_id:
+        if s.source_id != source_id:
+            continue
+        if workspace_id is None or s.workspace_id == workspace_id:
             return s
     return None
 
@@ -161,8 +164,8 @@ def get_workspace_item(workspace_id: str, source_id: str, sha256: str,
                        rebuild_on_miss: bool = True) -> Path | None:
     """Return absolute path for a blob, or None if not found.
 
-    Uses source_blob_index; optionally verifies on-disk hash; rebuilds
-    that source once if miss or stale when rebuild_on_miss is True.
+    Uses source_blob_index keyed by (source_id, sha256); workspace_id is
+    only used to pick among provisional roots if needed.
     """
     sha256 = sha256.lower()
     conn = db.connect()
@@ -171,11 +174,13 @@ def get_workspace_item(workspace_id: str, source_id: str, sha256: str,
     def lookup() -> Path | None:
         row = conn.execute(
             """SELECT relpath_within_source FROM source_blob_index
-               WHERE workspace_id=? AND source_id=? AND sha256=?""",
-            (workspace_id, source_id, sha256)).fetchone()
+               WHERE source_id=? AND sha256=?""",
+            (source_id, sha256)).fetchone()
         if not row:
             return None
-        src = _find_source(workspace_id, source_id)
+        src = _find_source(source_id, workspace_id)
+        if src is None:
+            src = _find_source(source_id, None)
         if src is None or not src.root.is_dir():
             return None
         path = (src.root / row["relpath_within_source"]).resolve()
@@ -198,7 +203,7 @@ def get_workspace_item(workspace_id: str, source_id: str, sha256: str,
         conn.close()
         return path
     if rebuild_on_miss:
-        src = _find_source(workspace_id, source_id)
+        src = _find_source(source_id, workspace_id) or _find_source(source_id, None)
         if src is not None:
             rebuild_source(conn, src)
             path = lookup()

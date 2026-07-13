@@ -252,8 +252,12 @@ opportunistically during case work).
 - Separate work item from workspace-config v2: polymorphic **items +
   memberships** spine on SQLite (not NoSQL; not one sparse mega-table).
 - Spec: **`docs/specs/schema-items-membership.md`**
-  - Phase A: evolve live tables for `collection_id` / multi-membership /
-    mount joins (unblocks v2)
+  - **Phase A SHIPPED (partial):** UNIQUE `(source_id, sha256)` on
+    `email_files` / `documents`; drop workspace from custody key;
+    `documents.email_id` no longer UNIQUE (multi-membership); document
+    ingest links same-sha under a new source_id without re-extract;
+    blob_index PK `(source_id, sha256)`; `test_schema_phase_a.py`.
+    Mount **query filter** still deferred to workspace-config v2.
   - Phase B: rename/unify (`items`, `item_memberships`, item_id FKs)
   - Phase C: polish (synthetic mid, drop legacy cols)
 - Add-ons (transactions, page_images, agent gated open) hang off item id;
@@ -263,8 +267,8 @@ opportunistically during case work).
 
 - **workspace-config v2 implementation** — design locked
   (`docs/specs/workspace-config-v2.md`); not coded.
-- **schema items + membership** — design locked
-  (`docs/specs/schema-items-membership.md`); not coded (Phase A–C).
+- **schema items + membership** — Phase A partial shipped; Phase B/C
+  + mount filter still open (`docs/specs/schema-items-membership.md`).
 - Visual (page-image) retrieval channel: designed, not started —
   docs/specs/visual-retrieval.md. First step is a smoke test of the
   cross-modal alignment claim it depends on.

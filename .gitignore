@@ -1,19 +1,13 @@
-# Case evidence — NEVER version or transmit
-ingestion-sources/
-# Derived data — fully regenerable via scripts/ingest.py
-output/
-# Workspace layer — ALL case-specific content lives here (WORKSPACE.md,
-# CORPUS.md specs, chronology, journal, case learnings, eval golden
-# sets + results). Never committed; the platform layer stays case-free.
+# ALL user/case data (evidence corpora, derived output, chronology,
+# journal, eval). Platform code stays case-free. See
+# docs/specs/workspace-user-data.md.
 workspaces/
-# Workspace config — carries privilege folder names (case content).
-# config.yaml.example (committed) documents the schema with placeholders.
+# Local overlay (workspace.dir etc.); schema in config.yaml.example
 config.yaml
-# Tool-specific dirs (hooks, permission settings, trigger stubs) —
-# local convenience only, never committed (ROADMAP tenet 11).
+# Tool-specific dirs — local convenience only (ROADMAP tenet 11)
 .claude/
 .cursor/
-# Local environment
+# Local environment / weights
 venv/
 models/
 __pycache__/

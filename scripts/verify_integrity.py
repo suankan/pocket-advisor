@@ -1,5 +1,5 @@
 """Chain-of-custody verification: re-hash every original under
-ingestion-sources/ (both .eml emails and standalone documents) and
+workspace corpora/ (both .eml emails and standalone documents) and
 compare against the recorded manifests.
 
 Run before anything sensitive (privilege log, exporting material).

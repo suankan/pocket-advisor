@@ -1,6 +1,6 @@
 """Stage 1: parse .eml files into the database.
 
-- Originals under ingestion-sources/ are opened read-only ('rb') and
+- Originals under workspace corpora/ are opened read-only ('rb') and
   never modified. SHA-256 of raw bytes is recorded before parsing.
 - Idempotent: a source_path already ingested with a matching sha256 is
   skipped. A matching path with a CHANGED sha256 is a chain-of-custody

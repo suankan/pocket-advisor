@@ -25,10 +25,11 @@ and will progressively separate:
    build docs matter to both the family-law and the build workspace) —
    sharing is by reference with privilege policy enforced at query
    time, never by copying.
-3. **Domain skills** — the "advisor" layer: tool-agnostic playbooks
-   (`skills/`) pairing the engine with domain expertise
-   (au-family-law today; nsw-construction and au-tax next). Skills are
-   distributable knowledge; workspaces are private data.
+3. **Domain skills** — the "advisor" layer: playbooks that pair the
+   engine with domain expertise. **User-facing location**: inside the
+   workspace (e.g. `workspaces/family-law/au-family-law.md`), next to
+   WORKSPACE.md — not a committed platform `skills/` tree. Productisation
+   may later ship *templates* users copy into a new workspace.
 
 End state: engine + skills become a productionised, distributable
 product that other people run on their own machines over their own
@@ -80,9 +81,9 @@ per-workspace golden sets before it is called an improvement.
    the only permitted network access.
 2. **Engine/case separation.** Pipeline code (`scripts/`) must stay
    case-agnostic. Case specifics (folder names, party names, dates,
-   jurisdiction) live only in config, `skills/`, `chronology.md`, and
-   data directories. If a change would hard-code a case fact into
-   `scripts/`, put it in config instead.
+   jurisdiction) live only in the workspace layer (WORKSPACE.md,
+   skill playbooks, chronology, corpora). If a change would hard-code a
+   case fact into `scripts/`, put it in the workspace or config instead.
 3. **Evidence integrity and privilege are product features, not case
    quirks.** Chain-of-custody manifests, privilege gating, OCR
    confidence flags, mandatory citations: deepen them, never bypass or
@@ -93,8 +94,9 @@ per-workspace golden sets before it is called an improvement.
    later) without touching ingestion or citation logic. Never let a
    storage engine's features leak into pipeline semantics.
 5. **Everything idempotent, incremental, regenerable.** Re-running any
-   stage is always safe; `output/` can always be rebuilt from
-   `ingestion-sources/`. A feature that breaks this is wrong by design.
+   stage is always safe; workspace `output/` can always be rebuilt
+   from workspace `corpora/`. A feature that breaks this is wrong by
+   design.
 6. **Boring dependencies, deliberately few.** Every new dependency,
    daemon, or file format must justify itself against "could config +
    stdlib + what we already have do this?" A second way to do an
@@ -126,7 +128,7 @@ per-workspace golden sets before it is called an improvement.
    below.
 11. **AI/tool agnostic.** The platform serves any agent CLI and any
    model. Canonical agentic instructions live ONLY in tool-agnostic
-   locations (AGENTS.md, docs/, skills/, workspace files). Tool-specific
+   locations (AGENTS.md, docs/, workspace files including skills). Tool-specific
    directories (`.claude/`, `.cursor/`, ...) are gitignored and NEVER
    committed — not even as thin adapters. Each tool/machine recreates
    its own trigger stubs, hooks, and permission settings locally,
@@ -179,8 +181,8 @@ per-workspace golden sets before it is called an improvement.
   gotchas, engine state ONLY
 - `scripts/` + platform config defaults — case-agnostic (no privilege
   folder names, no party mappings)
-- `skills/<domain>.md` — distributable domain playbooks: generic
-  legal/tax/procedural knowledge, zero client facts
+- Domain skills — **workspace files** (e.g. `au-family-law.md` beside
+  WORKSPACE.md); not committed platform content
 
 **Layer 2 — WORKSPACE (gitignored entirely; may exist N times):**
 ```
@@ -254,7 +256,7 @@ revisit the row — replace, don't layer around.
 | Transliteration shadow field solves "mechanical romanization," not "which of several valid romanizations does THIS corpus actually use" — that's a different, harder problem | A name-matching question the shadow field demonstrably can't answer, in a workspace where it matters | Canonical entity extraction/resolution (already ledgered above) — an alias-learning pass, not a bigger transliteration library |
 | Reranker cost (mean ~12s/query on the current `jina_mlx` default, was ~18s/query combined on the original `llama_cpp` stack — docs/specs/jina-mlx-migration.md) — acceptable for agent-driven CLI use, not interactive-chat speed | UI arrives (Phase 4-adjacent) or latency becomes a felt complaint | Persistent reranker process/daemon (avoid per-query model load), or a faster reranker model, measured the same eval-gated way |
 | `is_privileged` is the only retrieval-visibility-constraint primitive; enforced correctly (candidate-pool level) but only handles one restriction type, one workspace-wide flag | Duplex-build/finance workspaces need purpose-scoped or workspace-scoped visibility (same content, different eligibility per asking context) | Generalize `allowed_chunk_ids`-style pre-filtering into a per-collection visibility-policy check, evaluated per query, not just a binary privilege flag |
-| Single workspace: one DB, one corpus, paths hard-wired to repo layout | Second corpus arrives (duplex-build workspace) | Workspace abstraction: one engine, N workspace dirs; collections shareable by reference with privilege enforced at query time |
+| ~~Single workspace: paths hard-wired to repo-root ingestion-sources/output~~ DONE 2026-07-13 (scaled Phase 2): all user data under `workspaces/<name>/` (corpora + output); multi-workspace sharing still deferred | Second real matter needs isolation without a second clone | N workspaces + share-by-reference collections + query-time visibility |
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
 | Messenger screenshots OCR'd as flat text, no speaker/message attribution | Screenshots become load-bearing evidence (who-said-what disputes) | Message-boundary parsing + speaker/timestamp fields on extracted messages |
 | Privilege = single folder-set per corpus, one law firm | Multi-workspace collection sharing | Per-collection privilege/confidentiality policy evaluated on every query path |
@@ -304,20 +306,20 @@ capability only when a real workspace demands it, never speculatively.
     over tracked files returns nothing (spec:
     docs/specs/instruction-layer-split.md). **PHASE 1 COMPLETE.**
 
-**Currently between phases**: Phase 2's forcing case (a second/duplex-
-build workspace) is parked — not in progress, not scheduled (user
-decision). Per tenet 14, eval-gated accuracy/architecture work doesn't
-need a phase-forcing-case to proceed opportunistically; the Jina MLX
-stack migration (docs/specs/jina-mlx-migration.md, shipped 2026-07-13)
-and the visual retrieval channel design (docs/specs/visual-retrieval.md,
-planned, not started) both happened/are proposed in this gap, ledgered
-above rather than as a new phase.
-- **Phase 2 — workspace abstraction.** Forcing case: duplex-build
-  project (HBCF claim, OC certificate, NSW procedural docs +
-  nsw-construction skill). One engine, N workspaces; collections
-  shareable by reference across workspaces with privilege policy
-  enforced at query time; scripts audited fully case-agnostic; test
-  suite runs on a synthetic fixture corpus only.
+**Currently**: Phase 2 scaled down and shipped 2026-07-13 (single
+workspace user-data root — see below). Visual retrieval remains
+PLANNED in the gap (`docs/specs/visual-retrieval.md`). Full N-workspace
+sharing is deferred until a second matter forces it.
+- **Phase 2 — single workspace user-data root (COMPLETE 2026-07-13,
+  scaled down from multi-workspace).** Goal simplified: all user/case
+  data for the active matter lives under `workspaces/<name>/` so
+  gitignore is one line. Evidence is `corpora/` (was repo-root
+  `ingestion-sources/`); derived data is `output/`; eval/chronology/
+  journal stay co-located. Config: `INGESTION_SOURCES` and `OUTPUT_DIR`
+  derive from `workspace.dir`. Spec: docs/specs/workspace-user-data.md.
+  **Deferred** (old Phase 2 ambition): N workspaces, corpora shared by
+  reference, purpose-scoped visibility — revisit when a second real
+  matter (e.g. duplex-build) needs isolation without a second clone.
 - **Phase 3 — structured-data subsystem.** Forcing case: personal
   finance / ATO returns (double-serving family-law property
   settlement). Transaction extraction from statements into SQLite

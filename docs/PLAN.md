@@ -2,7 +2,7 @@
 
 ## Context
 
-The initial corpus: several hundred Thunderbird-exported `.eml` files (hundreds of MB) under `ingestion-sources/`, relating to an active legal matter. Goal: a fully local RAG system so an agent can answer questions grounded in this correspondence with mandatory citations, correlate events, and help draft responses — while preserving chain of custody (originals untouched, SHA-256 manifest) and flagging attorney-client privileged material (the user's own-solicitor folder; folder names live in the workspace config, never in this doc — ROADMAP tenet 10).
+The initial corpus: several hundred Thunderbird-exported `.eml` files (hundreds of MB) under the active workspace's `corpora/` (formerly repo-root `ingestion-sources/` — see docs/specs/workspace-user-data.md), relating to an active legal matter. Goal: a fully local RAG system so an agent can answer questions grounded in this correspondence with mandatory citations, correlate events, and help draft responses — while preserving chain of custody (originals untouched, SHA-256 manifest) and flagging attorney-client privileged material (filesystem `privileged/` under corpora; ROADMAP tenet 10).
 
 Corpus facts established by direct inspection (workspace-specific counts live in the workspace's LEARNINGS.md; the engine-relevant shape is):
 - Multiple source folders, one per correspondent/firm; one of them is the privileged own-solicitor channel.
@@ -18,9 +18,9 @@ Corpus facts established by direct inspection (workspace-specific counts live in
 
 ```
 <repo-root>/
-├── ingestion-sources/          # EXISTING — read-only, never written to
+├── workspaces/<name>/          # ALL user data (gitignored): corpora/, output/, WORKSPACE.md, eval/
 ├── venv/                       # Homebrew Python 3.12
-├── models/                     # GGUF embedding model from HuggingFace (gitignored, ~600MB)
+├── models/                     # embedding/rerank weights (gitignored)
 ├── scripts/
 │   ├── config.py               # paths, thresholds, model names
 │   ├── db.py                   # schema DDL + `init` CLI
@@ -43,9 +43,8 @@ Corpus facts established by direct inspection (workspace-specific counts live in
 │   └── logs/{ingest_*.log, review_queue.csv}
 ├── workspaces/<name>/          # gitignored case layer (added Phase 1d): WORKSPACE.md, corpora specs, chronology, journal, eval/
 ├── AGENTS.md                   # tool-agnostic agent entrypoint (opencode/hermes/any CLI read this)
-├── CLAUDE.md                   # thin pointer -> AGENTS.md (Claude Code convention)
 ├── RUNBOOK.md                  # human + agent: setup and how to run each stage
-├── .gitignore                  # excludes ingestion-sources/, output/, venv/, models/, workspaces/, config.yaml
+├── .gitignore                  # excludes workspaces/, venv/, models/, config.yaml
 └── docs/
     ├── PLAN.md                 # this implementation plan, checked in
     ├── LEARNINGS.md            # corpus gotchas + environment gotchas (see below)
@@ -140,8 +139,8 @@ touches real sources).
 The repo must be self-describing so any agent CLI (Claude Code, opencode, hermes) can resume work cold:
 
 - **`AGENTS.md`** (source of truth, the cross-tool convention): what the project is, hard rules (NEVER write under `ingestion-sources/`; privileged folders per config, excluded from external-facing output by default; every answer must cite message_id/date/sender; all processing stays local — no cloud APIs, no pushing data anywhere), how to run ingest/query, pointers to docs/PLAN.md, docs/LEARNINGS.md, docs/STATUS.md, RUNBOOK.md.
-- **`CLAUDE.md`**: one line pointing at AGENTS.md (so Claude Code picks it up natively).
-- **`docs/PLAN.md`**: this plan checked into the repo (the ~/.claude/plans copy is Claude-specific; the repo copy is the durable one).
+- **`docs/PLAN.md`**: this plan checked into the repo (the ~/.claude/plans copy is Claude-specific; the repo copy is the durable one). Any agent CLI (including Claude Code) is expected to read **AGENTS.md** as the entrypoint — no tool-specific stub file.
+
 - **`docs/LEARNINGS.md`**: every empirically-discovered gotcha so no future agent re-derives or trips on them: must parse with `email.policy.default` (compat32 silently fails on RFC2047); system Python has SQLite extension loading compiled out (hence Homebrew 3.12 + numpy vectors, not sqlite-vec); corpus is majority Russian → tesseract needs `eng+rus` via tesseract-lang; 8 duplicate Message-IDs across folders incl. privileged/non-privileged → privilege OR'd across copies, never trust one folder; 20% of emails lack threading headers → heuristic fallback; embedding model must be multilingual (bge-m3) because corpus is majority Russian — English-only embedders like nomic-embed-text v1 would silently degrade semantic search; bge-m3 needs no query/document prefixes (some models like e5/nomic do — document this if the model is ever swapped); filename-embedded timestamps are the Date fallback. Grows as new gotchas are found.
 - **`docs/STATUS.md`**: session log — what stage is built, what's verified, what's pending, known open issues. Every work session (any tool) ends by updating it.
 - **`git init`** with `.gitignore` excluding `ingestion-sources/` (evidence — never in git), `output/` (regenerable derived data), `venv/`, and the workspace layer (`workspaces/`, `config.yaml` — all case content; git history of case narrative = privilege/confidentiality risk if repo ever leaves the machine). Only code + platform docs are versioned. **No remote is configured; never push this repo to any hosting service** — rule stated in AGENTS.md.

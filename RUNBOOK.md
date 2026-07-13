@@ -38,50 +38,46 @@ full schema and comments. Unknown keys abort loudly at import time
   warning fires once per actual change, not on every subsequent run;
   `query.py`'s warning persists until that acknowledgment happens.
 - **safety-semantics** (`privilege.*`): privilege is a FILESYSTEM
-  CONVENTION, not a config key — nest a folder under an
-  `ingestion-sources/privileged/` directory (any depth) to make
-  everything under it privileged (AGENTS.md hard rule 2). The
-  auto-privilege flag only ratchets 0->1 — moving content back out
-  never un-privileges anything already ingested. `document_folders`
-  (which folders under `ingestion-sources/` are scanned for standalone,
-  non-.eml documents — orthogonal to privilege) is still a config key.
+  CONVENTION — nest under `workspaces/<name>/corpora/privileged/`
+  (any depth) to make content privileged (AGENTS.md hard rule 2). The
+  auto-privilege flag only ratchets 0->1. `document_folders` (paths
+  relative to `corpora/` scanned for standalone non-.eml docs) is
+  still a config key.
+
+## User-data layout (single folder)
+
+All case/user data for the active matter lives under
+`workspaces/<name>/` (gitignored as a whole — docs/specs/workspace-user-data.md):
+
+```
+workspaces/<name>/
+  corpora/          # evidence (.eml, PDFs, …) + CORPUS.md per corpus
+  output/           # DB, vectors, extracted text, logs, daemon socket
+  WORKSPACE.md, chronology.md, journal.md, eval/, …
+```
+
+`config.yaml → workspace.dir` selects the tree. Scripts set
+`INGESTION_SOURCES = …/corpora` and `OUTPUT_DIR = …/output`.
 
 ## Adding new emails
 
 1. Export from Thunderbird as .eml into the matching folder under
-   `ingestion-sources/` (or a new folder per correspondent — if the new
-   folder is privileged correspondence, create/place it under
-   `ingestion-sources/privileged/` FIRST, e.g.
-   `ingestion-sources/privileged/<correspondent>/`).
+   `workspaces/<name>/corpora/` (new correspondent folder OK). If
+   privileged, place under `corpora/privileged/<correspondent>/` FIRST.
 2. `venv/bin/python scripts/ingest.py all`
-   Idempotent: existing files are skipped, duplicates merged, only new
-   content is extracted/embedded.
-3. Check `output/logs/review_queue.csv` for anything flagged.
+3. Check `workspaces/<name>/output/logs/review_queue.csv` for flags.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
-1. Drop files anywhere under `ingestion-sources/additional-documents/`
-   (subfolders are fine and encouraged — the relative path becomes the
-   document's searchable title, so `disclosure/Payslips/x.pdf`
-   carries its context). To add a NEW drop folder, add its path
-   (relative to `ingestion-sources/`) to `document_folders` in
-   `config.yaml`; if its contents are privileged, nest it under
-   `ingestion-sources/privileged/` and reference that path, e.g.
-   `privileged/additional-documents` — BEFORE ingesting. No separate
-   privilege list to keep in sync.
-2. `venv/bin/python scripts/ingest.py all` (or just the `documents`
-   stage). Idempotent: unchanged files are skipped; changed content on
-   a known path is a chain-of-custody alarm; identical content at two
-   paths is flagged as a duplicate and not indexed twice.
-3. Check `output/logs/review_queue.csv` for: dates that had to come
-   from the filename or file-mtime (weak — verify them), skipped
-   `.msg`/`.zip` (unsupported in v1), and duplicates.
+1. Drop files under `workspaces/<name>/corpora/additional-documents/`
+   (subfolders encouraged). New drop roots: add path relative to
+   `corpora/` in `document_folders`. Privileged docs: nest under
+   `corpora/privileged/…` first.
+2. `venv/bin/python scripts/ingest.py all` (or `documents` stage).
+3. Check review_queue for weak dates / duplicates / unsupported types.
 
-Document dates are extracted from the text (statement period end, pay
-date, letter dateline, ...) and every query result shows
-`date_source`/`Doc date source` so you can tell how reliable the date
-is. Extracted text lives in `output/text/documents/<id>.txt`.
-
+Document dates are extracted from the text; query results show
+`date_source`. Extracted text: `workspaces/<name>/output/text/documents/`.
 ## Querying
 
 ```bash
@@ -91,9 +87,9 @@ venv/bin/python scripts/query.py "question text" \
     [--no-daemon] [--require-daemon]
 ```
 
-Privileged emails excluded unless `--include-privileged`. Full bodies
-are in `output/text/emails/<id>.txt`; attachment text in
-`output/text/attachments/<id>.txt`.
+Privileged emails excluded unless `--include-privileged`. Full bodies:
+`workspaces/<name>/output/text/emails/<id>.txt`; attachments under
+`…/output/text/attachments/`.
 
 ### Session-warm query daemon (recommended for multi-query work)
 
@@ -113,11 +109,10 @@ venv/bin/python scripts/query_daemon.py status
 venv/bin/python scripts/query_daemon.py stop
 ```
 
-Socket: `output/query_daemon.sock` (mode 0600, local only). Restart the
-daemon after `ingest.py embed` or model config changes. See
+Socket: `workspaces/<name>/output/query_daemon.sock` (mode 0600, local
+only). Restart after `ingest.py embed` or model config changes. See
 `docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
-`query.daemon_idle_sec` in `config.yaml`.
-
+`query.daemon_idle_sec`.
 ## Choosing the embedding backend (Jina MLX vs bge-m3 llama.cpp vs bge-m3 MLX)
 
 Default is **`jina_mlx`** (Apple-Silicon MLX-native
@@ -205,13 +200,13 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 
 ## Rebuilding from scratch
 
-`output/` is fully derived: delete it, run `ingest.py all` (full
+Workspace `output/` is fully derived: delete it, run `ingest.py all` (full
 re-embed of the corpus takes a few minutes on Apple Silicon — exact
 time scales with corpus size, see the active workspace's CORPUS.md for
 this workspace's counts). Originals and `models/` are untouched.
 
 ## Review points
 
-- `output/logs/review_queue.csv` — parse problems, custody alarms
-- `output/ocr_review/` — images whose OCR was low-confidence
+- `workspaces/<name>/output/logs/review_queue.csv` — parse/custody flags
+- `workspaces/<name>/output/ocr_review/` — low-confidence OCR images
 - `ingestion_log` table — structured log of every issue

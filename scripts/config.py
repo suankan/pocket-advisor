@@ -12,11 +12,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Source of truth — READ ONLY. No script may ever open a path under
-# this directory in write mode.
-INGESTION_SOURCES = PROJECT_ROOT / "ingestion-sources"
+# Active workspace (docs/specs/workspace-user-data.md, Phase 2 scaled
+# down). ALL user/case data lives under this tree so gitignore is one
+# line (`workspaces/`). Real name comes from config.yaml workspace.dir.
+WORKSPACE_DIR = PROJECT_ROOT / "workspaces" / "default"
 
-OUTPUT_DIR = PROJECT_ROOT / "output"
+# Evidence originals — READ ONLY. Under the workspace (was repo-root
+# ingestion-sources/). No script may open these paths in write mode.
+INGESTION_SOURCES = WORKSPACE_DIR / "corpora"
+
+# Derived data (DB, text extracts, vectors, logs, daemon socket) —
+# regenerable; also under the workspace user-data root.
+OUTPUT_DIR = WORKSPACE_DIR / "output"
 DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
 TEXT_EMAILS_DIR = OUTPUT_DIR / "text" / "emails"
 TEXT_ATTACHMENTS_DIR = OUTPUT_DIR / "text" / "attachments"
@@ -72,14 +79,12 @@ EMBED_DIM = 1024
 EMBED_CTX = 8192
 
 # Privilege: any email or document whose path under INGESTION_SOURCES
-# passes through a directory named exactly PRIVILEGED_DIR_NAME is
-# attorney-client privileged (e.g. ingestion-sources/privileged/
-# example-law-firm.example/...). OR'd across copies; auto flag only ever goes
-# 0 -> 1. Manual privilege_override column always wins. This is a
-# filesystem CONVENTION, not case-specific data — "privileged" is a
-# platform-level word, safe to hardcode, so config.yaml never needs to
-# carry real folder names to express privilege. See is_privileged_path
-# below and docs/specs/config-yaml.md.
+# (workspace corpora/) passes through a directory named exactly
+# PRIVILEGED_DIR_NAME is attorney-client privileged (e.g.
+# corpora/privileged/example-law-firm.example/...). OR'd across copies;
+# auto flag only ever goes 0 -> 1. Manual privilege_override column
+# always wins. Filesystem CONVENTION — "privileged" is a platform-level
+# word, safe to hardcode. See is_privileged_path and config-yaml.md.
 PRIVILEGED_DIR_NAME = "privileged"
 
 
@@ -104,7 +109,9 @@ TEXT_DOCUMENTS_DIR = OUTPUT_DIR / "text" / "documents"
 DOCUMENTS_EXTRACTED_DIR = OUTPUT_DIR / "documents_extracted"
 
 DOCUMENT_SKIP_UNSUPPORTED_EXTS = {".msg", ".zip"}  # v1: classified, not extracted
-IGNORED_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+# CORPUS.md sits beside evidence under corpora/ (workspace user-data
+# layout) — agent specs, never ingest as documents.
+IGNORED_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini", "CORPUS.md"}
 
 # Document date extraction: header/letterhead region searched first.
 # Generous because pdftotext -layout pads lines to ~150 chars — real
@@ -163,21 +170,13 @@ RERANK_TEXT_CHARS = 600
 
 # Session-warm query daemon (docs/specs/query-daemon.md): keeps embed +
 # rerank + vectors loaded so interactive/agent multi-query sessions
-# skip per-call cold start. Unix socket under output/ only (local).
+# skip per-call cold start. Unix socket under workspace output/ (local).
 QUERY_DAEMON_SOCKET = OUTPUT_DIR / "query_daemon.sock"
 QUERY_DAEMON_PID_FILE = OUTPUT_DIR / "query_daemon.pid"
 QUERY_DAEMON_AUTO = True          # query.py uses daemon when socket live
 QUERY_DAEMON_IDLE_SEC = 1800      # idle exit; 0 = run until stop
 
-# Active workspace directory (docs/specs/instruction-layer-split.md).
-# Workspaces live under workspaces/ (gitignored — they ARE the case
-# data layer). The real name comes from config.yaml (workspace.dir);
-# no workspace name is ever hardcoded here (ROADMAP tenet 10).
-WORKSPACE_DIR = PROJECT_ROOT / "workspaces" / "default"
-
-# Eval harness (docs/specs/eval-harness.md): workspace data (golden
-# sets + results contain case facts). Derived from WORKSPACE_DIR —
-# recomputed after the yaml overlay below.
+# Eval harness (docs/specs/eval-harness.md): under workspace.
 EVAL_DIR = WORKSPACE_DIR / "eval"
 EVAL_GOLDEN_DIR = EVAL_DIR / "golden"
 EVAL_RESULTS_DIR = EVAL_DIR / "results"
@@ -253,9 +252,30 @@ def load_yaml_overlay(path):
     # Recompute paths derived from an overridden value.
     globals()["EMBED_MODEL_PATH"] = MODELS_DIR / globals()["EMBED_MODEL_FILE"]
     globals()["RERANK_MODEL_PATH"] = MODELS_DIR / globals()["RERANK_MODEL_FILE"]
-    globals()["EVAL_DIR"] = globals()["WORKSPACE_DIR"] / "eval"
-    globals()["EVAL_GOLDEN_DIR"] = globals()["EVAL_DIR"] / "golden"
-    globals()["EVAL_RESULTS_DIR"] = globals()["EVAL_DIR"] / "results"
+    # User-data root: corpora + output + eval all under WORKSPACE_DIR
+    # (docs/specs/workspace-user-data.md).
+    _ws = globals()["WORKSPACE_DIR"]
+    globals()["INGESTION_SOURCES"] = _ws / "corpora"
+    globals()["OUTPUT_DIR"] = _ws / "output"
+    _out = globals()["OUTPUT_DIR"]
+    globals()["DB_PATH"] = _out / "pocket_advisor.db"
+    globals()["TEXT_EMAILS_DIR"] = _out / "text" / "emails"
+    globals()["TEXT_ATTACHMENTS_DIR"] = _out / "text" / "attachments"
+    globals()["ATTACHMENTS_EXTRACTED_DIR"] = _out / "attachments_extracted"
+    globals()["OCR_REVIEW_DIR"] = _out / "ocr_review"
+    globals()["LOGS_DIR"] = _out / "logs"
+    globals()["REVIEW_QUEUE_CSV"] = _out / "logs" / "review_queue.csv"
+    globals()["VECTORS_DIR"] = _out / "vectors"
+    globals()["VECTORS_NPY"] = _out / "vectors" / "vectors.npy"
+    globals()["VECTORS_IDS_NPY"] = _out / "vectors" / "vectors_ids.npy"
+    globals()["VECTORS_META_JSON"] = _out / "vectors" / "vectors.meta.json"
+    globals()["TEXT_DOCUMENTS_DIR"] = _out / "text" / "documents"
+    globals()["DOCUMENTS_EXTRACTED_DIR"] = _out / "documents_extracted"
+    globals()["QUERY_DAEMON_SOCKET"] = _out / "query_daemon.sock"
+    globals()["QUERY_DAEMON_PID_FILE"] = _out / "query_daemon.pid"
+    globals()["EVAL_DIR"] = _ws / "eval"
+    globals()["EVAL_GOLDEN_DIR"] = _ws / "eval" / "golden"
+    globals()["EVAL_RESULTS_DIR"] = _ws / "eval" / "results"
 
 
 _USER_CONFIG = PROJECT_ROOT / "config.yaml"

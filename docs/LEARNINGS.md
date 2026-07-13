@@ -144,7 +144,7 @@ generalizable core, the genericized version goes here.
   filters `IGNORED_FILENAMES`/dotfiles.
 - Testing anything that "tampers" with sources must use a temp fixture
   with monkeypatched config (`scripts/test_ingest_documents.py`) —
-  hard rule 1 forbids touching real ingestion-sources even for tests.
+  hard rule 1 forbids touching real workspace corpora/ even for tests.
 
 ## Retrieval (Phase 1b findings, generic cores)
 

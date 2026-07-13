@@ -9,30 +9,37 @@ case-specific instructions live in the workspace layer (below).
 
 ## Workspaces — where the case layer lives
 
-Everything case-specific (parties, privilege mappings, matter rules,
-chronology, journal, golden sets) lives under `workspaces/` (gitignored
-in full). The active workspace is set by `config.yaml → workspace.dir`.
+Everything user/case-facing (parties, privilege, matter rules,
+chronology, journal, golden sets, **domain skill playbooks**, evidence
+`corpora/`, derived `output/`) lives under `workspaces/<name>/`
+(gitignored in full). The active workspace is set by
+`config.yaml → workspace.dir`.
 
 **Loading order for case work**: this file → the active workspace's
 `WORKSPACE.md` → `corpora/<name>/CORPUS.md` for each corpus you touch
-→ the domain skill(s) the workspace references (in `skills/`). Do not
-answer case questions or draft case documents on platform instructions
-alone — the workspace files carry the roles, privilege discipline, and
-matter-specific rules.
+→ domain skill file(s) **in that workspace** (e.g.
+`workspaces/family-law/au-family-law.md` — named in WORKSPACE.md).
+Do not answer case questions or draft case documents on platform
+instructions alone.
 
 Every corpus a user adds must be accompanied by a `CORPUS.md`
 (provenance, parties, privilege status, what it evidences, retrieval
-hints) in the workspace's `corpora/` directory.
+hints) in the workspace's `corpora/` directory. Domain skills are
+user-owned playbooks in the workspace root (not under platform
+`skills/`).
 
 ## Hard rules — never violate
 
-1. **NEVER write, rename, or delete anything under `ingestion-sources/`.**
-   Those are evidence originals under chain-of-custody (SHA-256
-   manifest in the DB). Open read-only. A changed hash is treated as
-   tampering, not as an update.
+1. **NEVER write, rename, or delete evidence under the active
+   workspace's `corpora/`** (config: `INGESTION_SOURCES` =
+   `workspaces/<name>/corpora/`). Those are originals under
+   chain-of-custody (SHA-256 manifest in the DB). Open read-only. A
+   changed hash is treated as tampering, not as an update. All
+   user/case data lives under `workspaces/<name>/` (docs/specs/
+   workspace-user-data.md).
 2. **Privilege**: emails/documents with a copy physically nested under
-   an `ingestion-sources/` directory literally named `privileged`
-   (any depth, e.g. `ingestion-sources/privileged/<folder>/...`) are
+   a `corpora/` directory literally named `privileged` (any depth,
+   e.g. `workspaces/<name>/corpora/privileged/<folder>/...`) are
    privileged (`emails.is_privileged=1`; `privilege_override` column,
    if set, always wins). This is a filesystem convention, not a
    config key — `config.yaml` never carries real folder names for
@@ -58,7 +65,7 @@ hints) in the workspace's `corpora/` directory.
    has no git remote and must never be pushed anywhere.
 5. **Low-confidence OCR** (`attachments.ocr_flagged_low_conf=1`) must be
    caveated when cited — the extracted text may be wrong; the original
-   image is in `output/ocr_review/`.
+   image is under the workspace `output/ocr_review/`.
 6. This is technical/organizational assistance, not legal advice; say
    so when the distinction matters.
 7. **NO AUTOCOMMIT.** Never run `git commit` unless the user's CURRENT
@@ -118,16 +125,12 @@ hints) in the workspace's `corpora/` directory.
   acceptance criteria, verification commands)
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
-  workspace selection, privilege folders, all tunable knobs
-- `workspaces/<name>/` (gitignored) — the case layer: WORKSPACE.md,
-  corpora/*/CORPUS.md, chronology.md, journal.md, LEARNINGS.md, eval/
-- `skills/` — tool-agnostic, DISTRIBUTABLE domain playbooks (generic
-  legal/procedural knowledge, zero case facts). This file's loading
-  order is what makes them discoverable — ANY agent CLI reads the
-  relevant `skills/<domain>.md` before case analysis or drafting
-  because AGENTS.md says to, not via any tool-specific skill registry
+  workspace selection and tunable knobs
+- `workspaces/<name>/` (gitignored) — **entire user-data root**:
+  `corpora/` (evidence), `output/` (DB/vectors/text), WORKSPACE.md,
+  domain skill(s) e.g. `au-family-law.md`, CORPUS.md files,
+  chronology, journal, LEARNINGS, eval/
 - `scripts/` — the pipeline (see RUNBOOK.md)
-- `output/` — all derived data, fully regenerable
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
   present in this repo at all — gitignored, never committed, and not
   kept on disk either. Recreate hooks/permissions/trigger-stub
@@ -141,7 +144,7 @@ hints) in the workspace's `corpora/` directory.
 
 ```bash
 # ingest new emails AND standalone documents (idempotent — drop new .eml
-# into the email folders / other files into a document folder first)
+# into workspaces/<name>/corpora/… first; docs into document_folders)
 venv/bin/python scripts/ingest.py all
 
 # optional: keep embed+rerank warm for a multi-query agent/user session
@@ -163,9 +166,9 @@ venv/bin/python scripts/verify_integrity.py
 Answer workflow for case questions: prefer starting the query daemon for
 the session, then run `query.py` (often twice with rephrasings — English
 rephrasings, synonyms, added keywords), read the full email bodies of
-top hits from `output/text/emails/<id>.txt` (never rely on snippets
-alone for anything consequential), pull the whole thread when history
-matters (`--thread N`), then answer with citations.
+top hits from `workspaces/<name>/output/text/emails/<id>.txt` (never
+rely on snippets alone for anything consequential), pull the whole
+thread when history matters (`--thread N`), then answer with citations.
 **Query in English even when the corpus is majority non-English —
 never translate the question into the corpus's language.** The
 embedding backend is verified cross-lingual (docs/LEARNINGS.md); an

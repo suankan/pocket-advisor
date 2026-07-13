@@ -1,5 +1,5 @@
 """Stage 1b: ingest standalone documents (non-.eml) from the folders
-listed in config.DOCUMENT_FOLDERS (e.g. ingestion-sources/additional-documents/).
+listed in config.DOCUMENT_FOLDERS (e.g. corpora/additional-documents/).
 
 Each document becomes a synthetic singleton row in `emails`
 (source_kind='document') plus a provenance/extraction row in

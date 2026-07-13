@@ -97,6 +97,12 @@ def test_workspace_dir_derives_eval_paths():
               config.WORKSPACE_DIR == config.PROJECT_ROOT / "workspaces/test-ws")
         check("EVAL_RESULTS_DIR derived",
               config.EVAL_RESULTS_DIR == config.WORKSPACE_DIR / "eval" / "results")
+        check("INGESTION_SOURCES under workspace corpora",
+              config.INGESTION_SOURCES == config.WORKSPACE_DIR / "corpora")
+        check("OUTPUT_DIR under workspace",
+              config.OUTPUT_DIR == config.WORKSPACE_DIR / "output")
+        check("DB_PATH under workspace output",
+              config.DB_PATH == config.WORKSPACE_DIR / "output" / "pocket_advisor.db")
     finally:
         (config.WORKSPACE_DIR, config.EVAL_DIR,
          config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR) = before

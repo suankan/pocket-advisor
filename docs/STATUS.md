@@ -163,6 +163,26 @@ preserves the engine-relevant milestones.
   `scripts/test_query_daemon.py` (protocol, no model load). Restart
   daemon after re-embed / model config change.
 
+## 2026-07-13 — Phase 2 scaled down: single workspace user-data root
+
+- Spec: docs/specs/workspace-user-data.md. All user/case data under
+  `workspaces/<name>/`: `corpora/` (evidence, was root
+  `ingestion-sources/`), `output/` (DB/vectors/text), plus existing
+  workspace files. `config.INGESTION_SOURCES` / `OUTPUT_DIR` derive
+  from `workspace.dir`. Physical migration + DB path rewrite for
+  family-law workspace; root `ingestion-sources/` and `output/`
+  removed. `.gitignore` simplified to `workspaces/`. CORPUS.md added
+  to IGNORED_FILENAMES so it is not ingested as a document. Full
+  multi-workspace sharing deferred until a second matter forces it.
+
+## 2026-07-13 — domain skills live in the workspace
+
+- User-facing workflow: domain playbooks sit in the workspace root
+  (e.g. `workspaces/family-law/au-family-law.md`), not platform
+  `skills/`. Loading order and WORKSPACE.md updated; platform
+  `skills/au-family-law.md` removed. Productisation may later ship
+  copy-in templates.
+
 ## Known open items (engine)
 
 - Visual (page-image) retrieval channel: designed, not started —

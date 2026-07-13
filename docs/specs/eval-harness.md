@@ -57,19 +57,23 @@ can change nothing silently).
 ## eval.py behavior
 
 ```
-venv/bin/python scripts/eval.py run  [--golden eval/golden/family-law.yaml]
-                                     [--label "pre-reranker"] [--top-k 15]
+venv/bin/python scripts/eval.py run  --golden <path.yaml>
+                                     [--label L] [--top-k 15]
+                                     [--mode warm|cold]
 venv/bin/python scripts/eval.py compare <resultA.json> <resultB.json>
 venv/bin/python scripts/eval.py list [--golden ...]   # table of past runs
 ```
 
-**run**: for each question, invoke the real CLI end-to-end:
-`venv/bin/python scripts/query.py "<question>" --json` (subprocess, not
-import — we measure what the user runs; the per-invocation model load
-is accepted at this corpus size; batching is a ledger-able future
-optimization). Default retrieval settings only; no --include-privileged
-(the golden set must not require privileged hits unless the question
-entry sets `include_privileged: true`, which passes the flag through).
+**run**: for each golden question, run hybrid retrieval and score ranks.
+Default **`--mode warm`** (2026-07-13, docs/specs/warm-eval.md): load
+embed + rerank models and the vector matrix **once**, then call
+`query.run_search` in-process per question (independent ranking — not
+a generative chat context). **`--mode cold`**: spawn
+`venv/bin/python scripts/query.py "<question>" --json` once per
+question (CLI-faithful cold start; slower). Fingerprint records
+`retrieval_config.query_mode`. Default retrieval settings only; no
+`--include-privileged` unless the question entry sets
+`include_privileged: true`.
 
 Scoring per question (rank = 1-based position in `results` of the
 first email whose `message_id` is in `expect_any`, or whose `thread_id`
@@ -92,7 +96,8 @@ timings.
     "index": { ...vectors.meta.json contents... },
     "corpus": {"emails": 0, "chunks": 0, "embedded": 0},
     "retrieval_config": {"FTS_CANDIDATES":0,"VEC_CANDIDATES":0,
-                          "RRF_K":0,"DEFAULT_TOP_K":0},
+                          "RRF_K":0,"DEFAULT_TOP_K":0,
+                          "query_mode": "warm"},
     "golden_sha256": "...", "golden_count": 0
   },
   "aggregates": {"hit@1":0,"hit@5":0,"hit@15":0,"mrr":0,

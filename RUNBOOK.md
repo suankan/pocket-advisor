@@ -148,15 +148,25 @@ First use of `jina_mlx` downloads the model (~1.1GB, one-time). See
 ## Measuring retrieval quality (eval harness)
 
 ```bash
-venv/bin/python scripts/eval.py run --golden eval/golden/<name>.yaml [--label L] [--top-k 15]
+# default --mode warm: load embed+rerank once, then score all questions
+# (docs/specs/warm-eval.md). Much faster than cold; same ranking math.
+venv/bin/python scripts/eval.py run \
+  --golden workspaces/<ws>/eval/golden/<name>.yaml \
+  [--label L] [--top-k 15] [--mode warm]
+
+# optional: cold = subprocess query.py per question (CLI cold-start cost)
+venv/bin/python scripts/eval.py run \
+  --golden workspaces/<ws>/eval/golden/<name>.yaml \
+  --label cold-check --mode cold
+
 venv/bin/python scripts/eval.py compare eval/results/<A>.json eval/results/<B>.json
-venv/bin/python scripts/eval.py list [--golden eval/golden/<name>.yaml]
+venv/bin/python scripts/eval.py list [--golden workspaces/<ws>/eval/golden/<name>.yaml]
 ```
 
-`eval/` (golden sets + results) is workspace data — gitignored, never
-committed. `run` drives `query.py` end-to-end per golden question and
-scores hit@1/5/15 + MRR, fingerprinting the git commit, index identity,
-corpus counts, and golden-set hash so runs are honestly comparable.
+`eval/` under the active workspace is gitignored. `run` scores
+hit@1/5/15 + MRR, fingerprinting git commit, index identity, corpus
+counts, golden-set hash, and `query_mode` (warm|cold). Warm is not a
+chat LLM session — only encoder/reranker weights stay resident.
 `compare` exits non-zero if any aggregate regressed between two runs of
 the *same* golden set (a golden-set change disables the exit-code gate
 and just warns). Re-baseline after any re-ingest and before/after any

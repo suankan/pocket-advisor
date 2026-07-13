@@ -171,3 +171,11 @@ generalizable core, the genericized version goes here.
   the drift detection it was meant to support. Default missing
   historical fields to None/unknown and establish a baseline
   explicitly. (Found live in the chunking-fingerprint work.)
+- **Eval wall time is model load × N questions, not "KB lookup."**
+  Subprocess-per-question reloads embed + rerank weights every time
+  (~12–20 s/q cold). Warm eval (`eval.py run --mode warm`, default)
+  loads once and reuses weights + `vectors.npy` across the golden set;
+  each question is still an independent ranking call with no generative
+  chat context (docs/specs/warm-eval.md). Use `--mode cold` only when
+  you need CLI cold-start cost fidelity.
+

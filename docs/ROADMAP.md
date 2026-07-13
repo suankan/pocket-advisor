@@ -242,7 +242,7 @@ revisit the row — replace, don't layer around.
 | Interim decision (why it's fine now) | Revisit trigger | Target |
 |---|---|---|
 | Flat numpy brute-force vectors (exact recall, ms-fast at current corpus scale) | >~100k chunks or felt query latency | Embedded ANN store (LanceDB-class), behind same chunk_id interface |
-| Embedding+reranker model loaded per query invocation (~seconds, acceptable CLI) | Interactive UI, or per-query load felt as pain | Small local socket daemon, still in-process llama.cpp |
+| Embedding+reranker model loaded per **interactive** `query.py` invocation (~seconds, acceptable CLI). Eval no longer pays this ×N: `eval.py run --mode warm` (default, 2026-07-13) loads once per run — docs/specs/warm-eval.md. | Interactive UI, or per-query load felt as pain for chat-style use | Small local socket daemon for interactive query (eval already warm) |
 | FTS5 OR-of-tokens lexical leg (no lemmatization; dense leg carries cross-lingual) | Recall failures on inflected Russian keyword queries | Lemmatized shadow field (pymorphy3) or learned sparse |
 | Post-retrieval metadata filtering in query.py | NOW (agreed 2026-07-12) | Pre-filter: mask matrix + constrain FTS before ranking |
 | No reranker stage (agent reads full bodies instead) | NOW (agreed 2026-07-12) | bge-reranker-v2-m3 GGUF between RRF and output — DONE 2026-07-12, itself since superseded as default by `jina_mlx` 2026-07-13 (still available as `RERANK_BACKEND=llama_cpp`) |

@@ -1,4 +1,5 @@
-"""Retrieval eval harness (docs/specs/eval-harness.md, Phase 1a).
+"""Retrieval eval harness (docs/specs/eval-harness.md, Phase 1a;
+warm path: docs/specs/warm-eval.md).
 
 Measures query.py's retrieval quality against a golden question set and
 records every run with a full fingerprint (git commit, index identity,
@@ -7,8 +8,13 @@ honestly comparable. No accuracy-affecting change (pre-filter, reranker,
 transliteration, ...) is called an improvement without a `compare` run.
 
     eval.py run --golden eval/golden/<name>.yaml [--label L] [--top-k N]
+                [--mode warm|cold]
     eval.py compare <result_a.json> <result_b.json>
     eval.py list [--golden eval/golden/<name>.yaml]
+
+Default --mode warm loads embed/rerank models once per run (not a
+generative chat context). --mode cold spawns query.py per question
+(old CLI-faithful behavior).
 
 `eval/` is workspace data (golden sets + results contain case facts) —
 entirely gitignored; see config.py for why no default path is baked in
@@ -31,6 +37,7 @@ import db
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TOP_KS = (1, 5, 15)
+VALID_MODES = ("warm", "cold")
 
 
 # ---- golden set ------------------------------------------------------
@@ -112,10 +119,10 @@ def aggregate(scored, golden_by_id):
     return result
 
 
-# ---- I/O: invoking query.py, fingerprinting ---------------------------
+# ---- I/O: query invocation (warm | cold), fingerprinting ---------------
 
-def run_query(question, top_k, include_privileged=False):
-    """Subprocess, not import — measures what the user actually runs."""
+def run_query_cold(question, top_k, include_privileged=False):
+    """Subprocess query.py — CLI-faithful cold start every question."""
     cmd = [sys.executable, str(SCRIPT_DIR / "query.py"), question,
            "--json", "--top-k", str(top_k)]
     if include_privileged:
@@ -124,6 +131,46 @@ def run_query(question, top_k, include_privileged=False):
     if proc.returncode != 0:
         raise SystemExit(f"eval: query.py failed for {question!r}:\n{proc.stderr}")
     return json.loads(proc.stdout)
+
+
+class WarmQuerySession:
+    """Load embed + rerank weights and the vector matrix once; each
+    `search` is an independent ranking call with no chat history
+    (docs/specs/warm-eval.md)."""
+
+    def __init__(self):
+        import embedding_backends
+        import query as querymod
+        import rerank_backends
+
+        print("eval: warm mode — loading vector index + models once…",
+              flush=True)
+        t0 = time.time()
+        self.conn = db.connect()
+        db.migrate(self.conn)
+        self.vector_matrix, self.vector_ids = querymod.load_vector_index()
+        self.embed_backend = embedding_backends.get_backend()
+        self.rerank_backend = (rerank_backends.get_backend()
+                               if config.RERANK_ENABLED else None)
+        self._query = querymod
+        print(f"eval: warm resources ready in {time.time() - t0:.1f}s",
+              flush=True)
+
+    def search(self, question, top_k, include_privileged=False):
+        return self._query.run_search(
+            question,
+            top_k=top_k,
+            include_privileged=include_privileged,
+            conn=self.conn,
+            embed_backend=self.embed_backend,
+            rerank_backend=self.rerank_backend,
+            vector_matrix=self.vector_matrix,
+            vector_ids=self.vector_ids,
+            close_conn=False,
+        )
+
+    def close(self):
+        self.conn.close()
 
 
 def _git(args):
@@ -135,7 +182,7 @@ def _git(args):
         return None
 
 
-def build_fingerprint(conn, golden_path, golden_list, top_k):
+def build_fingerprint(conn, golden_path, golden_list, top_k, query_mode):
     index_meta = json.loads(config.VECTORS_META_JSON.read_text()) \
         if config.VECTORS_META_JSON.exists() else {}
     corpus = {
@@ -161,6 +208,7 @@ def build_fingerprint(conn, golden_path, golden_list, top_k):
             "RERANK_MODEL": config.RERANK_MODEL_FILE
                 if config.RERANK_BACKEND == "llama_cpp"
                 else config.MLX_JINA_RERANK_MODEL_REPO,
+            "query_mode": query_mode,
         },
         "golden_path": str(golden_path),
         "golden_sha256": hashlib.sha256(golden_bytes).hexdigest(),
@@ -222,6 +270,9 @@ def compute_comparison(a, b):
 # ---- CLI ---------------------------------------------------------------
 
 def cmd_run(args):
+    if args.mode not in VALID_MODES:
+        raise SystemExit(f"eval: --mode must be one of {VALID_MODES}, "
+                         f"got {args.mode!r}")
     golden_path = Path(args.golden)
     if not golden_path.exists():
         raise SystemExit(f"eval: golden set not found: {golden_path}")
@@ -232,20 +283,34 @@ def cmd_run(args):
     validate_golden(conn, golden_list)
     golden_by_id = {e["id"]: e for e in golden_list}
 
+    warm = None
+    if args.mode == "warm":
+        warm = WarmQuerySession()
+
     started = datetime.now(timezone.utc)
     t0 = time.time()
     scored = []
-    for entry in golden_list:
-        q0 = time.time()
-        data = run_query(entry["question"], args.top_k,
-                         entry.get("include_privileged", False))
-        s = score_question(entry, data)
-        s["seconds"] = round(time.time() - q0, 3)
-        scored.append(s)
+    try:
+        for i, entry in enumerate(golden_list, 1):
+            q0 = time.time()
+            priv = entry.get("include_privileged", False)
+            if warm is not None:
+                data = warm.search(entry["question"], args.top_k, priv)
+            else:
+                data = run_query_cold(entry["question"], args.top_k, priv)
+            s = score_question(entry, data)
+            s["seconds"] = round(time.time() - q0, 3)
+            scored.append(s)
+            print(f"  [{i}/{len(golden_list)}] {entry['id']}  "
+                  f"{s['seconds']:.1f}s  rank={s['rank']}", flush=True)
+    finally:
+        if warm is not None:
+            warm.close()
     duration = time.time() - t0
 
     aggregates = aggregate(scored, golden_by_id)
-    fingerprint = build_fingerprint(conn, golden_path, golden_list, args.top_k)
+    fingerprint = build_fingerprint(conn, golden_path, golden_list,
+                                    args.top_k, args.mode)
     conn.close()
 
     result = {"label": args.label, "started_utc": started.isoformat(),
@@ -258,8 +323,9 @@ def cmd_run(args):
     out_path = config.EVAL_RESULTS_DIR / f"{ts}__{slug}.json"
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
 
-    print(f"eval: {len(golden_list)} questions -> {out_path}")
-    print(f"  hit@1={aggregates['hit@1']:.2f} hit@5={aggregates['hit@5']:.2f} "
+    print(f"eval: {len(golden_list)} questions ({args.mode}) -> {out_path}")
+    print(f"  duration_s={duration:.1f}  "
+          f"hit@1={aggregates['hit@1']:.2f} hit@5={aggregates['hit@5']:.2f} "
           f"hit@15={aggregates['hit@15']:.2f} mrr={aggregates['mrr']:.3f}")
     for flag, agg in aggregates["by_flag"].items():
         print(f"  [{flag}] n={agg['n']} hit@5={agg['hit@5']:.2f} mrr={agg['mrr']:.3f}")
@@ -294,10 +360,15 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_run = sub.add_parser("run", help="run the golden set through query.py and score it")
+    p_run = sub.add_parser("run", help="run the golden set through query and score it")
     p_run.add_argument("--golden", required=True, help="path to golden set YAML")
     p_run.add_argument("--label", default="run")
     p_run.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
+    p_run.add_argument(
+        "--mode", choices=VALID_MODES, default="warm",
+        help="warm (default): load embed/rerank once in-process. "
+             "cold: subprocess query.py per question (CLI cold-start cost). "
+             "See docs/specs/warm-eval.md.")
     p_run.set_defaults(func=cmd_run)
 
     p_cmp = sub.add_parser("compare", help="compare two result JSON files")

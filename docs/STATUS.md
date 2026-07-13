@@ -144,12 +144,21 @@ preserves the engine-relevant milestones.
   agent. The visual-channel plan is now transcribed in full at
   docs/specs/visual-retrieval.md (status: PLANNED, not started).
 
+## 2026-07-13 — warm eval path (in-process model reuse)
+
+- Spec: docs/specs/warm-eval.md. `query.run_search` library entrypoint;
+  optional warm resources (conn, embed backend, rerank backend, vector
+  matrix). `eval.py run --mode warm|cold` (default **warm**): loads
+  models once per run; fingerprint records `query_mode`. Cold keeps
+  subprocess `query.py` per question. Not a generative LLM session —
+  no cross-question context. Unit tests: `scripts/test_eval.py`.
+
 ## Known open items (engine)
 
 - Visual (page-image) retrieval channel: designed, not started —
   docs/specs/visual-retrieval.md. First step is a smoke test of the
   cross-modal alignment claim it depends on.
-- Reranker cost is now ~12s/query mean (was ~18s) — still CLI-only
-  speed, not interactive-chat speed; ledgered for revisit when a UI
-  arrives (unchanged from before, just re-measured against the new
-  stack).
+- Reranker cost is now ~12s/query mean cold CLI (was ~18s) — still
+  CLI-only speed; warm eval amortizes load across the golden set;
+  interactive daemon still ledgered for a future UI.
+

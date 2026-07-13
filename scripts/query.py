@@ -1,7 +1,7 @@
 """Hybrid retrieval CLI: FTS5 keyword + vector semantic search, fused
 with Reciprocal Rank Fusion, filtered by metadata.
 
-    query.py "question" [--after YYYY-MM-DD] [--before YYYY-MM-DD]
+    query.py "question" [--after/--before YYYY-MM-DD]
              [--thread N] [--include-privileged] [--top-k N] [--json]
 
 PRIVILEGED EMAILS ARE EXCLUDED BY DEFAULT. Pass --include-privileged to
@@ -10,11 +10,14 @@ way, so the caller can never unknowingly quote privileged material.
 
 Every result carries message_id, date, sender, subject and source path:
 answers built on these results must cite them.
+
+Library entrypoint for warm eval: `run_search(...)` (docs/specs/warm-eval.md).
 """
 import argparse
 import json
 import re
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -82,32 +85,60 @@ def fts_search(conn, question, limit, allowed=None):
     return [r["rowid"] for r in rows]
 
 
-def vector_search(question, limit, allowed=None):
+def _check_vector_index():
+    """Fingerprint checks against vectors.meta.json. Returns (meta, None)
+    or (None, error_message)."""
     if not config.VECTORS_NPY.exists():
-        return []
+        return None, None
     meta = json.loads(config.VECTORS_META_JSON.read_text())
     fp = embedding_backends.current_fingerprint()
     built_with = embedding_backends.meta_fingerprint(meta)
     if embedding_backends.embedding_fields_changed(built_with, fp):
-        sys.exit(f"query: vector index was built with {built_with} but config "
-                 f"selects {fp}.\nEither run `venv/bin/python scripts/ingest.py "
-                 "embed` (full re-embed) or revert the config change. "
-                 "Searching a mismatched index would return garbage silently.")
+        return None, (
+            f"query: vector index was built with {built_with} but config "
+            f"selects {fp}.\nEither run `venv/bin/python scripts/ingest.py "
+            "embed` (full re-embed) or revert the config change. "
+            "Searching a mismatched index would return garbage silently.")
     if embedding_backends.chunking_fields_changed(built_with, fp):
         print(f"⚠ chunking config changed since the index was built "
               f"(chars {built_with['chunk_chars']}->{fp['chunk_chars']}, "
               f"overlap {built_with['chunk_overlap']}->{fp['chunk_overlap']}) — "
               "existing chunks were not rebuilt; results may mix chunk sizes.",
               file=sys.stderr)
-    matrix = np.load(config.VECTORS_NPY)
-    ids = np.load(config.VECTORS_IDS_NPY)
+    return meta, None
+
+
+def load_vector_index():
+    """Load vectors.npy + ids for reuse across many queries (warm eval).
+    Returns (matrix, ids) or (None, None) if no index on disk.
+    Raises SystemExit on fingerprint mismatch."""
+    meta, err = _check_vector_index()
+    if err:
+        raise SystemExit(err)
+    if meta is None:
+        return None, None
+    return np.load(config.VECTORS_NPY), np.load(config.VECTORS_IDS_NPY)
+
+
+def vector_search(question, limit, allowed=None, backend=None,
+                  vector_matrix=None, vector_ids=None):
+    """Dense leg. Pass backend + matrix/ids to avoid reloading per call."""
+    if vector_matrix is None or vector_ids is None:
+        matrix, ids = load_vector_index()
+        if matrix is None:
+            return []
+    else:
+        # Warm path still re-checks config vs meta once at load time;
+        # per-call we only search the provided matrix.
+        matrix, ids = vector_matrix, vector_ids
     if allowed is not None:
         mask = np.isin(ids, list(allowed))
         matrix, ids = matrix[mask], ids[mask]
     if matrix.shape[0] == 0:
         return []
 
-    backend = embedding_backends.get_backend()
+    if backend is None:
+        backend = embedding_backends.get_backend()
     q = backend.embed_one(question, is_query=True)
     sims = matrix @ q
     order = np.argsort(-sims)[:limit]
@@ -228,6 +259,60 @@ def thread_context(conn, results, args):
     return context
 
 
+def run_search(question, *, top_k=None, include_privileged=False,
+               after=None, before=None, thread=None, no_thread_context=False,
+               conn=None, embed_backend=None, rerank_backend=None,
+               vector_matrix=None, vector_ids=None, close_conn=False):
+    """Core hybrid search. Returns the same dict as `query.py --json`.
+
+    Pass open `conn`, loaded embed/rerank backends, and/or preloaded
+    vector arrays to avoid per-call cold starts (warm eval). Each call
+    is independent: only `question` (and filters) change ranking input
+    — no chat/history state (docs/specs/warm-eval.md).
+    """
+    owns_conn = conn is None
+    if owns_conn:
+        conn = db.connect()
+        db.migrate(conn)
+        close_conn = True
+
+    args = SimpleNamespace(
+        question=question,
+        top_k=config.DEFAULT_TOP_K if top_k is None else top_k,
+        include_privileged=include_privileged,
+        after=after,
+        before=before,
+        thread=thread,
+        no_thread_context=no_thread_context,
+    )
+
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL").fetchone()[0]
+    warnings = []
+    if pending:
+        warnings.append(f"{pending} chunks not yet embedded — run ingest.py embed; "
+                        "semantic results may be incomplete")
+
+    allowed = allowed_chunk_ids(conn, args)
+    fts = fts_search(conn, args.question, config.FTS_CANDIDATES, allowed)
+    vec = vector_search(args.question, config.VEC_CANDIDATES, allowed,
+                        backend=embed_backend,
+                        vector_matrix=vector_matrix, vector_ids=vector_ids)
+
+    fused = rrf_fuse([fts, vec])
+    if config.RERANK_ENABLED:
+        fused = reranker_mod.rerank(conn, args.question, fused,
+                                    backend=rerank_backend)
+    results = fetch_results(conn, fused, args)
+    context = [] if args.no_thread_context else thread_context(conn, results, args)
+
+    out = {"question": args.question, "warnings": warnings,
+           "results": results, "thread_context": context}
+    if close_conn:
+        conn.close()
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("question")
@@ -240,35 +325,21 @@ def main():
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    conn = db.connect()
-    db.migrate(conn)  # self-heal: schema current even before first ingest
-
-    # staleness check
-    pending = conn.execute(
-        "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL").fetchone()[0]
-    warnings = []
-    if pending:
-        warnings.append(f"{pending} chunks not yet embedded — run ingest.py embed; "
-                        "semantic results may be incomplete")
-
-    allowed = allowed_chunk_ids(conn, args)
-    fts = fts_search(conn, args.question, config.FTS_CANDIDATES, allowed)
-    vec = vector_search(args.question, config.VEC_CANDIDATES, allowed)
-
-    fused = rrf_fuse([fts, vec])
-    if config.RERANK_ENABLED:
-        fused = reranker_mod.rerank(conn, args.question, fused)
-    results = fetch_results(conn, fused, args)
-    context = [] if args.no_thread_context else thread_context(conn, results, args)
-
-    out = {"question": args.question, "warnings": warnings,
-           "results": results, "thread_context": context}
+    out = run_search(
+        args.question,
+        top_k=args.top_k,
+        include_privileged=args.include_privileged,
+        after=args.after,
+        before=args.before,
+        thread=args.thread,
+        no_thread_context=args.no_thread_context,
+    )
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        for w in warnings:
+        for w in out["warnings"]:
             print(f"⚠ {w}")
-        for i, r in enumerate(results, 1):
+        for i, r in enumerate(out["results"], 1):
             flags = []
             if r["source_kind"] == "document":
                 flags.append("DOCUMENT")
@@ -287,12 +358,12 @@ def main():
             print(f"    Source: {r['source_path']}")
             snippet = " ".join(r["snippet"].split())
             print(f"    {snippet[:400]}")
+        context = out["thread_context"]
         if context:
             print(f"\n--- same-thread context ({len(context)} emails) ---")
             for c in context:
                 p = " [PRIVILEGED]" if c["privileged"] else ""
                 print(f"  {c['date']}  {c['from_addr']}  {c['subject']}{p}")
-    conn.close()
 
 
 if __name__ == "__main__":

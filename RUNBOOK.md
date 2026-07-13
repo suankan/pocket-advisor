@@ -64,18 +64,20 @@ Copy to `workspaces/workspace-config.yaml` and edit. Each source has
 (`email_eml`|`documents`), `privileged` (bool).
 ## Adding new emails
 
-1. Export from Thunderbird as .eml into the matching folder under
-   `workspaces/<name>/corpora/` (new correspondent folder OK). If
-   privileged, place under `corpora/privileged/<correspondent>/` FIRST.
+1. Export from Thunderbird as .eml into the matching **source root**
+   declared in `workspaces/workspace-config.yaml` (`kind: email_eml`).
+   New correspondent folder inside that root is fine. For privilege:
+   set `privileged: true` on the source **and/or** nest under a
+   directory segment literally named `privileged/`.
 2. `venv/bin/python scripts/ingest.py all`
 3. Check `workspaces/<name>/output/logs/review_queue.csv` for flags.
+4. After bulk moves inside a source: `scripts/blob_index.py rebuild`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
-1. Drop files under `workspaces/<name>/corpora/additional-documents/`
-   (subfolders encouraged). New drop roots: add path relative to
-   `corpora/` in `document_folders`. Privileged docs: nest under
-   `corpora/privileged/…` first.
+1. Drop files under a source with `kind: documents` in the registry
+   (path relative to the workspace). Privileged: source
+   `privileged: true` and/or nest under `privileged/`.
 2. `venv/bin/python scripts/ingest.py all` (or `documents` stage).
 3. Check review_queue for weak dates / duplicates / unsupported types.
 
@@ -180,8 +182,10 @@ venv/bin/python scripts/blob_index.py lookup -w family-law -s jane@example.com \
   --sha256 <hex>
 ```
 
-Safe to rebuild anytime (docs/specs/source-blob-index.md). Full
-pathless ingest migration is separate; this cache is usable now.
+Safe to rebuild anytime (docs/specs/source-blob-index.md). Evidence
+rows are pathless — identity is `(workspace_id, source_id, sha256)`;
+this table is the regenerable path cache only. Rebuild after bulk
+moves inside a source tree.
 
 ## Measuring retrieval quality (eval harness)
 
@@ -221,7 +225,8 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 
 Workspace `output/` is fully derived: delete it, run `ingest.py all` (full
 re-embed of the corpus takes a few minutes on Apple Silicon — exact
-time scales with corpus size, see the active workspace's CORPUS.md for
+time scales with corpus size; see workspace-config source descriptions and
+the active workspace's WORKSPACE.md / eval notes for
 this workspace's counts). Originals and `models/` are untouched.
 
 ## Review points

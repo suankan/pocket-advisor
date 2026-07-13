@@ -54,7 +54,7 @@ Corpus facts established by direct inspection (workspace-specific counts live in
 ## SQLite schema (key points)
 
 - `emails` — one row per unique Message-ID: date_utc + date_raw, from/to/cc (JSON), subject + subject_normalized, in_reply_to/references_raw, thread_id + thread_link_method ('reference'|'subject_heuristic'|'singleton'), **is_privileged** (computed: any copy in a configured privileged folder; can only auto-go 0→1) + **privilege_override** (manual, always wins), body_text_path, body_source ('plain'|'html_stripped'), has_parse_issue.
-- `email_files` — one row per physical .eml: source_path (unique), source_folder, **sha256 of raw bytes** (chain of custody), size.
+- `email_files` — one row per physical .eml membership: **pathless** identity `(workspace_id, source_id, sha256)` (chain of custody), size; open via regenerable `source_blob_index` (see docs/specs/source-blob-index.md, STATUS 2026-07-13). Do not reintroduce path-as-identity.
 - `attachments` — filename (decoded) + filename_raw, content_type, sha256 of payload, extracted_copy_path + extracted_copy_sha256 (write-verify), extraction_method (native_pdftotext|ocr_tesseract|docx|xlsx|msg_nested|zip_member|skipped_small_image|error), ocr_confidence, ocr_flagged_low_conf, is_skipped/skip_reason, nullable parent_attachment_id (nested .msg/zip recursion).
 - `threads` — representative_subject, first/last date, email_count.
 - `chunks` — unit of retrieval/citation: source_type ('email_body'|'attachment'), email_id, attachment_id, chunk_index, text, embedded_at (NULL = pending embed; incremental marker).
@@ -88,7 +88,7 @@ Vector layer: `vectors.npy` float32 [N×1024, bge-m3 dim] + `vectors_ids.npy` (c
 3. Reciprocal Rank Fusion (k=60).
 4. Metadata filters: **privileged excluded by default** (safe-by-default); date range; thread restrict.
 5. Thread expansion: surface same-thread siblings labeled as context.
-6. Output per result: message_id, date, from, subject, is_privileged flag (always shown), snippet, ocr_flagged_low_conf warning, source_path. → grounds every Claude answer in citable sources.
+6. Output per result: message_id, date, from, subject, is_privileged flag (always shown), snippet, ocr_flagged_low_conf warning, source_id / source_ref (not filesystem paths). → grounds agent answers in citable sources.
 
 ## One-time setup vs incremental
 
@@ -96,7 +96,7 @@ One-time: `brew install python@3.12 tesseract-lang`; create venv + pip install (
 Incremental (repeatable as new emails arrive): `ingest.py all` — Stage 1 new files only, Stage 2 pending attachments only, Stage 3 full recompute, Stage 4 unembedded chunks only.
 
 **Incremental dedup (hard requirement — new emails will be dropped in over time):** re-running `ingest.py all` after adding files must never reprocess or double-index anything. Three dedup layers:
-1. **File level**: a source_path already in `email_files` with matching sha256 is skipped entirely (same file, same content). Same path with a *changed* sha256 is NOT silently re-ingested — it's flagged to the review queue (originals must never change; a changed hash is a chain-of-custody alarm, not an update).
+1. **Blob level**: same `(workspace_id, source_id, sha256)` already in `email_files` is skipped (same content under that source). Content change under a source is a **new** blob membership (content-addressed); do not treat path strings as identity. Tamper/review still surfaces when expected hashes disappear from disk (`verify_integrity`).
 2. **Message level**: a new file whose Message-ID already exists in `emails` (e.g. an overlapping Thunderbird re-export saved under a different filename, or the same email saved from two folders) gets only a new `email_files` provenance row — no second `emails` row, no re-extraction, no re-embedding, no duplicate search results. Privilege is recomputed across all copies (0→1 only).
 3. **Work-unit level**: attachments (`extraction_method IS NULL`) and chunks (`embedded_at IS NULL`) are only processed when pending, so an interrupted or repeated run resumes exactly where it left off.
 Near-duplicates with *different* Message-IDs (forwarded/re-sent copies) are intentionally NOT auto-merged — they're distinct evidence — but a subject+date+from fuzzy check flags suspected pairs to the review queue for human decision.

@@ -1,11 +1,11 @@
 # Spec: regenerable sha256 → path cache (`source_blob_index`)
 
-Status: IMPLEMENTED 2026-07-13 (table + rebuild/resolve API).
-Part of the path-agnostic evidence design: durable identity is
-`(workspace_id, source_id, sha256)`; filesystem paths are **not**
-custody identity. Paths appear only in this **derived** table so
-`get_workspace_item` stays fast after users shuffle files inside a
-source tree.
+Status: IMPLEMENTED 2026-07-13 (table + rebuild/resolve API +
+**pathless ingest** — evidence rows no longer store filesystem paths
+as identity). Durable identity is `(workspace_id, source_id, sha256)`;
+filesystem paths are **not** custody identity. Paths appear only in
+this **derived** table so `get_workspace_item` stays fast after users
+shuffle files inside a source tree.
 
 ## Goal
 
@@ -62,18 +62,16 @@ venv/bin/python scripts/blob_index.py lookup --workspace family-law \
   --source suan-svetlana --sha256 <hex>
 ```
 
-## Source roots (until full workspace-config drives ingest)
+## Source roots
 
 Rebuild needs a list of `(workspace_id, source_id, root Path)`.
 
-1. **Preferred:** `{workspaces.dir}/workspace-config.yaml` `sources[]`
-   (when that registry exists).
-2. **Provisional (current):** active workspace name as `workspace_id`;
-   each top-level directory under `corpora/` is a source whose
-   `source_id` is the relative path with `/` → `__` (e.g.
-   `privileged__setonfamily.law`). Document folders nested under
-   `additional-documents/` are separate sources when they are immediate
-   children. See `provisional_sources()` in `blob_index.py`.
+1. **Primary (shipped):** `{workspaces.dir}/workspace-config.yaml`
+   `sources[]` for the active workspace (docs/specs/workspace-config.md).
+2. **Fallback:** if no registry file, `provisional_sources()` in
+   `blob_index.py` walks `corpora/` (top-level dirs; under
+   `privileged/`, each child is its own source). Prefer fixing the
+   registry over relying on provisional discovery.
 
 ## Invalidation
 
@@ -81,7 +79,7 @@ Rebuild needs a list of `(workspace_id, source_id, root Path)`.
 - `get_workspace_item` if file missing or on-disk hash ≠ cached sha →
   rebuild that source once and retry.
 - Call `rebuild_all` after bulk file moves or before sensitive
-  verify_integrity once pathless custody lands.
+  `verify_integrity` runs.
 
 ## Safety
 

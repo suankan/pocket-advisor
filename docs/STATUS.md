@@ -183,14 +183,15 @@ preserves the engine-relevant milestones.
   `skills/au-family-law.md` removed. Productisation may later ship
   copy-in templates.
 
-## 2026-07-13 — pathless evidence identity
+## 2026-07-13 — regenerable source_blob_index (sha→path cache)
 
-- `email_files` / `documents` no longer store filesystem paths.
-  Identity is `(workspace_id, source_id, sha256)`. Open/locate via
-  `source_blob_index` + `get_workspace_item`. `verify_integrity` is
-  hash-set based (renames inside a source no longer fail). Query
-  results expose `source_id` / `source_ref` instead of paths. Derived
-  `output/` extract paths unchanged (engine-owned).
+- Spec: docs/specs/source-blob-index.md. Table `source_blob_index`
+  (workspace_id, source_id, sha256 → relpath_within_source). Fully
+  rebuildable; not custody identity. API/CLI: `scripts/blob_index.py`
+  rebuild|lookup|list-sources; `get_workspace_item(...)`. Self-test:
+  `scripts/test_blob_index.py`. Source roots preferred from
+  workspace-config.yaml (provisional corpora/ discovery remains as
+  fallback when no registry).
 
 ## 2026-07-13 — workspace-config.yaml registry (user sources)
 
@@ -199,19 +200,38 @@ preserves the engine-relevant milestones.
   `workspaces/workspace-config.yaml` with `active: true` and
   `sources[]` (id, description, path, kind, privileged). Platform
   config only has `workspaces.dir`. Ingest walks configured sources;
-  privilege from `privileged: bool`. DB columns `workspace_id` /
-  `source_id` on email_files + documents (migrated for family-law).
-  blob_index uses registry source ids. CORPUS.md superseded by
-  source.description (files may remain on disk unused).
+  privilege primarily from `source.privileged` (path-name heuristic
+  under a directory literally named `privileged/` remains as
+  fallback). DB columns `workspace_id` / `source_id` on email_files +
+  documents. blob_index uses registry source ids. Per-source
+  `description` supersedes CORPUS.md as the agent-facing provenance
+  text (CORPUS.md files may remain on disk; not required for ingest).
 
-## 2026-07-13 — regenerable source_blob_index (sha→path cache)
+## 2026-07-13 — pathless evidence identity (SHIPPED)
 
-- Spec: docs/specs/source-blob-index.md. Table `source_blob_index`
-  (workspace_id, source_id, sha256 → relpath_within_source). Fully
-  rebuildable; not custody identity. API/CLI: `scripts/blob_index.py`
-  rebuild|lookup|list-sources; `get_workspace_item(...)`. Provisional
-  source discovery from corpora/ until workspace-config.yaml drives
-  roots. Self-test: `scripts/test_blob_index.py`.
+- Commits: workspace-config → blob index → pathless identity
+  (`c0c3c79` and parents). `email_files` / `documents` no longer store
+  filesystem paths as identity. Durable key is
+  `(workspace_id, source_id, sha256)`. Open/locate via
+  `source_blob_index` + `get_workspace_item`. `verify_integrity` is
+  hash-set based (renames inside a source no longer fail integrity).
+  Query results expose `source_id` / `source_ref` instead of paths.
+  Derived `output/` extract paths unchanged (engine-owned). Ingest
+  dedup: same content under a source skips; content change = new blob
+  (not path overwrite).
+
+## 2026-07-13 — agent instruction reconciliation (this note)
+
+- Audit after pathless/registry work: STATUS had the milestones but
+  several agent-facing docs still described path identity, CORPUS.md as
+  required, and privilege as filesystem-only. Reconciled into
+  AGENTS.md, LEARNINGS.md, ROADMAP layout/ledger, RUNBOOK blob
+  section, and the workspace-config / source-blob-index specs.
+  **Case Q&A smoke** (interactive multi-query with citations across
+  sources including solicitor correspondence) exercised the warm path
+  and pathless citations successfully — engine-level confirmation that
+  retrieval + agent answer workflow still works after the identity
+  migration; case findings themselves stay in the workspace journal.
 
 ## Known open items (engine)
 
@@ -221,4 +241,10 @@ preserves the engine-relevant milestones.
 - Per-query **rerank inference** still ~several–10s even when models
   are warm (load amortized by daemon/eval); interactive sub-second UX
   would need different tradeoffs (e.g. optional no-rerank path).
+- Multi-workspace share-by-reference collections still deferred (one
+  active workspace via registry `active: true`).
+- PLAN.md still carries some pre-pathless schema wording in places —
+  treat AGENTS + specs + this STATUS as authoritative for identity/
+  privilege/layout; PLAN refresh is a follow-up cleanup, not a design
+  change.
 

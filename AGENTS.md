@@ -17,42 +17,47 @@ the **active** matter and evidence **sources** are in the user registry
 `{workspaces.dir}/workspace-config.yaml` (also gitignored). See
 docs/specs/workspace-config.md.
 
-**Loading order for case work**: this file → workspace-config.yaml
-(sources, privilege flags, descriptions) → the active workspace's
-`WORKSPACE.md` → domain skill file(s) in that workspace (e.g.
-`au-family-law.md`). Do not answer case questions on platform
-instructions alone.
+**Loading order for case work**: this file →
+`workspaces/workspace-config.yaml` (active workspace, sources,
+`privileged` flags, per-source **description**) → the active
+workspace's `WORKSPACE.md` → domain skill file(s) in that workspace
+(e.g. `au-family-law.md`). Do not answer case questions on platform
+instructions alone. Optional leftover `CORPUS.md` files are not the
+source of truth once a registry description exists.
 
 ## Hard rules — never violate
 
-1. **NEVER write, rename, or delete evidence under the active
-   workspace's `corpora/`** (config: `INGESTION_SOURCES` =
-   `workspaces/<name>/corpora/`). Those are originals under
-   chain-of-custody (SHA-256 manifest in the DB). Open read-only. A
-   changed hash is treated as tampering, not as an update. All
-   user/case data lives under `workspaces/<name>/` (docs/specs/
-   workspace-user-data.md).
-2. **Privilege**: emails/documents with a copy physically nested under
-   a `corpora/` directory literally named `privileged` (any depth,
-   e.g. `workspaces/<name>/corpora/privileged/<folder>/...`) are
-   privileged (`emails.is_privileged=1`; `privilege_override` column,
-   if set, always wins). This is a filesystem convention, not a
-   config key — `config.yaml` never carries real folder names for
-   privilege. Privileged content is EXCLUDED from retrieval by
-   default. Nothing that originated in a privileged channel — advice,
-   strategy, assessments, or the existence/content of the
-   communication — may appear in any outward-facing draft, quoted or
-   paraphrased; disclosure can waive privilege. The user's own
-   POSITIONS may be stated. If the user asks to convey something that
-   originated in a privileged channel, restate it as a bare position
-   with no trace of its origin and tell the user what you excluded and
-   why. The active workspace's WORKSPACE.md names the channels and
-   parties this applies to.
+1. **NEVER write, rename, or delete evidence under configured source
+   roots** (active workspace's sources in workspace-config.yaml;
+   typically under `workspaces/<name>/…`). Those are originals under
+   chain-of-custody: durable identity is
+   `(workspace_id, source_id, sha256)` in the DB, not a path. Open
+   read-only. A changed hash is treated as tampering, not as an
+   update. Locate blobs via `source_blob_index` /
+   `scripts/blob_index.py` after moves inside a source. All user/case
+   data lives under `workspaces/<name>/` (docs/specs/
+   workspace-user-data.md, source-blob-index.md).
+2. **Privilege**: a source is privileged when **either**
+   (a) its registry entry has `privileged: true`, **or** (b) a physical
+   copy sits under a directory segment literally named `privileged`
+   (any depth under the source root). `emails.is_privileged=1`;
+   `privilege_override`, if set, always wins. Platform `config.yaml`
+   never carries real folder names for privilege. Privileged content
+   is EXCLUDED from retrieval by default. Nothing that originated in a
+   privileged channel — advice, strategy, assessments, or the
+   existence/content of the communication — may appear in any
+   outward-facing draft, quoted or paraphrased; disclosure can waive
+   privilege. The user's own POSITIONS may be stated. If the user asks
+   to convey something that originated in a privileged channel,
+   restate it as a bare position with no trace of its origin and tell
+   the user what you excluded and why. WORKSPACE.md + source
+   descriptions name the channels and parties this applies to.
 3. **Citations are mandatory**: any answer drawn from the corpus must
-   cite message_id, date, and sender of each source email. Standalone
-   documents (query results flagged `[DOCUMENT]` / `source_kind:
-   "document"`) cite filename + date instead of sender, and their
-   `date_source` must be surfaced when it isn't `extracted_text`
+   cite message_id, date, and sender of each source email, plus
+   `source_id` / `source_ref` when useful. Standalone documents
+   (query results flagged `[DOCUMENT]` / `source_kind: "document"`)
+   cite filename + date instead of sender, and their `date_source`
+   must be surfaced when it isn't `extracted_text`
    (filename/mtime-derived dates are weak). No ungrounded claims about
    what the correspondence says.
 4. **Everything stays local**: no case data, extracted text, embeddings,
@@ -120,10 +125,12 @@ instructions alone.
   acceptance criteria, verification commands)
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
-  workspace selection and tunable knobs
+  `workspaces.dir` + engine knobs only (not active matter / sources)
+- `workspaces/workspace-config.yaml` (gitignored) — active workspace +
+  sources registry (docs/specs/workspace-config.md)
 - `workspaces/<name>/` (gitignored) — **entire user-data root**:
-  `corpora/` (evidence), `output/` (DB/vectors/text), WORKSPACE.md,
-  domain skill(s) e.g. `au-family-law.md`, CORPUS.md files,
+  evidence per `sources[].path`, `output/` (DB/vectors/text/daemon
+  socket), WORKSPACE.md, domain skill(s) e.g. `au-family-law.md`,
   chronology, journal, LEARNINGS, eval/
 - `scripts/` — the pipeline (see RUNBOOK.md)
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
@@ -138,8 +145,8 @@ instructions alone.
 ## Common operations
 
 ```bash
-# ingest new emails AND standalone documents (idempotent — drop new .eml
-# into workspaces/<name>/corpora/… first; docs into document_folders)
+# ingest new emails AND standalone documents (idempotent — drop new
+# files under the source roots declared in workspace-config.yaml)
 venv/bin/python scripts/ingest.py all
 
 # optional: keep embed+rerank warm for a multi-query agent/user session

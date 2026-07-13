@@ -74,10 +74,11 @@ registry file exists (migration window).
 
 ## DB
 
-- `email_files` / `documents`: columns `workspace_id`, `source_id`
-  (yaml ids). File open via `blob_index.get_workspace_item` when
-  pathless; `source_path` retained temporarily as
-  `relpath_within_source` for bridge.
+- `email_files` / `documents`: identity is
+  `(workspace_id, source_id, sha256)` — **no path column as identity**
+  (pathless, 2026-07-13). File open via
+  `blob_index.get_workspace_item` → `source_blob_index.relpath_within_source`
+  under the source root.
 
 ## Acceptance
 

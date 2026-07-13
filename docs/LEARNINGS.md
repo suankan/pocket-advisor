@@ -185,4 +185,50 @@ generalizable core, the genericized version goes here.
   after re-embed or model config changes. Warm residency is weights
   only — no cross-query chat contamination.
 
+## Workspace registry, pathless identity, blob index (2026-07-13)
+
+- **Evidence identity is `(workspace_id, source_id, sha256)`, never a
+  filesystem path.** Paths are regenerable via `source_blob_index`
+  (`scripts/blob_index.py`). Users may rename/move files *inside* a
+  configured source tree without breaking custody rows; rebuild the
+  index after bulk moves. Do not reintroduce `source_path` as a unique
+  identity column.
+- **`verify_integrity` is hash-set based.** Path-string equality is the
+  wrong integrity check after renames — compare expected vs on-disk
+  sha256 membership under each source. A changed hash of an already-
+  known path is still a custody alarm at ingest time.
+- **Ingest dedup under pathless identity:** same `(workspace_id,
+  source_id, sha256)` → skip; same logical file path with *different*
+  content → treat as a new blob (content-addressed), do not silently
+  overwrite the old hash's provenance. Tests cover skip-on-dupe and
+  content-change-as-new-blob.
+- **Active workspace + sources live in gitignored
+  `workspaces/workspace-config.yaml`**, not platform `config.yaml`.
+  Platform only has `workspaces.dir`. Exactly one workspace must be
+  `active: true`. Source roots must not nest/overlap; fail-loud on
+  unknown keys and path escapes (`scripts/workspace_config.py`).
+- **Privilege has two cooperating signals** (OR; `privilege_override`
+  still wins): (1) registry `sources[].privileged: bool` — preferred
+  for agent/config clarity; (2) filesystem convention: any path segment
+  literally named `privileged/` under a source root. Platform
+  `config.yaml` still must not carry real folder names. Retrieval
+  excludes privileged by default.
+- **Avoid circular imports between `config.py` and
+  `workspace_config.py`.** Loading the active workspace during config
+  bootstrap must stay yaml-only / light (no importing pipeline modules
+  that re-import config at module top). Circular import regressions
+  break every CLI entrypoint.
+- **Per-source `description` is the agent-facing provenance text**
+  (what CORPUS.md used to carry). CORPUS.md is optional leftover on
+  disk; do not re-require it for ingest. Prefer updating the registry
+  description over inventing parallel markdown.
+- **After re-embed or model/config change, restart `query_daemon`.**
+  Stale warm weights will serve wrong vectors or abort on fingerprint
+  mismatch depending on path.
+- **Solicitor / multi-source corpora:** substantive answers often live
+  in a non-party source (e.g. party's own solicitor correspondence).
+  Rephrase queries and do not assume the inter-party email folder alone
+  is sufficient — registry `description` should state what each source
+  evidences.
+
 

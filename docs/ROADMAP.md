@@ -184,25 +184,27 @@ per-workspace golden sets before it is called an improvement.
 - Domain skills — **workspace files** (e.g. `au-family-law.md` beside
   WORKSPACE.md); not committed platform content
 
-**Layer 2 — WORKSPACE (gitignored entirely; may exist N times):**
+**Layer 2 — USER REGISTRY + WORKSPACE (gitignored entirely):**
 ```
-workspaces/<name>/
-  WORKSPACE.md          # workspace agent entrypoint: parties & roles,
-                        # privilege policy, matter rules, active goals
-  config.yaml           # workspace config (privilege is a filesystem
-                        # convention — ingestion-sources/privileged/ —
-                        # not a config value; this file carries no
-                        # case-identifying data)
-  corpora/<corpus>/
-    CORPUS.md           # REQUIRED per corpus: provenance, parties,
-                        # privilege mapping, what it evidences,
-                        # retrieval hints; ingestion warns if missing
-  chronology.md / notes / golden-set / journal   # all private
+workspaces/
+  workspace-config.yaml   # REGISTRY (gitignored): all workspaces,
+                          # exactly one active: true; each has
+                          # sources[] {id, description, path, kind,
+                          # privileged}. Platform config only sets
+                          # workspaces.dir. See workspace-config.md.
+  <name>/                 # active workspace path from registry
+    WORKSPACE.md          # parties & roles, matter rules, goals
+    au-family-law.md …    # domain skill(s) live HERE (not platform)
+    output/               # DB, vectors, text, daemon socket
+    <source paths…>       # evidence roots as declared in sources[]
+    chronology / journal / eval / LEARNINGS   # private case layer
 ```
 
 **Loading order (hierarchical, most specific wins for its scope):**
-platform `AGENTS.md` → `WORKSPACE.md` → `CORPUS.md` for each corpus
-touched → domain skill(s) the workspace references.
+platform `AGENTS.md` → `workspace-config.yaml` (sources + privilege +
+descriptions) → `WORKSPACE.md` → domain skill(s) in that workspace.
+Per-source `description` replaces the old required CORPUS.md role
+(optional CORPUS.md files may still exist on disk).
 
 **Consequences:**
 - The session-log duty splits: engine changes → `docs/STATUS.md`
@@ -259,8 +261,10 @@ revisit the row — replace, don't layer around.
 | ~~Single workspace: paths hard-wired to repo-root ingestion-sources/output~~ DONE 2026-07-13 (scaled Phase 2): all user data under `workspaces/<name>/` (corpora + output); multi-workspace sharing still deferred | Second real matter needs isolation without a second clone | N workspaces + share-by-reference collections + query-time visibility |
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
 | Messenger screenshots OCR'd as flat text, no speaker/message attribution | Screenshots become load-bearing evidence (who-said-what disputes) | Message-boundary parsing + speaker/timestamp fields on extracted messages |
-| Privilege = single folder-set per corpus, one law firm | Multi-workspace collection sharing | Per-collection privilege/confidentiality policy evaluated on every query path |
-| ~~`config.yaml → privilege.privileged_folders` held real, case-identifying folder names~~ DONE 2026-07-12: privilege is now a filesystem convention (`ingestion-sources/privileged/<folder>/...`, `config.is_privileged_path`) — `config.yaml` no longer carries any case-identifying value. See `docs/specs/config-yaml.md` addendum. | — | — |
+| Privilege = per-source `privileged: bool` in workspace-config.yaml **plus** path-segment convention (`…/privileged/…`); still one binary flag at retrieval | Multi-workspace share-by-reference; purpose-scoped visibility | Per-collection privilege/confidentiality policy evaluated on every query path |
+| ~~`config.yaml → privilege.privileged_folders` held real folder names~~ DONE 2026-07-12 (filesystem convention). **Extended 2026-07-13**: registry `sources[].privileged` is the preferred explicit signal; path convention remains fallback. Platform config still has zero case folder names. | — | — |
+| ~~Evidence rows keyed by filesystem `source_path`~~ DONE 2026-07-13: pathless identity `(workspace_id, source_id, sha256)` + regenerable `source_blob_index` (docs/specs/source-blob-index.md, workspace-config.md) | — | — |
+| ~~Active matter / document folders in platform config.yaml~~ DONE 2026-07-13: `workspaces/workspace-config.yaml` registry | — | — |
 | ~~Committed platform files carry case content~~ DONE 2026-07-12 (Phase 1d): platform docs scrubbed to engine-only; case content lives under gitignored `workspaces/`; DoD grep clean incl. code comments and test fixtures (5 leaks found there by the grep itself) | — | — |
 | ~~STATUS.md is one mixed session log~~ DONE 2026-07-12: engine changelog (docs/STATUS.md) vs private workspace journal; pre-split history moved verbatim to the journal | — | — |
 | ~~au-family-law skill fuses playbook with matter facts~~ DONE 2026-07-12: skill is generic/distributable; identities in WORKSPACE.md | — | — |

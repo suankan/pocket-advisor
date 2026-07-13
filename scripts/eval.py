@@ -121,11 +121,12 @@ def aggregate(scored, golden_by_id):
 
 # ---- I/O: query invocation (warm | cold), fingerprinting ---------------
 
-def run_query_cold(question, top_k, include_privileged=False):
+def run_query_cold(question, top_k, include_privileged=True):
     """Subprocess query.py — CLI-faithful cold start every question.
 
-    Explicit --exclude-privileged when false so eval does not inherit
-    INCLUDE_PRIVILEGED_BY_DEFAULT (golden scores stay comparable).
+    Default includes privileged (same as interactive query / single-user
+    corpus). Pass include_privileged=False for an entry that needs a
+    restricted pass (--exclude-privileged).
     """
     cmd = [sys.executable, str(SCRIPT_DIR / "query.py"), question,
            "--json", "--top-k", str(top_k)]
@@ -148,8 +149,8 @@ class WarmQuerySession:
         self._warm = querymod.WarmResources(
             log=lambda m: print(f"eval: {m}", flush=True))
 
-    def search(self, question, top_k, include_privileged=False):
-        # Explicit bool — do not pass None (would use config default).
+    def search(self, question, top_k, include_privileged=True):
+        # Explicit bool — do not pass None (would re-resolve config).
         return self._warm.search(
             question, top_k=top_k,
             include_privileged=bool(include_privileged))
@@ -278,7 +279,7 @@ def cmd_run(args):
     try:
         for i, entry in enumerate(golden_list, 1):
             q0 = time.time()
-            priv = entry.get("include_privileged", False)
+            priv = entry.get("include_privileged", True)
             if warm is not None:
                 data = warm.search(entry["question"], args.top_k, priv)
             else:

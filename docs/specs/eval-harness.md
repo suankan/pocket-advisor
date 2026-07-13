@@ -72,8 +72,9 @@ a generative chat context). **`--mode cold`**: spawn
 `venv/bin/python scripts/query.py "<question>" --json` once per
 question (CLI-faithful cold start; slower). Fingerprint records
 `retrieval_config.query_mode`. Default retrieval settings only; no
-`--include-privileged` unless the question entry sets
-`include_privileged: true`.
+`--include-privileged` by default (same as interactive query). Set
+`include_privileged: false` on a question only for a restricted-pass
+slice.
 
 Scoring per question (rank = 1-based position in `results` of the
 first email whose `message_id` is in `expect_any`, or whose `thread_id`

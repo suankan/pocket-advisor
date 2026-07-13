@@ -32,13 +32,18 @@ VECTORS_META_JSON = VECTORS_DIR / "vectors.meta.json"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
-# Embedding backend: "llama_cpp" (default; GGUF via llama-cpp-python)
-# or "mlx" (Apple-Silicon MLX via mlx-embeddings — install
-# scripts/requirements-mlx.txt first). INDEX-INVALIDATING: changing
-# backend or model triggers a full re-embed on next `ingest.py embed`
-# (vectors from different backends are numerically incomparable), and
-# query.py refuses to search an index built with a different backend.
-EMBED_BACKEND = "llama_cpp"
+# Embedding backend: "jina_mlx" (default; Apple-Silicon MLX-native
+# Jina v5 text embedder — install scripts/requirements-mlx.txt first),
+# "llama_cpp" (GGUF via llama-cpp-python, bge-m3, no extra install —
+# fallback for non-Apple-Silicon machines), or "mlx" (Apple-Silicon MLX
+# bge-m3 via mlx-embeddings). eval-gated 2026-07-13: combined jina_mlx
+# embed+rerank vs bge-m3/llama_cpp scored mrr 0.461->0.534 (+16%), no
+# aggregate regression — docs/specs/jina-mlx-migration.md.
+# INDEX-INVALIDATING: changing backend or model triggers a full
+# re-embed on next `ingest.py embed` (vectors from different backends
+# are numerically incomparable), and query.py refuses to search an
+# index built with a different backend.
+EMBED_BACKEND = "jina_mlx"
 
 # MLX model (used only when EMBED_BACKEND == "mlx"). Downloaded from
 # HuggingFace on first use (one-time, inbound-only — same allowance as
@@ -46,6 +51,16 @@ EMBED_BACKEND = "llama_cpp"
 # API/repo verified 2026-07-12 (smoke test); full-corpus switch still
 # pending eval-harness comparison — see docs/specs/embedding-backends.md.
 MLX_EMBED_MODEL_REPO = "mlx-community/bge-m3-mlx-fp16"
+
+# Jina MLX-native models (used when EMBED_BACKEND/RERANK_BACKEND ==
+# "jina_mlx"). Pure-MLX ports (no llama.cpp/GGUF involved), fetched via
+# huggingface_hub.snapshot_download (weights + bundled inference code)
+# into MODELS_DIR/<repo-name>. API verified 2026-07-13 by standalone
+# smoke test (generic sentences; shape/normalization/discrimination/
+# cross-lingual/reranker-ordering all confirmed) — see
+# docs/specs/jina-mlx-migration.md. 1024-dim, matches EMBED_DIM.
+MLX_JINA_EMBED_MODEL_REPO = "jinaai/jina-embeddings-v5-text-small-retrieval-mlx"
+MLX_JINA_RERANK_MODEL_REPO = "jinaai/jina-reranker-v3-mlx"
 
 # Embedding model (llama.cpp GGUF, downloaded by fetch_model.py).
 # bge-m3: multilingual (critical — corpus is majority Russian),
@@ -126,6 +141,13 @@ DEFAULT_TOP_K = 15
 # RRF candidate list before the top-k cut. Transient, per-query only —
 # no index/fingerprint concern (contrast EMBED_BACKEND).
 RERANK_ENABLED = True
+# "jina_mlx" (default; MLX-native, listwise — jina-reranker-v3-mlx) or
+# "llama_cpp" (GGUF via llama-cpp-python, pointwise, no extra install).
+# No fingerprint concern (reranking is transient, not a persisted
+# index), but eval.py records it so reranker-swap comparisons stay
+# honest. eval-gated 2026-07-13: reranker-only swap alone scored mrr
+# 0.461->0.523, every aggregate improved — docs/specs/jina-mlx-migration.md.
+RERANK_BACKEND = "jina_mlx"
 RERANK_MODEL_REPO = "gpustack/bge-reranker-v2-m3-GGUF"
 RERANK_MODEL_FILE = "bge-reranker-v2-m3-Q8_0.gguf"
 RERANK_MODEL_PATH = MODELS_DIR / RERANK_MODEL_FILE
@@ -180,6 +202,9 @@ YAML_KEYS = {
     "models.embed_model_repo": ("EMBED_MODEL_REPO", str),
     "models.embed_model_file": ("EMBED_MODEL_FILE", str),
     "models.mlx_embed_model_repo": ("MLX_EMBED_MODEL_REPO", str),
+    "models.mlx_jina_embed_model_repo": ("MLX_JINA_EMBED_MODEL_REPO", str),
+    "models.mlx_jina_rerank_model_repo": ("MLX_JINA_RERANK_MODEL_REPO", str),
+    "models.rerank_backend": ("RERANK_BACKEND", str),
     "models.rerank_model_repo": ("RERANK_MODEL_REPO", str),
     "models.rerank_model_file": ("RERANK_MODEL_FILE", str),
 }

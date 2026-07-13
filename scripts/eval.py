@@ -156,6 +156,11 @@ def build_fingerprint(conn, golden_path, golden_list, top_k):
             "RRF_K": config.RRF_K,
             "DEFAULT_TOP_K": config.DEFAULT_TOP_K,
             "run_top_k": top_k,
+            "RERANK_ENABLED": config.RERANK_ENABLED,
+            "RERANK_BACKEND": config.RERANK_BACKEND,
+            "RERANK_MODEL": config.RERANK_MODEL_FILE
+                if config.RERANK_BACKEND == "llama_cpp"
+                else config.MLX_JINA_RERANK_MODEL_REPO,
         },
         "golden_path": str(golden_path),
         "golden_sha256": hashlib.sha256(golden_bytes).hexdigest(),

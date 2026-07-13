@@ -13,7 +13,7 @@ import numpy as np
 
 import config
 
-_VALID = ("llama_cpp", "mlx")
+_VALID = ("llama_cpp", "mlx", "jina_mlx")
 
 
 def current_fingerprint():
@@ -30,8 +30,9 @@ def current_fingerprint():
     if config.EMBED_BACKEND not in _VALID:
         raise SystemExit(
             f"config.EMBED_BACKEND must be one of {_VALID}, got {config.EMBED_BACKEND!r}")
-    model_id = config.EMBED_MODEL_FILE if config.EMBED_BACKEND == "llama_cpp" \
-        else config.MLX_EMBED_MODEL_REPO
+    model_id = {"llama_cpp": config.EMBED_MODEL_FILE,
+                "mlx": config.MLX_EMBED_MODEL_REPO,
+                "jina_mlx": config.MLX_JINA_EMBED_MODEL_REPO}[config.EMBED_BACKEND]
     return {"backend": config.EMBED_BACKEND, "model": model_id,
             "dim": config.EMBED_DIM, "chunk_chars": config.CHUNK_CHARS,
             "chunk_overlap": config.CHUNK_OVERLAP}
@@ -87,7 +88,8 @@ class LlamaCppBackend:
         self._model = Llama(model_path=str(config.EMBED_MODEL_PATH),
                             embedding=True, n_ctx=config.EMBED_CTX, verbose=False)
 
-    def embed_one(self, text):
+    def embed_one(self, text, is_query=False):
+        # bge-m3 needs no query/document prefix (docs/LEARNINGS.md).
         return _finalize(self._model.embed(text))
 
 
@@ -104,13 +106,46 @@ class MlxBackend:
         # Downloads from HuggingFace on first use (one-time, inbound-only).
         self._model, self._tokenizer = load(config.MLX_EMBED_MODEL_REPO)
 
-    def embed_one(self, text):
+    def embed_one(self, text, is_query=False):
         input_ids = self._tokenizer.encode(text, return_tensors="mlx")
         out = self._model(input_ids)
         return _finalize(np.array(out.text_embeds[0]))
 
 
+class JinaMlxEmbedBackend:
+    """jina-embeddings-v5-text-small-retrieval-mlx: pure-MLX, no
+    llama.cpp/GGUF. Requires a query/passage task_type distinction
+    (unlike bge-m3) — verified 2026-07-13 via standalone smoke test,
+    see docs/specs/jina-mlx-migration.md."""
+    name = "jina_mlx"
+
+    def __init__(self):
+        import json as _json
+
+        import mlx.core as mx
+        from tokenizers import Tokenizer
+
+        import mlx_model_loader
+
+        repo_dir = mlx_model_loader.snapshot_dir(config.MLX_JINA_EMBED_MODEL_REPO)
+        module = mlx_model_loader.load_module(
+            "jina_embed_model_v5", repo_dir / "model.py")
+
+        with open(repo_dir / "config.json") as f:
+            model_config = _json.load(f)
+        self._model = module.JinaEmbeddingModel(model_config)
+        weights = mx.load(str(repo_dir / "model.safetensors"))
+        self._model.load_weights(list(weights.items()))
+        self._tokenizer = Tokenizer.from_file(str(repo_dir / "tokenizer.json"))
+
+    def embed_one(self, text, is_query=False):
+        task_type = "retrieval.query" if is_query else "retrieval.passage"
+        out = self._model.encode([text], self._tokenizer, task_type=task_type)
+        return _finalize(np.array(out[0]))
+
+
 def get_backend():
     current_fingerprint()  # validates EMBED_BACKEND with a clear error
-    cls = {"llama_cpp": LlamaCppBackend, "mlx": MlxBackend}[config.EMBED_BACKEND]
+    cls = {"llama_cpp": LlamaCppBackend, "mlx": MlxBackend,
+           "jina_mlx": JinaMlxEmbedBackend}[config.EMBED_BACKEND]
     return cls()

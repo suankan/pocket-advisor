@@ -90,24 +90,56 @@ Privileged emails excluded unless `--include-privileged`. Full bodies
 are in `output/text/emails/<id>.txt`; attachment text in
 `output/text/attachments/<id>.txt`.
 
-## Choosing the embedding backend (llama.cpp vs MLX)
+## Choosing the embedding backend (Jina MLX vs bge-m3 llama.cpp vs bge-m3 MLX)
 
-Default is llama.cpp (GGUF, no extra install). To switch to Apple MLX:
+Default is **`jina_mlx`** (Apple-Silicon MLX-native
+`jina-embeddings-v5-text-small-retrieval`, no llama.cpp/GGUF involved)
+— eval-gated 2026-07-13 against the prior `bge-m3`/`llama_cpp`
+baseline: combined with the `jina_mlx` reranker, mrr 0.461->0.534
+(+16%), hit@15 0.654->0.808, no aggregate regression. Full account:
+`docs/specs/jina-mlx-migration.md`.
 
 ```bash
-venv/bin/pip install -r scripts/requirements-mlx.txt
-# edit scripts/config.py: EMBED_BACKEND = "mlx"
+venv/bin/pip install -r scripts/requirements-mlx.txt   # once
+venv/bin/python scripts/ingest.py embed   # first run downloads the
+                                          # model (~1.1GB, one-time)
+```
+
+To fall back to `bge-m3` (llama.cpp GGUF, no extra install — e.g. on
+non-Apple-Silicon):
+
+```bash
+# config.yaml: models.embed_backend: llama_cpp
 venv/bin/python scripts/ingest.py embed   # announces fingerprint change,
                                           # FULL re-embed (all chunks)
 ```
 
-Switching back: revert `EMBED_BACKEND`, run `ingest.py embed` again.
-The backend is INDEX-INVALIDATING: vectors from different backends are
-incomparable, so embed.py wipes and re-embeds on any change, and
-query.py refuses (exits non-zero) to search an index whose recorded backend/
-model doesn't match the config. The MLX model downloads from
-HuggingFace on first use (one-time, inbound-only). MLX path is
-unverified until first opt-in — see docs/specs/embedding-backends.md.
+`bge-m3` via Apple MLX (`mlx-embeddings`) remains available as a third
+option (`models.embed_backend: mlx`) but is superseded by `jina_mlx`
+for Apple-Silicon use — kept only as a already-verified fallback.
+
+Switching between any of the three: edit `models.embed_backend` in
+`config.yaml`, run `ingest.py embed` again. The backend is
+INDEX-INVALIDATING: vectors from different backends are incomparable,
+so embed.py wipes and re-embeds on any change, and query.py refuses
+(exits non-zero) to search an index whose recorded backend/model
+doesn't match the config. Models download from HuggingFace on first
+use (one-time, inbound-only).
+
+## Choosing the reranker backend (Jina MLX vs bge-reranker-v2-m3)
+
+Default is **`jina_mlx`** (`jina-reranker-v3-mlx`, MLX-native,
+listwise) — eval-gated 2026-07-13: reranker-only swap (embedder held
+at `bge-m3`) scored mrr 0.461->0.523, every aggregate improved, none
+regressed. Not index-invalidating (reranking is transient, no
+persisted artifact) — takes effect on the very next query.
+
+```bash
+# config.yaml: models.rerank_backend: llama_cpp   # to revert
+```
+
+First use of `jina_mlx` downloads the model (~1.1GB, one-time). See
+`docs/specs/jina-mlx-migration.md` for the full measured comparison.
 
 ## Measuring retrieval quality (eval harness)
 

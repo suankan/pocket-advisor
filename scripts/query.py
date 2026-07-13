@@ -108,7 +108,7 @@ def vector_search(question, limit, allowed=None):
         return []
 
     backend = embedding_backends.get_backend()
-    q = backend.embed_one(question)
+    q = backend.embed_one(question, is_query=True)
     sims = matrix @ q
     order = np.argsort(-sims)[:limit]
     return [int(ids[i]) for i in order]

@@ -123,27 +123,44 @@ ingestion:
   doc_date_header_window_chars: 6000
 
 models:
-  # Which embedding engine to use. "llama_cpp" (GGUF via
-  # llama-cpp-python, the default) or "mlx" (Apple-Silicon MLX via
-  # mlx-embeddings — requires `pip install -r
-  # scripts/requirements-mlx.txt` first). INDEX-INVALIDATING: switching
+  # Which embedding engine to use. "jina_mlx" (default: Apple-Silicon
+  # MLX-native jina-embeddings-v5-text-small-retrieval — requires
+  # `pip install -r scripts/requirements-mlx.txt` first), "llama_cpp"
+  # (GGUF via llama-cpp-python, bge-m3, no extra install — the fallback
+  # for non-Apple-Silicon machines), or "mlx" (Apple-Silicon MLX bge-m3
+  # via mlx-embeddings). eval-gated 2026-07-13: combined jina_mlx
+  # embed+rerank vs the bge-m3/llama_cpp baseline scored mrr
+  # 0.461->0.534 (+16%), hit@15 0.654->0.808, no aggregate regression —
+  # see docs/specs/jina-mlx-migration.md. INDEX-INVALIDATING: switching
   # backend or model triggers an automatic wipe + full re-embed on the
   # next `ingest.py embed`, since vectors from different
   # backends/models are numerically incomparable; query.py refuses to
   # search a mismatched index rather than return silently-wrong results.
-  embed_backend: llama_cpp   # llama_cpp | mlx
+  embed_backend: jina_mlx   # jina_mlx | llama_cpp | mlx
   # HuggingFace repo for the GGUF embedding model (used when
   # embed_backend is llama_cpp). INDEX-INVALIDATING.
   embed_model_repo: gpustack/bge-m3-GGUF
   # Exact GGUF filename within that repo. INDEX-INVALIDATING.
   embed_model_file: bge-m3-Q8_0.gguf
-  # HuggingFace repo for the MLX embedding model variant (used only
-  # when embed_backend is mlx). INDEX-INVALIDATING.
+  # HuggingFace repo for the MLX bge-m3 embedding model variant (used
+  # only when embed_backend is mlx). INDEX-INVALIDATING.
   mlx_embed_model_repo: mlx-community/bge-m3-mlx-fp16
-  # HuggingFace repo for the cross-encoder reranker GGUF model. NOT
-  # index-invalidating — reranking is a transient per-query operation
-  # with no persisted index, so changing this takes effect on the very
-  # next query with no rebuild needed.
+  # HuggingFace repo for the MLX-native Jina text embedder (used only
+  # when embed_backend is jina_mlx). Ships bundled inference code, no
+  # pip package — fetched via snapshot_download. INDEX-INVALIDATING.
+  mlx_jina_embed_model_repo: jinaai/jina-embeddings-v5-text-small-retrieval-mlx
+  # Which reranker engine to use. "jina_mlx" (default: MLX-native
+  # jina-reranker-v3, listwise) or "llama_cpp" (GGUF via
+  # llama-cpp-python, bge-reranker-v2-m3, pointwise, no extra install).
+  # NOT index-invalidating — reranking is transient, per-query, with no
+  # persisted index, so changing this takes effect on the very next
+  # query with no rebuild needed.
+  rerank_backend: jina_mlx   # jina_mlx | llama_cpp
+  # HuggingFace repo for the cross-encoder reranker GGUF model (used
+  # when rerank_backend is llama_cpp). Not index-invalidating.
   rerank_model_repo: gpustack/bge-reranker-v2-m3-GGUF
   # Exact GGUF filename within that repo. Not index-invalidating.
   rerank_model_file: bge-reranker-v2-m3-Q8_0.gguf
+  # HuggingFace repo for the MLX-native Jina reranker (used only when
+  # rerank_backend is jina_mlx). Not index-invalidating.
+  mlx_jina_rerank_model_repo: jinaai/jina-reranker-v3-mlx

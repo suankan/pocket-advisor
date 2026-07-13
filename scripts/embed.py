@@ -54,21 +54,21 @@ def sync_chunks(conn):
     change; changed source = custody alarm upstream)."""
     created = 0
     emails = conn.execute(
-        """SELECT e.id, e.body_text_path FROM emails e
+        """SELECT e.id, e.body_text_path FROM items e
            WHERE e.body_text_path IS NOT NULL AND NOT EXISTS
-             (SELECT 1 FROM chunks c WHERE c.email_id = e.id
+             (SELECT 1 FROM chunks c WHERE c.item_id = e.id
               AND c.source_type = 'email_body')""").fetchall()
     for row in emails:
         text = (config.PROJECT_ROOT / row["body_text_path"]).read_text(encoding="utf-8")
         for idx, s, e, chunk in chunk_text(text):
             conn.execute(
-                "INSERT INTO chunks (source_type, email_id, chunk_index, text,"
+                "INSERT INTO chunks (source_type, item_id, chunk_index, text,"
                 " char_start, char_end, translit_shadow) VALUES ('email_body', ?, ?, ?, ?, ?, ?)",
                 (row["id"], idx, chunk, s, e, transliteration.proper_noun_shadow(chunk)))
             created += 1
 
     atts = conn.execute(
-        """SELECT a.id, a.email_id, a.extracted_text_path FROM attachments a
+        """SELECT a.id, a.item_id, a.extracted_text_path FROM attachments a
            WHERE a.extracted_text_path IS NOT NULL AND a.is_skipped = 0
              AND a.extraction_method NOT IN ('error')
              AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.attachment_id = a.id)""").fetchall()
@@ -76,9 +76,9 @@ def sync_chunks(conn):
         text = (config.PROJECT_ROOT / row["extracted_text_path"]).read_text(encoding="utf-8")
         for idx, s, e, chunk in chunk_text(text):
             conn.execute(
-                "INSERT INTO chunks (source_type, email_id, attachment_id, chunk_index,"
+                "INSERT INTO chunks (source_type, item_id, attachment_id, chunk_index,"
                 " text, char_start, char_end, translit_shadow) VALUES ('attachment', ?, ?, ?, ?, ?, ?, ?)",
-                (row["email_id"], row["id"], idx, chunk, s, e,
+                (row["item_id"], row["id"], idx, chunk, s, e,
                  transliteration.proper_noun_shadow(chunk)))
             created += 1
     conn.commit()

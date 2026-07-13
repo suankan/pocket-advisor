@@ -23,7 +23,7 @@ _WS_V1 = frozenset({"id", "workspace_id", "active", "path", "title", "sources"})
 _WS_V2 = frozenset({"id", "workspace_id", "active", "path", "title", "collections"})
 _SRC_V1 = frozenset({"id", "description", "path", "kind", "privileged"})
 _COLL_V2 = frozenset({"id", "title", "description", "path", "privileged"})
-_MOUNT_V2 = frozenset({"id"})
+_MOUNT_V2 = frozenset({"id", "purposes"})
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,13 @@ class Source:
 
 
 @dataclass(frozen=True)
+class Mount:
+    """Workspace → collection mount (R-05 purpose tags optional)."""
+    collection: Source
+    purposes: tuple[str, ...] = ()  # empty = unrestricted (all purposes)
+
+
+@dataclass(frozen=True)
 class Workspace:
     id: str
     path: str
@@ -46,6 +53,7 @@ class Workspace:
     active: bool
     root: Path
     sources: tuple[Source, ...] = field(default_factory=tuple)
+    mounts: tuple[Mount, ...] = field(default_factory=tuple)
 
     @property
     def collection_ids(self) -> frozenset[str]:
@@ -286,6 +294,7 @@ def _load_v2(data: dict, ws_dir: Path) -> Registry:
         if not isinstance(mounts_raw, list):
             _die(f"{label}: collections must be a list of mounts")
         mounted: list[Source] = []
+        mount_objs: list[Mount] = []
         seen_m: set[str] = set()
         for j, mraw in enumerate(mounts_raw):
             ml = f"{label}.collections[{j}]"
@@ -300,11 +309,21 @@ def _load_v2(data: dict, ws_dir: Path) -> Registry:
             seen_m.add(mid)
             if mid not in coll_by_id:
                 _die(f"{ml}: unknown collection id {mid!r}")
-            mounted.append(coll_by_id[mid])
+            purposes_raw = mraw.get("purposes") or []
+            if not isinstance(purposes_raw, list):
+                _die(f"{ml}: purposes must be a list of strings")
+            purposes: list[str] = []
+            for p in purposes_raw:
+                if not isinstance(p, str) or not p.strip():
+                    _die(f"{ml}: each purpose must be a non-empty string")
+                purposes.append(p.strip())
+            coll = coll_by_id[mid]
+            mounted.append(coll)
+            mount_objs.append(Mount(collection=coll, purposes=tuple(purposes)))
 
         workspaces.append(Workspace(
             id=ws_id, path=ws_rel, title=title, active=active,
-            root=ws_root, sources=tuple(mounted)))
+            root=ws_root, sources=tuple(mounted), mounts=tuple(mount_objs)))
 
     if active_count != 1:
         _die(f"exactly one workspace must have active: true (found {active_count})")
@@ -377,9 +396,24 @@ def active_sources(kind: str | None = None) -> list[Source]:
     return out
 
 
-def active_collection_ids() -> frozenset[str]:
-    """Mounted collection/source ids for the active workspace (mount filter)."""
-    return active_workspace().collection_ids
+def active_collection_ids(purpose: str | None = None) -> frozenset[str]:
+    """Mounted collection/source ids for the active workspace (mount filter).
+
+    purpose (R-05): if set, keep mounts whose purposes list is empty
+    (unrestricted) OR includes the purpose tag. v1 workspaces (no mounts
+    metadata) treat every source as unrestricted.
+    """
+    ws = active_workspace()
+    if purpose is None:
+        return ws.collection_ids
+    if ws.mounts:
+        out: set[str] = set()
+        for m in ws.mounts:
+            if not m.purposes or purpose in m.purposes:
+                out.add(m.collection.id)
+        return frozenset(out)
+    # v1: no purpose metadata — all sources visible for any purpose
+    return ws.collection_ids
 
 
 def source_by_id(source_id: str) -> Source | None:

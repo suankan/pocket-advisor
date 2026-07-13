@@ -1,11 +1,8 @@
 """Chain-of-custody verification via content hashes (path-agnostic).
 
 Rebuilds the regenerable source_blob_index, then checks every recorded
-(source_id, sha256) is present on disk under that source with a matching
-hash. File renames inside a source do not fail. Identity is collection
-(source_id) + content — not workspace_id (schema-items-membership Phase A).
-
-Run before anything sensitive. Exit 0 = clean; exit 1 = drift.
+(collection_id, sha256) in item_memberships is present on disk under that
+collection with a matching hash. Schema B membership table.
 """
 import sys
 
@@ -19,20 +16,17 @@ def run():
     conn = db.connect()
     db.migrate(conn)
 
-    # Refresh sha→path cache from disk (regenerable; not identity).
     blob_index.rebuild_all(conn)
 
-    recorded_emails = conn.execute(
-        """SELECT source_id, sha256 FROM email_files
-           WHERE source_id IS NOT NULL AND sha256 IS NOT NULL""").fetchall()
-    recorded_docs = conn.execute(
-        """SELECT source_id, sha256, filename FROM documents
-           WHERE source_id IS NOT NULL AND sha256 IS NOT NULL""").fetchall()
+    recorded = conn.execute(
+        """SELECT collection_id, sha256, filename, membership_kind
+           FROM item_memberships
+           WHERE collection_id IS NOT NULL AND sha256 IS NOT NULL"""
+    ).fetchall()
     conn.close()
 
     problems = []
-    # Disk hashes by source_id (collection)
-    on_disk = {}  # src -> set(sha)
+    on_disk = {}
     for s in blob_index.list_sources():
         key = s.source_id
         shas = on_disk.setdefault(key, set())
@@ -47,29 +41,26 @@ def run():
                 except OSError:
                     continue
 
-    def check_rows(rows, label):
-        for r in rows:
-            key = r["source_id"]
-            sha = r["sha256"]
-            disk = on_disk.get(key, set())
-            if sha not in disk:
-                tag = r["filename"] if "filename" in r.keys() else sha[:12]
-                problems.append(
-                    f"MISSING {label}: source={r['source_id']} sha={sha[:12]}… ({tag})")
+    for r in recorded:
+        key = r["collection_id"]
+        sha = r["sha256"]
+        disk = on_disk.get(key, set())
+        if sha not in disk:
+            tag = r["filename"] or sha[:12]
+            problems.append(
+                f"MISSING {r['membership_kind']}: collection={key}"
+                f" sha={sha[:12]}… ({tag})")
 
-    check_rows(recorded_emails, "email")
-    check_rows(recorded_docs, "document")
-
-    recorded_set = {(r["source_id"], r["sha256"])
-                    for r in list(recorded_emails) + list(recorded_docs)}
+    recorded_set = {(r["collection_id"], r["sha256"]) for r in recorded}
     unrecorded = 0
     for sid, shas in on_disk.items():
         for sha in shas:
             if (sid, sha) not in recorded_set:
                 unrecorded += 1
 
-    print(f"verify_integrity: emails {len(recorded_emails)} recorded;"
-          f" documents {len(recorded_docs)} recorded;"
+    n_email = sum(1 for r in recorded if r["membership_kind"] == "email")
+    n_file = sum(1 for r in recorded if r["membership_kind"] == "file")
+    print(f"verify_integrity: memberships email={n_email} file={n_file};"
           f" {len(problems)} problems, {unrecorded} on-disk blobs not in DB")
     for msg in problems:
         print(f"  !! {msg}")

@@ -26,17 +26,17 @@ from extraction import (apply_low_confidence_flag, extract_docx, extract_pdf,
 from utils_log import now_iso
 
 
-def insert_child_attachment(conn, email_id, parent_id, name, ctype, payload):
+def insert_child_attachment(conn, item_id, parent_id, name, ctype, payload):
     """Nested attachment (from .msg or .zip): insert pending row +
     verified binary copy; it gets processed by the same loop."""
     sha = utils_hash.sha256_bytes(payload)
     cur = conn.execute(
-        """INSERT INTO attachments (email_id, parent_attachment_id, filename,
+        """INSERT INTO attachments (item_id, parent_attachment_id, filename,
            filename_raw, content_type, size_bytes, sha256) VALUES (?,?,?,?,?,?,?)""",
-        (email_id, parent_id, name, name, ctype, len(payload), sha),
+        (item_id, parent_id, name, name, ctype, len(payload), sha),
     )
     att_id = cur.lastrowid
-    sid = _source_id_for_email(conn, email_id)
+    sid = _source_id_for_email(conn, item_id)
     out_dir = config.extracted_attachments_dir(sid)
     out_dir.mkdir(parents=True, exist_ok=True)
     copy_path = out_dir / f"{att_id}__{utils_mime.sanitize_filename(name)}"
@@ -62,7 +62,7 @@ def extract_msg_nested(conn, row, path: Path):
         payload = att.data
         if isinstance(payload, bytes):
             insert_child_attachment(
-                conn, row["email_id"], row["id"],
+                conn, row["item_id"], row["id"],
                 att.longFilename or att.shortFilename or "unnamed",
                 "application/octet-stream", payload)
     m.close()
@@ -77,7 +77,7 @@ def extract_zip_nested(conn, row, path: Path):
                 continue
             names.append(info.filename)
             insert_child_attachment(
-                conn, row["email_id"], row["id"], Path(info.filename).name,
+                conn, row["item_id"], row["id"], Path(info.filename).name,
                 "application/octet-stream", z.read(info))
     return "[zip archive, members extracted as nested attachments]\n" + "\n".join(names)
 
@@ -101,19 +101,19 @@ def classify(row):
     return "unsupported"
 
 
-def _source_id_for_email(conn, email_id):
+def _source_id_for_email(conn, item_id):
     row = conn.execute(
-        "SELECT source_id FROM email_files WHERE email_id=? ORDER BY id LIMIT 1",
-        (email_id,),
+        "SELECT collection_id FROM item_memberships WHERE item_id=? ORDER BY id LIMIT 1",
+        (item_id,),
     ).fetchone()
-    return row["source_id"] if row else None
+    return row["collection_id"] if row else None
 
 
 def process(conn, row):
     kind = classify(row)
     path = config.PROJECT_ROOT / row["extracted_copy_path"]
     text, method, conf = None, None, None
-    sid = _source_id_for_email(conn, row["email_id"])
+    sid = _source_id_for_email(conn, row["item_id"])
 
     if kind == "image_small":
         conn.execute(

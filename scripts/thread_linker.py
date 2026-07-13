@@ -21,10 +21,10 @@ MSGID_TOKEN = re.compile(r"<[^>]+>")
 
 
 class Container:
-    __slots__ = ("email_id", "parent", "children")
+    __slots__ = ("item_id", "parent", "children")
 
     def __init__(self):
-        self.email_id = None
+        self.item_id = None
         self.parent = None
         self.children = []
 
@@ -66,7 +66,7 @@ def run():
     conn = db.connect()
     rows = conn.execute(
         "SELECT id, message_id, in_reply_to, references_raw, subject_normalized,"
-        " from_addr, to_addrs, cc_addrs, date_utc FROM emails ORDER BY date_utc").fetchall()
+        " from_addr, to_addrs, cc_addrs, date_utc FROM items ORDER BY date_utc").fetchall()
 
     containers = {}
 
@@ -78,7 +78,7 @@ def run():
     linked_by_reference = set()
     for row in rows:
         own = get(row["message_id"])
-        own.email_id = row["id"]
+        own.item_id = row["id"]
         refs = MSGID_TOKEN.findall(row["references_raw"] or "")
         irt = row["in_reply_to"]
         if irt and (not refs or refs[-1] != irt):
@@ -91,7 +91,7 @@ def run():
             link(parent, child)
 
     # Assign thread ids per root subtree
-    conn.execute("UPDATE emails SET thread_id = NULL, thread_link_method = NULL")
+    conn.execute("UPDATE items SET thread_id = NULL, thread_link_method = NULL")
     conn.execute("DELETE FROM threads")
 
     assigned = {}  # root container -> thread_id
@@ -110,19 +110,19 @@ def run():
         # everything gets a thread id, refined below by the fallback pass.
         email_thread[row["id"]] = thread_for_root(root)
         method = "reference" if row["id"] in linked_by_reference or c.children else "pending"
-        conn.execute("UPDATE emails SET thread_id=?, thread_link_method=? WHERE id=?",
+        conn.execute("UPDATE items SET thread_id=?, thread_link_method=? WHERE id=?",
                      (email_thread[row["id"]], method, row["id"]))
 
     # Fallback: merge 'pending' emails into threads sharing normalized
     # subject + a participant within the window; else mark singleton.
     window = timedelta(days=config.THREAD_FALLBACK_WINDOW_DAYS)
     pending = conn.execute(
-        "SELECT * FROM emails WHERE thread_link_method = 'pending' ORDER BY date_utc").fetchall()
+        "SELECT * FROM items WHERE thread_link_method = 'pending' ORDER BY date_utc").fetchall()
     for row in pending:
         method, target = "singleton", None
         if row["subject_normalized"]:
             candidates = conn.execute(
-                "SELECT * FROM emails WHERE subject_normalized = ? AND id != ?"
+                "SELECT * FROM items WHERE subject_normalized = ? AND id != ?"
                 " AND thread_link_method IN ('reference','subject_heuristic')",
                 (row["subject_normalized"], row["id"])).fetchall()
             mine = participants(row)
@@ -138,23 +138,23 @@ def run():
                 if my_dt and abs(my_dt - cand_dt) <= window and mine & participants(cand):
                     method, target = "subject_heuristic", cand["thread_id"]
                     break
-        conn.execute("UPDATE emails SET thread_link_method=?, thread_id=COALESCE(?,thread_id)"
+        conn.execute("UPDATE items SET thread_link_method=?, thread_id=COALESCE(?,thread_id)"
                      " WHERE id=?", (method, target, row["id"]))
 
     # Thread stats + prune empty threads
     conn.execute("""
         UPDATE threads SET
-          email_count = (SELECT COUNT(*) FROM emails WHERE thread_id = threads.id),
-          first_date  = (SELECT MIN(date_utc) FROM emails WHERE thread_id = threads.id),
-          last_date   = (SELECT MAX(date_utc) FROM emails WHERE thread_id = threads.id),
-          representative_subject = (SELECT subject FROM emails WHERE thread_id = threads.id
+          email_count = (SELECT COUNT(*) FROM items WHERE thread_id = threads.id),
+          first_date  = (SELECT MIN(date_utc) FROM items WHERE thread_id = threads.id),
+          last_date   = (SELECT MAX(date_utc) FROM items WHERE thread_id = threads.id),
+          representative_subject = (SELECT subject FROM items WHERE thread_id = threads.id
                                     ORDER BY date_utc LIMIT 1)
     """)
     conn.execute("DELETE FROM threads WHERE email_count = 0")
     conn.commit()
 
     counts = dict(conn.execute(
-        "SELECT thread_link_method, COUNT(*) FROM emails GROUP BY thread_link_method").fetchall())
+        "SELECT thread_link_method, COUNT(*) FROM items GROUP BY thread_link_method").fetchall())
     n_threads = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
     conn.close()
     print(f"thread_linker: {n_threads} threads; link methods: {counts}")

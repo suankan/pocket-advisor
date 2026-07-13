@@ -6,7 +6,7 @@
   skipped. A matching path with a CHANGED sha256 is a chain-of-custody
   alarm -> review queue, not re-ingested.
 - Duplicate Message-IDs across folders produce one logical `emails` row
-  with multiple `email_files` provenance rows; privilege is OR'd across
+  with multiple `item_memberships` provenance rows; privilege is OR'd across
   all copies and only ever auto-transitions 0 -> 1.
 """
 import email
@@ -103,23 +103,24 @@ def iter_attachments(msg):
 
 def upsert_email(conn, msg, source_path, rel_path, sha, size,
                  workspace_id=None, source_id=None):
+    collection_id = source_id
     mid = utils_mime.normalize_message_id(msg.get("Message-ID"))
     has_issue = 0
     if not mid:
-        # "@pocket-lawyer" is a frozen namespace token, NOT branding:
-        # changing it would re-mint message_ids for already-ingested
-        # content (breaking dedup + golden-set ground truth). Keep even
-        # though the project is now named pocket-advisor.
-        mid = f"<synthetic-{utils_hash.sha256_bytes(str(rel_path).encode())}@pocket-lawyer>"
-        flag(conn, rel_path, "parse", "warning", "missing Message-ID, synthetic id assigned")
+        # R-02: content-based synthetic id (file sha), not path — same
+        # bytes under two names share one items row. "@pocket-lawyer" is
+        # a frozen namespace token (do not rebrand).
+        mid = f"<synthetic-{sha}@pocket-lawyer>"
+        flag(conn, rel_path, "parse", "warning",
+             "missing Message-ID, synthetic id from content sha")
         has_issue = 1
 
-    # Provenance label: prefer configured source_id; else first path part.
-    source_folder = source_id or (rel_path.parts[0] if rel_path.parts else "")
-    row = conn.execute("SELECT id FROM emails WHERE message_id = ?", (mid,)).fetchone()
+    # Provenance label: prefer collection_id; else first path part.
+    source_folder = collection_id or (rel_path.parts[0] if rel_path.parts else "")
+    row = conn.execute("SELECT id FROM items WHERE message_id = ?", (mid,)).fetchone()
 
     if row:
-        email_id = row["id"]
+        item_id = row["id"]
     else:
         date_utc, date_raw = parse_date(msg, source_path)
         subject = utils_mime.decode_maybe_encoded(str(msg.get("Subject", "")) or "(no subject)")
@@ -128,11 +129,12 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
         body, body_source, charset = extract_body(msg)
 
         cur = conn.execute(
-            """INSERT INTO emails (message_id, date_utc, date_raw, from_name, from_addr,
-               to_addrs, cc_addrs, subject, subject_normalized, in_reply_to,
-               references_raw, body_source, charset_detected, has_parse_issue, ingested_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (mid, date_utc, date_raw,
+            """INSERT INTO items (item_kind, message_id, date_utc, date_raw,
+               from_name, from_addr, to_addrs, cc_addrs, subject,
+               subject_normalized, in_reply_to, references_raw, body_source,
+               charset_detected, has_parse_issue, ingested_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("email", mid, date_utc, date_raw,
              utils_mime.decode_maybe_encoded(from_name) or None,
              (from_addr or "").lower() or None,
              addr_list(msg, "To"), addr_list(msg, "Cc"),
@@ -141,42 +143,43 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
              msg.get("References"),
              body_source, str(charset), has_issue, now_iso()),
         )
-        email_id = cur.lastrowid
+        item_id = cur.lastrowid
 
-        body_dir = config.text_emails_dir(source_id)
-        body_path = body_dir / f"{email_id}.txt"
+        body_dir = config.text_emails_dir(collection_id)
+        body_path = body_dir / f"{item_id}.txt"
         body_path.parent.mkdir(parents=True, exist_ok=True)
         body_path.write_text(body, encoding="utf-8")
-        conn.execute("UPDATE emails SET body_text_path = ? WHERE id = ?",
-                     (str(body_path.relative_to(config.PROJECT_ROOT)), email_id))
+        conn.execute("UPDATE items SET body_text_path = ? WHERE id = ?",
+                     (str(body_path.relative_to(config.PROJECT_ROOT)), item_id))
 
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
-            insert_attachment(conn, email_id, rel_path, decoded_name, raw_name,
-                              ctype, payload, source_id=source_id)
+            insert_attachment(conn, item_id, rel_path, decoded_name, raw_name,
+                              ctype, payload, collection_id=collection_id)
 
-    # Pathless identity: (source_id, sha256) — collection + content
-    # (workspace_id is optional metadata; schema-items-membership Phase A).
+    # Pathless identity: (collection_id, sha256) — Schema B memberships.
     conn.execute(
-        """INSERT INTO email_files (email_id, source_folder, sha256,
-           file_size_bytes, ingested_at, workspace_id, source_id)
-           VALUES (?,?,?,?,?,?,?)""",
-        (email_id, source_folder or source_id or "", sha, size, now_iso(),
-         workspace_id, source_id),
+        """INSERT INTO item_memberships (
+               item_id, source_folder, filename, sha256, file_size_bytes,
+               membership_kind, ingested_at, workspace_id, collection_id)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (item_id, source_folder or collection_id or "",
+         rel_path.name if rel_path else "",
+         sha, size, "email", now_iso(), workspace_id, collection_id),
     )
-    return email_id
+    return item_id
 
 
-def insert_attachment(conn, email_id, rel_path, decoded_name, raw_name, ctype, payload,
-                      source_id=None):
+def insert_attachment(conn, item_id, rel_path, decoded_name, raw_name, ctype, payload,
+                      collection_id=None):
     payload_sha = utils_hash.sha256_bytes(payload)
     cur = conn.execute(
-        """INSERT INTO attachments (email_id, filename, filename_raw, content_type,
+        """INSERT INTO attachments (item_id, filename, filename_raw, content_type,
            size_bytes, sha256) VALUES (?,?,?,?,?,?)""",
-        (email_id, decoded_name, raw_name, ctype, len(payload), payload_sha),
+        (item_id, decoded_name, raw_name, ctype, len(payload), payload_sha),
     )
     att_id = cur.lastrowid
     safe = utils_mime.sanitize_filename(decoded_name)
-    out_dir = config.extracted_attachments_dir(source_id)
+    out_dir = config.extracted_attachments_dir(collection_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     copy_path = out_dir / f"{att_id}__{safe}"
     disk_sha = utils_hash.write_and_verify(copy_path, payload)
@@ -203,12 +206,12 @@ def recompute_privilege(conn):
     except SystemExit:
         pass
     rows = conn.execute(
-        "SELECT DISTINCT email_id, source_id FROM email_files").fetchall()
-    ids = {r["email_id"] for r in rows
-           if r["source_id"] and r["source_id"] in priv_sources}
+        "SELECT DISTINCT item_id, collection_id FROM item_memberships").fetchall()
+    ids = {r["item_id"] for r in rows
+           if r["collection_id"] and r["collection_id"] in priv_sources}
     if ids:
         conn.executemany(
-            "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
+            "UPDATE items SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
             [(i,) for i in ids],
         )
 
@@ -217,10 +220,10 @@ def run():
     import workspace_config as wc
     conn = db.connect()
     db.migrate(conn)
-    known_sha = {(r["source_id"], r["sha256"])
+    known_sha = {(r["collection_id"], r["sha256"])
                  for r in conn.execute(
-                     "SELECT source_id, sha256 FROM email_files"
-                     " WHERE source_id IS NOT NULL AND sha256 IS NOT NULL")}
+                     "SELECT collection_id, sha256 FROM item_memberships"
+                     " WHERE collection_id IS NOT NULL AND sha256 IS NOT NULL")}
     stats = {"new": 0, "skipped": 0, "dup_message_id": 0, "errors": 0, "custody_alarm": 0}
 
     try:
@@ -251,10 +254,10 @@ def run():
 
             try:
                 msg = email.message_from_bytes(raw, policy=email.policy.default)
-                before = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
+                before = conn.execute("SELECT COUNT(*) c FROM items").fetchone()["c"]
                 upsert_email(conn, msg, path, rel, sha, len(raw),
                              workspace_id=ws_id, source_id=sid)
-                after = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"]
+                after = conn.execute("SELECT COUNT(*) c FROM items").fetchone()["c"]
                 if after == before:
                     stats["dup_message_id"] += 1
                 else:

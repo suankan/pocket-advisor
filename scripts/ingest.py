@@ -33,7 +33,11 @@ def main():
     if stage in ("all", "embed"):
         import embed
         embed.run()
-    if stage not in ("all", "parse", "documents", "attachments", "thread", "embed"):
+    if stage in ("transactions",):
+        import extract_transactions
+        extract_transactions.run()
+    if stage not in ("all", "parse", "documents", "attachments", "thread",
+                     "embed", "transactions"):
         print(__doc__)
         return 2
     return 0

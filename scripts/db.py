@@ -8,8 +8,12 @@ import sys
 import config
 
 BASE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS emails (
+-- Schema B (docs/specs/schema-items-membership.md): items + memberships.
+-- Schema A pathless identity preserved: UNIQUE (collection_id, sha256).
+
+CREATE TABLE IF NOT EXISTS items (
     id                  INTEGER PRIMARY KEY,
+    item_kind           TEXT NOT NULL DEFAULT 'email',
     message_id          TEXT UNIQUE NOT NULL,
     date_utc            TEXT,
     date_raw            TEXT,
@@ -32,23 +36,41 @@ CREATE TABLE IF NOT EXISTS emails (
     ingested_at         TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS email_files (
+CREATE TABLE IF NOT EXISTS item_memberships (
     id              INTEGER PRIMARY KEY,
-    email_id        INTEGER NOT NULL REFERENCES emails(id),
+    item_id         INTEGER NOT NULL REFERENCES items(id),
     workspace_id    TEXT,
-    source_id       TEXT,
+    collection_id   TEXT,
     source_folder   TEXT NOT NULL DEFAULT '',
+    filename        TEXT NOT NULL DEFAULT '',
     sha256          TEXT NOT NULL,
     file_size_bytes INTEGER,
+    membership_kind TEXT NOT NULL DEFAULT 'email',
     ingested_at     TEXT NOT NULL,
-    -- Phase A identity: collection (source_id) + content hash only
-    -- (docs/specs/schema-items-membership.md). workspace_id is metadata.
-    UNIQUE (source_id, sha256)
+    UNIQUE (collection_id, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS item_file_meta (
+    item_id               INTEGER PRIMARY KEY REFERENCES items(id),
+    extracted_copy_path   TEXT,
+    extracted_copy_sha256 TEXT,
+    extraction_method     TEXT,
+    extracted_text_path   TEXT,
+    ocr_confidence        REAL,
+    ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
+    is_skipped            INTEGER NOT NULL DEFAULT 0,
+    skip_reason           TEXT,
+    doc_date              TEXT,
+    doc_date_source       TEXT,
+    doc_date_detail       TEXT,
+    doc_date_raw          TEXT,
+    has_parse_issue       INTEGER NOT NULL DEFAULT 0,
+    processed_at          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
     id                    INTEGER PRIMARY KEY,
-    email_id              INTEGER NOT NULL REFERENCES emails(id),
+    item_id               INTEGER NOT NULL REFERENCES items(id),
     parent_attachment_id  INTEGER REFERENCES attachments(id),
     filename              TEXT,
     filename_raw          TEXT,
@@ -77,7 +99,7 @@ CREATE TABLE IF NOT EXISTS threads (
 CREATE TABLE IF NOT EXISTS chunks (
     id               INTEGER PRIMARY KEY,
     source_type      TEXT NOT NULL,
-    email_id         INTEGER NOT NULL REFERENCES emails(id),
+    item_id          INTEGER NOT NULL REFERENCES items(id),
     attachment_id    INTEGER REFERENCES attachments(id),
     chunk_index      INTEGER NOT NULL,
     text             TEXT NOT NULL,
@@ -87,37 +109,39 @@ CREATE TABLE IF NOT EXISTS chunks (
     translit_shadow  TEXT
 );
 
-CREATE TABLE IF NOT EXISTS documents (
+CREATE TABLE IF NOT EXISTS page_images (
     id                    INTEGER PRIMARY KEY,
-    -- Not UNIQUE: same content may have multi-collection memberships
-    -- sharing one emails row (schema-items-membership Phase A).
-    email_id              INTEGER NOT NULL REFERENCES emails(id),
-    workspace_id          TEXT,
-    source_id             TEXT,
-    source_folder         TEXT NOT NULL DEFAULT '',
-    filename              TEXT NOT NULL,
+    item_id               INTEGER NOT NULL REFERENCES items(id),
+    source_kind           TEXT NOT NULL,
+    attachment_id         INTEGER REFERENCES attachments(id),
+    page_number           INTEGER NOT NULL,
+    image_path            TEXT NOT NULL,
     sha256                TEXT NOT NULL,
-    size_bytes            INTEGER,
-    extracted_copy_path   TEXT,
-    extracted_copy_sha256 TEXT,
-    extraction_method     TEXT,
-    extracted_text_path   TEXT,
+    page_text_method      TEXT,
+    ocr_text              TEXT,
     ocr_confidence        REAL,
     ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
-    is_skipped            INTEGER NOT NULL DEFAULT 0,
-    skip_reason           TEXT,
-    doc_date              TEXT,
-    doc_date_source       TEXT,
-    doc_date_detail       TEXT,
-    doc_date_raw          TEXT,
-    has_parse_issue       INTEGER NOT NULL DEFAULT 0,
-    ingested_at           TEXT NOT NULL,
-    processed_at          TEXT,
-    UNIQUE (source_id, sha256)
+    rasterized_at         TEXT NOT NULL,
+    img_embedded_at       TEXT,
+    UNIQUE (source_kind, attachment_id, item_id, page_number)
 );
 
-CREATE INDEX IF NOT EXISTS idx_documents_email ON documents(email_id);
-CREATE INDEX IF NOT EXISTS idx_documents_sha ON documents(sha256);
+CREATE TABLE IF NOT EXISTS transactions (
+    id              INTEGER PRIMARY KEY,
+    item_id         INTEGER NOT NULL REFERENCES items(id),
+    collection_id   TEXT,
+    txn_date        TEXT,
+    amount          REAL,
+    currency        TEXT DEFAULT 'AUD',
+    description     TEXT,
+    account_hint    TEXT,
+    row_index       INTEGER,
+    source_page     INTEGER,
+    raw_line        TEXT,
+    extracted_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(txn_date);
 
 CREATE TABLE IF NOT EXISTS ingestion_log (
     id          INTEGER PRIMARY KEY,
@@ -129,14 +153,16 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     resolved    INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date_utc);
-CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
-CREATE INDEX IF NOT EXISTS idx_emails_privileged ON emails(is_privileged);
-CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_email ON chunks(email_id);
+CREATE INDEX IF NOT EXISTS idx_items_date ON items(date_utc);
+CREATE INDEX IF NOT EXISTS idx_items_thread ON items(thread_id);
+CREATE INDEX IF NOT EXISTS idx_items_privileged ON items(is_privileged);
+CREATE INDEX IF NOT EXISTS idx_items_kind ON items(item_kind);
+CREATE INDEX IF NOT EXISTS idx_memberships_item ON item_memberships(item_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_collection ON item_memberships(collection_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments(item_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);
+CREATE INDEX IF NOT EXISTS idx_page_images_item ON page_images(item_id);
 
--- Regenerable sha256→path cache (docs/specs/source-blob-index.md).
--- NOT custody identity: drop and rebuild anytime from disk + config.
 CREATE TABLE IF NOT EXISTS source_blob_index (
     workspace_id          TEXT,
     source_id             TEXT NOT NULL,
@@ -443,19 +469,264 @@ def _migrate_collection_identity_phase_a(conn):
                 """)
 
 
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone()
+    return row is not None
+
+
+def _migrate_schema_b_items_memberships(conn):
+    """Schema B: emails→items, email_files∪documents→item_memberships,
+    documents extract cols→item_file_meta, email_id→item_id on children.
+
+    Preserves primary key ids so existing chunk/attachment FKs stay valid.
+    Idempotent: no-op when emails is gone and items exists.
+    """
+    if not _table_exists(conn, "emails"):
+        # Finish partial leftovers if any
+        if _table_exists(conn, "attachments_sb"):
+            conn.execute("DROP TABLE IF EXISTS attachments")
+            conn.execute("ALTER TABLE attachments_sb RENAME TO attachments")
+        return
+
+    # Table rewrites with self-FKs / parent FKs need FK checks off.
+    conn.execute("PRAGMA foreign_keys=OFF")
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS items (
+            id                  INTEGER PRIMARY KEY,
+            item_kind           TEXT NOT NULL DEFAULT 'email',
+            message_id          TEXT UNIQUE NOT NULL,
+            date_utc            TEXT,
+            date_raw            TEXT,
+            from_name           TEXT,
+            from_addr           TEXT,
+            to_addrs            TEXT,
+            cc_addrs            TEXT,
+            subject             TEXT,
+            subject_normalized  TEXT,
+            in_reply_to         TEXT,
+            references_raw      TEXT,
+            thread_id           INTEGER,
+            thread_link_method  TEXT,
+            is_privileged       INTEGER NOT NULL DEFAULT 0,
+            privilege_override  INTEGER,
+            body_text_path      TEXT,
+            body_source         TEXT,
+            charset_detected    TEXT,
+            has_parse_issue     INTEGER NOT NULL DEFAULT 0,
+            ingested_at         TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO items (
+            id, item_kind, message_id, date_utc, date_raw, from_name, from_addr,
+            to_addrs, cc_addrs, subject, subject_normalized, in_reply_to,
+            references_raw, thread_id, thread_link_method, is_privileged,
+            privilege_override, body_text_path, body_source, charset_detected,
+            has_parse_issue, ingested_at
+        )
+        SELECT id,
+               CASE WHEN COALESCE(source_kind, 'email') = 'document'
+                    THEN 'file' ELSE COALESCE(source_kind, 'email') END,
+               message_id, date_utc, date_raw, from_name, from_addr,
+               to_addrs, cc_addrs, subject, subject_normalized, in_reply_to,
+               references_raw, thread_id, thread_link_method, is_privileged,
+               privilege_override, body_text_path, body_source, charset_detected,
+               has_parse_issue, ingested_at
+        FROM emails;
+    """)
+
+    # memberships from email_files
+    if _table_exists(conn, "email_files"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS item_memberships (
+                id              INTEGER PRIMARY KEY,
+                item_id         INTEGER NOT NULL,
+                workspace_id    TEXT,
+                collection_id   TEXT,
+                source_folder   TEXT NOT NULL DEFAULT '',
+                filename        TEXT NOT NULL DEFAULT '',
+                sha256          TEXT NOT NULL,
+                file_size_bytes INTEGER,
+                membership_kind TEXT NOT NULL DEFAULT 'email',
+                ingested_at     TEXT NOT NULL,
+                UNIQUE (collection_id, sha256)
+            );
+            INSERT OR IGNORE INTO item_memberships (
+                item_id, workspace_id, collection_id, source_folder, filename,
+                sha256, file_size_bytes, membership_kind, ingested_at
+            )
+            SELECT email_id, workspace_id, source_id,
+                   COALESCE(source_folder, ''), '',
+                   sha256, file_size_bytes, 'email', ingested_at
+            FROM email_files;
+        """)
+
+    # memberships + file meta from documents
+    if _table_exists(conn, "documents"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS item_memberships (
+                id              INTEGER PRIMARY KEY,
+                item_id         INTEGER NOT NULL,
+                workspace_id    TEXT,
+                collection_id   TEXT,
+                source_folder   TEXT NOT NULL DEFAULT '',
+                filename        TEXT NOT NULL DEFAULT '',
+                sha256          TEXT NOT NULL,
+                file_size_bytes INTEGER,
+                membership_kind TEXT NOT NULL DEFAULT 'email',
+                ingested_at     TEXT NOT NULL,
+                UNIQUE (collection_id, sha256)
+            );
+            INSERT OR IGNORE INTO item_memberships (
+                item_id, workspace_id, collection_id, source_folder, filename,
+                sha256, file_size_bytes, membership_kind, ingested_at
+            )
+            SELECT email_id, workspace_id, source_id,
+                   COALESCE(source_folder, ''), COALESCE(filename, ''),
+                   sha256, size_bytes, 'file', ingested_at
+            FROM documents;
+
+            CREATE TABLE IF NOT EXISTS item_file_meta (
+                item_id               INTEGER PRIMARY KEY,
+                extracted_copy_path   TEXT,
+                extracted_copy_sha256 TEXT,
+                extraction_method     TEXT,
+                extracted_text_path   TEXT,
+                ocr_confidence        REAL,
+                ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
+                is_skipped            INTEGER NOT NULL DEFAULT 0,
+                skip_reason           TEXT,
+                doc_date              TEXT,
+                doc_date_source       TEXT,
+                doc_date_detail       TEXT,
+                doc_date_raw          TEXT,
+                has_parse_issue       INTEGER NOT NULL DEFAULT 0,
+                processed_at          TEXT
+            );
+            INSERT OR IGNORE INTO item_file_meta (
+                item_id, extracted_copy_path, extracted_copy_sha256,
+                extraction_method, extracted_text_path, ocr_confidence,
+                ocr_flagged_low_conf, is_skipped, skip_reason,
+                doc_date, doc_date_source, doc_date_detail, doc_date_raw,
+                has_parse_issue, processed_at
+            )
+            SELECT email_id, extracted_copy_path, extracted_copy_sha256,
+                   extraction_method, extracted_text_path, ocr_confidence,
+                   ocr_flagged_low_conf, is_skipped, skip_reason,
+                   doc_date, doc_date_source, doc_date_detail, doc_date_raw,
+                   has_parse_issue, processed_at
+            FROM documents
+            GROUP BY email_id;
+        """)
+
+    # attachments / chunks: rewrite email_id → item_id
+    if _table_exists(conn, "attachments") and _table_has_column(conn, "attachments", "email_id"):
+        conn.executescript("""
+            CREATE TABLE attachments_sb (
+                id                    INTEGER PRIMARY KEY,
+                item_id               INTEGER NOT NULL,
+                parent_attachment_id  INTEGER,
+                filename              TEXT,
+                filename_raw          TEXT,
+                content_type          TEXT,
+                size_bytes            INTEGER,
+                sha256                TEXT NOT NULL,
+                extracted_copy_path   TEXT,
+                extracted_copy_sha256 TEXT,
+                extraction_method     TEXT,
+                extracted_text_path   TEXT,
+                ocr_confidence        REAL,
+                ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
+                is_skipped            INTEGER NOT NULL DEFAULT 0,
+                skip_reason           TEXT,
+                processed_at          TEXT
+            );
+            INSERT INTO attachments_sb
+                (id, item_id, parent_attachment_id, filename, filename_raw,
+                 content_type, size_bytes, sha256, extracted_copy_path,
+                 extracted_copy_sha256, extraction_method, extracted_text_path,
+                 ocr_confidence, ocr_flagged_low_conf, is_skipped, skip_reason,
+                 processed_at)
+            SELECT id, email_id, parent_attachment_id, filename, filename_raw,
+                   content_type, size_bytes, sha256, extracted_copy_path,
+                   extracted_copy_sha256, extraction_method, extracted_text_path,
+                   ocr_confidence, ocr_flagged_low_conf, is_skipped, skip_reason,
+                   processed_at
+            FROM attachments;
+            DROP TABLE attachments;
+            ALTER TABLE attachments_sb RENAME TO attachments;
+            CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments(item_id);
+        """)
+
+    if _table_exists(conn, "chunks") and _table_has_column(conn, "chunks", "email_id"):
+        # Drop FTS first — depends on chunks
+        conn.executescript("""
+            DROP TRIGGER IF EXISTS chunks_ai;
+            DROP TRIGGER IF EXISTS chunks_ad;
+            DROP TRIGGER IF EXISTS chunks_au;
+            DROP TABLE IF EXISTS chunks_fts;
+            CREATE TABLE chunks_sb (
+                id               INTEGER PRIMARY KEY,
+                source_type      TEXT NOT NULL,
+                item_id          INTEGER NOT NULL,
+                attachment_id    INTEGER,
+                chunk_index      INTEGER NOT NULL,
+                text             TEXT NOT NULL,
+                char_start       INTEGER,
+                char_end         INTEGER,
+                embedded_at      TEXT,
+                translit_shadow  TEXT
+            );
+            INSERT INTO chunks_sb
+                (id, source_type, item_id, attachment_id, chunk_index, text,
+                 char_start, char_end, embedded_at, translit_shadow)
+            SELECT id, source_type, email_id, attachment_id, chunk_index, text,
+                   char_start, char_end, embedded_at, translit_shadow
+            FROM chunks;
+            DROP TABLE chunks;
+            ALTER TABLE chunks_sb RENAME TO chunks;
+            CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);
+        """)
+
+    # Drop legacy tables
+    conn.executescript("""
+        DROP TABLE IF EXISTS documents;
+        DROP TABLE IF EXISTS email_files;
+        DROP TABLE IF EXISTS emails;
+        DROP TABLE IF EXISTS attachments_sb;
+        DROP TABLE IF EXISTS chunks_sb;
+    """)
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
 def migrate(conn):
     """Apply schema + guarded column additions. Idempotent and silent —
     safe to call from any entrypoint (ingest stages, query.py)."""
+    # Legacy path: prepare old tables then convert to Schema B.
+    if _table_exists(conn, "emails"):
+        ensure_column(conn, "emails", "source_kind",
+                      "source_kind TEXT NOT NULL DEFAULT 'email'")
+        if _table_exists(conn, "chunks"):
+            ensure_column(conn, "chunks", "translit_shadow", "translit_shadow TEXT")
+        if _table_exists(conn, "email_files"):
+            ensure_column(conn, "email_files", "workspace_id", "workspace_id TEXT")
+            ensure_column(conn, "email_files", "source_id", "source_id TEXT")
+        if _table_exists(conn, "documents"):
+            ensure_column(conn, "documents", "workspace_id", "workspace_id TEXT")
+            ensure_column(conn, "documents", "source_id", "source_id TEXT")
+        _migrate_pathless_evidence(conn)
+        _migrate_collection_identity_phase_a(conn)
+        _migrate_schema_b_items_memberships(conn)
+
     conn.executescript(BASE_SCHEMA)
-    ensure_column(conn, "emails", "source_kind",
-                  "source_kind TEXT NOT NULL DEFAULT 'email'")
     ensure_column(conn, "chunks", "translit_shadow", "translit_shadow TEXT")
-    ensure_column(conn, "email_files", "workspace_id", "workspace_id TEXT")
-    ensure_column(conn, "email_files", "source_id", "source_id TEXT")
-    ensure_column(conn, "documents", "workspace_id", "workspace_id TEXT")
-    ensure_column(conn, "documents", "source_id", "source_id TEXT")
-    _migrate_pathless_evidence(conn)
-    _migrate_collection_identity_phase_a(conn)
+    ensure_column(conn, "item_memberships", "workspace_id", "workspace_id TEXT")
+    ensure_column(conn, "item_memberships", "collection_id", "collection_id TEXT")
+    ensure_column(conn, "item_memberships", "filename",
+                  "filename TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "item_memberships", "membership_kind",
+                  "membership_kind TEXT NOT NULL DEFAULT 'email'")
     _ensure_chunks_fts_shadow_column(conn)
     conn.commit()
 

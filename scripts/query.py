@@ -32,11 +32,15 @@ import embedding_backends
 import reranker as reranker_mod
 
 
-def _mounted_collection_ids():
-    """Active workspace mount set; empty frozenset if no registry."""
+def _mounted_collection_ids(purpose=None):
+    """Active workspace mount set; empty frozenset if no registry.
+
+    purpose (R-05): if set, only collections whose mount purposes include
+    that tag (or have empty/unrestricted purposes) remain.
+    """
     try:
         import workspace_config as wc
-        return wc.active_collection_ids()
+        return wc.active_collection_ids(purpose=purpose)
     except SystemExit:
         return None
     except Exception:
@@ -50,9 +54,10 @@ def allowed_chunk_ids(conn, args):
     unfiltered top-K cut. None = no filter active (fast path, byte-
     identical to unfiltered behavior).
 
-    Mount filter (workspace-config v2): only chunks whose email_id has a
-    membership in email_files or documents with source_id in the active
-    workspace's mounted collections (schema-items-membership Phase A).
+    Mount filter (workspace-config v2): only chunks whose item_id has a
+    membership in item_memberships with collection_id in the active
+    workspace's mounted collections. Optional purpose filter (R-05):
+    further restrict mounts by collection purpose tags.
     """
     conds, params = [], []
     if not args.include_privileged:
@@ -68,29 +73,25 @@ def allowed_chunk_ids(conn, args):
         conds.append("e.thread_id = ?")
         params.append(args.thread)
 
-    mounts = _mounted_collection_ids()
+    mounts = _mounted_collection_ids(getattr(args, "purpose", None))
     mount_sql = ""
     if mounts is not None and len(mounts) > 0:
-        # Restrict to items with membership in a mounted collection.
         placeholders = ",".join("?" * len(mounts))
         mount_sql = (
             f" AND e.id IN ("
-            f"  SELECT email_id FROM email_files WHERE source_id IN ({placeholders})"
-            f"  UNION"
-            f"  SELECT email_id FROM documents WHERE source_id IN ({placeholders})"
+            f"  SELECT item_id FROM item_memberships"
+            f"  WHERE collection_id IN ({placeholders})"
             f")"
         )
         params.extend(list(mounts))
-        params.extend(list(mounts))
     elif mounts is not None and len(mounts) == 0:
-        # Active workspace mounts nothing — empty candidate set.
         return set()
 
     if not conds and not mount_sql:
         return None
     where = " AND ".join(conds) if conds else "1=1"
     rows = conn.execute(
-        f"SELECT c.id FROM chunks c JOIN emails e ON e.id = c.email_id"
+        f"SELECT c.id FROM chunks c JOIN items e ON e.id = c.item_id"
         f" WHERE {where}{mount_sql}", params).fetchall()
     return {r["id"] for r in rows}
 
@@ -201,26 +202,26 @@ def effective_privileged(row):
 
 
 def fetch_results(conn, chunk_ids, args):
-    results, seen_emails = [], set()
+    results, seen_items = [], set()
     for cid in chunk_ids:
         row = conn.execute(
             """SELECT c.id AS chunk_id, c.text, c.source_type, c.attachment_id,
-                      e.id AS email_id, e.message_id, e.date_utc, e.from_addr,
+                      e.id AS item_id, e.message_id, e.date_utc, e.from_addr,
                       e.from_name, e.subject, e.thread_id, e.thread_link_method,
-                      e.is_privileged, e.privilege_override, e.source_kind,
+                      e.is_privileged, e.privilege_override, e.item_kind,
                       a.filename AS attachment_name,
                       a.ocr_flagged_low_conf AS att_low_conf,
-                      d.filename AS doc_filename,
-                      d.source_id AS doc_source_id,
-                      d.sha256 AS doc_sha256,
-                      d.workspace_id AS doc_workspace_id,
-                      d.doc_date_source, d.doc_date_detail,
-                      d.ocr_flagged_low_conf AS doc_low_conf
+                      m.filename AS mem_filename,
+                      m.collection_id AS mem_collection_id,
+                      fm.doc_date_source, fm.doc_date_detail,
+                      fm.ocr_flagged_low_conf AS doc_low_conf
                FROM chunks c
-               JOIN emails e ON e.id = c.email_id
+               JOIN items e ON e.id = c.item_id
                LEFT JOIN attachments a ON a.id = c.attachment_id
-               LEFT JOIN documents d ON d.email_id = e.id
-               WHERE c.id = ?""", (cid,)).fetchone()
+               LEFT JOIN item_memberships m ON m.item_id = e.id
+               LEFT JOIN item_file_meta fm ON fm.item_id = e.id
+               WHERE c.id = ?
+               LIMIT 1""", (cid,)).fetchone()
         if row is None:
             continue
         if effective_privileged(row) and not args.include_privileged:
@@ -231,44 +232,47 @@ def fetch_results(conn, chunk_ids, args):
             continue
         if args.thread and row["thread_id"] != args.thread:
             continue
-        if row["email_id"] in seen_emails:
-            continue  # one (best) chunk per email in primary results
-        seen_emails.add(row["email_id"])
+        if row["item_id"] in seen_items:
+            continue  # one (best) chunk per item in primary results
+        seen_items.add(row["item_id"])
 
-        is_document = row["source_kind"] == "document"
-        if is_document:
-            matched_in = f"document: {row['doc_filename']}"
+        is_file = row["item_kind"] in ("file", "document")
+        mem = conn.execute(
+            """SELECT collection_id, workspace_id, sha256, filename
+               FROM item_memberships WHERE item_id=? LIMIT 1""",
+            (row["item_id"],)).fetchone()
+        collection_id = mem["collection_id"] if mem else row["mem_collection_id"]
+        mem_filename = (mem["filename"] if mem else None) or row["mem_filename"]
+        if is_file:
+            matched_in = f"document: {mem_filename or '?'}"
             low_conf = bool(row["doc_low_conf"])
-            source_id = row["doc_source_id"]
             date_source = row["doc_date_source"]
-            cite_ref = f"source:{source_id}" if source_id else row["doc_filename"]
+            cite_ref = (
+                f"source:{collection_id}" if collection_id
+                else (mem_filename or row["message_id"]))
         else:
             matched_in = ("attachment: " + (row["attachment_name"] or "?")) \
                 if row["source_type"] == "attachment" else "email body"
             low_conf = bool(row["att_low_conf"])
-            src = conn.execute(
-                """SELECT source_id, workspace_id, sha256 FROM email_files
-                   WHERE email_id=? LIMIT 1""",
-                (row["email_id"],)).fetchone()
-            source_id = src["source_id"] if src else None
-            cite_ref = f"source:{source_id}" if source_id else None
+            cite_ref = f"source:{collection_id}" if collection_id else None
             date_source = "email_header"
 
         results.append({
             "message_id": row["message_id"],
             "date": row["date_utc"],
             "date_source": date_source,
-            "from": row["doc_filename"] if is_document
+            "from": mem_filename if is_file
                     else (row["from_name"] or row["from_addr"]),
             "from_addr": row["from_addr"],
             "subject": row["subject"],
-            "source_kind": row["source_kind"],
-            "source_id": source_id,
+            "item_kind": row["item_kind"],
+            "source_kind": "document" if is_file else "email",
+            "source_id": collection_id,
             "privileged": effective_privileged(row),
             "thread_id": row["thread_id"],
             "thread_link_method": row["thread_link_method"],
             "matched_in": matched_in,
-            "date_detail": row["doc_date_detail"] if is_document else None,
+            "date_detail": row["doc_date_detail"] if is_file else None,
             "low_confidence_ocr": low_conf,
             "snippet": row["text"][:600],
             "source_ref": cite_ref,
@@ -287,7 +291,7 @@ def thread_context(conn, results, args):
             continue
         sibs = conn.execute(
             """SELECT message_id, date_utc, from_addr, subject, is_privileged,
-                      privilege_override FROM emails
+                      privilege_override FROM items
                WHERE thread_id = ? ORDER BY date_utc""", (r["thread_id"],)).fetchall()
         for s in sibs:
             if s["message_id"] in shown:
@@ -477,18 +481,20 @@ def format_results(out, as_json=False):
         print(f"⚠ {w}")
     for i, r in enumerate(out["results"], 1):
         flags = []
-        if r["source_kind"] == "document":
+        if r.get("item_kind") in ("file", "document") or r.get("source_kind") == "document":
             flags.append("DOCUMENT")
         if r["privileged"]:
             flags.append("PRIVILEGED")
         if r["low_confidence_ocr"]:
             flags.append("LOW-CONF-OCR")
+        if r.get("visual_match"):
+            flags.append("VISUAL-MATCH")
         print(f"\n[{i}] {r['date']}  {r['from']}  {' '.join(flags)}")
         print(f"    Subject: {r['subject']}")
         print(f"    Message-ID: {r['message_id']}")
         print(f"    Matched in: {r['matched_in']}   Thread: {r['thread_id']}"
               f" ({r['thread_link_method']})")
-        if r["source_kind"] == "document":
+        if r.get("item_kind") in ("file", "document") or r.get("source_kind") == "document":
             print(f"    Doc date source: {r['date_source']}"
                   f" ({r['date_detail'] or 'n/a'})")
         print(f"    Source: {r.get('source_ref') or r.get('source_id') or '—'}")
@@ -509,6 +515,8 @@ def main():
     ap.add_argument("--before")
     ap.add_argument("--thread", type=int)
     ap.add_argument("--include-privileged", action="store_true")
+    ap.add_argument("--purpose", default=None,
+                    help="R-05: only search collections mounted for this purpose tag")
     ap.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
     ap.add_argument("--no-thread-context", action="store_true")
     ap.add_argument("--json", action="store_true")

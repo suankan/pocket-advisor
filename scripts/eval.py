@@ -66,7 +66,7 @@ def validate_golden(conn, golden_list):
             errors.append(f"{eid}: needs expect_any and/or expect_thread")
         for mid in e.get("expect_any") or []:
             if not conn.execute(
-                    "SELECT 1 FROM emails WHERE message_id=?", (mid,)).fetchone():
+                    "SELECT 1 FROM items WHERE message_id=?", (mid,)).fetchone():
                 errors.append(f"{eid}: unknown message_id {mid!r}")
         if e.get("expect_thread") is not None:
             if not conn.execute(
@@ -163,7 +163,7 @@ def build_fingerprint(conn, golden_path, golden_list, top_k, query_mode):
     index_meta = json.loads(config.VECTORS_META_JSON.read_text()) \
         if config.VECTORS_META_JSON.exists() else {}
     corpus = {
-        "emails": conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0],
+        "emails": conn.execute("SELECT COUNT(*) FROM items").fetchone()[0],
         "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
         "embedded": conn.execute(
             "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NOT NULL").fetchone()[0],

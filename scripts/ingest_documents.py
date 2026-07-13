@@ -1,18 +1,9 @@
-"""Stage 1b: ingest standalone documents (non-.eml) from the folders
-listed in config.DOCUMENT_FOLDERS (e.g. corpora/additional-documents/).
+"""Stage 1b: ingest standalone documents (non-.eml).
 
-Each document becomes a synthetic singleton row in `emails`
-(source_kind='document') plus a provenance/extraction row in
-`documents`, so chunking, embedding, FTS, threading, and query.py all
-work on it unchanged. Chain-of-custody semantics are identical to
-parse_eml.py: originals opened read-only, sha256 recorded before
-anything else, changed content on a known path is a tampering alarm,
-never a re-ingest.
-
-A document that fails extraction or has an unsupported type still gets
-its `documents` + `emails` rows (audit trail), but emails.body_text_path
-stays NULL — which keeps it out of chunking/embedding/retrieval with no
-downstream filtering needed.
+Each document becomes an `items` row (`item_kind='file'`) plus
+`item_memberships` (+ `item_file_meta` for extract/OCR/date). Schema B:
+docs/specs/schema-items-membership.md. Chain-of-custody: originals
+read-only; identity is (collection_id, sha256).
 """
 import sys
 from datetime import datetime, timezone
@@ -43,14 +34,7 @@ def classify_document(path: Path):
 
 
 def iter_source_files():
-    """Only the configured drop folders — never the email folders or
-    stray files at the ingestion-sources root. Also used by
-    verify_integrity.py so both walks apply identical filters.
-
-    Yields (path, folder) pairs — folder is the matching
-    config.DOCUMENT_FOLDERS entry (possibly multi-segment, e.g.
-    "privileged/additional-documents"), needed by callers to strip the
-    right number of leading path parts."""
+    """Legacy DOCUMENT_FOLDERS walk when no registry sources."""
     for folder in sorted(config.DOCUMENT_FOLDERS):
         root = config.INGESTION_SOURCES / folder
         if not root.exists():
@@ -61,23 +45,23 @@ def iter_source_files():
             if path.name in config.IGNORED_FILENAMES or path.name.startswith("."):
                 continue
             if path.suffix.lower() == ".eml":
-                continue  # parse_eml.py's domain
+                continue
             yield path, folder
 
 
-def process_document(conn, doc_id, email_id, copy_path, filename):
+def process_document(conn, item_id, copy_path, filename, collection_id=None):
     kind = classify_document(copy_path)
     if kind in ("unsupported", "unsupported_v1"):
         reason = ("no extractor for this filetype" if kind == "unsupported"
                   else ".msg/.zip nested extraction not supported for standalone"
                        " documents in v1")
         conn.execute(
-            "UPDATE documents SET extraction_method='skipped_unsupported',"
-            " is_skipped=1, skip_reason=?, processed_at=? WHERE id=?",
-            (reason, now_iso(), doc_id))
+            """UPDATE item_file_meta SET extraction_method='skipped_unsupported',
+               is_skipped=1, skip_reason=?, processed_at=? WHERE item_id=?""",
+            (reason, now_iso(), item_id))
         flag(conn, filename, "ingest_document", "warning",
-             f"document {doc_id}: {reason}")
-        return  # body_text_path stays NULL -> inert downstream
+             f"document item {item_id}: {reason}")
+        return
 
     try:
         conf = None
@@ -91,26 +75,20 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
         elif kind == "xlsx":
             text, method = extraction.extract_xlsx(copy_path), "xlsx"
     except Exception as e:
-        # Record the failure on the row (mirrors extract_attachments):
-        # the file stays ingested for audit but is never chunked, and a
-        # broken extractor isn't expensively retried on every run.
         conn.execute(
-            "UPDATE documents SET extraction_method='error', skip_reason=?,"
-            " processed_at=? WHERE id=?",
-            (f"{type(e).__name__}: {e}"[:500], now_iso(), doc_id))
+            """UPDATE item_file_meta SET extraction_method='error', skip_reason=?,
+               processed_at=? WHERE item_id=?""",
+            (f"{type(e).__name__}: {e}"[:500], now_iso(), item_id))
         flag(conn, filename, "ingest_document", "error",
-             f"document {doc_id}: extraction failed:"
+             f"document item {item_id}: extraction failed:"
              f" {type(e).__name__}: {e}")
-        return  # body_text_path stays NULL -> inert downstream
+        return
 
     text, low_conf = extraction.apply_low_confidence_flag(text, conf, copy_path)
 
-    sid_row = conn.execute(
-        "SELECT source_id FROM documents WHERE id=?", (doc_id,)).fetchone()
-    sid = sid_row["source_id"] if sid_row else None
-    text_dir = config.text_documents_dir(sid)
+    text_dir = config.text_documents_dir(collection_id)
     text_dir.mkdir(parents=True, exist_ok=True)
-    text_path = text_dir / f"{email_id}.txt"
+    text_path = text_dir / f"{item_id}.txt"
     text_path.write_text(text or "", encoding="utf-8")
 
     mtime_date = datetime.fromtimestamp(
@@ -119,143 +97,107 @@ def process_document(conn, doc_id, email_id, copy_path, filename):
         text or "", filename, mtime_date)
 
     conn.execute(
-        """UPDATE documents SET extraction_method=?, extracted_text_path=?,
+        """UPDATE item_file_meta SET extraction_method=?, extracted_text_path=?,
            ocr_confidence=?, ocr_flagged_low_conf=?, doc_date=?,
            doc_date_source=?, doc_date_detail=?, doc_date_raw=?,
-           processed_at=? WHERE id=?""",
+           processed_at=? WHERE item_id=?""",
         (method, str(text_path.relative_to(config.PROJECT_ROOT)), conf,
-         int(low_conf), doc_date, source, detail, raw, now_iso(), doc_id))
-    # Full ISO timestamp so date sorting / --after/--before behave
-    # identically to email timestamps; the bare date lives in documents.
+         int(low_conf), doc_date, source, detail, raw, now_iso(), item_id))
     conn.execute(
-        "UPDATE emails SET date_utc=?, date_raw=?, body_text_path=? WHERE id=?",
+        "UPDATE items SET date_utc=?, date_raw=?, body_text_path=? WHERE id=?",
         (f"{doc_date}T00:00:00+00:00", raw or doc_date,
-         str(text_path.relative_to(config.PROJECT_ROOT)), email_id))
+         str(text_path.relative_to(config.PROJECT_ROOT)), item_id))
     if source in ("filename", "mtime"):
         flag(conn, filename, "ingest_document", "warning",
-             f"document {doc_id}: date derived from {source}"
+             f"document item {item_id}: date derived from {source}"
              f" ({detail or 'filesystem timestamp'}), not found in extracted"
              " text — verify")
 
 
-def _link_document_membership(conn, email_id, path: Path, rel_path: Path,
-                              folder: str, sha, raw: bytes, *,
-                              workspace_id=None, source_id=None,
-                              privileged=False, template_doc=None):
-    """Insert a documents membership row for an existing content email_id.
-
-    Used for multi-collection membership (same sha, new source_id): reuses
-    extract paths from template_doc when provided; does not re-extract.
-    """
+def _insert_membership(conn, item_id, path: Path, folder: str, sha, raw: bytes, *,
+                       workspace_id=None, collection_id=None, privileged=False):
     now = now_iso()
-    source_folder = source_id or folder or path.parent.name
-    if template_doc:
+    source_folder = collection_id or folder or path.parent.name
+    conn.execute(
+        """INSERT INTO item_memberships (
+               item_id, source_folder, filename, sha256, file_size_bytes,
+               membership_kind, ingested_at, workspace_id, collection_id)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (item_id, source_folder or collection_id or "", path.name, sha, len(raw),
+         "file", now, workspace_id, collection_id))
+    if privileged:
         conn.execute(
-            """INSERT INTO documents (
-                   email_id, source_folder, filename, sha256, size_bytes,
-                   ingested_at, workspace_id, source_id,
-                   extracted_copy_path, extracted_copy_sha256, extraction_method,
-                   extracted_text_path, ocr_confidence, ocr_flagged_low_conf,
-                   is_skipped, skip_reason, doc_date, doc_date_source,
-                   doc_date_detail, doc_date_raw, has_parse_issue, processed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (email_id, source_folder or source_id or "", path.name, sha, len(raw),
-             now, workspace_id, source_id,
-             template_doc["extracted_copy_path"],
-             template_doc["extracted_copy_sha256"],
-             template_doc["extraction_method"],
-             template_doc["extracted_text_path"],
-             template_doc["ocr_confidence"],
-             template_doc["ocr_flagged_low_conf"],
-             template_doc["is_skipped"],
-             template_doc["skip_reason"],
-             template_doc["doc_date"],
-             template_doc["doc_date_source"],
-             template_doc["doc_date_detail"],
-             template_doc["doc_date_raw"],
-             template_doc["has_parse_issue"],
-             template_doc["processed_at"]))
-        if privileged:
-            conn.execute(
-                "UPDATE emails SET is_privileged = 1"
-                " WHERE is_privileged = 0 AND id = ?",
-                (email_id,))
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    doc_cur = conn.execute(
-        """INSERT INTO documents (email_id, source_folder,
-           filename, sha256, size_bytes, ingested_at, workspace_id, source_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (email_id, source_folder or source_id or "", path.name, sha, len(raw), now,
-         workspace_id, source_id))
-    return doc_cur.lastrowid
+            "UPDATE items SET is_privileged = 1"
+            " WHERE is_privileged = 0 AND id = ?",
+            (item_id,))
 
 
 def insert_document(conn, path: Path, rel_path: Path, folder: str, sha, raw: bytes,
                     workspace_id=None, source_id=None, privileged=False):
+    collection_id = source_id
     now = now_iso()
-    # Subject: path under the source root (user-visible context).
     subject = " / ".join(rel_path.parts) if rel_path.parts else path.name
-    # "@pocket-lawyer" is a frozen namespace token, NOT branding — see
-    # the matching comment in parse_eml.py. Do not rebrand.
+    # "@pocket-lawyer" is a frozen namespace token — do not rebrand.
     mid = f"<doc-{sha}@pocket-lawyer>"
     cur = conn.execute(
-        """INSERT INTO emails (message_id, subject, subject_normalized,
-           source_kind, body_source, has_parse_issue, is_privileged, ingested_at)
-           VALUES (?,?,?, 'document', 'document_extracted', 0, ?, ?)""",
+        """INSERT INTO items (item_kind, message_id, subject, subject_normalized,
+           body_source, has_parse_issue, is_privileged, ingested_at)
+           VALUES ('file', ?, ?, ?, 'document_extracted', 0, ?, ?)""",
         (mid, subject, utils_mime.normalize_subject(subject),
          1 if privileged else 0, now))
-    email_id = cur.lastrowid
+    item_id = cur.lastrowid
 
-    doc_id = _link_document_membership(
-        conn, email_id, path, rel_path, folder, sha, raw,
-        workspace_id=workspace_id, source_id=source_id, privileged=privileged)
+    _insert_membership(
+        conn, item_id, path, folder, sha, raw,
+        workspace_id=workspace_id, collection_id=collection_id,
+        privileged=privileged)
 
-    out_dir = config.extracted_documents_dir(source_id)
+    conn.execute(
+        "INSERT OR IGNORE INTO item_file_meta (item_id) VALUES (?)",
+        (item_id,))
+
+    out_dir = config.extracted_documents_dir(collection_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    copy_path = out_dir / f"{email_id}__{utils_mime.sanitize_filename(path.name)}"
-    # written from the SAME bytes that were hashed — no re-read window
+    copy_path = out_dir / f"{item_id}__{utils_mime.sanitize_filename(path.name)}"
     disk_sha = utils_hash.write_and_verify(copy_path, raw)
     conn.execute(
-        "UPDATE documents SET extracted_copy_path=?, extracted_copy_sha256=?"
-        " WHERE id=?",
-        (str(copy_path.relative_to(config.PROJECT_ROOT)), disk_sha, doc_id))
+        """UPDATE item_file_meta SET extracted_copy_path=?, extracted_copy_sha256=?
+           WHERE item_id=?""",
+        (str(copy_path.relative_to(config.PROJECT_ROOT)), disk_sha, item_id))
     if disk_sha != sha:
         flag(conn, rel_path, "ingest_document", "error",
-             f"document {doc_id} write verification FAILED (disk hash mismatch)")
+             f"document item {item_id} write verification FAILED"
+             " (disk hash mismatch)")
         conn.execute(
-            "UPDATE documents SET extraction_method='error',"
-            " skip_reason='write_verify_failed', processed_at=? WHERE id=?",
-            (now_iso(), doc_id))
+            """UPDATE item_file_meta SET extraction_method='error',
+               skip_reason='write_verify_failed', processed_at=?
+               WHERE item_id=?""",
+            (now_iso(), item_id))
         return
 
-    process_document(conn, doc_id, email_id, copy_path, path.name)
+    process_document(conn, item_id, copy_path, path.name,
+                     collection_id=collection_id)
 
 
 def link_existing_document(conn, path: Path, rel_path: Path, folder: str,
                            sha, raw: bytes, *, workspace_id=None, source_id=None,
                            privileged=False):
-    """Phase A multi-membership: same content sha, new collection (source_id).
-
-    Reuses the existing emails/chunks graph; adds a documents membership row.
-    """
+    """Multi-membership: same content sha, new collection_id — no re-extract."""
+    collection_id = source_id
     mid = f"<doc-{sha}@pocket-lawyer>"
     erow = conn.execute(
-        "SELECT id FROM emails WHERE message_id = ?", (mid,)).fetchone()
+        "SELECT id FROM items WHERE message_id = ?", (mid,)).fetchone()
     if not erow:
         return False
-    email_id = erow["id"]
-    template = conn.execute(
-        "SELECT * FROM documents WHERE sha256 = ? LIMIT 1", (sha,)).fetchone()
-    _link_document_membership(
-        conn, email_id, path, rel_path, folder, sha, raw,
-        workspace_id=workspace_id, source_id=source_id, privileged=privileged,
-        template_doc=template)
+    item_id = erow["id"]
+    _insert_membership(
+        conn, item_id, path, folder, sha, raw,
+        workspace_id=workspace_id, collection_id=collection_id,
+        privileged=privileged)
     return True
 
 
 def recompute_privilege(conn):
-    """Prefer workspace-config source.privileged; path heuristic fallback."""
     import workspace_config as wc
     priv_sources = set()
     try:
@@ -263,12 +205,13 @@ def recompute_privilege(conn):
     except SystemExit:
         pass
     rows = conn.execute(
-        "SELECT email_id, source_id FROM documents").fetchall()
-    ids = {r["email_id"] for r in rows
-           if r["source_id"] and r["source_id"] in priv_sources}
+        "SELECT item_id, collection_id FROM item_memberships"
+        " WHERE membership_kind='file'").fetchall()
+    ids = {r["item_id"] for r in rows
+           if r["collection_id"] and r["collection_id"] in priv_sources}
     if ids:
         conn.executemany(
-            "UPDATE emails SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
+            "UPDATE items SET is_privileged = 1 WHERE is_privileged = 0 AND id = ?",
             [(i,) for i in ids],
         )
 
@@ -278,14 +221,13 @@ def run():
     config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
     db.migrate(conn)
-    known_src_sha = {(r["source_id"], r["sha256"])
+    known_src_sha = {(r["collection_id"], r["sha256"])
                      for r in conn.execute(
-                         "SELECT source_id, sha256 FROM documents"
-                         " WHERE source_id IS NOT NULL")}
-    # sha -> email_id for multi-membership links
-    sha_to_email = {r["sha256"]: r["email_id"]
-                    for r in conn.execute(
-                        "SELECT sha256, email_id FROM documents")}
+                         "SELECT collection_id, sha256 FROM item_memberships"
+                         " WHERE collection_id IS NOT NULL")}
+    sha_to_item = {r["sha256"]: r["item_id"]
+                   for r in conn.execute(
+                       "SELECT sha256, item_id FROM item_memberships")}
     stats = {"new": 0, "skipped": 0, "duplicate_content": 0,
              "linked_membership": 0, "errors": 0, "custody_alarm": 0}
 
@@ -296,7 +238,7 @@ def run():
         doc_sources = []
         ws_id = getattr(config, "ACTIVE_WORKSPACE_ID", config.WORKSPACE_DIR.name)
 
-    jobs = []  # (path, rel, folder, source_id)
+    jobs = []
     if doc_sources:
         for source in doc_sources:
             if not source.root.is_dir():
@@ -323,9 +265,7 @@ def run():
         if (sid, sha) in known_src_sha:
             stats["skipped"] += 1
             continue
-        if sha in sha_to_email:
-            # Same bytes under a different collection: multi-membership
-            # (schema-items-membership Phase A) — do not re-extract.
+        if sha in sha_to_item:
             try:
                 ok = link_existing_document(
                     conn, path, rel, folder, sha, raw,
@@ -335,12 +275,12 @@ def run():
                     known_src_sha.add((sid, sha))
                     flag(conn, rel, "ingest_document", "info",
                          f"duplicate content sha {sha[:12]}… linked as"
-                         f" membership under source_id={sid}"
+                         f" membership under collection_id={sid}"
                          " (shared content graph)")
                 else:
                     stats["duplicate_content"] += 1
                     flag(conn, rel, "ingest_document", "warning",
-                         f"duplicate content sha {sha[:12]}… but no emails"
+                         f"duplicate content sha {sha[:12]}… but no items"
                          " row found — skipped")
                 conn.commit()
             except Exception as e:
@@ -356,12 +296,12 @@ def run():
                             workspace_id=ws_id, source_id=sid, privileged=priv)
             stats["new"] += 1
             known_src_sha.add((sid, sha))
-            # email_id of the row we just made
             er = conn.execute(
-                "SELECT email_id FROM documents WHERE source_id=? AND sha256=?",
+                "SELECT item_id FROM item_memberships"
+                " WHERE collection_id=? AND sha256=?",
                 (sid, sha)).fetchone()
             if er:
-                sha_to_email[sha] = er["email_id"]
+                sha_to_item[sha] = er["item_id"]
             conn.commit()
         except Exception as e:
             conn.rollback()

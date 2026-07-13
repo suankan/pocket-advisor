@@ -40,7 +40,7 @@ def make_corpus():
     conn.execute("INSERT INTO threads (id, representative_subject) VALUES (1, 'x')")
     for i, mid in enumerate(("m1", "m2", "m3"), start=1):
         conn.execute(
-            "INSERT INTO emails (message_id, thread_id, ingested_at) VALUES (?, ?, ?)",
+            "INSERT INTO items (message_id, thread_id, ingested_at) VALUES (?, ?, ?)",
             (mid, 1, now))
     conn.commit()
     return conn

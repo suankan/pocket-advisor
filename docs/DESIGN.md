@@ -33,10 +33,10 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents | — |
 | **Measure + accuracy** — eval, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 eval/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm eval, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
-| **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | 2026-07-13 user-data root, registry v1, pathless+blob index, collections v2, cache | R-05 purpose-scoped visibility; R-06 ocr_review path |
-| **Schema spine** — collection custody, multi-membership; honest `items` names | **Partial** | Schema **A** (2026-07-13): `(source_id, sha256)`, multi-membership | **R-01** Schema B rename; **R-02** Schema C polish |
-| **Structured numbers** — transactions SQL, reconciliation, row citations | **Open** | — (prose flatten is interim) | **R-04** |
-| **Visual / page-image retrieval** | **Open** | Spec only (not a ship) | **R-03** (smoke first) |
+| **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | 2026-07-13 user-data root…v2 cache; **R-05** mount `purposes` + `query --purpose` | R-06 ocr_review path |
+| **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs; synthetic mid from content sha | — |
+| **Structured numbers** — transactions SQL, row citations | **Partial** | **R-04** heuristic `transactions` table + extractor | richer parsers / reconciliation when finance forces |
+| **Visual / page-image retrieval** | **Partial** | **R-03** `page_images` schema, smoke script, `IMG_*` knobs (leg off until torch + smoke PASS) | full rasterize/embed/query when smoke PASS |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |
@@ -137,21 +137,22 @@ Platform `config.yaml`: `workspaces.dir` + engine knobs only.
 
 ### Schema (live tables)
 
-Still email-era names; **Schema A** behavior is live:
+**Schema B live** (R-01/R-02):
 
 | Table | Role |
 |---|---|
-| `emails` | Logical parent for retrieval (incl. synthetic docs) |
-| `email_files` | `.eml` membership: UNIQUE `(source_id, sha256)` |
-| `documents` | Standalone files; multi-membership allowed (same sha, new collection links without re-extract) |
-| `chunks` / FTS / vectors | Retrieval units keyed by `chunk_id` / `email_id` |
-| `source_blob_index` | Regenerable sha → path |
+| `items` | Logical parent (`item_kind` email\|file); mail headers on row |
+| `item_memberships` | Blob in a collection: UNIQUE `(collection_id, sha256)` |
+| `item_file_meta` | File extract/OCR/date (1:1 item) |
+| `chunks` / FTS / vectors | Retrieval units; FK `item_id` |
+| `page_images` | Visual channel rows (R-03; empty until leg enabled) |
+| `transactions` | Structured amounts (R-04 heuristic) |
+| `source_blob_index` | Regenerable sha → path (`source_id` ≈ collection) |
 
 **Frozen namespace:** synthetic `message_id` values still use the
-`@pocket-lawyer` suffix (pre-rename token). Do **not** rename that
-string — it would re-mint ids and break dedup/golden ground truth.
+`@pocket-lawyer` suffix (pre-rename token). Missing Message-ID uses
+`synthetic-{content_sha}` (R-02). Do **not** rebrand the suffix.
 
-**Schema B** (`items` / `item_memberships` rename) = ROADMAP **R-01**.
 **Spec:** [schema-items-membership.md](specs/schema-items-membership.md).
 
 ### Pipeline
@@ -203,8 +204,8 @@ in CHANGELOG, not here.
 | FTS5 OR-of-tokens (no lemmatization) | Russian keyword recall failures | Lemmatized shadow or learned sparse |
 | No entity/claim extraction at ingest | Correlation questions agent workflow can't answer | Ingest-time entities/claims |
 | Transliteration = mechanical romanization only | Name-match fails where corpus uses a different conventional spelling | Alias/entity resolution, not a bigger translit lib |
-| Visibility = mounts + binary privilege only | Purpose-scoped eligibility needed | Per-collection visibility policy beyond privilege |
-| Tabular statements flattened to prose chunks | Finance/ATO needs sums/joins | Structured transactions — **R-04** |
+| Mount purposes optional; privilege still binary | Finer purpose-inside-collection rules | Extend purpose-visibility.md |
+| Transaction extract is regex-heuristic only | Finance needs real statement parsers | Richer R-04 follow-ons |
 | Messenger screenshots = flat OCR | Who-said-what disputes | Message-boundary + speaker fields — **R-11** |
 | Git history may still contain case content (local-only repo) | Deliberate hygiene window | History reset — **R-09** |
 | Python engine (TS target parked) | User explicitly resumes TS | **R-08** full planned migration |
@@ -228,7 +229,9 @@ that slice; this table is the map.
 | [workspace-config.md](specs/workspace-config.md) | v1 dual-read legacy |
 | [workspace-user-data.md](specs/workspace-user-data.md) | Historical migrate into `workspaces/` |
 | [source-blob-index.md](specs/source-blob-index.md) | Path cache |
-| [schema-items-membership.md](specs/schema-items-membership.md) | Schema A live; B/C open (R-01, R-02) |
+| [schema-items-membership.md](specs/schema-items-membership.md) | Schema A+B+C shipped |
+| [structured-transactions.md](specs/structured-transactions.md) | R-04 minimal |
+| [purpose-visibility.md](specs/purpose-visibility.md) | R-05 mount purposes |
 | [instruction-layer-split.md](specs/instruction-layer-split.md) | Platform vs workspace |
 | [config-yaml.md](specs/config-yaml.md) | Platform knobs |
 | [eval-harness.md](specs/eval-harness.md) | Measurement |
@@ -240,12 +243,11 @@ that slice; this table is the map.
 | [warm-eval.md](specs/warm-eval.md) | In-process warm eval |
 | [query-daemon.md](specs/query-daemon.md) | Session-warm query |
 
-### Planned (see ROADMAP)
+### Partial / planned (see ROADMAP)
 
 | Spec | ROADMAP |
 |---|---|
-| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 |
-| Schema B/C in [schema-items-membership.md](specs/schema-items-membership.md) | R-01, R-02 |
+| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 remainder (full leg) |
 
 There is **no** `docs/history/`, no `PLAN.md`, and no `STATUS.md`.
 Product history is only [`CHANGELOG.md`](CHANGELOG.md).

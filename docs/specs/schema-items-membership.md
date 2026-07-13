@@ -1,9 +1,7 @@
 # Spec: DB schema — items + membership (polymorphic content spine)
 
-Status: **DESIGN LOCKED / NOT IMPLEMENTED** 2026-07-13.  
-Separate work item from workspace-config v2 (collections + mounts).  
-May be scheduled **after** or **partially alongside** v2; do **not**
-require a greenfield mega-table or NoSQL product.
+Status: **Schema A+B+C SHIPPED** 2026-07-13 (R-01, R-02). Live tables:
+`items`, `item_memberships`, `item_file_meta`; FKs use `item_id`.
 
 Related:
 
@@ -166,24 +164,20 @@ Do **not** require full rename before collections v2 can ship.
 
 **Exit:** Phase A complete — collection-scoped custody + multi-membership + mount filter.
 
-### Phase B — Naming + polymorphic parent (schema cleanup)
+### Phase B — Naming + polymorphic parent (schema cleanup) · **SHIPPED R-01**
 
-**Goal:** honest names and extension points.
+- [x] Introduce `items` (migrate from `emails`)  
+- [x] Unify membership into `item_memberships`  
+- [x] Split file OCR/date fields into `item_file_meta`  
+- [ ] Optional `item_email_headers` (mail columns remain on `items`)  
+- [x] Rename FKs: `email_id` → `item_id` on chunks/attachments  
+- [x] Update scripts + tests  
 
-- [ ] Introduce `items` (migrate from `emails`) **or** formalize `emails` as items in docs until rename  
-- [ ] Unify membership into `item_memberships` (or keep two tables with shared semantics + views)  
-- [ ] Split file OCR/date fields into `item_file_meta` or `attrs` JSON  
-- [ ] Optional `item_email_headers` for mail-only columns  
-- [ ] Rename FKs: `email_id` → `item_id` on chunks/attachments  
-- [ ] Update all scripts, tests, AGENTS citation wording if needed  
+### Phase C — Optional polish · **SHIPPED R-02 (partial)**
 
-**Exit:** clear spine for Phase 3 / visual without fake “email” PDFs in product language.
-
-### Phase C — Optional polish
-
-- [ ] Content-based synthetic id for `.eml` missing Message-ID (avoid dual email rows for identical bodies)  
-- [ ] Drop legacy `source_folder` if redundant with collection_id + blob_index  
-- [ ] VACUUM / size notes in RUNBOOK  
+- [x] Content-based synthetic id for `.eml` missing Message-ID (`synthetic-{sha}`)  
+- [ ] Drop legacy `source_folder` (kept for provenance labels)  
+- [x] VACUUM / size notes in RUNBOOK  
 
 ---
 
@@ -207,6 +201,5 @@ Do **not** require full rename before collections v2 can ship.
 - [x] Phased A/B/C checklist so v2 is not blocked on full rename  
 - [x] Later use cases attach via FK to item id  
 - [x] Phase A implemented  
-- [ ] Phase B implemented  
-
-**Schedule:** Phase A shipped with/after v2 identity (2026-07-13). Phase B when naming debt hurts more than mount delivery.  
+- [x] Phase B implemented  
+- [x] Phase C partial (synthetic mid + RUNBOOK notes)  

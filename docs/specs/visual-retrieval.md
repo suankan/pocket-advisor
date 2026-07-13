@@ -1,11 +1,10 @@
 # Spec: visual (page-image) retrieval channel
 
-Status: PLANNED, NOT STARTED. Design approved by the user 2026-07-13,
-transcribed here from the planning-tool copy so it survives regardless
-of which agentic CLI picks up the work next (AGENTS.md hard rule 8).
-Prerequisite MET: the text embedder is now `jina-embeddings-v5-text-small-retrieval-mlx`
-(docs/specs/jina-mlx-migration.md) — this channel's core design
-depends on the text stack actually being that model, not `bge-m3`.
+Status: **PARTIAL (R-03)** 2026-07-13. Schema `page_images` + config
+knobs (`IMG_*`) + `scripts/smoke_visual_alignment.py` +
+`requirements-visual.txt` shipped. Smoke **SKIPs** until torch/transformers
+installed; full rasterize/embed/query leg still gated on
+`IMG_LEG_ENABLED=false`. Parent FK is `item_id` (Schema B).
 
 ## Goal
 

@@ -243,6 +243,15 @@ active workspace's WORKSPACE.md / eval notes). Originals under
 `workspaces/corpora/` and `models/` are untouched. **Never** delete
 `corpora/` as a rebuild shortcut.
 
+After large membership/schema migrations, reclaim SQLite free pages:
+
+```bash
+venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import db; c=db.connect(); c.execute('VACUUM'); c.close()"
+```
+
+Optional structured rows (R-04): `venv/bin/python scripts/ingest.py transactions`.
+Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
+
 ## Review points
 
 - `workspaces/state/logs/review_queue.csv` — parse/custody flags

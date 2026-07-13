@@ -19,6 +19,38 @@ map; open work is `R-nn`.
 
 ## 2026-07-13
 
+### R-01 Schema B — items + memberships · SHIPPED
+
+Renamed spine: `emails`→`items`, `email_files`∪`documents` memberships
+→`item_memberships`, file extract cols→`item_file_meta`, FKs
+`email_id`→`item_id`. Live DB migrated; multi-membership preserved.
+Tests: `scripts/test_schema_items.py`. Spec:
+[schema-items-membership.md](specs/schema-items-membership.md).
+
+### R-02 Schema C polish (partial) · SHIPPED
+
+Missing Message-ID → `synthetic-{content_sha}@pocket-lawyer` (content-
+based, not path). RUNBOOK vacuum/size notes. `source_folder` retained
+for labels.
+
+### R-03 Visual channel (partial) · SHIPPED
+
+`page_images` table (item_id), `IMG_*` config, `requirements-visual.txt`,
+`scripts/smoke_visual_alignment.py` (SKIP until torch). Full query leg
+still off (`IMG_LEG_ENABLED=false`). Spec: [visual-retrieval.md](specs/visual-retrieval.md).
+
+### R-04 Structured transactions (minimal) · SHIPPED
+
+`transactions` table + heuristic line extractor
+(`scripts/extract_transactions.py`, `ingest.py transactions`). Spec:
+[structured-transactions.md](specs/structured-transactions.md).
+
+### R-05 Purpose-scoped mounts · SHIPPED
+
+Mount `purposes: []` in workspace-config v2; `query.py --purpose TAG`
+filters via `active_collection_ids(purpose=…)`. Spec:
+[purpose-visibility.md](specs/purpose-visibility.md).
+
 ### Docs: DESIGN / ROADMAP / CHANGELOG lifecycle · SHIPPED
 
 Retired living `STATUS.md`, living `PLAN.md`, and any `docs/history/`

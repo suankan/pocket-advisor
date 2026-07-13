@@ -233,6 +233,12 @@ EVAL_RESULTS_DIR = EVAL_DIR / "results"
 # Dotted yaml path -> (module attribute name, type converter). Anything
 # in config.yaml not in this map aborts loudly at import time — a typo
 # in a safety-semantics key must never silently do nothing.
+# Visual channel (R-03) — off until smoke + index ship
+IMG_LEG_ENABLED = False
+IMG_EMBED_MODEL_REPO = "jinaai/jina-embeddings-v5-omni-small-retrieval"
+IMG_EMBED_DIM = 1024
+IMG_PAGE_DPI = 150
+
 YAML_KEYS = {
     # Preferred: only the parent directory for all workspaces.
     "workspaces.dir": ("WORKSPACES_DIR", lambda v: PROJECT_ROOT / v),
@@ -265,6 +271,10 @@ YAML_KEYS = {
     "models.rerank_backend": ("RERANK_BACKEND", str),
     "models.rerank_model_repo": ("RERANK_MODEL_REPO", str),
     "models.rerank_model_file": ("RERANK_MODEL_FILE", str),
+    "models.img_leg_enabled": ("IMG_LEG_ENABLED", bool),
+    "models.img_embed_model_repo": ("IMG_EMBED_MODEL_REPO", str),
+    "models.img_embed_dim": ("IMG_EMBED_DIM", int),
+    "ingestion.ocr.img_page_dpi": ("IMG_PAGE_DPI", int),
 }
 
 

@@ -34,8 +34,10 @@ preserves the engine-relevant milestones.
   index fingerprint enforcement (wipe+re-embed on change; query aborts
   on mismatch). MLX path API-fixed after real-code verification caught
   two wrong assumptions from docs-only research; smoke-tested on
-  generic sentences; full-corpus MLX comparison still pending an eval
-  run (ledger).
+  generic sentences. The planned full-corpus MLX (`bge-m3`) comparison
+  was never run — superseded 2026-07-13 by a fuller migration to a
+  different model entirely (see below), which WAS eval-verified before
+  shipping.
 - **2026-07-12 — Phase 1a: eval harness** (`scripts/eval.py`
   run/compare/list): golden-set YAML, hit@k + MRR + per-flag slices,
   fully fingerprinted results, regression-gating compare. 26-question
@@ -99,10 +101,55 @@ preserves the engine-relevant milestones.
   truth. Commented in both files.
 - Full test sweep green from the new path; verify_integrity clean.
 
+## 2026-07-13 — Jina MLX stack migration (embed + rerank), made DEFAULT (Sonnet 5)
+
+- Migrated `EMBED_BACKEND`/`RERANK_BACKEND` from `bge-m3`/`llama_cpp`
+  to `jina-embeddings-v5-text-small-retrieval-mlx` /
+  `jina-reranker-v3-mlx` (both pure-MLX, no GGUF), executing the
+  pre-existing plan and extending the pluggable-backend pattern to the
+  reranker for the first time (new `scripts/rerank_backends.py`,
+  `scripts/mlx_model_loader.py` for safe module loading of the models'
+  bundled inference code). Full account: docs/specs/jina-mlx-migration.md.
+- Verified in isolation per tenet 14 before combining: regression
+  check first (default config byte-identical, 0 deltas across the
+  26-question golden set — the refactor itself was inert); reranker-
+  only (mrr +14%, every aggregate improved); embedder-only (mixed,
+  hit@5 regressed — measured, never shipped alone); combined, now
+  default (mrr +16%, hit@15 +23%, no aggregate regression vs the prior
+  baseline; the one soft spot vs. reranker-only-alone traced to a
+  single known-hard borderline case, within noise).
+- Found and fixed a real bug along the way: the new backends were
+  re-hitting HuggingFace on every single query instead of using the
+  local cache (`local_files_only` fix in `mlx_model_loader.py`) —
+  verified with a re-run producing byte-identical results, confirming
+  it was a pure latency/offline-safety fix.
+- Measured latency improved as a side effect: mean per-query wall time
+  dropped from 18.2s (old llama_cpp stack) to 11.8s (new combined
+  stack) on the live corpus — supersedes the old "15s/query" figure
+  below.
+- Also fixed a stale, case-content-leaking TODO comment in the
+  (gitignored) local `config.yaml` referencing a real correspondent
+  folder name directly — replaced with the generic explanation already
+  used in `config.yaml.example`, after verifying via the DB that the
+  migration the TODO tracked (moving that folder under
+  `ingestion-sources/privileged/`) had in fact already completed.
+- Added AGENTS.md hard rule 8: any agentic CLI with a native
+  context-management/memory facility must prioritize writing
+  decisions/plans/learnings in-repo and reconcile its private memory
+  into the canonical files before ending a session (reinforces ROADMAP
+  tenet 11, AI/tool agnostic) — prompted by finding that this session's
+  own predecessor work (the Jina MLX migration plan, and the
+  not-yet-implemented visual-channel plan) existed only in a
+  Claude-Code-specific planning-tool directory, invisible to any other
+  agent. The visual-channel plan is now transcribed in full at
+  docs/specs/visual-retrieval.md (status: PLANNED, not started).
+
 ## Known open items (engine)
 
-- MLX backend: full-corpus re-embed + eval comparison vs llama_cpp
-  still pending (ROADMAP ledger; do before relying on MLX for real
-  answers).
-- Reranker latency (15s/query) acceptable for agent CLI use only —
-  ledgered for revisit when a UI arrives.
+- Visual (page-image) retrieval channel: designed, not started —
+  docs/specs/visual-retrieval.md. First step is a smoke test of the
+  cross-modal alignment claim it depends on.
+- Reranker cost is now ~12s/query mean (was ~18s) — still CLI-only
+  speed, not interactive-chat speed; ledgered for revisit when a UI
+  arrives (unchanged from before, just re-measured against the new
+  stack).

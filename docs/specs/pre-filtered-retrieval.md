@@ -86,10 +86,10 @@ opposing-counsel email about the same legal-engagement topic — not
 noise.
 
 Root cause: before this fix, ~21% of every top-50 FTS/vector candidate
-list was privileged content (69/853 emails, but privileged emails run
-disproportionately long — own-solicitor advice threads — so their share
-of CHUNKS is much higher than their share of emails). That capacity was
-wasted — ranked, then discarded in `fetch_results`, never able to
+list was privileged content (a small minority of emails, but
+privileged emails run disproportionately long — own-solicitor advice
+threads — so their share of CHUNKS is much higher than their share of
+emails). That capacity was wasted — ranked, then discarded in `fetch_results`, never able to
 appear in output — while genuine non-privileged competitors who would
 have ranked just outside the top-50 were correctly excluded from ever
 being seen. The fix reclaims that wasted capacity for eligible content,

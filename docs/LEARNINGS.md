@@ -13,7 +13,13 @@ generalizable core, the genericized version goes here.
   Any text-processing component (embeddings, OCR, tokenization) must
   handle every script in the corpus. English-only embedding models
   (e.g. nomic-embed-text v1) silently degrade semantic search on
-  non-English content — that's why bge-m3 was chosen.
+  non-English content — that's why every embedder used here
+  (`bge-m3`, then `jina-embeddings-v5-text` — docs/specs/jina-mlx-migration.md)
+  was chosen for verified multilingual/cross-lingual retrieval.
+  Practical implication for querying: an English question already
+  retrieves non-English content correctly — never translate the
+  question into the corpus's language first (AGENTS.md answer
+  workflow).
 - **Duplicate Message-IDs occur across source folders**, including
   across privileged and non-privileged ones. Privilege must be OR'd
   across all physical copies; never trust one folder. Schema: one

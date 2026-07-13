@@ -4,9 +4,11 @@ Status: IMPLEMENTED + SHIPPED 2026-07-13. Combined jina_mlx embed+rerank
 stack is now the DEFAULT (`scripts/config.py`). Visual (page-image)
 channel is Phase B, not started — its prerequisite (text stack
 actually running the aligned Jina v5 text model, not bge-m3) is now
-met; see `docs/ROADMAP.md` and the smooth-tickling-zebra plan.
-Planned by: Fable 5 (high), per ROADMAP tenet 12. Executes the design
-in `/Users/suankan/.claude/plans/golden-dreaming-umbrella.md` as written.
+met; see `docs/ROADMAP.md` and docs/specs/visual-retrieval.md.
+Planned by: Fable 5 (high), per ROADMAP tenet 12. Executes a design
+originally drafted in a planning-tool copy, transcribed here so it
+survives regardless of which agentic CLI continues the work (AGENTS.md
+hard rule 8).
 
 ## Goal
 

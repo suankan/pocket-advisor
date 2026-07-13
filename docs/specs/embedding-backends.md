@@ -1,16 +1,27 @@
 # Spec: pluggable embedding backend (llama.cpp | MLX)
 
 Status: IMPLEMENTED 2026-07-12. llama.cpp path verified in production.
-MLX path API-fixed + smoke-tested 2026-07-12 (see Risks) — full-corpus
-switch still pending eval-harness comparison (Phase 1a).
+MLX path API-fixed + smoke-tested 2026-07-12 (see Risks). **SUPERSEDED
+2026-07-13**: the "full-corpus switch pending eval-harness comparison"
+item below was never completed for the `bge-m3`/`mlx` backend
+specifically — instead superseded by a fuller migration to
+`jina-embeddings-v5-text` (docs/specs/jina-mlx-migration.md), now the
+shipped default. This doc's backend-abstraction pattern (fingerprint,
+wipe-on-change, `get_backend()` dispatch) remains exactly as built and
+is what the Jina backend plugs into; `llama_cpp` and `mlx` (`bge-m3`)
+both remain available, unmeasured-since-2026-07-12 fallback options,
+not the default.
 Planned by: Fable 5 (high). Written to ROADMAP tenet 12: any capable
 model must be able to execute/verify this without re-deriving intent.
 
 ## Goal
 
 The embedding engine becomes a user-configurable choice between:
-- `llama_cpp` (default; current behavior; bge-m3 Q8_0 GGUF, in-process)
+- `llama_cpp` (current behavior at the time this was written; bge-m3
+  Q8_0 GGUF, in-process — since 2026-07-13, a fallback, not the default)
 - `mlx` (Apple-Silicon MLX via `mlx-embeddings`; optional install)
+- `jina_mlx` (added 2026-07-13, now default — see
+  docs/specs/jina-mlx-migration.md, not part of this original spec)
 
 ## Invariant that shapes the design
 
@@ -69,10 +80,13 @@ everything on model change). Therefore backend+model+dim form the index
       `generate(model, processor, texts=[...])` (didn't exist) ->
       `tokenizer.encode` + `model(input_ids)` + `.text_embeds`; repo id
       `mlx-community/bge-m3` (doesn't exist) -> `-mlx-fp16` variant.
-- [ ] (on full opt-in, after eval harness) full re-embed of the real
-      corpus completes, cross-lingual known-answer query returns
-      expected email, eval harness (1a) scores comparable to llama_cpp
-      baseline before this is called production-ready.
+- [~] SUPERSEDED, not completed as originally scoped: this item
+      (full-corpus MLX/`bge-m3` re-embed + eval comparison) was
+      overtaken by the 2026-07-13 decision to migrate straight to
+      `jina_mlx` instead, which WAS fully eval-verified before shipping
+      — see docs/specs/jina-mlx-migration.md's acceptance criteria.
+      `mlx`/`bge-m3` itself remains unmeasured against `llama_cpp` and
+      should not be treated as production-verified if ever selected.
 
 ## Verification commands
 
@@ -88,12 +102,14 @@ venv/bin/python scripts/query.py "<q>" --json    # diff vs saved baseline
 - Resolved 2026-07-12: `MLX_EMBED_MODEL_REPO` and the `mlx_embeddings`
   API were wrong as first written (guessed from doc summaries, not
   verified) — fixed and smoke-tested, see acceptance criteria above.
-- Remaining risk: smoke test used generic sentences, not the real
-  corpus. Retrieval-quality parity with llama_cpp on actual case
-  documents (Russian legal correspondence, OCR'd scans, financial
-  statements) is NOT yet known — that's what the eval-harness
-  comparison (Phase 1a/1b) will establish before any full-corpus
-  switch is treated as safe to use for real answers.
+- Superseded, not resolved: smoke test used generic sentences, not the
+  real corpus, and retrieval-quality parity between `mlx`/`bge-m3` and
+  `llama_cpp`/`bge-m3` was never established — the project moved to
+  measuring `jina_mlx` instead (which was measured against the real
+  golden set) rather than closing this comparison out. If `mlx`/`bge-m3`
+  is ever selected again, treat it as unverified until measured.
 - MLX weights download from HuggingFace on first use — permitted
   (one-time inbound model download, same allowance as the GGUF).
-- The reranker (Phase 1b) should reuse this backend pattern when added.
+- The reranker (Phase 1b) should reuse this backend pattern when added
+  — DONE 2026-07-13: `scripts/rerank_backends.py` follows this exact
+  pattern (see docs/specs/jina-mlx-migration.md).

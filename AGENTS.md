@@ -70,6 +70,35 @@ hints) in the workspace's `corpora/` directory.
    commit CONTENT hygiene, not commit AUTHORIZATION) is never standing
    permission. Default end state of any task: changes left uncommitted
    for the user to review.
+8. **Persist knowledge in-repo, not only in tool-private memory.** If
+   your agentic CLI has a native context-management/memory facility
+   (saved instructions, session summaries, a persistent notes store —
+   whatever form it takes for your tool), that facility MUST NOT become
+   the sole record of anything load-bearing for this repo. Concretely:
+   - **Prioritize writing decisions, plans, and learnings into the
+     canonical in-repo location** (this file, `docs/`, `docs/specs/`,
+     or the active workspace layer for case-specific content) over your
+     own private store. The in-repo file is authoritative; your private
+     memory is a convenience cache, not a second source of truth.
+   - **Before ending a work session, reconcile the two.** Check what
+     your native facility captured about this repo during the session
+     and merge anything load-bearing into the right in-repo file:
+     engine-level facts → `docs/LEARNINGS.md`; interim/architectural
+     decisions → `docs/ROADMAP.md`'s ledger; build/verification state →
+     `docs/STATUS.md`; a plan for not-yet-implemented work → a new
+     `docs/specs/*.md` (status: PLANNED) so it survives regardless of
+     which tool picks the work up next; case-specific facts → the
+     workspace layer, never a platform file (tenet 10).
+   - **Do NOT merge tool-specific mechanics** — permission-prompt
+     settings, keybindings, hook configuration, or anything meaningful
+     only to your own tool. That stays in your private store or a
+     tool-specific dotdir (already gitignored per tenet 11). The test
+     from tenet 11 applies here too: deleting your tool's entire memory
+     must lose zero knowledge about this repo, only your own
+     convenience.
+   This exists to reinforce ROADMAP tenet 11 (AI/tool agnostic): the
+   next agent continuing this work may be a different tool entirely,
+   with no access to your memory at all.
 
 ## What lives where
 
@@ -124,7 +153,12 @@ venv/bin/python scripts/verify_integrity.py
 ```
 
 Answer workflow for case questions: run `query.py` (often twice with
-rephrasings), read the full email bodies of top hits from
-`output/text/emails/<id>.txt` (never rely on snippets alone for
-anything consequential), pull the whole thread when history matters
-(`--thread N`), then answer with citations.
+rephrasings — English rephrasings, synonyms, added keywords), read the
+full email bodies of top hits from `output/text/emails/<id>.txt` (never
+rely on snippets alone for anything consequential), pull the whole
+thread when history matters (`--thread N`), then answer with citations.
+**Query in English even when the corpus is majority non-English —
+never translate the question into the corpus's language.** The
+embedding backend is verified cross-lingual (docs/LEARNINGS.md); an
+English question already retrieves non-English content correctly, and
+translating adds a lossy extra step for no retrieval benefit.

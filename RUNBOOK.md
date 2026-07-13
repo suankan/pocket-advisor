@@ -5,10 +5,14 @@
 ```bash
 brew install python@3.12 tesseract tesseract-lang poppler
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
-venv/bin/pip install -r scripts/requirements.txt   # llama-cpp-python compiles ~minutes
-venv/bin/python scripts/fetch_model.py             # bge-m3 GGUF, ~600MB, one-time download
+venv/bin/pip install -r scripts/requirements.txt      # llama-cpp-python compiles ~minutes
+venv/bin/pip install -r scripts/requirements-mlx.txt  # needed for the default jina_mlx backend
 venv/bin/python scripts/db.py init
 cp config.yaml.example config.yaml   # then edit workspace.dir etc.
+venv/bin/python scripts/fetch_model.py   # downloads whichever models the config selects
+                                          # (default: jina_mlx embed+rerank, ~1.1GB each,
+                                          # one-time); see "Choosing the embedding/reranker
+                                          # backend" below for alternatives
 ```
 
 ## Configuring pocket-advisor
@@ -167,9 +171,10 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 
 ## Rebuilding from scratch
 
-`output/` is fully derived: delete it, run `ingest.py all` (embedding
-~768 emails takes a few minutes on the M5). Originals and `models/`
-are untouched.
+`output/` is fully derived: delete it, run `ingest.py all` (full
+re-embed of the corpus takes a few minutes on Apple Silicon — exact
+time scales with corpus size, see the active workspace's CORPUS.md for
+this workspace's counts). Originals and `models/` are untouched.
 
 ## Review points
 

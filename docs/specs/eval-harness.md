@@ -141,8 +141,8 @@ the eval.py implementation task.
 
 - [x] `eval.py run` on a 3-question smoke golden set completes, writes
       a results file matching the JSON shape above, prints aggregates.
-      Verified against the real corpus/index (853 emails, 9087 chunks):
-      hit@1=hit@5=hit@15=0.67, mrr=0.667 on 3 real (uncurated) questions.
+      Verified against the real corpus/index: hit@1=hit@5=hit@15=0.67,
+      mrr=0.667 on 3 real (uncurated) questions.
 - [x] Unknown message_id in golden set aborts with the offending ids
       (verified in test_eval.py and manually).
 - [x] `compare` of two identical runs prints deltas (all "unchanged,

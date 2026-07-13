@@ -108,10 +108,10 @@ way, matching the pre-filter/reranker episodes' discipline.
 
 ## Acceptance criteria
 
-- [x] Migration ran clean against the real 9087-chunk DB (backed up
+- [x] Migration ran clean against the real corpus DB (backed up
       first): `chunks_fts` rebuilt as 2-column in ~2s,
-      `verify_integrity.py` clean (812/812 emails, 49/49 documents, 0
-      problems). Found and fixed a real bug in the FIRST version of the
+      `verify_integrity.py` clean (0 problems, all emails/documents
+      accounted for). Found and fixed a real bug in the FIRST version of the
       proper-noun heuristic before it was ever wired in: excluding
       sentence-initial capitalized words missed the exact real test
       case (a name as the sentence's first word — "Ксения выросла..."
@@ -168,10 +168,10 @@ What this does and doesn't tell us:
   match its mechanical transliteration, since there's no alternative
   spelling already established) — untested, plausible, not verified.
 - Cost of keeping it: real but small — one schema migration (done,
-  ~2s), ~1858 chunks carry non-empty shadow data, `unidecode` is a
-  lightweight dependency, zero query-time cost change, zero risk to
-  citation-quality text (shadow lives only in the FTS index, never
-  shown to the user).
+  ~2s), a modest fraction of chunks carry non-empty shadow data,
+  `unidecode` is a lightweight dependency, zero query-time cost change,
+  zero risk to citation-quality text (shadow lives only in the FTS
+  index, never shown to the user).
 
 Recommendation surfaced to the user rather than decided unilaterally,
 given the outcome is a genuine null result on the one thing this item

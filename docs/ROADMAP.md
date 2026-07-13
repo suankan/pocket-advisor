@@ -241,18 +241,18 @@ revisit the row — replace, don't layer around.
 
 | Interim decision (why it's fine now) | Revisit trigger | Target |
 |---|---|---|
-| Flat numpy brute-force vectors (exact recall, ms-fast at ~9k chunks) | >~100k chunks or felt query latency | Embedded ANN store (LanceDB-class), behind same chunk_id interface |
+| Flat numpy brute-force vectors (exact recall, ms-fast at current corpus scale) | >~100k chunks or felt query latency | Embedded ANN store (LanceDB-class), behind same chunk_id interface |
 | Embedding+reranker model loaded per query invocation (~seconds, acceptable CLI) | Interactive UI, or per-query load felt as pain | Small local socket daemon, still in-process llama.cpp |
 | FTS5 OR-of-tokens lexical leg (no lemmatization; dense leg carries cross-lingual) | Recall failures on inflected Russian keyword queries | Lemmatized shadow field (pymorphy3) or learned sparse |
 | Post-retrieval metadata filtering in query.py | NOW (agreed 2026-07-12) | Pre-filter: mask matrix + constrain FTS before ranking |
-| No reranker stage (agent reads full bodies instead) | NOW (agreed 2026-07-12) | bge-reranker-v2-m3 GGUF between RRF and output |
+| No reranker stage (agent reads full bodies instead) | NOW (agreed 2026-07-12) | bge-reranker-v2-m3 GGUF between RRF and output — DONE 2026-07-12, itself since superseded as default by `jina_mlx` 2026-07-13 (still available as `RERANK_BACKEND=llama_cpp`) |
 | No Cyrillic↔Latin name bridging in lexical leg | NOW (agreed 2026-07-12) | Deterministic transliteration shadow text in FTS index |
 | Hard-coded constants in config.py | NOW (agreed 2026-07-12) | config.yaml overlay: fail-loud unknown keys, meta.json mismatch warnings |
 | No entity/claim extraction (synthesis-time correlation via agent workflow + chronology.md) | Correlation questions the read-the-thread workflow demonstrably can't answer, or corpus ≫10× current | Ingestion-time claim/entity extraction into queryable fields |
 | Phase 1a complete: eval harness + curated 24-question golden set + `baseline-pre-1b` recorded (hit@5=0.58, mrr=0.358) | Any Phase-1b item lands | `eval.py compare` against baseline-pre-1b before declaring pre-filter/reranker/translit an improvement |
 | Phase 1b COMPLETE 2026-07-12: pre-filter + reranker + transliteration shadow field, all shipped. Net vs baseline-pre-1b: mrr 0.358->0.457 (+28%), hit@1 0.208->0.375, hit@5 0.583->0.625. hit@15 0.792->0.667 (reranker's precision-for-recall tradeoff, investigated, accepted). Transliteration measured ZERO effect on its 2-question golden sample (the corpus's established Western-convention spelling of a name vs the mechanical-phonetic romanization — exact-token FTS matches neither way) — kept anyway: cheap, harmless (0 regression on all 26 questions), correctly built, generalizes to future non-Latin corpora, may help names without a competing established spelling. See docs/specs/{pre-filtered-retrieval,reranker,transliteration}.md. | — | Phase 1c: config.yaml |
 | Transliteration shadow field solves "mechanical romanization," not "which of several valid romanizations does THIS corpus actually use" — that's a different, harder problem | A name-matching question the shadow field demonstrably can't answer, in a workspace where it matters | Canonical entity extraction/resolution (already ledgered above) — an alias-learning pass, not a bigger transliteration library |
-| Reranker cost: 15s/query (100 candidates, 600-char truncated text) — acceptable for agent-driven CLI use, not interactive-chat speed | UI arrives (Phase 4-adjacent) or latency becomes a felt complaint | Batch scoring showed no speedup in this llama-cpp-python version (tested); investigate a persistent reranker process/daemon, smaller candidate window, or a faster reranker model |
+| Reranker cost (mean ~12s/query on the current `jina_mlx` default, was ~18s/query combined on the original `llama_cpp` stack — docs/specs/jina-mlx-migration.md) — acceptable for agent-driven CLI use, not interactive-chat speed | UI arrives (Phase 4-adjacent) or latency becomes a felt complaint | Persistent reranker process/daemon (avoid per-query model load), or a faster reranker model, measured the same eval-gated way |
 | `is_privileged` is the only retrieval-visibility-constraint primitive; enforced correctly (candidate-pool level) but only handles one restriction type, one workspace-wide flag | Duplex-build/finance workspaces need purpose-scoped or workspace-scoped visibility (same content, different eligibility per asking context) | Generalize `allowed_chunk_ids`-style pre-filtering into a per-collection visibility-policy check, evaluated per query, not just a binary privilege flag |
 | Single workspace: one DB, one corpus, paths hard-wired to repo layout | Second corpus arrives (duplex-build workspace) | Workspace abstraction: one engine, N workspace dirs; collections shareable by reference with privilege enforced at query time |
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
@@ -264,6 +264,7 @@ revisit the row — replace, don't layer around.
 | ~~au-family-law skill fuses playbook with matter facts~~ DONE 2026-07-12: skill is generic/distributable; identities in WORKSPACE.md | — | — |
 | Git history contains case content; commits stayed free/dirty for velocity (repo is local-only). Segregation milestone REACHED 2026-07-12 (Phase 1d verified) | NOW — next commit | Reset history to zero; re-commit clean root; enforce layer-clean commits thereafter (check every diff for case content before committing) |
 | ~~MLX embedding backend (bge-m3) API-fixed + smoke-tested but not yet compared to llama_cpp on the real corpus~~ SUPERSEDED 2026-07-13: superseded by the jina_mlx embed+rerank migration below before this comparison was ever run — bge-m3/mlx remains available as a third backend option, unmeasured, not the shipped default | — | — |
+| Visual (page-image) retrieval channel: DESIGNED, not implemented (docs/specs/visual-retrieval.md, 2026-07-13). Additive third RRF leg embedding page images (jina-embeddings-v5-omni-small-retrieval) alongside the existing text pipeline, exploiting that model's vector-space alignment with the text embedder above. Depends on the Jina MLX text migration below (alignment claim only holds against that model). | User requests implementation start | Execute the spec's sequencing (smoke test alignment claim first) |
 | Jina MLX stack (embed: jina-embeddings-v5-text-small-retrieval-mlx; rerank: jina-reranker-v3-mlx) migrated and made the DEFAULT 2026-07-13. Both models' real API verified by reading/running actual bundled source before writing code (not trusted from model cards). Eval-gated per question: default-config regression check first (byte-identical, 0 deltas across 26 questions) confirming the refactor itself was inert; then isolated swaps — reranker-only: mrr 0.461->0.523, hit@1 0.385->0.423, hit@5 0.615->0.692, hit@15 0.654->0.808, no aggregate regressed; embedder-only: mixed (mrr/hit@1/hit@15 up within noise, hit@5 -0.077 regressed — the one output NOT shipped as an interim state); combined (both jina_mlx): mrr 0.461->0.534 (+16%), hit@1 +0.038, hit@5 +0.038, hit@15 +0.154, no aggregate regressed vs baseline. Combined vs the better isolated run (reranker-only) showed a -0.038 hit@5 delta (exactly the noise floor, 1/26) — traced to a single already-flagged hard case (cy001, Cyrillic-only-name matching) shifting rank 4->6; investigated per tenet 14 discipline (same pattern as the original reranker's hit@15 tradeoff), not a systemic effect. Full account: docs/specs/jina-mlx-migration.md. | New corpus-shape or another candidate model surfaces | Repeat the same isolated-swap eval discipline before replacing again |
 | Entire pipeline is Python (llama-cpp-python, pytesseract, extract-msg, openpyxl, python-docx, sqlite3, numpy) — TypeScript is the recorded target but PARKED 2026-07-12 (user decision; not scheduled, not abandoned) | User explicitly resumes it — not to be picked up opportunistically alongside other work | TypeScript throughout. Feasibility checked 2026-07-12: node-llama-cpp (mature, Metal-supported, drop-in) and better-sqlite3+FTS5 (drop-in) are low risk; tesseract OCR is language-neutral (subprocess wrapper either way); .msg parsing has viable TS libs (@kenjiuno/msgreader, unverified by us). HIGHEST RISK: MLX bindings for Node/TS (node-mlx, mlx-node) are community-maintained and less mature than the Python mlx-embeddings we just barely got working this session — expect the same class of API surprises, possibly worse. Migrate module-by-module (full port + delete Python original, not a parallel language flag), using the eval harness (language-agnostic: subprocess + JSON) as the regression gate at every step. Do the highest-risk piece (MLX) early while attention is fresh, not last. |
 | Agent workflow encoded in AGENTS.md prose + skills | Productisation (final phase) | Shippable agent playbooks / packaged skills |
@@ -275,7 +276,7 @@ capability only when a real workspace demands it, never speculatively.
 
 - **Phase 0 — case tool (done, in use).** Pipeline built and verified
   over the live family-law corpus; chronology and skills in service.
-- **Phase 1 — measurement, then accuracy (current).** Order matters:
+- **Phase 1 — measurement, then accuracy (COMPLETE 2026-07-12).** Order matters:
   - **1a. Eval harness — COMPLETE 2026-07-12** (`scripts/eval.py`
     run/compare/list; 24-question curated golden set;
     `baseline-pre-1b` recorded — spec + numbers:
@@ -302,6 +303,15 @@ capability only when a real workspace demands it, never speculatively.
     selects the active workspace. DoD verified: case-term `git grep`
     over tracked files returns nothing (spec:
     docs/specs/instruction-layer-split.md). **PHASE 1 COMPLETE.**
+
+**Currently between phases**: Phase 2's forcing case (a second/duplex-
+build workspace) is parked — not in progress, not scheduled (user
+decision). Per tenet 14, eval-gated accuracy/architecture work doesn't
+need a phase-forcing-case to proceed opportunistically; the Jina MLX
+stack migration (docs/specs/jina-mlx-migration.md, shipped 2026-07-13)
+and the visual retrieval channel design (docs/specs/visual-retrieval.md,
+planned, not started) both happened/are proposed in this gap, ledgered
+above rather than as a new phase.
 - **Phase 2 — workspace abstraction.** Forcing case: duplex-build
   project (HBCF claim, OC certificate, NSW procedural docs +
   nsw-construction skill). One engine, N workspaces; collections

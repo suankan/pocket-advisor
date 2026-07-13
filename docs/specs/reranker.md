@@ -2,7 +2,14 @@
 
 Status: IMPLEMENTED + SHIPPED 2026-07-12. API verified by running real
 code before writing the spec (see Verified mechanism). Measured against
-`post-prefilter` per tenet 13 — see Measured effect below.
+`post-prefilter` per tenet 13 — see Measured effect below. **Not the
+default since 2026-07-13**: `RERANK_BACKEND` defaults to `jina_mlx`
+now (docs/specs/jina-mlx-migration.md); the mechanism documented here
+(`bge-reranker-v2-m3`/`llama_cpp`, pointwise) remains available as
+`RERANK_BACKEND=llama_cpp` and everything measured below is still an
+accurate historical record of that backend, just no longer the
+out-of-the-box behavior. `scripts/reranker.py` now delegates the
+scoring step described here to `scripts/rerank_backends.py`.
 Planned by: Fable 5 (high), per ROADMAP tenet 12. Owed: recover the
 ranking precision given up by the pre-filter fix
 (docs/specs/pre-filtered-retrieval.md) — score against `post-prefilter`,

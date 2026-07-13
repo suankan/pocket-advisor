@@ -62,7 +62,7 @@ way, matching the pre-filter/reranker episodes' discipline.
   (generalizes to any future non-Latin corpus without extra engine
   code; a Chinese/Arabic/Devanagari corpus gets the same mechanism for
   free, even though the ROMANIZATION-CONVENTION mismatch problem
-  identified above is NOT solved by this — see ROADMAP ledger).
+  identified above is NOT solved by this — see DESIGN interim ledger).
 - Proper-noun heuristic: Cyrillic word, capitalized, NOT at sentence-
   start (regex + basic sentence-boundary check) — approximates "names"
   without needing NER/LLM extraction (that's the heavier, deferred
@@ -158,7 +158,7 @@ What this does and doesn't tell us:
   name, where the "correct" one for a given corpus is a matter of
   established convention, not phonetics.
 - It's real evidence for why canonical entity extraction/resolution
-  (already deferred in the ROADMAP ledger) is the actual long-term fix
+  (already deferred in DESIGN interim / ROADMAP R-12) is the actual long-term fix
   for this class of problem — an entity-resolution pass could learn
   "Ксения = Xenia" as an explicit alias for a corpus's actual
   convention, which no generic transliteration library can know.

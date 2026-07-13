@@ -52,9 +52,9 @@ agent to discover `workspaces/*/WORKSPACE.md` and read before case work.
 | `AGENTS.md` | Genericize: corpus description, rule 2 (privilege discipline stated without firm names — the folders come from config.yaml; the outward-facing drafting rule stated in terms of "opposing counsel"), chronology pointer → workspace section. Add Workspaces section. |
 | `skills/au-family-law.md` | SPLIT: generic AU family-law playbook (statutes, drafting conventions in "own solicitor"/"opposing counsel" terms) stays committed; solicitor/party identities move to WORKSPACE.md. |
 | `.claude/skills/au-family-law/SKILL.md` | Stub description genericized (drop matter/firm names). |
-| `docs/PLAN.md` | Context section rewritten generic (folder names → placeholders, no email addresses, no user paths); corpus-specific verification counts trimmed to proportions or moved to workspace. |
+| `docs/PLAN.md` | Context scrubbed generic in Phase 1d; later retired entirely — living design is DESIGN + specs + RUNBOOK. |
 | `docs/LEARNINGS.md` | SPLIT: engine gotchas stay (party-name examples removed, proportions kept); case-flavored process lessons move to workspace LEARNINGS.md with genericized engine-pattern versions kept. Bank-institution wording table KEPT (public institutions, reusable extraction knowledge; accepted weak inference). |
-| `docs/STATUS.md` | Old content moves verbatim to workspace `journal.md`; fresh platform STATUS.md written as engine-only milestone summary. Session-log duty splits per ROADMAP: engine → STATUS, case → journal. |
+| `docs/STATUS.md` | Pre-split mixed log → workspace journal; later engine STATUS → CHANGELOG + DESIGN; file deleted. |
 | `docs/specs/*.md` | Scrub case facts from verification write-ups (names, addresses, folder names) → generic descriptions; the measured numbers stay. |
 | `docs/ROADMAP.md` | Final-pass scrub check. |
 | `RUNBOOK.md` | Genericize the one case-flavored example path. |

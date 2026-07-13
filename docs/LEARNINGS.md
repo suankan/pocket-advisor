@@ -7,6 +7,10 @@ ENGINE lessons only — case-specific originals live in the active
 workspace's LEARNINGS.md (ROADMAP tenet 10); when a case lesson has a
 generalizable core, the genericized version goes here.
 
+As-built / tenets / interim ledger / spec index → `docs/DESIGN.md`.
+Future work → `docs/ROADMAP.md`. Shipped milestones →
+`docs/CHANGELOG.md`. Scoped designs → `docs/specs/`.
+
 ## Corpus-shaped engine lessons
 
 - **Multilingual corpora need multilingual components end-to-end.**

@@ -119,7 +119,7 @@ config/index change (daemon should be restarted after
 5. Idle timeout exits cleanly when configured.
 6. Unit test for protocol framing without loading real models
    (mock handler or encode/decode helpers).
-7. STATUS + ROADMAP ledger updated.
+7. CHANGELOG entry; DESIGN if as-built paths/behavior changed.
 
 ## Verification
 

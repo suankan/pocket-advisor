@@ -307,7 +307,7 @@ get tagged `flags: [visual]`.
 6. Author visual golden questions.
 7. `eval.py run --label visual-off` vs `visual-on`, `compare`.
 8. `eval.py compare` reranking modes, pick the default.
-9. Docs + tests + ROADMAP ledger row.
+9. Docs + tests: ship R-03 → CHANGELOG; DESIGN if as-built changes.
 
 ## Verification commands
 

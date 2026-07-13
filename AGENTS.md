@@ -81,19 +81,22 @@ instructions alone.
    whatever form it takes for your tool), that facility MUST NOT become
    the sole record of anything load-bearing for this repo. Concretely:
    - **Prioritize writing decisions, plans, and learnings into the
-     canonical in-repo location** (this file, `docs/`, `docs/specs/`,
-     or the active workspace layer for case-specific content) over your
-     own private store. The in-repo file is authoritative; your private
-     memory is a convenience cache, not a second source of truth.
+     canonical in-repo location** (this file, `docs/DESIGN.md`,
+     `docs/ROADMAP.md`, `docs/CHANGELOG.md`, `docs/LEARNINGS.md`,
+     `docs/specs/`, or the active workspace layer for case-specific
+     content) over your own private store. The in-repo file is
+     authoritative; your private memory is a convenience cache, not a
+     second source of truth.
    - **Before ending a work session, reconcile the two.** Check what
      your native facility captured about this repo during the session
      and merge anything load-bearing into the right in-repo file:
-     engine-level facts → `docs/LEARNINGS.md`; interim/architectural
-     decisions → `docs/ROADMAP.md`'s ledger; build/verification state →
-     `docs/STATUS.md`; a plan for not-yet-implemented work → a new
-     `docs/specs/*.md` (status: PLANNED) so it survives regardless of
-     which tool picks the work up next; case-specific facts → the
-     workspace layer, never a platform file (tenet 10).
+     engine gotchas → `docs/LEARNINGS.md`; interim still-in-force
+     shortcuts → `docs/DESIGN.md` interim ledger; **shipped** work →
+     `docs/CHANGELOG.md` (and remove from ROADMAP); **future** work →
+     `docs/ROADMAP.md` with stable ID + `docs/specs/*.md` (PLANNED);
+     as-built architecture changes → `docs/DESIGN.md`; case-specific
+     facts → the workspace layer, never a platform file (tenet 10).
+     Do **not** revive parallel PLAN.md / STATUS.md files.
    - **Do NOT merge tool-specific mechanics** — permission-prompt
      settings, keybindings, hook configuration, or anything meaningful
      only to your own tool. That stays in your private store or a
@@ -107,25 +110,26 @@ instructions alone.
 
 ## What lives where
 
-- `docs/PLAN.md` — full architecture and design decisions
-- `docs/ROADMAP.md` — the bigger picture; READ BEFORE any architecture,
-  dependency, schema, or tooling decision. Interim/"for now" choices
-  must pass its checklist and be recorded in its interim-decisions
-  ledger — this is how we avoid an unsupportable zoo on the way to a
-  productised engine
+Lifecycle (read this first for architecture work):
+
+```text
+ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense──►  DESIGN (as-built)
+```
+
+- `docs/DESIGN.md` — **as-built**: vision, tenets, **capability map**
+  (theme status + which R-nn / CHANGELOG eras), layout/schema/query
+  summary, interim ledger, **spec index**. READ BEFORE architecture,
+  dependency, schema, or tooling decisions. No living Phase-0…4 counter.
+- `docs/ROADMAP.md` — **future only**: open items with stable IDs
+  (`R-nn`), forcing use cases, ship checklist. Nothing shipped lives here.
+- `docs/CHANGELOG.md` — **shipped** product milestones, newest first;
+  may grow forever. Prefer one entry per capability, not per commit.
+- `docs/specs/` — **scoped design** + acceptance + verification (tenet
+  12). DESIGN indexes them; ROADMAP items must point at a PLANNED/open
+  spec before implement.
 - `docs/LEARNINGS.md` — empirically-discovered ENGINE gotchas; READ
   BEFORE changing pipeline code, and APPEND when you discover a new
   one. Case-specific lessons go to the workspace's own LEARNINGS.md
-- `docs/STATUS.md` — ENGINE build/verification state; UPDATE at end of
-  every work session that touches the engine. Case findings go to the
-  workspace journal, never here
-- `docs/specs/` — per-work-item specs (tenet 12: quantified scope,
-  acceptance criteria, verification commands). **Live registry is
-  workspace-config v2** (collections + mounts, one DB, `corpora/` +
-  `state/`, per-collection cache) —
-  `docs/specs/workspace-config-v2.md` (v1 dual-read still supported).
-  DB spine Phase A shipped; Phase B/C (items rename) open —
-  `docs/specs/schema-items-membership.md`
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
   `workspaces.dir` + engine knobs only (not active matter / collections)
@@ -146,8 +150,7 @@ instructions alone.
   conveniences locally per machine/tool if you want them; the platform
   itself depends on none of it. No original instruction content ever
   goes there; edit the canonical file an adapter would point at
-  (docs/ROADMAP.md tenet: AI/tool
-  agnostic)
+  (docs/DESIGN.md tenet: AI/tool agnostic)
 
 ## Common operations
 

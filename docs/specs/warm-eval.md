@@ -120,7 +120,7 @@ venv/bin/python scripts/eval.py run \
 - `scripts/reranker.py` — optional `backend=` argument
 - `scripts/eval.py` — `--mode`, warm loop, fingerprint
 - `docs/specs/eval-harness.md` — point at this addendum
-- `RUNBOOK.md`, `docs/LEARNINGS.md`, `docs/STATUS.md`, ROADMAP ledger
+- `RUNBOOK.md`, `docs/LEARNINGS.md`, `docs/CHANGELOG.md`, DESIGN if needed
   row update (model load per query still true for CLI; warm for eval)
 
 ## Verification commands

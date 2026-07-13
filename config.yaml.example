@@ -1,12 +1,12 @@
 # Platform-layer configuration — fully agnostic of any user/workspace
-# content (docs/ROADMAP.md tenet 10). Copy this to config.yaml
+# content (docs/DESIGN.md tenet 10). Copy this to config.yaml
 # (gitignored, but no longer required to be — it carries no
 # case-identifying values by design; see privilege convention below)
 # and fill in real values. Every key is optional; anything omitted
 # falls back to the default in scripts/config.py. Unknown keys abort
 # loudly (typo protection).
 #
-# Three-class knob discipline (docs/ROADMAP.md):
+# Three-class knob discipline (docs/DESIGN.md):
 #   - query / ingestion.ocr / ingestion.thread_fallback_window_days /
 #     ingestion.doc_date_header_window_chars: FREE, change anytime.
 #   - ingestion.chunking / models.embed_*: INDEX-INVALIDATING. Model

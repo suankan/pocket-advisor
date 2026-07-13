@@ -71,7 +71,7 @@ corresponding `_FILE` key was overridden, not left stale.
 
 ## A real gap found while scoping this: chunking was never fingerprinted
 
-`docs/PLAN.md`'s original yaml sketch commented chunking fields
+early pipeline design originally commented chunking fields
 "CHANGING THESE INVALIDATES EXISTING CHUNKS" — but no code ever
 enforced it. `embed.py`'s existing fingerprint check (built for the
 embedding backend) only covers backend/model/dim. Extending it to

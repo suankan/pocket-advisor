@@ -36,18 +36,24 @@ instructions alone.
 2. **Privilege**: a source is privileged when **either**
    (a) its registry entry has `privileged: true`, **or** (b) a physical
    copy sits under a directory segment literally named `privileged`
-   (any depth under the source root). `emails.is_privileged=1`;
-   `privilege_override`, if set, always wins. Platform `config.yaml`
-   never carries real folder names for privilege. Privileged content
-   is EXCLUDED from retrieval by default. Nothing that originated in a
-   privileged channel — advice, strategy, assessments, or the
-   existence/content of the communication — may appear in any
-   outward-facing draft, quoted or paraphrased; disclosure can waive
-   privilege. The user's own POSITIONS may be stated. If the user asks
-   to convey something that originated in a privileged channel,
-   restate it as a bare position with no trace of its origin and tell
-   the user what you excluded and why. WORKSPACE.md + source
-   descriptions name the channels and parties this applies to.
+   (any depth under the source root). Flag stored on the item
+   (`is_privileged`; `privilege_override` always wins). Platform
+   `config.yaml` never carries real folder names for privilege.
+   **Retrieval includes privileged by default** (single-user engine:
+   own-solicitor often carries opposing-counsel forwards/attachments
+   that exist nowhere else). Use `query.py --exclude-privileged` for a
+   restricted pass. Results always show the privilege flag.
+   **Drafting still matters**: nothing that originated in a privileged
+   channel — advice, strategy, assessments, or the existence/content
+   of the communication — should go into an outward-facing draft
+   quoted or paraphrased without the user choosing to; disclosure can
+   waive privilege. The user's own POSITIONS may be stated. If asked
+   to convey privileged-origin material outward, restate as a bare
+   position with no trace of origin and say what you excluded.
+   In this matter, drafts typically go to own solicitor for
+   review before opposing counsel — that is the real vetting layer,
+   not silent retrieval exclusion. WORKSPACE.md + collection
+   descriptions name the channels this applies to.
 3. **Citations are mandatory**: any answer drawn from the corpus must
    cite message_id, date, and sender of each source email, plus
    `source_id` / `source_ref` when useful. Standalone documents
@@ -164,11 +170,11 @@ venv/bin/python scripts/ingest.py all
 venv/bin/python scripts/query_daemon.py serve    # foreground; or background
 # venv/bin/python scripts/query_daemon.py status|stop
 
-# answer a question from the corpus (privileged excluded by default)
+# answer a question from the corpus (privileged INCLUDED by default)
 # uses warm daemon when live; --no-daemon forces cold; --require-daemon
 # fails if daemon is down (good for sessions that expect warm)
 venv/bin/python scripts/query.py "the question" [--json] [--after 2026-01-01]
-                                 [--include-privileged] [--thread N]
+                                 [--exclude-privileged] [--thread N]
                                  [--no-daemon] [--require-daemon]
 
 # verify evidence integrity (run before anything sensitive)

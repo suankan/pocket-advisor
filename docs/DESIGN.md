@@ -180,8 +180,13 @@ eval: [eval-harness.md](specs/eval-harness.md), [warm-eval.md](specs/warm-eval.m
 ### Privilege
 
 OR of: (1) `collections[].privileged`, (2) path segment `privileged/`.
-`privilege_override` wins. Excluded from retrieval by default. Platform
-config never holds real folder names.
+`privilege_override` wins. **Included in retrieval by default**
+(`query.include_privileged_by_default`, true) — single-user; own-
+solicitor is often the only path for opposing-counsel material as
+forwards/PDFs. Opt out with `--exclude-privileged`. Results still show
+the privilege flag. Platform config never holds real folder names.
+Drafting hygiene remains agent-side (AGENTS hard rule 2), not silent
+retrieval exclusion.
 
 ### Instruction loading order
 

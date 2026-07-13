@@ -101,13 +101,15 @@ do not bulk-browse `state/cache/` as a library).
 ```bash
 venv/bin/python scripts/query.py "question text" \
     [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--thread N] \
-    [--include-privileged] [--top-k 15] [--json] \
+    [--include-privileged|--exclude-privileged] [--top-k 15] [--json] \
     [--no-daemon] [--require-daemon]
 ```
 
-Privileged items excluded unless `--include-privileged`. Visibility is
-also limited to **collections mounted by the active workspace**. Full
-bodies: paths from query/DB under
+Privileged items are **included by default** (config
+`query.include_privileged_by_default`, default true). Use
+`--exclude-privileged` for a restricted pass. Results always flag
+privilege. Visibility is also limited to **collections mounted by the
+active workspace**. Full bodies: paths from query/DB under
 `workspaces/state/cache/<collection_id>/text/…`.
 
 ### Session-warm query daemon (recommended for multi-query work)

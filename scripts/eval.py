@@ -122,11 +122,17 @@ def aggregate(scored, golden_by_id):
 # ---- I/O: query invocation (warm | cold), fingerprinting ---------------
 
 def run_query_cold(question, top_k, include_privileged=False):
-    """Subprocess query.py — CLI-faithful cold start every question."""
+    """Subprocess query.py — CLI-faithful cold start every question.
+
+    Explicit --exclude-privileged when false so eval does not inherit
+    INCLUDE_PRIVILEGED_BY_DEFAULT (golden scores stay comparable).
+    """
     cmd = [sys.executable, str(SCRIPT_DIR / "query.py"), question,
            "--json", "--top-k", str(top_k)]
     if include_privileged:
         cmd.append("--include-privileged")
+    else:
+        cmd.append("--exclude-privileged")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise SystemExit(f"eval: query.py failed for {question!r}:\n{proc.stderr}")
@@ -143,8 +149,10 @@ class WarmQuerySession:
             log=lambda m: print(f"eval: {m}", flush=True))
 
     def search(self, question, top_k, include_privileged=False):
+        # Explicit bool — do not pass None (would use config default).
         return self._warm.search(
-            question, top_k=top_k, include_privileged=include_privileged)
+            question, top_k=top_k,
+            include_privileged=bool(include_privileged))
 
     def close(self):
         self._warm.close()

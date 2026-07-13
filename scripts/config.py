@@ -221,6 +221,11 @@ QUERY_DAEMON_SOCKET = OUTPUT_DIR / "query_daemon.sock"
 QUERY_DAEMON_PID_FILE = OUTPUT_DIR / "query_daemon.pid"
 QUERY_DAEMON_AUTO = True          # query.py uses daemon when socket live
 QUERY_DAEMON_IDLE_SEC = 1800      # idle exit; 0 = run until stop
+# Single-user default: include privileged (own-solicitor) channels in
+# retrieval. Opposing counsel material often only arrives via that
+# channel as forwards/attachments. Use --exclude-privileged for a
+# restricted pass. Product multi-tenant "safe default" is not current.
+INCLUDE_PRIVILEGED_BY_DEFAULT = True
 
 # Eval harness (docs/specs/eval-harness.md): under workspace.
 EVAL_DIR = WORKSPACE_DIR / "eval"
@@ -261,6 +266,7 @@ YAML_KEYS = {
     "query.rerank_text_chars": ("RERANK_TEXT_CHARS", int),
     "query.daemon_auto": ("QUERY_DAEMON_AUTO", bool),
     "query.daemon_idle_sec": ("QUERY_DAEMON_IDLE_SEC", int),
+    "query.include_privileged_by_default": ("INCLUDE_PRIVILEGED_BY_DEFAULT", bool),
     "ingestion.chunking.chars": ("CHUNK_CHARS", int),
     "ingestion.chunking.overlap": ("CHUNK_OVERLAP", int),
     "ingestion.ocr.langs": ("OCR_LANGS", str),

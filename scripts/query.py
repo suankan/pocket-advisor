@@ -2,12 +2,13 @@
 with Reciprocal Rank Fusion, filtered by metadata.
 
     query.py "question" [--after/--before YYYY-MM-DD]
-             [--thread N] [--include-privileged] [--top-k N] [--json]
+             [--thread N] [--include-privileged|--exclude-privileged] [--top-k N] [--json]
              [--no-daemon] [--require-daemon]
 
-PRIVILEGED EMAILS ARE EXCLUDED BY DEFAULT. Pass --include-privileged to
-see them; the privilege flag is always shown on every result either
-way, so the caller can never unknowingly quote privileged material.
+Privileged collections are INCLUDED by default (single-user: own-
+solicitor often carries opposing-counsel forwards/attachments). Pass
+--exclude-privileged for a restricted pass. Results still always show
+the privilege flag so drafts can be handled carefully.
 
 Every result carries message_id, date, sender, subject and source path:
 answers built on these results must cite them.
@@ -453,7 +454,7 @@ def thread_context(conn, results, args):
     return context
 
 
-def run_search(question, *, top_k=None, include_privileged=False,
+def run_search(question, *, top_k=None, include_privileged=None,
                after=None, before=None, thread=None, no_thread_context=False,
                purpose=None,
                conn=None, embed_backend=None, rerank_backend=None,
@@ -475,6 +476,8 @@ def run_search(question, *, top_k=None, include_privileged=False,
         db.migrate(conn)
         close_conn = True
 
+    if include_privileged is None:
+        include_privileged = bool(config.INCLUDE_PRIVILEGED_BY_DEFAULT)
     args = SimpleNamespace(
         question=question,
         top_k=config.DEFAULT_TOP_K if top_k is None else top_k,
@@ -583,7 +586,7 @@ class WarmResources:
             f"(embed={config.EMBED_BACKEND}, "
             f"rerank={config.RERANK_BACKEND if config.RERANK_ENABLED else 'off'})")
 
-    def search(self, question, *, top_k=None, include_privileged=False,
+    def search(self, question, *, top_k=None, include_privileged=None,
                after=None, before=None, thread=None, no_thread_context=False,
                purpose=None):
         return run_search(
@@ -656,9 +659,11 @@ def daemon_request(payload, timeout=600):
     return json.loads(line)
 
 
-def search_via_daemon(question, *, top_k=None, include_privileged=False,
+def search_via_daemon(question, *, top_k=None, include_privileged=None,
                       after=None, before=None, thread=None,
                       no_thread_context=False, purpose=None):
+    if include_privileged is None:
+        include_privileged = bool(config.INCLUDE_PRIVILEGED_BY_DEFAULT)
     resp = daemon_request({
         "op": "search",
         "question": question,
@@ -716,7 +721,13 @@ def main():
     ap.add_argument("--after")
     ap.add_argument("--before")
     ap.add_argument("--thread", type=int)
-    ap.add_argument("--include-privileged", action="store_true")
+    priv = ap.add_mutually_exclusive_group()
+    priv.add_argument(
+        "--include-privileged", action="store_true", default=None,
+        help="include privileged collections (default: on; see config)")
+    priv.add_argument(
+        "--exclude-privileged", action="store_true",
+        help="exclude privileged collections (restricted retrieval pass)")
     ap.add_argument("--purpose", default=None,
                     help="R-05: only search collections mounted for this purpose tag")
     ap.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
@@ -727,6 +738,14 @@ def main():
     ap.add_argument("--require-daemon", action="store_true",
                     help="fail if the warm query daemon is not reachable")
     args = ap.parse_args()
+
+    if args.exclude_privileged:
+        include_privileged = False
+    elif args.include_privileged:
+        include_privileged = True
+    else:
+        include_privileged = bool(config.INCLUDE_PRIVILEGED_BY_DEFAULT)
+    args.include_privileged = include_privileged
 
     use_daemon = False
     if args.require_daemon and args.no_daemon:

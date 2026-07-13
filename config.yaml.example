@@ -66,6 +66,10 @@ query:
   # local Unix socket so embed/rerank weights stay loaded. FREE knobs.
   daemon_auto: true          # use daemon when socket is live
   daemon_idle_sec: 1800      # daemon exits after N idle seconds; 0=never
+  # Include registry-privileged collections in retrieval by default.
+  # Single-user: own-solicitor often holds opposing-counsel forwards.
+  # Set false (or pass --exclude-privileged) for a restricted pass.
+  include_privileged_by_default: true
 
 ingestion:
   chunking:

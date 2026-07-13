@@ -25,7 +25,9 @@ collections:
     description: >
       Own-solicitor channel (attorney-client privileged). Advice and
       strategy — not for outward-facing drafts.
-    path: corpora/privileged/suan-solicitor
+    # Privilege is registry privileged: true (and/or a path segment named
+    # privileged/). Folder need not sit under corpora/privileged/.
+    path: corpora/suan-solicitor
     privileged: true
 
   - id: svetlana-solicitor

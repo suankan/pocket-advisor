@@ -72,10 +72,14 @@ def handle_request(resources: querymod.WarmResources, req: dict) -> dict:
         if not q or not isinstance(q, str):
             return {"ok": False, "error": "search requires string 'question'"}
         try:
+            # None → config.INCLUDE_PRIVILEGED_BY_DEFAULT inside run_search
+            priv = req.get("include_privileged", None)
+            if priv is not None:
+                priv = bool(priv)
             result = resources.search(
                 q,
                 top_k=req.get("top_k"),
-                include_privileged=bool(req.get("include_privileged")),
+                include_privileged=priv,
                 after=req.get("after"),
                 before=req.get("before"),
                 thread=req.get("thread"),

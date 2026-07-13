@@ -1,0 +1,72 @@
+# Schema v2 example — DESIGN LOCKED, not loaded by engine yet.
+# Full design: docs/specs/workspace-config-v2.md
+# Live registry is still schema v1: workspaces/workspace-config.yaml
+#
+# Copy/adapt to workspaces/workspace-config.yaml only after the v2 loader ships.
+#
+# collections = physical facts (path under workspaces.dir)
+# workspaces  = visibility mounts + matter folder (semi-inferred state)
+# No kind: / retrieval: — engine dispatches per file / internal type map.
+
+schema_version: 2
+
+collections:
+  - id: suan-svetlana
+    title: "Spousal email (Suan ↔ Svetlana)"
+    description: >
+      Spousal email correspondence. Majority Russian. Separation, parenting,
+      finances, property negotiation record.
+    path: corpora/suan-svetlana
+    privileged: false
+
+  - id: suan-solicitor
+    title: "Own solicitor (privileged)"
+    description: >
+      Own-solicitor channel (attorney-client privileged). Advice and
+      strategy — not for outward-facing drafts.
+    path: corpora/privileged/suan-solicitor
+    privileged: true
+
+  - id: svetlana-solicitor
+    title: "Opposing counsel (Shore Lawyers)"
+    description: >
+      Opposing-counsel correspondence. Outward-facing formal record;
+      allegations are instructed positions, not findings.
+    path: corpora/svetlana-solicitor
+    privileged: false
+
+  - id: svetlana-financial-disclosure
+    title: "Wife financial disclosure PDFs"
+    description: >
+      Wife's financial disclosure package (bank statements, loans, payslips,
+      super, etc.) for property settlement and bank/ATO analysis.
+    path: corpora/svetlana-financial-disclosure
+    privileged: false
+
+  - id: suan-financial-disclosure
+    title: "Suan financial disclosure PDFs"
+    description: >
+      Suan's financial disclosure package for property settlement and
+      related bank/ATO analysis.
+    path: corpora/suan-financial-disclosure
+    privileged: false
+
+workspaces:
+  - id: family-law
+    active: true
+    path: family-law
+    title: "Family law matter"
+    collections:
+      - id: suan-svetlana
+      - id: suan-solicitor
+      - id: svetlana-solicitor
+      - id: svetlana-financial-disclosure
+      - id: suan-financial-disclosure
+
+  - id: personal-finance
+    active: false
+    path: personal-finance
+    title: "Personal finance / bank statements / ATO"
+    collections:
+      - id: svetlana-financial-disclosure
+      - id: suan-financial-disclosure

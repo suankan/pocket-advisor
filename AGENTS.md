@@ -122,7 +122,11 @@ source of truth once a registry description exists.
   every work session that touches the engine. Case findings go to the
   workspace journal, never here
 - `docs/specs/` — per-work-item specs (tenet 12: quantified scope,
-  acceptance criteria, verification commands)
+  acceptance criteria, verification commands). Live registry is
+  workspace-config **v1**; **v2** (collections + mounts, one DB,
+  `state/`) is DESIGN LOCKED at `docs/specs/workspace-config-v2.md` —
+  not implemented yet. DB spine (**items + membership**, phased
+  migrate) is DESIGN LOCKED at `docs/specs/schema-items-membership.md`
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
   `workspaces.dir` + engine knobs only (not active matter / sources)

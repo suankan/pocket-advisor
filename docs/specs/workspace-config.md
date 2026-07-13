@@ -1,9 +1,13 @@
-# Spec: workspace-config.yaml (user registry)
+# Spec: workspace-config.yaml (user registry) — schema v1
 
-Status: IMPLEMENTED 2026-07-13. Single gitignored registry under
+Status: IMPLEMENTED 2026-07-13 (**live**). Single gitignored registry under
 `{workspaces.dir}/workspace-config.yaml` declares all workspaces and
 their evidence **sources**. Platform `config.yaml` only sets
 `workspaces.dir` (+ engine knobs). Active matter is **not** in git.
+
+**Next:** schema v2 (collections + workspace mounts, one DB, `state/`)
+is **DESIGN LOCKED** — see `docs/specs/workspace-config-v2.md`. Do not
+implement v2 until that slice is scheduled.
 
 Related: docs/specs/source-blob-index.md (sha→path cache),
 docs/specs/workspace-user-data.md (user-data root).

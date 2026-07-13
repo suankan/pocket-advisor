@@ -233,18 +233,45 @@ preserves the engine-relevant milestones.
   retrieval + agent answer workflow still works after the identity
   migration; case findings themselves stay in the workspace journal.
 
+## 2026-07-13 — collections + workspaces v2 (**DESIGN LOCKED**)
+
+Canonical design: **`docs/specs/workspace-config-v2.md`**  
+Example yaml: **`docs/specs/workspace-config-v2.example.yaml`**  
+Local sketch: `workspaces/workspace-config-new.yaml` (not loaded)
+
+**Summary of locks:** collections (physical) + workspace mounts
+(visibility); one shared DB; corpora = read-only facts; engine tree =
+`state/` with `cache/<collection_id>/`; agent-readable matter state only
+under `workspaces/<id>/`; no registry `kind:` or `retrieval:`; custody
+`(collection_id, sha256)`; query mount pre-filter. Live engine remains
+schema **v1**. Implementation = checklist in the v2 spec (do not start
+opportunistically during case work).
+
+## 2026-07-13 — DB schema items + membership (**DESIGN LOCKED**)
+
+- Separate work item from workspace-config v2: polymorphic **items +
+  memberships** spine on SQLite (not NoSQL; not one sparse mega-table).
+- Spec: **`docs/specs/schema-items-membership.md`**
+  - Phase A: evolve live tables for `collection_id` / multi-membership /
+    mount joins (unblocks v2)
+  - Phase B: rename/unify (`items`, `item_memberships`, item_id FKs)
+  - Phase C: polish (synthetic mid, drop legacy cols)
+- Add-ons (transactions, page_images, agent gated open) hang off item id;
+  not in this migration’s must-ship scope.
+
 ## Known open items (engine)
 
+- **workspace-config v2 implementation** — design locked
+  (`docs/specs/workspace-config-v2.md`); not coded.
+- **schema items + membership** — design locked
+  (`docs/specs/schema-items-membership.md`); not coded (Phase A–C).
 - Visual (page-image) retrieval channel: designed, not started —
   docs/specs/visual-retrieval.md. First step is a smoke test of the
   cross-modal alignment claim it depends on.
 - Per-query **rerank inference** still ~several–10s even when models
   are warm (load amortized by daemon/eval); interactive sub-second UX
   would need different tradeoffs (e.g. optional no-rerank path).
-- Multi-workspace share-by-reference collections still deferred (one
-  active workspace via registry `active: true`).
-- PLAN.md still carries some pre-pathless schema wording in places —
-  treat AGENTS + specs + this STATUS as authoritative for identity/
-  privilege/layout; PLAN refresh is a follow-up cleanup, not a design
-  change.
+- PLAN.md still carries some pre-pathless / pre-v2 schema wording —
+  treat AGENTS + specs + STATUS as authoritative; PLAN refresh is
+  cleanup, not a design change.
 

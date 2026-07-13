@@ -259,6 +259,8 @@ revisit the row — replace, don't layer around.
 | Reranker cost (mean ~12s/query on the current `jina_mlx` default, was ~18s/query combined on the original `llama_cpp` stack — docs/specs/jina-mlx-migration.md) — acceptable for agent-driven CLI use, not interactive-chat speed | UI arrives (Phase 4-adjacent) or latency becomes a felt complaint | Persistent reranker process/daemon (avoid per-query model load), or a faster reranker model, measured the same eval-gated way |
 | `is_privileged` is the only retrieval-visibility-constraint primitive; enforced correctly (candidate-pool level) but only handles one restriction type, one workspace-wide flag | Duplex-build/finance workspaces need purpose-scoped or workspace-scoped visibility (same content, different eligibility per asking context) | Generalize `allowed_chunk_ids`-style pre-filtering into a per-collection visibility-policy check, evaluated per query, not just a binary privilege flag |
 | ~~Single workspace: paths hard-wired to repo-root ingestion-sources/output~~ DONE 2026-07-13 (scaled Phase 2): all user data under `workspaces/<name>/` (corpora + output); multi-workspace sharing still deferred | Second real matter needs isolation without a second clone | N workspaces + share-by-reference collections + query-time visibility |
+| Multi-workspace / collections v2 — **DESIGN LOCKED** 2026-07-13: collections + mounts; one DB; corpora read-only; `state/cache/<collection_id>/`; no registry `kind`/`retrieval`. Spec: `docs/specs/workspace-config-v2.md` | User schedules implement slice / second matter (e.g. personal-finance) needs mounts | Execute v2 spec checklist (loader, DB identity, mount pre-filter, path migrate) |
+| DB spine: items + membership (polymorphic SQLite) — **DESIGN LOCKED** 2026-07-13. Not NoSQL; not list-of-collections column. Spec: `docs/specs/schema-items-membership.md` (Phase A evolve for v2; Phase B rename/unify) | v2 mounts need collection identity / multi-membership; or naming debt blocks new types | Execute Phase A with/after v2 identity; Phase B when scheduled |
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
 | Messenger screenshots OCR'd as flat text, no speaker/message attribution | Screenshots become load-bearing evidence (who-said-what disputes) | Message-boundary parsing + speaker/timestamp fields on extracted messages |
 | Privilege = per-source `privileged: bool` in workspace-config.yaml **plus** path-segment convention (`…/privileged/…`); still one binary flag at retrieval | Multi-workspace share-by-reference; purpose-scoped visibility | Per-collection privilege/confidentiality policy evaluated on every query path |
@@ -311,9 +313,10 @@ capability only when a real workspace demands it, never speculatively.
     docs/specs/instruction-layer-split.md). **PHASE 1 COMPLETE.**
 
 **Currently**: Phase 2 scaled down and shipped 2026-07-13 (single
-workspace user-data root — see below). Visual retrieval remains
-PLANNED in the gap (`docs/specs/visual-retrieval.md`). Full N-workspace
-sharing is deferred until a second matter forces it.
+workspace user-data root — see below). **Collections + multi-workspace
+mounts (schema v2)** is DESIGN LOCKED (`docs/specs/workspace-config-v2.md`)
+but not implemented — next engine slice when scheduled. Visual retrieval
+remains PLANNED (`docs/specs/visual-retrieval.md`).
 - **Phase 2 — single workspace user-data root (COMPLETE 2026-07-13,
   scaled down from multi-workspace).** Goal simplified: all user/case
   data for the active matter lives under `workspaces/<name>/` so

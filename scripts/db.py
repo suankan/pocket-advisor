@@ -126,6 +126,21 @@ CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
 CREATE INDEX IF NOT EXISTS idx_emails_privileged ON emails(is_privileged);
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_email ON chunks(email_id);
+
+-- Regenerable sha256→path cache (docs/specs/source-blob-index.md).
+-- NOT custody identity: drop and rebuild anytime from disk + config.
+CREATE TABLE IF NOT EXISTS source_blob_index (
+    workspace_id          TEXT NOT NULL,
+    source_id             TEXT NOT NULL,
+    sha256                TEXT NOT NULL,
+    relpath_within_source TEXT NOT NULL,
+    size_bytes            INTEGER,
+    mtime_ns              INTEGER,
+    indexed_at            TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, source_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_source_blob_source
+    ON source_blob_index(workspace_id, source_id);
 """
 
 # chunks_fts is 2-column (text + translit_shadow, see

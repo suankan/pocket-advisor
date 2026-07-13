@@ -164,6 +164,22 @@ persisted artifact) — takes effect on the very next query.
 First use of `jina_mlx` downloads the model (~1.1GB, one-time). See
 `docs/specs/jina-mlx-migration.md` for the full measured comparison.
 
+## Blob path cache (sha256 → file, regenerable)
+
+Evidence identity is moving toward `(workspace_id, source_id, sha256)`
+with **no path as identity**. A derived SQLite table maps hash → path
+for fast open after users shuffle files inside a source:
+
+```bash
+venv/bin/python scripts/blob_index.py list-sources
+venv/bin/python scripts/blob_index.py rebuild
+venv/bin/python scripts/blob_index.py lookup -w family-law -s jane@example.com \
+  --sha256 <hex>
+```
+
+Safe to rebuild anytime (docs/specs/source-blob-index.md). Full
+pathless ingest migration is separate; this cache is usable now.
+
 ## Measuring retrieval quality (eval harness)
 
 ```bash

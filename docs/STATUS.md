@@ -183,6 +183,15 @@ preserves the engine-relevant milestones.
   `skills/au-family-law.md` removed. Productisation may later ship
   copy-in templates.
 
+## 2026-07-13 — regenerable source_blob_index (sha→path cache)
+
+- Spec: docs/specs/source-blob-index.md. Table `source_blob_index`
+  (workspace_id, source_id, sha256 → relpath_within_source). Fully
+  rebuildable; not custody identity. API/CLI: `scripts/blob_index.py`
+  rebuild|lookup|list-sources; `get_workspace_item(...)`. Provisional
+  source discovery from corpora/ until workspace-config.yaml drives
+  roots. Self-test: `scripts/test_blob_index.py`.
+
 ## Known open items (engine)
 
 - Visual (page-image) retrieval channel: designed, not started —

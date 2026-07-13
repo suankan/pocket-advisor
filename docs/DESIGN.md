@@ -35,8 +35,8 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
 | **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | 2026-07-13 user-data root…v2 cache; **R-05** mount `purposes` + `query --purpose` | R-06 ocr_review path |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs; synthetic mid from content sha | — |
-| **Structured numbers** — transactions SQL, row citations | **Partial** | **R-04** heuristic `transactions` table + extractor | richer parsers / reconciliation when finance forces |
-| **Visual / page-image retrieval** | **Partial** | **R-03** `page_images` schema, smoke script, `IMG_*` knobs (leg off until torch + smoke PASS) | full rasterize/embed/query when smoke PASS |
+| **Structured numbers** — transactions SQL, row citations | **Done (heuristic)** | **R-04** `transactions` + extractor + unit test | R-04b richer parsers when finance forces |
+| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** smoke PASS; rasterize/embed/query leg behind `IMG_LEG_ENABLED` | enable + `ingest.py images` on real corpus |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |
@@ -247,7 +247,7 @@ that slice; this table is the map.
 
 | Spec | ROADMAP |
 |---|---|
-| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 remainder (full leg) |
+| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 shipped opt-in; R-03b eval polish open |
 
 There is **no** `docs/history/`, no `PLAN.md`, and no `STATUS.md`.
 Product history is only [`CHANGELOG.md`](CHANGELOG.md).

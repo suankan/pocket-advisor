@@ -43,7 +43,7 @@ DESIGN capability map. “Schema A/B/C” is only the migration slices in
 
 | ID | Item | Theme (DESIGN map) | Trigger to start | Spec / notes |
 |---|---|---|---|---|
-| **R-03** | Visual channel remainder — rasterize, omni index, query leg, eval | Visual | Smoke PASS (`smoke_visual_alignment.py`) + user enables `IMG_LEG_ENABLED` | [visual-retrieval.md](specs/visual-retrieval.md) |
+| **R-03b** | Visual golden eval + measure IMG_RRF_WEIGHT / ocr_proxy vs skip | Visual | After enabling IMG leg on live corpus | [visual-retrieval.md](specs/visual-retrieval.md) |
 | **R-04b** | Richer transaction parsers / transfer reconciliation / extraction eval | Structured numbers | Finance workspace forces quality beyond heuristic | [structured-transactions.md](specs/structured-transactions.md) |
 | **R-06** | Optional: per-collection `ocr_review` under `state/cache/<id>/` | User data + multi-collection | Cleanup if shared path still confuses | small |
 | **R-07** | Productisation — clean-room engine repo, packaging, stranger docs, licensing, UPL | Productisation | Explicit productisation decision only | never as side effect of case work |
@@ -55,8 +55,8 @@ DESIGN capability map. “Schema A/B/C” is only the migration slices in
 | **R-13** | ANN vector store (LanceDB-class) | Measure + accuracy | >~100k chunks or felt dense latency | DESIGN interim |
 | **R-14** | FTS lemmatization / better lexical leg | Measure + accuracy | Inflected non-English keyword recall fails | DESIGN interim |
 
-**Recently shipped (see CHANGELOG):** R-01 Schema B, R-02 Schema C
-(partial), R-03 smoke+schema, R-04 heuristic transactions, R-05 purpose
+**Recently shipped (see CHANGELOG):** R-01 Schema B, R-02 Schema C,
+R-03 visual pipeline (opt-in), R-04 heuristic transactions, R-05 purpose
 mounts.
 
 ---

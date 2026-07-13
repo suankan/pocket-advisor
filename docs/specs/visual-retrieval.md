@@ -1,10 +1,13 @@
 # Spec: visual (page-image) retrieval channel
 
-Status: **PARTIAL (R-03)** 2026-07-13. Schema `page_images` + config
-knobs (`IMG_*`) + `scripts/smoke_visual_alignment.py` +
-`requirements-visual.txt` shipped. Smoke **SKIPs** until torch/transformers
-installed; full rasterize/embed/query leg still gated on
-`IMG_LEG_ENABLED=false`. Parent FK is `item_id` (Schema B).
+Status: **SHIPPED (R-03)** 2026-07-13 — pipeline complete, **off by
+default**. Alignment smoke **PASS** (cosine match 0.46 > mismatch 0.26).
+Enable with `models.img_leg_enabled: true` then `ingest.py images`.
+
+Shipped modules: `page_images` table (`item_id`), `image_embedding_backends.py`
+(confirmed `embed`+`AutoProcessor` API), `embed_images.py` (rasterize +
+index), query third RRF leg with kind-tagged keys, `IMG_*` knobs,
+`smoke_visual_alignment.py`, `requirements-visual.txt` (+ torchvision).
 
 ## Goal
 

@@ -80,6 +80,7 @@ def handle_request(resources: querymod.WarmResources, req: dict) -> dict:
                 before=req.get("before"),
                 thread=req.get("thread"),
                 no_thread_context=bool(req.get("no_thread_context")),
+                purpose=req.get("purpose"),
             )
             return {"ok": True, "result": result}
         except SystemExit as e:

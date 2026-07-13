@@ -233,11 +233,19 @@ EVAL_RESULTS_DIR = EVAL_DIR / "results"
 # Dotted yaml path -> (module attribute name, type converter). Anything
 # in config.yaml not in this map aborts loudly at import time — a typo
 # in a safety-semantics key must never silently do nothing.
-# Visual channel (R-03) — off until smoke + index ship
+# Visual channel (R-03) — off by default; enable after smoke PASS.
 IMG_LEG_ENABLED = False
+IMG_EMBED_BACKEND = "jina_omni_torch"
 IMG_EMBED_MODEL_REPO = "jinaai/jina-embeddings-v5-omni-small-retrieval"
-IMG_EMBED_DIM = 1024
+IMG_EMBED_DIM = 1024  # must equal EMBED_DIM for alignment
 IMG_PAGE_DPI = 150
+IMG_VEC_CANDIDATES = 20
+IMG_RRF_WEIGHT = 1.0
+IMG_RERANK_MODE = "skip"  # skip | ocr_proxy
+PAGE_IMAGES_DIR = OUTPUT_DIR / "page_images"
+IMG_VECTORS_NPY = VECTORS_DIR / "img_vectors.npy"
+IMG_VECTORS_IDS_NPY = VECTORS_DIR / "img_vectors_ids.npy"
+IMG_VECTORS_META_JSON = VECTORS_DIR / "img_vectors.meta.json"
 
 YAML_KEYS = {
     # Preferred: only the parent directory for all workspaces.
@@ -275,7 +283,12 @@ YAML_KEYS = {
     "models.img_embed_model_repo": ("IMG_EMBED_MODEL_REPO", str),
     "models.img_embed_dim": ("IMG_EMBED_DIM", int),
     "ingestion.ocr.img_page_dpi": ("IMG_PAGE_DPI", int),
+    "query.img_vec_candidates": ("IMG_VEC_CANDIDATES", int),
+    "query.img_rrf_weight": ("IMG_RRF_WEIGHT", float),
+    "query.img_rerank_mode": ("IMG_RERANK_MODE", str),
+    "models.img_embed_backend": ("IMG_EMBED_BACKEND", str),
 }
+
 
 
 def _flatten(d, prefix=""):
@@ -371,6 +384,10 @@ def _apply_workspace_paths():
     globals()["VECTORS_NPY"] = _out / "vectors" / "vectors.npy"
     globals()["VECTORS_IDS_NPY"] = _out / "vectors" / "vectors_ids.npy"
     globals()["VECTORS_META_JSON"] = _out / "vectors" / "vectors.meta.json"
+    globals()["PAGE_IMAGES_DIR"] = _out / "page_images"
+    globals()["IMG_VECTORS_NPY"] = _out / "vectors" / "img_vectors.npy"
+    globals()["IMG_VECTORS_IDS_NPY"] = _out / "vectors" / "img_vectors_ids.npy"
+    globals()["IMG_VECTORS_META_JSON"] = _out / "vectors" / "img_vectors.meta.json"
     globals()["TEXT_DOCUMENTS_DIR"] = _out / "text" / "documents"
     globals()["DOCUMENTS_EXTRACTED_DIR"] = _out / "documents_extracted"
     globals()["QUERY_DAEMON_SOCKET"] = _out / "query_daemon.sock"

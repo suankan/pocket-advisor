@@ -68,6 +68,9 @@ workspaces:
     active: false
     path: personal-finance
     title: "Personal finance / bank statements / ATO"
+    # R-05: optional purpose tags restrict query.py --purpose TAG
     collections:
       - id: svetlana-financial-disclosure
+        purposes: [disclosure, settlement]
       - id: suan-financial-disclosure
+        purposes: [disclosure, settlement]

@@ -252,6 +252,16 @@ venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import db; c=db.co
 Optional structured rows (R-04): `venv/bin/python scripts/ingest.py transactions`.
 Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
 
+Visual page-image channel (R-03, opt-in after smoke PASS):
+
+```bash
+venv/bin/pip install -r scripts/requirements-visual.txt
+venv/bin/python scripts/smoke_visual_alignment.py   # expect PASS
+# config.yaml: models.img_leg_enabled: true
+venv/bin/python scripts/ingest.py images            # rasterize + omni index
+venv/bin/python scripts/query.py "site plan stamp" --no-daemon
+```
+
 ## Review points
 
 - `workspaces/state/logs/review_queue.csv` — parse/custody flags

@@ -19,6 +19,13 @@ map; open work is `R-nn`.
 
 ## 2026-07-13
 
+### R-03 visual pipeline complete (opt-in) · SHIPPED
+
+Alignment smoke **PASS**. Full path: `embed_images.py` (pdftoppm + omni
+embed + `img_vectors.npy`), query third RRF leg with `("chunk"|"img", id)`
+keys, `ingest.py images`. Default `IMG_LEG_ENABLED=false` — enable in
+config after installing `requirements-visual.txt`.
+
 ### R-01 Schema B — items + memberships · SHIPPED
 
 Renamed spine: `emails`→`items`, `email_files`∪`documents` memberships

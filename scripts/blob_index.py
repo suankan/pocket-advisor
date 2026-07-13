@@ -70,13 +70,24 @@ def provisional_sources(workspace_id: str | None = None) -> list[SourceRoot]:
 
 
 def list_sources() -> list[SourceRoot]:
-    """Prefer workspace-config registry; else provisional corpora discovery."""
+    """Prefer workspace-config registry; else provisional corpora discovery.
+
+    v2: one entry per global collection (not per mount).
+    v1: sources from every workspace (dedupe by source_id).
+    """
     reg = Path(config.WORKSPACES_DIR) / "workspace-config.yaml"
     if reg.is_file():
         import workspace_config as wc
+        r = wc.load_registry(reg, config.WORKSPACES_DIR)
+        if r.schema_version >= 2 and r.collections:
+            return [SourceRoot("shared", c.id, c.root) for c in r.collections]
+        seen: set[str] = set()
         out: list[SourceRoot] = []
-        for ws in wc.load_registry(reg, config.WORKSPACES_DIR).workspaces:
+        for ws in r.workspaces:
             for src in ws.sources:
+                if src.id in seen:
+                    continue
+                seen.add(src.id)
                 out.append(SourceRoot(ws.id, src.id, src.root))
         return out
     return provisional_sources()

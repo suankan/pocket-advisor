@@ -1,8 +1,10 @@
 # Spec: collections + workspaces registry (schema v2)
 
-Status: **DESIGN LOCKED** 2026-07-13 — not implemented.  
-Live engine still uses schema v1 (`docs/specs/workspace-config.md` +
-gitignored `workspaces/workspace-config.yaml`).
+Status: **DESIGN LOCKED** 2026-07-13; **loader + mount filter SHIPPED**
+(partial). Dual-read v1/v2 in `scripts/workspace_config.py`; query
+pre-filter by mounted `source_id`s. Full path layout (`workspaces/state/`,
+top-level `corpora/`) not required yet — live may use transitional
+paths under `family-law/corpora/…`.
 
 Illustrative instance (gitignored, may drift):  
 `workspaces/workspace-config-new.yaml`  
@@ -194,19 +196,19 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 
 ---
 
-## Implementation checklist (when scheduled)
+## Implementation checklist
 
-- [ ] Committed example + this spec (this file)  
-- [ ] `workspace_config.py` v2 loader (or dual-read v1/v2)  
-- [ ] Ingest: single collection walk + per-file dispatch; drop `kind` filter  
-- [ ] DB migrate: `source_id` → `collection_id`; uniqueness without `workspace_id`  
-- [ ] Blob index roots from `collections[].path`; PK without `workspace_id`  
-- [ ] Query mount pre-filter  
+- [x] Committed example + this spec  
+- [x] `workspace_config.py` dual-read v1/v2  
+- [x] Ingest: v2 collections (kind=None) included in both walkers → per-file  
+- [x] DB Phase A: uniqueness without `workspace_id` (see schema-items-membership)  
+- [x] Blob index: collection roots from registry; PK `(source_id, sha256)`  
+- [x] Query mount pre-filter  
+- [x] Tests: v2 loader cases in `test_workspace_config.py`  
 - [ ] Paths: `OUTPUT_DIR` → `workspaces/state/` (+ `cache/<collection_id>/…`)  
 - [ ] Optional FS move: `family-law/corpora/…` → `corpora/…`  
 - [ ] AGENTS.md hard rules: corpora read-only; no bulk `state/cache` browse  
-- [ ] Tests: dual-mount same collection; integrity after path rename; unknown keys  
-- [ ] Migrate live `workspace-config.yaml` → v2; retire v1 paths  
+- [ ] Live yaml always v2 with preferred `corpora/<id>` paths (optional)  
 
 ---
 

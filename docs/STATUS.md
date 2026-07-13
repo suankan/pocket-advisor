@@ -233,19 +233,23 @@ preserves the engine-relevant milestones.
   retrieval + agent answer workflow still works after the identity
   migration; case findings themselves stay in the workspace journal.
 
-## 2026-07-13 — collections + workspaces v2 (**DESIGN LOCKED**)
+## 2026-07-13 — collections + workspaces v2 (**LOADER + MOUNTS SHIPPED**)
 
 Canonical design: **`docs/specs/workspace-config-v2.md`**  
-Example yaml: **`docs/specs/workspace-config-v2.example.yaml`**  
-Local sketch: `workspaces/workspace-config-new.yaml` (not loaded)
+Example: **`docs/specs/workspace-config-v2.example.yaml`**
 
-**Summary of locks:** collections (physical) + workspace mounts
-(visibility); one shared DB; corpora = read-only facts; engine tree =
-`state/` with `cache/<collection_id>/`; agent-readable matter state only
-under `workspaces/<id>/`; no registry `kind:` or `retrieval:`; custody
-`(collection_id, sha256)`; query mount pre-filter. Live engine remains
-schema **v1**. Implementation = checklist in the v2 spec (do not start
-opportunistically during case work).
+**Shipped:**
+- Dual-read loader: schema_version **1** and **2** (`workspace_config.py`)
+- v2: global `collections[]` (path relative to `workspaces.dir`);
+  workspaces mount by id; no `kind`/`retrieval` on collections
+- Query **mount pre-filter**: chunks only if membership `source_id` ∈
+  active mounts (`query.allowed_chunk_ids`)
+- blob_index rebuild walks each collection once (v2)
+- Live registry may use v2 with transitional paths
+  `family-law/corpora/…` (no FS move required yet)
+
+**Still open from v2 checklist:** `state/` path rename, corpora/ FS
+move, AGENTS bulk-cache rules, full Phase B items rename.
 
 ## 2026-07-13 — DB schema items + membership (**DESIGN LOCKED**)
 
@@ -265,8 +269,8 @@ opportunistically during case work).
 
 ## Known open items (engine)
 
-- **workspace-config v2 implementation** — design locked
-  (`docs/specs/workspace-config-v2.md`); not coded.
+- **workspace-config v2** — loader + mounts + query filter shipped;
+  path layout (`state/`, top-level `corpora/`) still optional migrate.
 - **schema items + membership** — Phase A partial shipped; Phase B/C
   + mount filter still open (`docs/specs/schema-items-membership.md`).
 - Visual (page-image) retrieval channel: designed, not started —

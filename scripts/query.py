@@ -32,12 +32,28 @@ import embedding_backends
 import reranker as reranker_mod
 
 
+def _mounted_collection_ids():
+    """Active workspace mount set; empty frozenset if no registry."""
+    try:
+        import workspace_config as wc
+        return wc.active_collection_ids()
+    except SystemExit:
+        return None
+    except Exception:
+        return None
+
+
 def allowed_chunk_ids(conn, args):
-    """Chunk ids satisfying privilege/date/thread filters, computed
+    """Chunk ids satisfying privilege/date/thread/mount filters, computed
     BEFORE ranking (docs/specs/pre-filtered-retrieval.md) — a selective
     filter must not be starved by candidates that never made an
     unfiltered top-K cut. None = no filter active (fast path, byte-
-    identical to unfiltered behavior)."""
+    identical to unfiltered behavior).
+
+    Mount filter (workspace-config v2): only chunks whose email_id has a
+    membership in email_files or documents with source_id in the active
+    workspace's mounted collections (schema-items-membership Phase A).
+    """
     conds, params = [], []
     if not args.include_privileged:
         conds.append("(CASE WHEN e.privilege_override IS NOT NULL"
@@ -51,11 +67,31 @@ def allowed_chunk_ids(conn, args):
     if args.thread:
         conds.append("e.thread_id = ?")
         params.append(args.thread)
-    if not conds:
+
+    mounts = _mounted_collection_ids()
+    mount_sql = ""
+    if mounts is not None and len(mounts) > 0:
+        # Restrict to items with membership in a mounted collection.
+        placeholders = ",".join("?" * len(mounts))
+        mount_sql = (
+            f" AND e.id IN ("
+            f"  SELECT email_id FROM email_files WHERE source_id IN ({placeholders})"
+            f"  UNION"
+            f"  SELECT email_id FROM documents WHERE source_id IN ({placeholders})"
+            f")"
+        )
+        params.extend(list(mounts))
+        params.extend(list(mounts))
+    elif mounts is not None and len(mounts) == 0:
+        # Active workspace mounts nothing — empty candidate set.
+        return set()
+
+    if not conds and not mount_sql:
         return None
+    where = " AND ".join(conds) if conds else "1=1"
     rows = conn.execute(
         f"SELECT c.id FROM chunks c JOIN emails e ON e.id = c.email_id"
-        f" WHERE {' AND '.join(conds)}", params).fetchall()
+        f" WHERE {where}{mount_sql}", params).fetchall()
     return {r["id"] for r in rows}
 
 

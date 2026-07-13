@@ -61,7 +61,9 @@ instructions alone.
    has no git remote and must never be pushed anywhere.
 5. **Low-confidence OCR** (`attachments.ocr_flagged_low_conf=1`) must be
    caveated when cited — the extracted text may be wrong; the original
-   image is under the workspace `output/ocr_review/`.
+   image is under `workspaces/state/` (often
+   `state/cache/<collection_id>/ocr_review/` or shared `state/ocr_review/`
+   depending on extract path — open via DB / query path, not by browsing).
 6. This is technical/organizational assistance, not legal advice; say
    so when the distinction matters.
 7. **NO AUTOCOMMIT.** Never run `git commit` unless the user's CURRENT
@@ -118,20 +120,25 @@ instructions alone.
   every work session that touches the engine. Case findings go to the
   workspace journal, never here
 - `docs/specs/` — per-work-item specs (tenet 12: quantified scope,
-  acceptance criteria, verification commands). Live registry is
-  workspace-config **v1**; **v2** (collections + mounts, one DB,
-  `state/`) is DESIGN LOCKED at `docs/specs/workspace-config-v2.md` —
-  not implemented yet. DB spine (**items + membership**, phased
-  migrate) is DESIGN LOCKED at `docs/specs/schema-items-membership.md`
+  acceptance criteria, verification commands). **Live registry is
+  workspace-config v2** (collections + mounts, one DB, `corpora/` +
+  `state/`, per-collection cache) —
+  `docs/specs/workspace-config-v2.md` (v1 dual-read still supported).
+  DB spine Phase A shipped; Phase B/C (items rename) open —
+  `docs/specs/schema-items-membership.md`
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
-  `workspaces.dir` + engine knobs only (not active matter / sources)
-- `workspaces/workspace-config.yaml` (gitignored) — active workspace +
-  sources registry (docs/specs/workspace-config.md)
-- `workspaces/` (gitignored) — user data: `corpora/` (read-only facts),
-  `state/` (shared engine DB/vectors/text), `workspace-config.yaml`,
-  and per-matter folders `workspaces/<id>/` (WORKSPACE.md, skills,
-  journal, chronology, eval — not bulk evidence)
+  `workspaces.dir` + engine knobs only (not active matter / collections)
+- `workspaces/workspace-config.yaml` (gitignored) — schema_version 2:
+  `collections[]` + workspace mounts (docs/specs/workspace-config-v2.md;
+  example: workspace-config-v2.example.yaml)
+- `workspaces/` (gitignored) — user data:
+  - `corpora/<collection_id>/` — read-only evidence (never write)
+  - `state/` — shared regenerable engine store (DB, vectors, logs,
+    daemon socket, `cache/<collection_id>/{text,extracted}/`)
+  - `workspace-config.yaml` — registry
+  - `<workspace_id>/` — matter layer only (WORKSPACE.md, skills,
+    journal, chronology, eval — not bulk evidence)
 - `scripts/` — the pipeline (see RUNBOOK.md)
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
   present in this repo at all — gitignored, never committed, and not

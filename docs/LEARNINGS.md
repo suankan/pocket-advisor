@@ -187,48 +187,63 @@ generalizable core, the genericized version goes here.
 
 ## Workspace registry, pathless identity, blob index (2026-07-13)
 
-- **Evidence identity is `(workspace_id, source_id, sha256)`, never a
-  filesystem path.** Paths are regenerable via `source_blob_index`
-  (`scripts/blob_index.py`). Users may rename/move files *inside* a
-  configured source tree without breaking custody rows; rebuild the
-  index after bulk moves. Do not reintroduce `source_path` as a unique
-  identity column.
+- **Custody identity is `(source_id, sha256)`** (collection-scoped;
+  `source_id` ≈ collection id), **never a filesystem path.** Paths are
+  regenerable via `source_blob_index` (`scripts/blob_index.py`). Users
+  may rename/move files *inside* a collection tree without breaking
+  custody rows; rebuild the index after bulk moves. Do not reintroduce
+  `source_path` as a unique identity column. (`workspace_id` was
+  dropped from uniqueness in schema Phase A — multi-membership is via
+  separate rows, not a list column.)
 - **`verify_integrity` is hash-set based.** Path-string equality is the
   wrong integrity check after renames — compare expected vs on-disk
-  sha256 membership under each source. A changed hash of an already-
-  known path is still a custody alarm at ingest time.
-- **Ingest dedup under pathless identity:** same `(workspace_id,
-  source_id, sha256)` → skip; same logical file path with *different*
-  content → treat as a new blob (content-addressed), do not silently
-  overwrite the old hash's provenance. Tests cover skip-on-dupe and
-  content-change-as-new-blob.
-- **Active workspace + sources live in gitignored
-  `workspaces/workspace-config.yaml`**, not platform `config.yaml`.
-  Platform only has `workspaces.dir`. Exactly one workspace must be
-  `active: true`. Source roots must not nest/overlap; fail-loud on
-  unknown keys and path escapes (`scripts/workspace_config.py`).
+  sha256 membership under each collection. A changed hash of an
+  already-known path is still a custody alarm at ingest time.
+- **Ingest dedup under pathless identity:** same `(source_id, sha256)`
+  → skip; same logical file path with *different* content → treat as a
+  new blob (content-addressed), do not silently overwrite the old
+  hash's provenance. **Document multi-membership:** same sha under a
+  *new* collection id links a membership row without re-extract
+  (`link_existing_document`).
+- **Registry is schema v2** in gitignored
+  `workspaces/workspace-config.yaml`: global `collections[]` +
+  workspaces that **mount** collection ids. Platform `config.yaml` only
+  has `workspaces.dir` + engine knobs. Exactly one workspace
+  `active: true`. Collection roots under `workspaces/corpora/` must not
+  nest/overlap; fail-loud on unknown keys and path escapes
+  (`scripts/workspace_config.py`). No registry `kind`/`retrieval` —
+  ingest dispatches per file.
+- **Query isolation = mounts ∩ privilege.** Chunks are eligible only
+  when membership `source_id` is in the active workspace's mounts
+  (`query.allowed_chunk_ids`). Privilege is still a separate filter.
+- **Layout:** `workspaces/corpora/` = read-only facts; `workspaces/state/`
+  = one regenerable engine store (DB, vectors, logs, daemon socket);
+  `state/cache/<collection_id>/{text,extracted}/` = per-collection
+  extracts. Matter folders hold md/eval only — not bulk evidence.
+  Agents open cache paths from query/DB results; do not bulk-browse
+  `state/cache/` as a library.
 - **Privilege has two cooperating signals** (OR; `privilege_override`
-  still wins): (1) registry `sources[].privileged: bool` — preferred
-  for agent/config clarity; (2) filesystem convention: any path segment
-  literally named `privileged/` under a source root. Platform
-  `config.yaml` still must not carry real folder names. Retrieval
-  excludes privileged by default.
+  still wins): (1) registry `collections[].privileged: bool` —
+  preferred; (2) filesystem convention: any path segment literally
+  named `privileged/` under a collection root. Platform `config.yaml`
+  still must not carry real folder names. Retrieval excludes
+  privileged by default.
 - **Avoid circular imports between `config.py` and
   `workspace_config.py`.** Loading the active workspace during config
   bootstrap must stay yaml-only / light (no importing pipeline modules
   that re-import config at module top). Circular import regressions
   break every CLI entrypoint.
-- **Per-source `description` is the agent-facing provenance text**
+- **Per-collection `description` is the agent-facing provenance text**
   (what CORPUS.md used to carry). CORPUS.md is optional leftover on
   disk; do not re-require it for ingest. Prefer updating the registry
   description over inventing parallel markdown.
 - **After re-embed or model/config change, restart `query_daemon`.**
   Stale warm weights will serve wrong vectors or abort on fingerprint
-  mismatch depending on path.
-- **Solicitor / multi-source corpora:** substantive answers often live
-  in a non-party source (e.g. party's own solicitor correspondence).
-  Rephrase queries and do not assume the inter-party email folder alone
-  is sufficient — registry `description` should state what each source
-  evidences.
+  mismatch depending on path. Socket lives under `workspaces/state/`.
+- **Solicitor / multi-collection corpora:** substantive answers often
+  live in a non-party collection (e.g. party's own solicitor
+  correspondence). Rephrase queries and do not assume one inter-party
+  email folder alone is sufficient — registry `description` should
+  state what each collection evidences.
 
 

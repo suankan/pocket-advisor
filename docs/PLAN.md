@@ -1,8 +1,16 @@
-# Pocket Lawyer — Local RAG over an Evidence Email Corpus
+# Pocket Advisor — Local RAG over Evidence Corpora
+
+> **Authority note (2026-07-13):** For current layout, registry schema,
+> and custody identity, prefer **AGENTS.md**, **docs/STATUS.md**, and
+> specs `workspace-config-v2.md` / `schema-items-membership.md` /
+> `source-blob-index.md`. This PLAN retains historical pipeline design;
+> several sections below still describe intermediate path names
+> (`output/`, path-based identity). Where they conflict, the agent
+> docs + STATUS win.
 
 ## Context
 
-The initial corpus: several hundred Thunderbird-exported `.eml` files (hundreds of MB) under the active workspace's `corpora/` (formerly repo-root `ingestion-sources/` — see docs/specs/workspace-user-data.md), relating to an active legal matter. Goal: a fully local RAG system so an agent can answer questions grounded in this correspondence with mandatory citations, correlate events, and help draft responses — while preserving chain of custody (originals untouched, SHA-256 manifest) and flagging attorney-client privileged material (filesystem `privileged/` under corpora; ROADMAP tenet 10).
+The initial corpus: several hundred Thunderbird-exported `.eml` files (hundreds of MB) under `workspaces/corpora/` collections (see docs/specs/workspace-config-v2.md), relating to an active legal matter. Goal: a fully local RAG system so an agent can answer questions grounded in this correspondence with mandatory citations, correlate events, and help draft responses — while preserving chain of custody (originals untouched, SHA-256 manifest) and flagging attorney-client privileged material (registry `privileged` and/or filesystem `privileged/` under collections; ROADMAP tenet 10).
 
 Corpus facts established by direct inspection (workspace-specific counts live in the workspace's LEARNINGS.md; the engine-relevant shape is):
 - Multiple source folders, one per correspondent/firm; one of them is the privileged own-solicitor channel.
@@ -14,47 +22,34 @@ Corpus facts established by direct inspection (workspace-specific counts live in
 - **System Python 3.9 (`/usr/bin/python3`) has SQLite extension loading compiled out** → `sqlite-vec` impossible there. Decision: Homebrew Python 3.12 venv; vectors stored as flat numpy files (brute-force cosine is <50ms at this scale), NOT sqlite-vec.
 - Embeddings: originally **llama.cpp via `llama-cpp-python`** (user decision — pure Python ecosystem, no Ollama daemon dependency), with a GGUF embedding model downloaded once from HuggingFace. Model: **bge-m3** (Q8_0 GGUF, ~600MB, 1024-dim, 8k context) — chosen because it is strongly **multilingual**, unlike nomic-embed-text v1 which is English-centric and would underperform badly on a majority-non-English corpus. bge-m3 needs no query/document prefixes. Embeddings remain 100% local; the only network access is the one-time model weights download from HuggingFace (inbound only — no case data ever leaves the machine). **The rest of this section describes that original mechanism and its rationale (still accurate — bge-m3/llama_cpp remains a supported fallback backend); it is NOT the current default as of 2026-07-13.** The default embedder/reranker is now the MLX-native Jina v5 stack, eval-verified as an improvement — see `docs/specs/jina-mlx-migration.md` and RUNBOOK.md's "Choosing the embedding/reranker backend" sections for what's actually running. The pluggable-backend architecture this section describes (fingerprinted index, wipe-on-change, in-process no-daemon model loading) is unchanged; only the default model choice is.
 
-## Directory layout to create
+## Directory layout (current — post collections v2)
 
 ```
 <repo-root>/
-├── workspaces/<name>/          # ALL user data (gitignored): corpora/, output/, WORKSPACE.md, eval/
+├── workspaces/                 # ALL user data (gitignored)
+│   ├── workspace-config.yaml   # v2: collections[] + workspace mounts
+│   ├── corpora/<collection>/   # READ-ONLY evidence facts
+│   ├── state/                  # ONE regenerable engine store
+│   │   ├── pocket_advisor.db
+│   │   ├── vectors/
+│   │   ├── logs/
+│   │   ├── query_daemon.sock
+│   │   └── cache/<collection_id>/{text,extracted}/
+│   └── <workspace_id>/         # matter: WORKSPACE.md, skills, journal, eval
 ├── venv/                       # Homebrew Python 3.12
 ├── models/                     # embedding/rerank weights (gitignored)
-├── scripts/
-│   ├── config.py               # paths, thresholds, model names
-│   ├── db.py                   # schema DDL + `init` CLI
-│   ├── utils_mime.py           # header/filename decode, charset fallbacks, sanitize
-│   ├── utils_hash.py           # sha256 helpers, write-then-verify
-│   ├── parse_eml.py            # Stage 1
-│   ├── extract_attachments.py  # Stage 2
-│   ├── thread_linker.py        # Stage 3
-│   ├── embed.py                # Stage 4
-│   ├── ingest.py               # orchestrator: all|parse|attachments|thread|embed
-│   ├── query.py                # hybrid retrieval CLI
-│   ├── verify_integrity.py     # re-hash originals vs manifest
-│   └── requirements.txt
-├── output/
-│   ├── pocket_advisor.db
-│   ├── vectors/{vectors.npy, vectors_ids.npy, vectors.meta.json}
-│   ├── text/{emails,attachments}/<id>.txt
-│   ├── attachments_extracted/<id>__<name>
-│   ├── ocr_review/             # low-confidence OCR images for human review
-│   └── logs/{ingest_*.log, review_queue.csv}
-├── workspaces/<name>/          # gitignored case layer (added Phase 1d): WORKSPACE.md, corpora specs, chronology, journal, eval/
-├── AGENTS.md                   # tool-agnostic agent entrypoint (opencode/hermes/any CLI read this)
-├── RUNBOOK.md                  # human + agent: setup and how to run each stage
+├── scripts/                    # pipeline (see RUNBOOK.md)
+├── AGENTS.md                   # tool-agnostic agent entrypoint
+├── RUNBOOK.md
 ├── .gitignore                  # excludes workspaces/, venv/, models/, config.yaml
-└── docs/
-    ├── PLAN.md                 # this implementation plan, checked in
-    ├── LEARNINGS.md            # corpus gotchas + environment gotchas (see below)
-    └── STATUS.md               # what's built/verified/pending — updated at end of every work session
+└── docs/                       # PLAN, LEARNINGS, STATUS, specs/
 ```
 
 ## SQLite schema (key points)
 
 - `emails` — one row per unique Message-ID: date_utc + date_raw, from/to/cc (JSON), subject + subject_normalized, in_reply_to/references_raw, thread_id + thread_link_method ('reference'|'subject_heuristic'|'singleton'), **is_privileged** (computed: any copy in a configured privileged folder; can only auto-go 0→1) + **privilege_override** (manual, always wins), body_text_path, body_source ('plain'|'html_stripped'), has_parse_issue.
-- `email_files` — one row per physical .eml membership: **pathless** identity `(workspace_id, source_id, sha256)` (chain of custody), size; open via regenerable `source_blob_index` (see docs/specs/source-blob-index.md, STATUS 2026-07-13). Do not reintroduce path-as-identity.
+- `email_files` — one row per physical .eml membership: **pathless** custody identity **`(source_id, sha256)`** (collection-scoped; Phase A), size; open via regenerable `source_blob_index` (see docs/specs/source-blob-index.md, schema-items-membership.md). Do not reintroduce path-as-identity.
+- `documents` — standalone files; multi-membership allowed (same content sha linked under multiple `source_id`s without re-extract).
 - `attachments` — filename (decoded) + filename_raw, content_type, sha256 of payload, extracted_copy_path + extracted_copy_sha256 (write-verify), extraction_method (native_pdftotext|ocr_tesseract|docx|xlsx|msg_nested|zip_member|skipped_small_image|error), ocr_confidence, ocr_flagged_low_conf, is_skipped/skip_reason, nullable parent_attachment_id (nested .msg/zip recursion).
 - `threads` — representative_subject, first/last date, email_count.
 - `chunks` — unit of retrieval/citation: source_type ('email_body'|'attachment'), email_id, attachment_id, chunk_index, text, embedded_at (NULL = pending embed; incremental marker).
@@ -96,7 +91,7 @@ One-time: `brew install python@3.12 tesseract-lang`; create venv + pip install (
 Incremental (repeatable as new emails arrive): `ingest.py all` — Stage 1 new files only, Stage 2 pending attachments only, Stage 3 full recompute, Stage 4 unembedded chunks only.
 
 **Incremental dedup (hard requirement — new emails will be dropped in over time):** re-running `ingest.py all` after adding files must never reprocess or double-index anything. Three dedup layers:
-1. **Blob level**: same `(workspace_id, source_id, sha256)` already in `email_files` is skipped (same content under that source). Content change under a source is a **new** blob membership (content-addressed); do not treat path strings as identity. Tamper/review still surfaces when expected hashes disappear from disk (`verify_integrity`).
+1. **Blob level**: same `(source_id, sha256)` already in `email_files` is skipped (same content under that collection). Content change under a collection is a **new** blob membership (content-addressed); do not treat path strings as identity. Tamper/review still surfaces when expected hashes disappear from disk (`verify_integrity`).
 2. **Message level**: a new file whose Message-ID already exists in `emails` (e.g. an overlapping Thunderbird re-export saved under a different filename, or the same email saved from two folders) gets only a new `email_files` provenance row — no second `emails` row, no re-extraction, no re-embedding, no duplicate search results. Privilege is recomputed across all copies (0→1 only).
 3. **Work-unit level**: attachments (`extraction_method IS NULL`) and chunks (`embedded_at IS NULL`) are only processed when pending, so an interrupted or repeated run resumes exactly where it left off.
 Near-duplicates with *different* Message-IDs (forwarded/re-sent copies) are intentionally NOT auto-merged — they're distinct evidence — but a subject+date+from fuzzy check flags suspected pairs to the review queue for human decision.

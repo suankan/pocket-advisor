@@ -1,16 +1,17 @@
 # Spec: workspace-config.yaml (user registry) — schema v1
 
-Status: IMPLEMENTED 2026-07-13 (**live**). Single gitignored registry under
-`{workspaces.dir}/workspace-config.yaml` declares all workspaces and
-their evidence **sources**. Platform `config.yaml` only sets
-`workspaces.dir` (+ engine knobs). Active matter is **not** in git.
+Status: IMPLEMENTED 2026-07-13; **superseded as the live default by v2**
+(same file, `schema_version: 2`). Loader still **dual-reads** v1 for
+compat (`scripts/workspace_config.py`). Prefer
+`docs/specs/workspace-config-v2.md` +
+`workspace-config-v2.example.yaml` for new registries.
 
-**Next:** schema v2 (collections + workspace mounts, one DB, `state/`)
-is **DESIGN LOCKED** — see `docs/specs/workspace-config-v2.md`. Do not
-implement v2 until that slice is scheduled.
+v1 declared workspaces with nested **sources**. Platform `config.yaml`
+only sets `workspaces.dir` (+ engine knobs). Active matter is **not**
+in git.
 
-Related: docs/specs/source-blob-index.md (sha→path cache),
-docs/specs/workspace-user-data.md (user-data root).
+Related: docs/specs/workspace-config-v2.md (live), source-blob-index.md,
+workspace-user-data.md (historical path migrate).
 
 ## Files
 

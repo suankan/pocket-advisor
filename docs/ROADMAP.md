@@ -94,7 +94,7 @@ per-workspace golden sets before it is called an improvement.
    later) without touching ingestion or citation logic. Never let a
    storage engine's features leak into pipeline semantics.
 5. **Everything idempotent, incremental, regenerable.** Re-running any
-   stage is always safe; workspace `output/` can always be rebuilt
+   stage is always safe; `workspaces/state/` can always be rebuilt
    from workspace `corpora/`. A feature that breaks this is wrong by
    design.
 6. **Boring dependencies, deliberately few.** Every new dependency,
@@ -187,24 +187,27 @@ per-workspace golden sets before it is called an improvement.
 **Layer 2 — USER REGISTRY + WORKSPACE (gitignored entirely):**
 ```
 workspaces/
-  workspace-config.yaml   # REGISTRY (gitignored): all workspaces,
-                          # exactly one active: true; each has
-                          # sources[] {id, description, path, kind,
-                          # privileged}. Platform config only sets
-                          # workspaces.dir. See workspace-config.md.
-  <name>/                 # active workspace path from registry
-    WORKSPACE.md          # parties & roles, matter rules, goals
-    au-family-law.md …    # domain skill(s) live HERE (not platform)
-    output/               # DB, vectors, text, daemon socket
-    <source paths…>       # evidence roots as declared in sources[]
-    chronology / journal / eval / LEARNINGS   # private case layer
+  workspace-config.yaml   # REGISTRY v2 (gitignored): collections[] +
+                          # workspaces[] with mounts; exactly one
+                          # workspace active: true. No kind/retrieval.
+                          # Platform config only sets workspaces.dir.
+                          # See workspace-config-v2.md.
+  corpora/<collection_id>/  # READ-ONLY evidence facts (shared by ref)
+  state/                    # ONE regenerable engine store
+    pocket_advisor.db, vectors/, logs/, query_daemon.sock
+    cache/<collection_id>/{text,extracted}/
+  <workspace_id>/           # matter layer only (no bulk evidence)
+    WORKSPACE.md            # parties & roles, matter rules, goals
+    au-family-law.md …      # domain skill(s) live HERE (not platform)
+    chronology / journal / eval / LEARNINGS
 ```
 
 **Loading order (hierarchical, most specific wins for its scope):**
-platform `AGENTS.md` → `workspace-config.yaml` (sources + privilege +
-descriptions) → `WORKSPACE.md` → domain skill(s) in that workspace.
-Per-source `description` replaces the old required CORPUS.md role
-(optional CORPUS.md files may still exist on disk).
+platform `AGENTS.md` → `workspace-config.yaml` (active mounts +
+collection privilege + descriptions) → `WORKSPACE.md` → domain
+skill(s) in that workspace. Per-collection `description` replaces the
+old required CORPUS.md role (optional CORPUS.md may still exist on
+disk). Query visibility = mounted collections ∩ privilege rules.
 
 **Consequences:**
 - The session-log duty splits: engine changes → `docs/STATUS.md`
@@ -258,14 +261,14 @@ revisit the row — replace, don't layer around.
 | Transliteration shadow field solves "mechanical romanization," not "which of several valid romanizations does THIS corpus actually use" — that's a different, harder problem | A name-matching question the shadow field demonstrably can't answer, in a workspace where it matters | Canonical entity extraction/resolution (already ledgered above) — an alias-learning pass, not a bigger transliteration library |
 | Reranker cost (mean ~12s/query on the current `jina_mlx` default, was ~18s/query combined on the original `llama_cpp` stack — docs/specs/jina-mlx-migration.md) — acceptable for agent-driven CLI use, not interactive-chat speed | UI arrives (Phase 4-adjacent) or latency becomes a felt complaint | Persistent reranker process/daemon (avoid per-query model load), or a faster reranker model, measured the same eval-gated way |
 | `is_privileged` is the only retrieval-visibility-constraint primitive; enforced correctly (candidate-pool level) but only handles one restriction type, one workspace-wide flag | Duplex-build/finance workspaces need purpose-scoped or workspace-scoped visibility (same content, different eligibility per asking context) | Generalize `allowed_chunk_ids`-style pre-filtering into a per-collection visibility-policy check, evaluated per query, not just a binary privilege flag |
-| ~~Single workspace: paths hard-wired to repo-root ingestion-sources/output~~ DONE 2026-07-13 (scaled Phase 2): all user data under `workspaces/<name>/` (corpora + output); multi-workspace sharing still deferred | Second real matter needs isolation without a second clone | N workspaces + share-by-reference collections + query-time visibility |
-| Multi-workspace / collections v2 — **DESIGN LOCKED** 2026-07-13: collections + mounts; one DB; corpora read-only; `state/cache/<collection_id>/`; no registry `kind`/`retrieval`. Spec: `docs/specs/workspace-config-v2.md` | User schedules implement slice / second matter (e.g. personal-finance) needs mounts | Execute v2 spec checklist (loader, DB identity, mount pre-filter, path migrate) |
-| DB spine: items + membership (polymorphic SQLite) — **DESIGN LOCKED** 2026-07-13. Not NoSQL; not list-of-collections column. Spec: `docs/specs/schema-items-membership.md` (Phase A evolve for v2; Phase B rename/unify) | v2 mounts need collection identity / multi-membership; or naming debt blocks new types | Execute Phase A with/after v2 identity; Phase B when scheduled |
+| ~~Single workspace: paths hard-wired to repo-root ingestion-sources/output~~ DONE 2026-07-13 (scaled Phase 2), then superseded by v2 layout below | — | — |
+| ~~Multi-workspace / collections v2~~ **SHIPPED 2026-07-13**: collections + mounts; one DB; `workspaces/corpora/` read-only; `workspaces/state/` + `state/cache/<collection_id>/`; no registry `kind`/`retrieval`; dual-read v1/v2; query mount pre-filter. Spec: `docs/specs/workspace-config-v2.md` | Second real matter needs purpose-scoped visibility beyond mounts+privilege; multi-DB | Per-collection visibility policy; multi-DB only if forced |
+| DB spine: items + membership — **DESIGN LOCKED** 2026-07-13. **Phase A SHIPPED** (collection-scoped UNIQUE `(source_id, sha256)`, multi-membership document links, blob_index PK). Phase B/C open (items rename / polish). Spec: `docs/specs/schema-items-membership.md` | Naming debt blocks new item types or Phase 3/visual parent ids | Phase B when scheduled |
 | Tabular data flattened to prose (xlsx/statement PDFs extracted as text and chunked) | Finance/ATO workspace onboarding; interim symptom: questions needing sums/joins over already-ingested financial statements | Structured-data subsystem: transaction tables in SQLite, cross-account reconciliation, categorisation, per-row source citations |
 | Messenger screenshots OCR'd as flat text, no speaker/message attribution | Screenshots become load-bearing evidence (who-said-what disputes) | Message-boundary parsing + speaker/timestamp fields on extracted messages |
 | Privilege = per-source `privileged: bool` in workspace-config.yaml **plus** path-segment convention (`…/privileged/…`); still one binary flag at retrieval | Multi-workspace share-by-reference; purpose-scoped visibility | Per-collection privilege/confidentiality policy evaluated on every query path |
-| ~~`config.yaml → privilege.privileged_folders` held real folder names~~ DONE 2026-07-12 (filesystem convention). **Extended 2026-07-13**: registry `sources[].privileged` is the preferred explicit signal; path convention remains fallback. Platform config still has zero case folder names. | — | — |
-| ~~Evidence rows keyed by filesystem `source_path`~~ DONE 2026-07-13: pathless identity `(workspace_id, source_id, sha256)` + regenerable `source_blob_index` (docs/specs/source-blob-index.md, workspace-config.md) | — | — |
+| ~~`config.yaml → privilege.privileged_folders` held real folder names~~ DONE 2026-07-12 (filesystem convention). **Extended 2026-07-13**: registry `collections[].privileged` (v2; was `sources[].privileged` in v1) is the preferred explicit signal; path convention remains fallback. Platform config still has zero case folder names. | — | — |
+| ~~Evidence rows keyed by filesystem `source_path`~~ DONE 2026-07-13: pathless identity; custody key evolved to **`(source_id, sha256)`** (collection-scoped; workspace dropped from uniqueness in Phase A) + regenerable `source_blob_index` (docs/specs/source-blob-index.md, schema-items-membership.md) | — | — |
 | ~~Active matter / document folders in platform config.yaml~~ DONE 2026-07-13: `workspaces/workspace-config.yaml` registry | — | — |
 | ~~Committed platform files carry case content~~ DONE 2026-07-12 (Phase 1d): platform docs scrubbed to engine-only; case content lives under gitignored `workspaces/`; DoD grep clean incl. code comments and test fixtures (5 leaks found there by the grep itself) | — | — |
 | ~~STATUS.md is one mixed session log~~ DONE 2026-07-12: engine changelog (docs/STATUS.md) vs private workspace journal; pre-split history moved verbatim to the journal | — | — |
@@ -312,21 +315,24 @@ capability only when a real workspace demands it, never speculatively.
     over tracked files returns nothing (spec:
     docs/specs/instruction-layer-split.md). **PHASE 1 COMPLETE.**
 
-**Currently**: Phase 2 scaled down and shipped 2026-07-13 (single
-workspace user-data root — see below). **Collections + multi-workspace
-mounts (schema v2)** is DESIGN LOCKED (`docs/specs/workspace-config-v2.md`)
-but not implemented — next engine slice when scheduled. Visual retrieval
-remains PLANNED (`docs/specs/visual-retrieval.md`).
-- **Phase 2 — single workspace user-data root (COMPLETE 2026-07-13,
-  scaled down from multi-workspace).** Goal simplified: all user/case
-  data for the active matter lives under `workspaces/<name>/` so
-  gitignore is one line. Evidence is `corpora/` (was repo-root
-  `ingestion-sources/`); derived data is `output/`; eval/chronology/
-  journal stay co-located. Config: `INGESTION_SOURCES` and `OUTPUT_DIR`
-  derive from `workspace.dir`. Spec: docs/specs/workspace-user-data.md.
-  **Deferred** (old Phase 2 ambition): N workspaces, corpora shared by
-  reference, purpose-scoped visibility — revisit when a second real
-  matter (e.g. duplex-build) needs isolation without a second clone.
+**Currently**: Phase 2 user-data root + **collections/mounts v2** +
+schema Phase A are SHIPPED (2026-07-13). Layout: `workspaces/corpora/`,
+`workspaces/state/` (incl. per-collection cache), matter folders
+md/eval only; one DB; mount pre-filter. **Next engine slices when
+scheduled:** schema Phase B (items rename), visual-channel smoke
+(`docs/specs/visual-retrieval.md`), Phase 3 structured data when a
+finance workspace forces it. Prefer **using** mounts (e.g. second
+matter / personal-finance) over speculative rename work.
+- **Phase 2 — single workspace user-data root (COMPLETE 2026-07-13),
+  then multi-collection mounts (COMPLETE 2026-07-13).** First slice:
+  all user data under `workspaces/` (gitignore one line); evidence
+  `corpora/`, derived under matter `output/` (later renamed `state/`).
+  Spec: docs/specs/workspace-user-data.md. **Second slice (v2):**
+  global `collections[]`, workspace mounts, one shared DB, path
+  hygiene (`corpora/` + `state/`), per-collection
+  `state/cache/<collection_id>/`. Spec:
+  docs/specs/workspace-config-v2.md. Purpose-scoped visibility beyond
+  mounts+privilege still deferred.
 - **Phase 3 — structured-data subsystem.** Forcing case: personal
   finance / ATO returns (double-serving family-law property
   settlement). Transaction extraction from statements into SQLite

@@ -233,10 +233,14 @@ preserves the engine-relevant milestones.
   retrieval + agent answer workflow still works after the identity
   migration; case findings themselves stay in the workspace journal.
 
-## 2026-07-13 — collections + workspaces v2 (**LOADER + MOUNTS SHIPPED**)
+## 2026-07-13 — collections + workspaces v2 (**SHIPPED**)
 
 Canonical design: **`docs/specs/workspace-config-v2.md`**  
 Example: **`docs/specs/workspace-config-v2.example.yaml`**
+
+Commits (engine): `872e22a` Phase A → `840d40b` loader+mounts →
+`6fde016` corpora+state paths → `2b6f224` / `b9e62d5` per-collection
+cache.
 
 **Shipped:**
 - Dual-read loader: schema_version **1** and **2** (`workspace_config.py`)
@@ -246,41 +250,51 @@ Example: **`docs/specs/workspace-config-v2.example.yaml`**
   active mounts (`query.allowed_chunk_ids`)
 - blob_index rebuild walks each collection once (v2)
 - **Path hygiene:** evidence at `workspaces/corpora/<collection>/`;
-  engine at `workspaces/state/`; matter folders md/eval only.
-- **Per-collection cache SHIPPED:**
+  engine at `workspaces/state/`; matter folders md/eval only
+- **Per-collection cache:**
   `state/cache/<collection_id>/{text,extracted}/…` for body text and
   binary extracts; legacy flat `state/text` and `*_extracted` migrated
-  and emptied. New ingest writes only under `cache/<collection_id>/`.
+  and emptied. New ingest writes only under `cache/<collection_id>/`
 
-## 2026-07-13 — DB schema items + membership (**DESIGN LOCKED**)
+## 2026-07-13 — DB schema items + membership (Phase A **SHIPPED**)
 
-- Separate work item from workspace-config v2: polymorphic **items +
-  memberships** spine on SQLite (not NoSQL; not one sparse mega-table).
-- Spec: **`docs/specs/schema-items-membership.md`**
-  - **Phase A SHIPPED (partial):** UNIQUE `(source_id, sha256)` on
-    `email_files` / `documents`; drop workspace from custody key;
-    `documents.email_id` no longer UNIQUE (multi-membership); document
-    ingest links same-sha under a new source_id without re-extract;
-    blob_index PK `(source_id, sha256)`; `test_schema_phase_a.py`.
-    Query mount filter shipped with v2 loader.
-  - Phase B: rename/unify (`items`, `item_memberships`, item_id FKs)
-  - Phase C: polish (synthetic mid, drop legacy cols)
-- Add-ons (transactions, page_images, agent gated open) hang off item id;
-  not in this migration’s must-ship scope.
+- Design: polymorphic **items + memberships** spine on SQLite (not
+  NoSQL; not list-of-collections column). Spec:
+  **`docs/specs/schema-items-membership.md`**
+- **Phase A SHIPPED** (unblocks v2 without full rename):
+  UNIQUE `(source_id, sha256)` on `email_files` / `documents`; drop
+  workspace from custody uniqueness; `documents.email_id` no longer
+  UNIQUE (multi-membership); document ingest links same-sha under a
+  new source_id without re-extract; blob_index PK `(source_id,
+  sha256)`; `test_schema_phase_a.py`; query mount filter with v2
+- **Phase B open:** rename/unify (`items`, `item_memberships`, item_id
+  FKs) — naming debt; schedule when it blocks new types
+- **Phase C open:** polish (synthetic mid, drop legacy cols)
+- Add-ons (transactions, page_images) hang off stable parent id; not
+  in Phase A scope
+
+## 2026-07-13 — agent docs reconcile (v2 + Phase A)
+
+- After collections v2 + Phase A + path/cache work, several agent-
+  facing docs still said “v2 not implemented” or described v1-only
+  layout (`sources[]`, matter-local `output/`, path identity with
+  `workspace_id`). Reconciled into **AGENTS.md**, **ROADMAP.md**
+  (layout + ledger + “Currently”), **RUNBOOK.md**, **LEARNINGS.md**,
+  **PLAN.md** (layout/identity notes), and spec acceptance checklists
+  (workspace-config-v2, schema-items-membership Phase A).
 
 ## Known open items (engine)
 
-- **workspace-config v2** — loader + mounts + query filter +
-  `corpora/` + `state/` + `state/cache/<collection_id>/` shipped.
-- **schema items + membership** — Phase A shipped; Phase B/C open
-  (`docs/specs/schema-items-membership.md`).
+- **schema items + membership** — Phase B/C open
+  (`docs/specs/schema-items-membership.md`). Prefer using mounts /
+  second matter before speculative rename.
 - Visual (page-image) retrieval channel: designed, not started —
-  docs/specs/visual-retrieval.md. First step is a smoke test of the
-  cross-modal alignment claim it depends on.
+  docs/specs/visual-retrieval.md. First step: smoke-test the
+  cross-modal alignment claim.
+- Optional: nest remaining shared `ocr_review` under
+  `state/cache/<collection_id>/` if not already per-collection.
 - Per-query **rerank inference** still ~several–10s even when models
-  are warm (load amortized by daemon/eval); interactive sub-second UX
-  would need different tradeoffs (e.g. optional no-rerank path).
-- PLAN.md still carries some pre-pathless / pre-v2 schema wording —
-  treat AGENTS + specs + STATUS as authoritative; PLAN refresh is
-  cleanup, not a design change.
+  are warm; interactive sub-second UX needs different tradeoffs.
+- Phase 3 structured-data (transactions) when a finance workspace
+  forces it — not speculative.
 

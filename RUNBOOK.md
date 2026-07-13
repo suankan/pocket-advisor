@@ -37,52 +37,65 @@ full schema and comments. Unknown keys abort loudly at import time
   embed` acknowledges the change (updates `vectors.meta.json`) so the
   warning fires once per actual change, not on every subsequent run;
   `query.py`'s warning persists until that acknowledgment happens.
-- **safety-semantics** (`privilege.*`): privilege is a FILESYSTEM
-  CONVENTION — nest under `workspaces/<name>/corpora/privileged/`
-  (any depth) to make content privileged (AGENTS.md hard rule 2). The
-  auto-privilege flag only ratchets 0->1. `document_folders` (paths
-  relative to `corpora/` scanned for standalone non-.eml docs) is
-  still a config key.
+- **safety-semantics** (`privilege.*`): privilege is (1) registry
+  `collections[].privileged: true` and/or (2) a path segment literally
+  named `privileged/` under a collection root (AGENTS.md hard rule 2).
+  Platform `config.yaml` never carries real folder names. The
+  auto-privilege flag only ratchets 0→1.
 
-## User-data layout + workspace-config
+## User-data layout + workspace-config (v2)
 
 Platform `config.yaml` only sets `workspaces.dir` (default `workspaces`).
-**Active matter and evidence sources** are declared in the gitignored
-user registry (docs/specs/workspace-config.md):
+**Collections, mounts, and active matter** are declared in the
+gitignored registry (docs/specs/workspace-config-v2.md):
 
 ```
-workspaces/workspace-config.yaml   # all workspaces, active: true, sources[]
-workspaces/<path>/
-  output/              # DB, vectors, text, logs, daemon socket
-  WORKSPACE.md, au-family-law.md, chronology, eval/, …
-  … evidence folders listed in sources[].path (any layout you choose)
+workspaces/
+  workspace-config.yaml     # schema_version: 2; collections[] + workspaces[]
+  corpora/<collection_id>/  # READ-ONLY evidence (never write/rename/delete)
+  state/                    # ONE regenerable engine store
+    pocket_advisor.db
+    vectors/
+    logs/                   # review_queue.csv, ingest logs
+    query_daemon.sock
+    cache/<collection_id>/{text,extracted}/
+  <workspace_id>/           # matter layer only
+    WORKSPACE.md, skills, chronology, journal, eval/, …
 ```
 
-Schema reference (committed): `docs/specs/workspace-config.example.yaml`.
-Copy to `workspaces/workspace-config.yaml` and edit. Each source has
-`id`, `description`, `path` (relative to that workspace), `kind`
-(`email_eml`|`documents`), `privileged` (bool).
+Schema reference (committed):
+`docs/specs/workspace-config-v2.example.yaml` (v1 example still at
+`workspace-config.example.yaml`; loader dual-reads both). Each
+**collection** has `id`, `title`, `description`, `path` (relative to
+`workspaces.dir`, e.g. `corpora/…`), `privileged` (bool). No `kind` /
+`retrieval` — ingest dispatches per file by extension. Each
+**workspace** mounts a list of collection ids; query only sees mounted
+collections.
+
 ## Adding new emails
 
-1. Export from Thunderbird as .eml into the matching **source root**
-   declared in `workspaces/workspace-config.yaml` (`kind: email_eml`).
-   New correspondent folder inside that root is fine. For privilege:
-   set `privileged: true` on the source **and/or** nest under a
+1. Export from Thunderbird as `.eml` into the matching **collection
+   root** under `workspaces/corpora/…` (path in workspace-config). New
+   correspondent folder inside that root is fine. For privilege: set
+   `privileged: true` on the collection **and/or** nest under a
    directory segment literally named `privileged/`.
 2. `venv/bin/python scripts/ingest.py all`
-3. Check `workspaces/<name>/output/logs/review_queue.csv` for flags.
-4. After bulk moves inside a source: `scripts/blob_index.py rebuild`.
+3. Check `workspaces/state/logs/review_queue.csv` for flags.
+4. After bulk moves inside a collection: `scripts/blob_index.py rebuild`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
-1. Drop files under a source with `kind: documents` in the registry
-   (path relative to the workspace). Privileged: source
-   `privileged: true` and/or nest under `privileged/`.
+1. Drop files under a collection root in `workspaces/corpora/…`
+   (privileged: collection `privileged: true` and/or nest under
+   `privileged/`).
 2. `venv/bin/python scripts/ingest.py all` (or `documents` stage).
 3. Check review_queue for weak dates / duplicates / unsupported types.
 
 Document dates are extracted from the text; query results show
-`date_source`. Extracted text: `workspaces/<name>/output/text/documents/`.
+`date_source`. Extracted text lives under
+`workspaces/state/cache/<collection_id>/text/…` (path from query/DB —
+do not bulk-browse `state/cache/` as a library).
+
 ## Querying
 
 ```bash
@@ -92,9 +105,10 @@ venv/bin/python scripts/query.py "question text" \
     [--no-daemon] [--require-daemon]
 ```
 
-Privileged emails excluded unless `--include-privileged`. Full bodies:
-`workspaces/<name>/output/text/emails/<id>.txt`; attachments under
-`…/output/text/attachments/`.
+Privileged items excluded unless `--include-privileged`. Visibility is
+also limited to **collections mounted by the active workspace**. Full
+bodies: paths from query/DB under
+`workspaces/state/cache/<collection_id>/text/…`.
 
 ### Session-warm query daemon (recommended for multi-query work)
 
@@ -114,8 +128,8 @@ venv/bin/python scripts/query_daemon.py status
 venv/bin/python scripts/query_daemon.py stop
 ```
 
-Socket: `workspaces/<name>/output/query_daemon.sock` (mode 0600, local
-only). Restart after `ingest.py embed` or model config changes. See
+Socket: `workspaces/state/query_daemon.sock` (mode 0600, local only).
+Restart after `ingest.py embed` or model config changes. See
 `docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
 `query.daemon_idle_sec`.
 ## Choosing the embedding backend (Jina MLX vs bge-m3 llama.cpp vs bge-m3 MLX)
@@ -171,21 +185,20 @@ First use of `jina_mlx` downloads the model (~1.1GB, one-time). See
 
 ## Blob path cache (sha256 → file, regenerable)
 
-Evidence identity is moving toward `(workspace_id, source_id, sha256)`
-with **no path as identity**. A derived SQLite table maps hash → path
-for fast open after users shuffle files inside a source:
+Custody identity is **`(source_id, sha256)`** (collection-scoped;
+`source_id` ≈ collection id) — **no path as identity**. A derived
+SQLite table maps hash → path for fast open after users shuffle files
+inside a collection:
 
 ```bash
 venv/bin/python scripts/blob_index.py list-sources
 venv/bin/python scripts/blob_index.py rebuild
-venv/bin/python scripts/blob_index.py lookup -w family-law -s jane@example.com \
-  --sha256 <hex>
+venv/bin/python scripts/blob_index.py lookup -s <collection_id> --sha256 <hex>
 ```
 
-Safe to rebuild anytime (docs/specs/source-blob-index.md). Evidence
-rows are pathless — identity is `(workspace_id, source_id, sha256)`;
-this table is the regenerable path cache only. Rebuild after bulk
-moves inside a source tree.
+Safe to rebuild anytime (docs/specs/source-blob-index.md). This table
+is the regenerable path cache only. Rebuild after bulk moves inside a
+collection tree.
 
 ## Measuring retrieval quality (eval harness)
 
@@ -223,14 +236,16 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 
 ## Rebuilding from scratch
 
-Workspace `output/` is fully derived: delete it, run `ingest.py all` (full
-re-embed of the corpus takes a few minutes on Apple Silicon — exact
-time scales with corpus size; see workspace-config source descriptions and
-the active workspace's WORKSPACE.md / eval notes for
-this workspace's counts). Originals and `models/` are untouched.
+`workspaces/state/` is fully derived: delete it (or wipe DB+vectors+
+cache), run `ingest.py all` (full re-embed takes minutes on Apple
+Silicon — scales with corpus size; see collection descriptions and the
+active workspace's WORKSPACE.md / eval notes). Originals under
+`workspaces/corpora/` and `models/` are untouched. **Never** delete
+`corpora/` as a rebuild shortcut.
 
 ## Review points
 
-- `workspaces/<name>/output/logs/review_queue.csv` — parse/custody flags
-- `workspaces/<name>/output/ocr_review/` — low-confidence OCR images
+- `workspaces/state/logs/review_queue.csv` — parse/custody flags
+- `workspaces/state/` OCR review images (per-collection cache or shared
+  `ocr_review/` — open via DB/query, not free browse)
 - `ingestion_log` table — structured log of every issue

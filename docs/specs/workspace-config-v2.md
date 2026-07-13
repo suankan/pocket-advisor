@@ -1,15 +1,13 @@
 # Spec: collections + workspaces registry (schema v2)
 
-Status: **DESIGN LOCKED** 2026-07-13; **loader + mount filter SHIPPED**
-(partial). Dual-read v1/v2 in `scripts/workspace_config.py`; query
-pre-filter by mounted `source_id`s. Full path layout (`workspaces/state/`,
-top-level `corpora/`) not required yet — live may use transitional
-paths under `family-law/corpora/…`.
+Status: **SHIPPED** 2026-07-13 (loader, mounts, path layout,
+per-collection cache). Dual-read v1/v2 in `scripts/workspace_config.py`;
+query pre-filter by mounted `source_id`s; evidence under
+`workspaces/corpora/`; engine under `workspaces/state/` including
+`state/cache/<collection_id>/{text,extracted}/`.
 
-Illustrative instance (gitignored, may drift):  
-`workspaces/workspace-config-new.yaml`  
-Committed schema sketch:  
-`docs/specs/workspace-config-v2.example.yaml`
+Live instance (gitignored): `workspaces/workspace-config.yaml`  
+Committed schema sketch: `docs/specs/workspace-config-v2.example.yaml`
 
 Related: pathless identity (`source-blob-index.md`), visual channel
 (`visual-retrieval.md`), user-data root (`workspace-user-data.md`),
@@ -75,8 +73,7 @@ copy-by-folder. We need:
     WORKSPACE.md, skills, journal, chronology, LEARNINGS, eval/
 ```
 
-Live transitional: evidence may still sit under `family-law/corpora/…`
-and engine under `family-law/output/` until a migrate pass.
+Live layout matches the target above (migrated 2026-07-13).
 
 ---
 

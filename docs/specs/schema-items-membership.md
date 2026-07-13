@@ -160,11 +160,11 @@ Do **not** require full rename before collections v2 can ship.
 - [x] Treat `source_id` as collection identity in code/docs (column name kept)  
 - [x] Drop `workspace_id` from membership uniqueness → **UNIQUE (source_id, sha256)**  
 - [x] Document multi-membership: on global document sha hit, **link membership** if missing (`link_existing_document`)  
-- [ ] Query: allowed `email_id`s from `email_files` ∪ `documents` where `source_id` ∈ mounts (**deferred to workspace-config v2**)  
+- [x] Query: allowed `email_id`s from `email_files` ∪ `documents` where `source_id` ∈ mounts (shipped with workspace-config v2)  
 - [x] blob_index PK → `(source_id, sha256)`; lookup by source_id + sha  
 - [x] Tests: `scripts/test_schema_phase_a.py`; integrity after migrate  
 
-**Exit (partial):** collection-scoped custody + multi-membership ready; mount **filter** ships with v2.
+**Exit:** Phase A complete — collection-scoped custody + multi-membership + mount filter.
 
 ### Phase B — Naming + polymorphic parent (schema cleanup)
 
@@ -206,7 +206,7 @@ Do **not** require full rename before collections v2 can ship.
 - [x] Dup-content multi-membership policy recorded  
 - [x] Phased A/B/C checklist so v2 is not blocked on full rename  
 - [x] Later use cases attach via FK to item id  
-- [ ] Phase A implemented  
+- [x] Phase A implemented  
 - [ ] Phase B implemented  
 
-**Schedule:** separate engine slice(s); prefer Phase A with or right after workspace-config v2 identity work; Phase B when naming debt hurts more than mount delivery.  
+**Schedule:** Phase A shipped with/after v2 identity (2026-07-13). Phase B when naming debt hurts more than mount delivery.  

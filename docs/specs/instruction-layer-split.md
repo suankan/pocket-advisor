@@ -59,7 +59,7 @@ agent to discover `workspaces/*/WORKSPACE.md` and read before case work.
 | `docs/ROADMAP.md` | Final-pass scrub check. |
 | `RUNBOOK.md` | Genericize the one case-flavored example path. |
 | `chronology.md`, `eval/` | Move into workspace dir. |
-| `config.py` / `config.yaml(.example)` | New `workspace.dir` key; `EVAL_*` derived from it (recomputed after overlay, like model paths). Platform default `workspaces/default`; real name only in gitignored config.yaml. |
+| `config.py` / `config.yaml` | Platform knobs only (committed). Matter selection is workspace-config registry, not config.yaml. |
 | `.gitignore` | `workspaces/` added; root `eval/`+`chronology.md` entries replaced. |
 
 ## Verification

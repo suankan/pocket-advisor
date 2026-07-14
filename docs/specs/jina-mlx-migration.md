@@ -148,7 +148,7 @@ Followed exactly as specced in golden-dreaming-umbrella.md:
       0.615->0.654, hit@15 0.654->0.808** — every aggregate improved
       vs baseline, none regressed. See Measured effect below for the
       combined-vs-best-isolated-run sanity check.
-- [x] Docs (`RUNBOOK.md`, `config.yaml.example`, `docs/ROADMAP.md`
+- [x] Docs (`RUNBOOK.md`, `config.yaml`, `docs/ROADMAP.md`
       ledger) updated; combined jina_mlx stack made the code-level
       default in `scripts/config.py` (`EMBED_BACKEND`/`RERANK_BACKEND`
       both `"jina_mlx"`).

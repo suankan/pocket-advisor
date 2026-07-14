@@ -20,7 +20,7 @@ workspaces/<name>/                 # entire user-data root (gitignored)
   chronology.md, journal.md, LEARNINGS.md, eval/
 ```
 
-Platform code (`scripts/`, `docs/`, `config.yaml.example`) stays
+Platform code (`scripts/`, `docs/`, committed `config.yaml`) stays
 case-free at the repo root. Domain skills live **in the workspace**
 (not a committed platform `skills/` tree). **One gitignore line**
 covers user data: `workspaces/`.

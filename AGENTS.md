@@ -137,7 +137,7 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
   BEFORE changing pipeline code, and APPEND when you discover a new
   one. Case-specific lessons go to the workspace's own LEARNINGS.md
 - `RUNBOOK.md` — setup + how to run each stage
-- `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
+- `config.yaml` (committed; schema documented in-file) —
   `workspaces.dir` + engine knobs only (models, query, ingestion).
   **Not** privilege lists or document-folder names — those are registry
   / path-convention only (hard rule 2)

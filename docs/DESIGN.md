@@ -181,10 +181,11 @@ cache). Details: **RUNBOOK** + **specs** + **LEARNINGS**.
 **Models (MLX-only, Apple Silicon):** three HF repos under `models:` —
 `mlx_model_embed_text`, `mlx_model_embed_omni`, `mlx_model_rerank`.
 Matched text/omni pairs only (nano↔nano 768-d or small↔small 1024-d).
-Code default in `config.py` is nano; live `config.yaml` may select
-small. Universal loader: `scripts/mlx_model_loader.py`. No GGUF /
-llama.cpp. Warm multi-query: [query-daemon.md](specs/query-daemon.md);
-eval: [eval-harness.md](specs/eval-harness.md),
+Code defaults in `config.py` are nano; committed `config.yaml` may
+select small (matched pair). Universal loader:
+`scripts/mlx_model_loader.py`. No GGUF / llama.cpp. Warm multi-query:
+[query-daemon.md](specs/query-daemon.md); eval:
+[eval-harness.md](specs/eval-harness.md),
 [warm-eval.md](specs/warm-eval.md).
 
 ### Privilege

@@ -21,7 +21,7 @@ validation and mismatch warnings extending the fingerprint mechanism
 `config.yaml` is platform-layer only: no case-identifying folder names
 or privilege lists. Evidence collections + `privileged` flags live in
 the gitignored `workspaces/workspace-config.yaml` registry.
-`config.yaml.example` (committed) documents the platform schema.
+`config.yaml` (committed) documents the platform schema.
 
 ## Schema (mapped against actual current config.py values)
 
@@ -86,17 +86,13 @@ detection, not remediation.
 
 ## Implementation steps
 
-1. `config.yaml.example` (committed) + real `config.yaml` (gitignored,
-   this workspace's actual values) per schema above.
-2. `.gitignore`: add `config.yaml` (keep `config.yaml.example` tracked).
+1. Committed platform `config.yaml` (schema + comments in-file; no
+   separate `.example` file).
+2. `config.yaml` is tracked in git (not gitignored) — platform-only,
+   zero case content.
 3. `config.py`: after existing defaults, load `config.yaml` if present;
-   overlay onto module attributes (list->set where the default is a
-   set); fail loudly (`SystemExit`, listing every offending key) on any
-   yaml key not in a known-keys map — typo protection matters when one
-   key governs privilege. Recompute `EMBED_MODEL_PATH`/
-   `RERANK_MODEL_PATH` after overlay. `PRIVILEGED_FOLDERS`/
-   `DOCUMENT_FOLDERS` default to empty sets (no longer hardcoded case
-   values) with a clear comment.
+   overlay onto module attributes; fail loudly (`SystemExit`, listing
+   every offending key) on any yaml key not in a known-keys map.
 4. `embedding_backends.py`: extend `current_fingerprint()`/
    `meta_fingerprint()` to include `chunk_chars`/`chunk_overlap`
    alongside backend/model/dim.
@@ -114,9 +110,8 @@ detection, not remediation.
 
 ## Acceptance criteria
 
-- [x] Real `config.yaml` created with this workspace's actual current
-      values; not git-tracked (confirmed via `git status`).
-- [x] `config.yaml.example` committed, generic placeholder values only.
+- [x] Platform `config.yaml` committed with documented schema (no
+      case-identifying values); not gitignored.
 - [x] Unknown key in `config.yaml` aborts with the offending key listed
       (verified with a deliberate typo).
 - [x] Missing `config.yaml` falls back to code defaults unchanged
@@ -156,7 +151,7 @@ detection, not remediation.
 venv/bin/python scripts/test_config.py
 venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-configyaml
 venv/bin/python scripts/eval.py compare eval/results/*post-translit*.json eval/results/*post-configyaml*.json
-git status --short   # config.yaml must NOT appear; config.yaml.example must
+git status --short   # config.yaml is tracked platform config
 ```
 
 ## Addendum 2026-07-12: `privileged_folders` key removed, replaced by a filesystem convention

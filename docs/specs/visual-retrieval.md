@@ -251,7 +251,7 @@ get tagged `flags: [visual]`.
 ## Files touched (planned)
 
 - `scripts/db.py` — `page_images` table
-- `scripts/config.py`, `config.yaml.example` — new knobs, `YAML_KEYS`
+- `scripts/config.py`, `config.yaml` — new knobs, `YAML_KEYS`
 - `scripts/extraction.py` — `extract_page_text()`
 - `scripts/rasterize_pages.py` — new
 - `scripts/image_embedding_backends.py` — new

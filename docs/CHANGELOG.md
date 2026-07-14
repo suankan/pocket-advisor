@@ -19,6 +19,12 @@ map; open work is `R-nn`.
 
 ## 2026-07-14
 
+### Committed platform `config.yaml` (no `.example`) · SHIPPED
+
+`config.yaml` is tracked (not gitignored): platform knobs only, full
+schema comments in-file. `config.yaml.example` removed. Case/user data
+remains under gitignored `workspaces/`.
+
 ### Platform config + ingest embed CLI cleanup · SHIPPED
 
 - **Models:** MLX-only via `mlx_model_loader.py`; knobs

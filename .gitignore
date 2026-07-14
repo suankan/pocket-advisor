@@ -2,9 +2,8 @@
 # journal, eval). Platform code stays case-free. See
 # docs/specs/workspace-user-data.md.
 workspaces/
-# Local overlay (workspace.dir etc.); schema in config.yaml.example
-config.yaml
 # Tool-specific dirs — local convenience only (ROADMAP tenet 11)
+# Platform config.yaml is committed (no case data).
 .claude/
 .cursor/
 # Local environment / weights

@@ -7,7 +7,7 @@ brew install python@3.12 tesseract tesseract-lang poppler
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
 venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
 venv/bin/python scripts/db.py init
-cp config.yaml.example config.yaml   # then edit models.* / workspaces.dir
+# config.yaml is committed platform config — edit models / knobs as needed
 venv/bin/python scripts/fetch_model.py   # downloads text + omni + rerank MLX
                                           # repos from HuggingFace (one-time,
                                           # inbound weights only)
@@ -15,10 +15,9 @@ venv/bin/python scripts/fetch_model.py   # downloads text + omni + rerank MLX
 
 ## Configuring pocket-advisor
 
-`config.yaml` (gitignored by default, though it carries no
-case-identifying values — see privilege convention below) overlays
-onto `scripts/config.py`'s defaults. See `config.yaml.example` for the
-full schema and comments. Unknown keys abort loudly at import time
+Committed `config.yaml` (platform layer, no case content) overlays
+onto `scripts/config.py`'s defaults. Schema and comments live in
+`config.yaml` itself. Unknown keys abort loudly at import time
 (typo protection). Three classes of knob:
 
 - **free** (`query.*`, `ingestion.ocr.*`, `ingestion.embed_text` /

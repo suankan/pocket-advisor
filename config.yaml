@@ -1,29 +1,24 @@
-# Platform-layer configuration — fully agnostic of any user/workspace
-# content (docs/DESIGN.md tenet 10). Copy this to config.yaml
-# (gitignored, but no longer required to be — it carries no
-# case-identifying values by design; see privilege convention below)
-# and fill in real values. Every key is optional; anything omitted
-# falls back to the default in scripts/config.py. Unknown keys abort
-# loudly (typo protection).
+# Platform-layer configuration — no user/workspace/case content
+# (docs/DESIGN.md tenet 10). Committed with the repo. Every key is
+# optional; omitted keys fall back to scripts/config.py. Unknown keys
+# abort loudly (typo protection).
 #
 # Three-class knob discipline (docs/DESIGN.md):
-#   - query / ingestion.ocr / ingestion.thread_fallback_window_days /
-#     ingestion.doc_date_header_window_chars: FREE, change anytime.
-#   - ingestion.chunking / models.embed_*: INDEX-INVALIDATING. Model
-#     changes trigger an automatic wipe + full re-embed on next
-#     `ingest.py --embed text`. Chunking changes only WARN — there is no
-#     automated re-chunk pipeline; a chunking mismatch needs manual
-#     attention (see docs/specs/config-yaml.md).
+#   - query / ingestion.ocr / ingestion.thread_* / ingestion.doc_date_* /
+#     ingestion.embed_text|embed_images: FREE, change anytime.
+#   - ingestion.chunking / models.mlx_model_embed_*: INDEX-INVALIDATING.
+#     Model changes wipe + re-embed on next `ingest.py --embed text`
+#     (or --embed images / --embed all). Chunking only WARNs — no
+#     automated re-chunk pipeline (docs/specs/config-yaml.md).
 #   - Privilege is NOT configured here: collections[].privileged in
 #     workspaces/workspace-config.yaml and/or a path segment literally
-#     named privileged/ (AGENTS.md hard rule 2). Platform config never
-#     carries folder names or privilege lists.
+#     named privileged/ (AGENTS.md hard rule 2).
 
 workspaces:
   # Parent directory for all matters (relative to repo root). Active
   # workspace + evidence collections are declared in the gitignored user
   # registry: {dir}/workspace-config.yaml
-  # See docs/specs/workspace-config.md and workspace-config.example.yaml.
+  # See docs/specs/workspace-config-v2.md and workspace-config-v2.example.yaml.
   dir: workspaces
 
 # Optional legacy (ignored when workspace-config.yaml is present):
@@ -53,8 +48,7 @@ query:
   # How many characters of each candidate's (whitespace-collapsed)
   # text are fed to the reranker. Reranker cost scales ~linearly with
   # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
-  # 300 chars) — it's a latency/thoroughness dial, not an accuracy
-  # guarantee either way; see docs/specs/reranker.md.
+  # 300 chars) — latency/thoroughness dial; see docs/specs/reranker.md.
   rerank_text_chars: 600
   # Session-warm query daemon (docs/specs/query-daemon.md): when
   # `query_daemon.py serve` is running, query.py sends searches over a
@@ -70,15 +64,12 @@ ingestion:
   chunking:
     # Target chunk size in characters. Splitting prefers a paragraph
     # break, then any newline, within the last 40% of the target
-    # length, so chunks rarely cut mid-sentence. INDEX-INVALIDATING:
-    # changing this only affects newly-created chunks — existing
-    # chunks keep their original size (no automated re-chunk
-    # pipeline); ingest.py --embed text / query.py will WARN when config no
-    # longer matches what the index was actually built with.
+    # length. INDEX-INVALIDATING for *new* chunks only — existing
+    # chunks keep original size (no automated re-chunk); ingest /
+    # query WARN when config no longer matches vectors.meta.json.
     chars: 1500
-    # Character overlap between adjacent chunks of the same source
-    # document, so content near a chunk boundary isn't only ever
-    # visible in one chunk. Same INDEX-INVALIDATING caveat as above.
+    # Overlap between adjacent chunks of the same source. Same
+    # INDEX-INVALIDATING caveat as chars.
     overlap: 200
   ocr:
     # Tesseract language flags, e.g. "eng+rus" for a bilingual corpus.
@@ -86,41 +77,28 @@ ingestion:
     # into plausible-looking garbage — no error, just wrong text.
     langs: eng+rus
     # Mean OCR word-confidence (0-100) below which extracted text is
-    # flagged ocr_flagged_low_conf and copied to output/ocr_review/ for
-    # human verification against the original image.
+    # flagged ocr_flagged_low_conf and copied for human review.
     low_confidence: 60.0
-    # DPI used when rasterizing scanned PDF pages before OCR. Higher
-    # improves OCR accuracy on small text at the cost of processing
-    # time and disk space for the intermediate images.
+    # DPI when rasterizing scanned PDF pages before OCR.
     pdf_dpi: 300
     # Image attachments at or below this size (bytes) are treated as
-    # signature/logo images and skipped entirely (not OCR'd, not
-    # indexed) rather than wasting OCR time on non-content images.
+    # signature/logo and skipped (not OCR'd / not indexed).
     small_image_bytes: 20000
-    # If pdftotext's native (non-OCR) extraction yields fewer than
-    # this many non-whitespace characters, the PDF is treated as a
-    # scanned image and OCR'd instead of trusting the (near-empty)
-    # native text layer.
+    # If pdftotext native extraction yields fewer than this many
+    # non-whitespace chars, treat PDF as scanned and OCR instead.
     pdf_native_text_min_chars: 40
-  # For emails whose headers lack In-Reply-To/References (so they
-  # can't be threaded via Message-ID chains), the fallback heuristic
-  # links emails sharing a normalized subject and at least one
-  # participant within this many days of each other.
+  # Fallback threading when headers lack In-Reply-To/References:
+  # same normalized subject + ≥1 shared participant within this window.
   thread_fallback_window_days: 60
-  # How many characters of a standalone document's extracted text are
-  # searched for a header/letterhead date (statement period, pay date,
-  # dateline) before falling back to a full-text scan, then filename,
-  # then file mtime. Generous by default because pdftotext -layout
-  # pads lines with long space runs, pushing real header content
-  # further into the character count than it looks.
+  # Header/letterhead window (chars) for standalone document dates
+  # before full-text / filename / mtime fallback.
   doc_date_header_window_chars: 6000
   # Channels run by `ingest.py --embed all` and by stage `all`.
   # Explicit `--embed text` / `--embed images` force that channel
-  # regardless of these flags. FREE knobs (not index-invalidating by
-  # themselves — only the model repo / actual embed is).
+  # regardless of these flags. FREE knobs.
   embed_text: true
   # Page-image third RRF leg (omni MLX). Also gates query-time image
-  # fusion and omni model fetch. Enable then: ingest.py --embed images
+  # fusion and omni model fetch. Then: ingest.py --embed images
   # (or --embed all).
   embed_images: true
 
@@ -130,8 +108,13 @@ models:
   #   text-small-mlx ↔ omni-small-mlx  (1024-d)
   # INDEX-INVALIDATING: changing text/omni repo wipes + re-embeds on
   # next `ingest.py --embed text` / `--embed images`. Reranker is not.
-  # Requires: pip install -r scripts/requirements-mlx.txt
+  # Requires: pip install -r scripts/requirements.txt (includes MLX).
   # Fetch once: venv/bin/python scripts/fetch_model.py
-  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
-  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx
+  #
+  # Nano (smaller/faster) — code defaults in scripts/config.py:
+  # mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
+  # mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx
+  # Small (higher quality, larger):
+  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-small-mlx
+  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-small-mlx
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx

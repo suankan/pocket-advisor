@@ -17,7 +17,7 @@ workspace-user-data.md (historical path migrate).
 
 | File | Git | Role |
 |---|---|---|
-| `./config.yaml` | gitignored | `workspaces.dir`, models, query, OCR, … |
+| `./config.yaml` | committed | `workspaces.dir`, models, query, OCR, … |
 | `{dir}/workspace-config.yaml` | gitignored | workspaces + sources + `active` |
 | `docs/specs/workspace-config.example.yaml` | committed | schema reference |
 

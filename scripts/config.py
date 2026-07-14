@@ -2,10 +2,10 @@
 
 All scripts import from here. Defaults below are code-level invariants
 (engine-generic). User-tunable, workspace-specific values load from
-config.yaml (gitignored — carries privilege folder names, case
-content) and overlay onto these defaults at the bottom of this file;
-see config.yaml.example and docs/specs/config-yaml.md for the schema
-and the three-class knob discipline (free / index-invalidating /
+committed config.yaml (platform knobs only — no case content) and
+overlay onto these defaults at the bottom of this file; see
+config.yaml and docs/specs/config-yaml.md for the schema and the
+three-class knob discipline (free / index-invalidating /
 safety-semantics).
 """
 from pathlib import Path
@@ -280,7 +280,7 @@ def load_yaml_overlay(path):
         raise SystemExit(
             "config.yaml: unknown key(s), not applied:\n" +
             "\n".join(f"  - {k}" for k in unknown) +
-            f"\nValid keys: see {path.parent / 'config.yaml.example'}")
+            f"\nValid keys: see {path.parent / 'config.yaml'}")
     globals().update(applied)
     # Image dim always tracks text dim (shared vector space).
     globals()["IMG_EMBED_DIM"] = globals()["EMBED_DIM"]

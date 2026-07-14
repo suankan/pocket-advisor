@@ -160,7 +160,9 @@ Do **not** require full rename before collections v2 can ship.
 - [x] Document multi-membership: on global document sha hit, **link membership** if missing (`link_existing_document`)  
 - [x] Query: allowed `email_id`s from `email_files` ∪ `documents` where `source_id` ∈ mounts (shipped with workspace-config v2)  
 - [x] blob_index PK → `(source_id, sha256)`; lookup by source_id + sha  
-- [x] Tests: `scripts/test_schema_phase_a.py`; integrity after migrate  
+- [x] Tests: `test_schema_phase_a.py` (retired 2026-07-14, asserted on the
+  pre-Schema-B `documents`/`emails` tables that Phase B removed;
+  superseded by `scripts/test_schema_items.py`); integrity after migrate  
 
 **Exit:** Phase A complete — collection-scoped custody + multi-membership + mount filter.
 

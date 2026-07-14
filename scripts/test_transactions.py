@@ -18,7 +18,7 @@ def main():
     try:
         config.PROJECT_ROOT = tmp
         config.WORKSPACES_DIR = tmp / "workspaces"
-        config.STATE_DIR = tmp / "workspaces" / "state"
+        config.STATE_DIR = tmp / "workspaces" / ".state"
         config.OUTPUT_DIR = config.STATE_DIR
         config.DB_PATH = config.STATE_DIR / "t.db"
         config.STATE_DIR.mkdir(parents=True)

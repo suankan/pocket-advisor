@@ -142,24 +142,27 @@ def main():
     check("fresh run: 0 errors/alarms",
           stats["errors"] == 0 and stats["custody_alarm"] == 0, str(stats))
 
-    row = q1("SELECT d.doc_date, d.doc_date_source, d.doc_date_detail, e.date_utc,"
-             " e.source_kind, e.subject FROM documents d JOIN emails e"
-             " ON e.id=d.email_id WHERE d.filename='statement.xlsx'")
+    row = q1("SELECT f.doc_date, f.doc_date_source, f.doc_date_detail, i.date_utc,"
+             " i.item_kind, i.subject FROM item_file_meta f JOIN items i"
+             " ON i.id=f.item_id JOIN item_memberships m ON m.item_id=i.id"
+             " WHERE m.filename='statement.xlsx'")
     check("statement date extracted",
           row["doc_date"] == "2026-04-15"
           and row["doc_date_source"] == "extracted_text"
           and row["doc_date_detail"] == "keyword:statement date", dict(row).__repr__())
-    check("emails row: full ISO timestamp + source_kind",
+    check("items row: full ISO timestamp + item_kind",
           row["date_utc"] == "2026-04-15T00:00:00+00:00"
-          and row["source_kind"] == "document", dict(row).__repr__())
+          and row["item_kind"] == "file", dict(row).__repr__())
 
-    row = q1("SELECT doc_date, doc_date_detail FROM documents"
-             " WHERE filename='letter_ru.xlsx'")
+    row = q1("SELECT f.doc_date, f.doc_date_detail FROM item_file_meta f"
+             " JOIN item_memberships m ON m.item_id=f.item_id"
+             " WHERE m.filename='letter_ru.xlsx'")
     check("russian dateline in nested subfolder",
           row["doc_date"] == "2026-05-18", dict(row).__repr__())
 
-    row = q1("SELECT d.is_skipped, e.body_text_path FROM documents d"
-             " JOIN emails e ON e.id=d.email_id WHERE d.filename='notes.txt'")
+    row = q1("SELECT f.is_skipped, i.body_text_path FROM item_file_meta f"
+             " JOIN items i ON i.id=f.item_id JOIN item_memberships m"
+             " ON m.item_id=i.id WHERE m.filename='notes.txt'")
     check("unsupported: skipped, body_text_path NULL (inert downstream)",
           row["is_skipped"] == 1 and row["body_text_path"] is None, dict(row).__repr__())
 
@@ -175,8 +178,8 @@ def main():
     check("duplicate content not re-indexed",
           stats["new"] == 0 and (stats["skipped"] >= 3 or stats["duplicate_content"] >= 1),
           str(stats))
-    row = q1("SELECT COUNT(*) c FROM documents")
-    check("still 3 documents rows", row["c"] == 3, str(row["c"]))
+    row = q1("SELECT COUNT(*) c FROM item_memberships")
+    check("still 3 item_memberships rows", row["c"] == 3, str(row["c"]))
     (DOCS / "copy_of_statement.xlsx").unlink()
 
     print("== content change is a new blob (pathless; not path custody) ==")
@@ -187,7 +190,7 @@ def main():
           stats["custody_alarm"] == 0, str(stats))
 
     print("== privileged/ folder convention ==")
-    row = q1("SELECT COUNT(*) c FROM emails WHERE source_kind='document'"
+    row = q1("SELECT COUNT(*) c FROM items WHERE item_kind='file'"
              " AND is_privileged=1")
     check("nothing privileged yet ('docs' has no privileged/ ancestor)",
           row["c"] == 0, str(row["c"]))
@@ -200,22 +203,22 @@ def main():
     config.DOCUMENT_FOLDERS = {"docs", "privileged/solicitor-docs"}
     ingest_documents.run()
 
-    row = q1("SELECT e.is_privileged, d.source_folder FROM documents d"
-             " JOIN emails e ON e.id=d.email_id WHERE d.filename='advice.xlsx'")
+    row = q1("SELECT i.is_privileged, m.source_folder FROM item_memberships m"
+             " JOIN items i ON i.id=m.item_id WHERE m.filename='advice.xlsx'")
     check("document under privileged/ is privileged",
           row["is_privileged"] == 1, dict(row).__repr__())
     check("source_folder records source id / folder",
           row["source_folder"] in ("legacy", "solicitor-docs"), dict(row).__repr__())
 
-    row = q1("SELECT COUNT(*) c FROM emails WHERE source_kind='document'"
+    row = q1("SELECT COUNT(*) c FROM items WHERE item_kind='file'"
              " AND is_privileged=1")
     check("only the privileged/ document is flagged", row["c"] == 1, str(row["c"]))
 
     # recompute_privilege rescans every run — idempotent, still ratchets
     # 0->1 only, never flips a real privileged doc back down.
     ingest_documents.run()
-    row = q1("SELECT is_privileged FROM emails e JOIN documents d ON d.email_id=e.id"
-             " WHERE d.filename='advice.xlsx'")
+    row = q1("SELECT i.is_privileged FROM items i JOIN item_memberships m"
+             " ON m.item_id=i.id WHERE m.filename='advice.xlsx'")
     check("still privileged after a second run", row["is_privileged"] == 1, dict(row))
 
     shutil.rmtree(TMP)

@@ -29,7 +29,7 @@ def main():
     try:
         config.PROJECT_ROOT = tmp
         config.WORKSPACES_DIR = tmp / "workspaces"
-        config.STATE_DIR = tmp / "workspaces" / "state"
+        config.STATE_DIR = tmp / "workspaces" / ".state"
         config.OUTPUT_DIR = config.STATE_DIR
         config.CACHE_DIR = config.STATE_DIR / "cache"
         config.DB_PATH = config.OUTPUT_DIR / "test.db"

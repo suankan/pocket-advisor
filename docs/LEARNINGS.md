@@ -26,8 +26,8 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   workflow).
 - **Duplicate Message-IDs occur across source folders**, including
   across privileged and non-privileged ones. Privilege must be OR'd
-  across all physical copies; never trust one folder. Schema: one
-  `emails` row per Message-ID, N `email_files` rows.
+  across all physical copies; never trust one folder. Schema (current,
+  Schema B): one `items` row per Message-ID, N `item_memberships` rows.
 - **A large minority of real-world emails lack In-Reply-To/References**
   (a fifth of the initial corpus). Subject+participant threading
   fallback is a core path, not an edge case. `thread_link_method`
@@ -53,15 +53,24 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 - **Tesseract from Homebrew ships English only.** Other languages need
   `brew install tesseract-lang`. Without the right language pack, OCR
   produces plausible-looking garbage *silently* (no error).
-- **bge-m3 needs NO query/document prefixes.** If the embedding model
-  is ever swapped: e5-family needs `query:`/`passage:`, nomic needs
-  `search_query:`/`search_document:` — asymmetric-prefix mistakes
-  degrade retrieval silently. Re-embed EVERYTHING on model change
-  (vectors from different models are incomparable) — enforced since
-  2026-07-12 by the index fingerprint in vectors.meta.json.
-- `llama-cpp-python` `.embed()` may return per-token vectors depending
-  on build/pooling; the embedding backend mean-pools if ndim > 1. Both
-  sides L2-normalize; cosine = dot product.
+- **Know your embedding model's query/document asymmetry mechanism —
+  they differ by family, and getting it backwards degrades retrieval
+  silently.** bge-m3 (superseded, see jina-mlx-migration.md) needed no
+  prefix at all; e5-family needs a `query:`/`passage:` text prefix;
+  nomic needs `search_query:`/`search_document:`. The current live
+  model (Jina v5 MLX) uses neither — it passes `task_type=
+  "retrieval.query"` vs `"retrieval.passage"` as a model-call argument
+  (`is_query` in `mlx_model_loader.py::embed_one`), not a text prefix.
+  Re-embed EVERYTHING on model change (vectors from different models
+  are incomparable) — enforced since 2026-07-12 by the index
+  fingerprint in vectors.meta.json.
+- (Historical, `llama-cpp-python` backend removed 2026-07-13 — see
+  jina-mlx-migration.md) `.embed()` could return per-token vectors
+  depending on build/pooling; the old backend mean-pooled if ndim > 1.
+  The current MLX path (`mlx_model_loader.py::finalize_vec`) has no
+  such fallback — it asserts the exact expected dim and raises loudly
+  on a shape mismatch instead. Both sides L2-normalize; cosine = dot
+  product.
 - FTS5 `MATCH` syntax breaks on user punctuation — `query.py` quotes
   each token. FTS5's default unicode61 tokenizer handles Cyrillic fine.
 - An FTS5 virtual table's column set cannot be changed by `CREATE
@@ -101,12 +110,13 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 
 ## Standalone documents
 
-- Documents are modeled as synthetic singleton `emails` rows
-  (`source_kind='document'`) so chunking/FTS/vectors/threading/query
-  all work unchanged. Their chunks carry `source_type='email_body'`
+- Documents are modeled as synthetic singleton `items` rows
+  (`item_kind='file'`) so chunking/FTS/vectors/threading/query all work
+  unchanged. Their chunks still carry `source_type='email_body'`
   internally (changing that would touch sync_chunks' re-chunk guard);
-  query.py branches on `emails.source_kind`, never on chunk
-  source_type, for document labeling.
+  query.py branches on `items.item_kind`, never on chunk source_type,
+  for document labeling (`source_kind` in query output is a derived
+  display field, not a DB column).
 - **dateutil has no Russian locale** — Russian genitive month names
   (января…декабря) are hand-mapped in `doc_dates.py`.
 - **Bank-statement bodies are full of transaction dates** — a naive

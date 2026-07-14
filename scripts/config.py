@@ -35,10 +35,6 @@ DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
 # Per-collection engine cache (not agent free-browse):
 #   .state/cache/<collection_id>/{text,extracted}/…
 CACHE_DIR = OUTPUT_DIR / "cache"
-# Legacy flat dirs (pre-cache layout) — kept as fallbacks for reads/migrate
-TEXT_EMAILS_DIR = OUTPUT_DIR / "text" / "emails"
-TEXT_ATTACHMENTS_DIR = OUTPUT_DIR / "text" / "attachments"
-ATTACHMENTS_EXTRACTED_DIR = OUTPUT_DIR / "attachments_extracted"
 OCR_REVIEW_DIR = OUTPUT_DIR / "ocr_review"
 LOGS_DIR = OUTPUT_DIR / "logs"
 REVIEW_QUEUE_CSV = LOGS_DIR / "review_queue.csv"
@@ -343,10 +339,6 @@ def _apply_workspace_paths():
     _out = state
     globals()["CACHE_DIR"] = _out / "cache"
     globals()["DB_PATH"] = _out / "pocket_advisor.db"
-    # Legacy flat paths (reads/migrate); new writes use collection_cache_dir()
-    globals()["TEXT_EMAILS_DIR"] = _out / "text" / "emails"
-    globals()["TEXT_ATTACHMENTS_DIR"] = _out / "text" / "attachments"
-    globals()["ATTACHMENTS_EXTRACTED_DIR"] = _out / "attachments_extracted"
     globals()["OCR_REVIEW_DIR"] = _out / "ocr_review"
     globals()["LOGS_DIR"] = _out / "logs"
     globals()["REVIEW_QUEUE_CSV"] = _out / "logs" / "review_queue.csv"

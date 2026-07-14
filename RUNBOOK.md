@@ -172,7 +172,7 @@ inside a collection:
 ```bash
 venv/bin/python scripts/blob_index.py list-sources
 venv/bin/python scripts/blob_index.py rebuild
-venv/bin/python scripts/blob_index.py lookup -s <collection_id> --sha256 <hex>
+venv/bin/python scripts/blob_index.py lookup -w <workspace_id> -s <collection_id> --sha256 <hex>
 ```
 
 Safe to rebuild anytime (docs/specs/source-blob-index.md). This table

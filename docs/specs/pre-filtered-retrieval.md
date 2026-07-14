@@ -138,14 +138,14 @@ a stopping point.
       "Wrong prediction, corrected" above. Actual: real, understood,
       accepted MRR/hit@5 regression on the golden set, traced to
       correct removal of privileged-content crowding, not a bug.
-      `eval.py compare` correctly caught this (exit 1) — the harness
+      `search_accuracy_test.py compare` correctly caught this (exit 1) — the harness
       did its job; the fix was judged correct anyway (see Measured
       Effect) and shipped as a user decision after review.
 - [x] Privileged-exclusion still verified correct with the new masking
       path active (spot-check: a privileged-only query still returns 0
       privileged rows by default, all rows flagged correctly with
       `--include-privileged`).
-- [x] `test_ingest_documents.py` / `test_eval.py` unaffected (neither
+- [x] `test_ingest_documents.py` / `test_search_accuracy_test.py` unaffected (neither
       exercises query.py's filter path) — re-run clean after the change.
 
 ## Verification commands
@@ -156,6 +156,6 @@ a stopping point.
 venv/bin/python scripts/query.py "<gen004 question>" --thread <gen004 thread> --json
 
 # regression gate: unfiltered aggregate must be byte-identical
-venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-prefilter
-venv/bin/python scripts/eval.py compare eval/results/*baseline-pre-1b*.json eval/results/*post-prefilter*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden search-accuracy-test/golden/family-law.yaml --label post-prefilter
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/*baseline-pre-1b*.json search-accuracy-test/results/*post-prefilter*.json
 ```

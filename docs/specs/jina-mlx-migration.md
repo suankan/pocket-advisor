@@ -105,7 +105,7 @@ Followed exactly as specced in golden-dreaming-umbrella.md:
    embed/rerank models the active config selects (previously only ever
    fetched the embed GGUF, silently never the reranker GGUF either —
    fixed as part of this work).
-7. **`scripts/eval.py`**: `build_fingerprint()`'s `retrieval_config`
+7. **`scripts/search_accuracy_test.py`**: `build_fingerprint()`'s `retrieval_config`
    gained `RERANK_ENABLED`/`RERANK_BACKEND`/`RERANK_MODEL` so
    reranker-swap comparisons are honestly labeled (previously silently
    untracked).
@@ -125,7 +125,7 @@ Followed exactly as specced in golden-dreaming-umbrella.md:
       by reading and running actual source, not trusting model-card
       snippets — see Verified mechanism above.
 - [x] Reranker-only swap (`RERANK_BACKEND=jina_mlx`, embedder stays
-      `bge-m3`/`llama_cpp`): `eval.py compare post-refactor-baseline
+      `bge-m3`/`llama_cpp`): `search_accuracy_test.py compare post-refactor-baseline
       jina-rerank-only` — **mrr 0.461->0.523 (+14% relative), hit@1
       0.385->0.423, hit@5 0.615->0.692, hit@15 0.654->0.808** — every
       aggregate improved, none regressed (exit code 0, no gate
@@ -134,8 +134,8 @@ Followed exactly as specced in golden-dreaming-umbrella.md:
       date-window question); net clearly positive.
 - [x] Embedder-only swap (`EMBED_BACKEND=jina_mlx`, reranker reverted
       to `bge-reranker-v2-m3`/`llama_cpp`): full re-embed of the real
-      corpus completed (0 failures — count in the gitignored eval
-      result's fingerprint, not repeated here). `eval.py compare
+      corpus completed (0 failures — count in the gitignored search-accuracy-test
+      result's fingerprint, not repeated here). `search_accuracy_test.py compare
       post-refactor-baseline jina-embed-only` — **mrr 0.461->0.477,
       hit@1 0.385->0.423, hit@15 0.654->0.692 (all within noise), hit@5
       0.615->0.538 REGRESSED (-0.077, beyond noise)** — mixed result,
@@ -143,7 +143,7 @@ Followed exactly as specced in golden-dreaming-umbrella.md:
       isolated state was measured and recorded but never shipped as an
       interim default.
 - [x] Combined (`EMBED_BACKEND=jina_mlx` + `RERANK_BACKEND=jina_mlx`):
-      `eval.py compare post-refactor-baseline jina-full-stack` — **mrr
+      `search_accuracy_test.py compare post-refactor-baseline jina-full-stack` — **mrr
       0.461->0.534 (+16% relative), hit@1 0.385->0.423, hit@5
       0.615->0.654, hit@15 0.654->0.808** — every aggregate improved
       vs baseline, none regressed. See Measured effect below for the
@@ -182,9 +182,9 @@ this migration an improvement.
 
 ```bash
 venv/bin/python scripts/test_rerank_backends.py
-venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label jina-rerank-only
-venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*post-refactor-baseline*.json workspaces/family-law/eval/results/*jina-rerank-only*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml --label jina-rerank-only
+venv/bin/python scripts/search_accuracy_test.py compare workspaces/family-law/search-accuracy-test/results/*post-refactor-baseline*.json workspaces/family-law/search-accuracy-test/results/*jina-rerank-only*.json
 venv/bin/python scripts/ingest.py --embed text   # full re-embed after EMBED_BACKEND=jina_mlx
-venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label jina-embed-only
-venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*post-refactor-baseline*.json workspaces/family-law/eval/results/*jina-embed-only*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml --label jina-embed-only
+venv/bin/python scripts/search_accuracy_test.py compare workspaces/family-law/search-accuracy-test/results/*post-refactor-baseline*.json workspaces/family-law/search-accuracy-test/results/*jina-embed-only*.json
 ```

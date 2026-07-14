@@ -1,8 +1,13 @@
 """Text embedding — single MLX path (Jina v5 via mlx_model_loader).
 
-Fingerprint = model repo + dim + chunking knobs. embed.py wipes on
-change; query.py refuses a mismatched index.
+Fingerprint = model repo + dim + chunking knobs. Each distinct
+(model, dim) fingerprint gets its own cache directory (see
+`index_paths`) — switching models never deletes another model's
+cache; see docs/specs/multi-model-vector-cache.md.
 """
+import hashlib
+import json
+
 import config
 import mlx_model_loader
 
@@ -55,6 +60,26 @@ def chunking_fields_changed(a, b):
         return False
     return (a["chunk_chars"], a["chunk_overlap"]) != (
         b["chunk_chars"], b["chunk_overlap"])
+
+
+def fingerprint_slug(fp: dict) -> str:
+    """Deterministic per-model cache directory name. The hash is the
+    sole authority for identity (any fingerprint field changing gets a
+    distinct directory); the model-name prefix is cosmetic only, for
+    a scannable `ls`."""
+    name = str(fp.get("model", "unknown")).split("/")[-1]
+    h = hashlib.sha256(
+        json.dumps(fp, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+    return f"{name}__{fp.get('dim')}d__{h}"
+
+
+def index_paths(fp: dict):
+    """(vectors.npy, vectors_ids.npy, meta.json, vecs_dir) for this
+    fingerprint's cache directory. vecs_dir holds one durable
+    <chunk_id>.npy per embedded chunk — the source of truth that
+    vectors.npy/vectors_ids.npy get rebuilt from each run."""
+    d = config.VECTORS_DIR / "text" / fingerprint_slug(fp)
+    return d / "vectors.npy", d / "vectors_ids.npy", d / "meta.json", d / "vecs"
 
 
 class MlxTextBackend:

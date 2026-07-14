@@ -101,14 +101,14 @@ chasing a marginal format improvement.
       (cost scales ~linearly with input length, measured), bringing it
       to 15s/query. Acceptable for an agent-driven CLI, not
       interactive-chat-speed.
-- [x] Found and fixed a real bug during the first eval run: naive
+- [x] Found and fixed a real bug during the first search-accuracy-test run: naive
       truncation sliced INTO `pdftotext -layout`'s column-padding
       whitespace (LEARNINGS.md's documented issue) for PDF-derived
       chunks, so the reranker saw only padding for some financial
       documents. Fixed: collapse whitespace before truncating (same
       pattern already used in `doc_dates.py` for the same root cause).
       Verified fix: `doc001` went from a hard miss (v1) to rank 5 (v2).
-- [x] `eval.py compare post-prefilter post-reranker-v2`: mrr
+- [x] `search_accuracy_test.py compare post-prefilter post-reranker-v2`: mrr
       0.271->0.457 (+69% relative), hit@1 0.083->0.375, hit@5
       0.417->0.625 — all substantial improvements, and mrr now EXCEEDS
       the original `baseline-pre-1b` (0.358), meaning pre-filter+
@@ -152,6 +152,6 @@ Phase 1b started.
 ## Verification commands
 
 ```bash
-venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-reranker
-venv/bin/python scripts/eval.py compare eval/results/*post-prefilter*.json eval/results/*post-reranker*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden search-accuracy-test/golden/family-law.yaml --label post-reranker
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/*post-prefilter*.json search-accuracy-test/results/*post-reranker*.json
 ```

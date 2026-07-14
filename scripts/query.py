@@ -13,7 +13,7 @@ the privilege flag so drafts can be handled carefully.
 Every result carries message_id, date, sender, subject and source path:
 answers built on these results must cite them.
 
-Library: `run_search(...)` / `WarmResources` (warm-eval + query-daemon).
+Library: `run_search(...)` / `WarmResources` (search-accuracy-test-warm-mode + query-daemon).
 If the session daemon is up (docs/specs/query-daemon.md), this CLI
 sends the search over the local Unix socket (warm); otherwise cold.
 """
@@ -129,39 +129,35 @@ def fts_search(conn, question, limit, allowed=None):
     return [r["rowid"] for r in rows]
 
 
-def _check_vector_index():
-    """Fingerprint checks against vectors.meta.json. Returns (meta, None)
-    or (None, error_message)."""
-    if not config.VECTORS_NPY.exists():
-        return None, None
-    meta = json.loads(config.VECTORS_META_JSON.read_text())
-    fp = embedding_backends.current_fingerprint()
+def _check_vector_index(fp):
+    """Resolve the current model's cache dir and warn on chunking drift.
+    Model/dim mismatch can no longer happen here by construction — the
+    path itself is derived from the current fingerprint (see
+    docs/specs/multi-model-vector-cache.md); a stale index just means
+    resolving to a directory that hasn't been embedded into yet."""
+    vectors_npy, vectors_ids_npy, meta_json, vecs_dir = embedding_backends.index_paths(fp)
+    if not vectors_npy.exists():
+        return None, vectors_npy, vectors_ids_npy
+    meta = json.loads(meta_json.read_text())
     built_with = embedding_backends.meta_fingerprint(meta)
-    if embedding_backends.embedding_fields_changed(built_with, fp):
-        return None, (
-            f"query: vector index was built with {built_with} but config "
-            f"selects {fp}.\nEither run `venv/bin/python scripts/ingest.py "
-            "embed` (full re-embed) or revert the config change. "
-            "Searching a mismatched index would return garbage silently.")
     if embedding_backends.chunking_fields_changed(built_with, fp):
         print(f"⚠ chunking config changed since the index was built "
               f"(chars {built_with['chunk_chars']}->{fp['chunk_chars']}, "
               f"overlap {built_with['chunk_overlap']}->{fp['chunk_overlap']}) — "
               "existing chunks were not rebuilt; results may mix chunk sizes.",
               file=sys.stderr)
-    return meta, None
+    return meta, vectors_npy, vectors_ids_npy
 
 
 def load_vector_index():
-    """Load vectors.npy + ids for reuse across many queries (warm eval).
-    Returns (matrix, ids) or (None, None) if no index on disk.
-    Raises SystemExit on fingerprint mismatch."""
-    meta, err = _check_vector_index()
-    if err:
-        raise SystemExit(err)
+    """Load vectors.npy + ids for reuse across many queries (warm search-accuracy-test).
+    Returns (matrix, ids) or (None, None) if no index on disk for the
+    currently configured model."""
+    fp = embedding_backends.current_fingerprint()
+    meta, vectors_npy, vectors_ids_npy = _check_vector_index(fp)
     if meta is None:
         return None, None
-    return np.load(config.VECTORS_NPY), np.load(config.VECTORS_IDS_NPY)
+    return np.load(vectors_npy), np.load(vectors_ids_npy)
 
 
 def vector_search(question, limit, allowed=None, backend=None,
@@ -227,24 +223,20 @@ def allowed_page_image_ids(conn, args):
 
 
 def img_vector_search(query_vec, limit, allowed=None):
-    """Visual dense leg — same query vector as text (alignment claim)."""
+    """Visual dense leg — same query vector as text (alignment claim).
+    Resolves the cache dir for the currently configured omni model —
+    see docs/specs/multi-model-vector-cache.md; a model/dim mismatch
+    can no longer happen here by construction."""
     if not config.EMBED_IMAGES:
         return []
-    if not (Path(config.IMG_VECTORS_NPY).is_file()
-            and Path(config.IMG_VECTORS_IDS_NPY).is_file()
-            and Path(config.IMG_VECTORS_META_JSON).is_file()):
-        return []
     import image_embedding_backends as ieb
-    meta = json.loads(Path(config.IMG_VECTORS_META_JSON).read_text())
-    built = ieb.meta_fingerprint(meta)
     cur = ieb.current_fingerprint()
-    if ieb.embedding_fields_changed(built, cur):
-        raise SystemExit(
-            "query: image index fingerprint mismatch vs config "
-            f"(built={built}, current={cur}). "
-            "Run `venv/bin/python scripts/ingest.py --embed images` to rebuild.")
-    matrix = np.load(config.IMG_VECTORS_NPY)
-    ids = np.load(config.IMG_VECTORS_IDS_NPY)
+    img_vectors_npy, img_vectors_ids_npy, img_vectors_meta_json, _ = ieb.index_paths(cur)
+    if not (img_vectors_npy.is_file() and img_vectors_ids_npy.is_file()
+            and img_vectors_meta_json.is_file()):
+        return []
+    matrix = np.load(img_vectors_npy)
+    ids = np.load(img_vectors_ids_npy)
     if allowed is not None:
         mask = np.isin(ids, list(allowed))
         matrix, ids = matrix[mask], ids[mask]
@@ -462,9 +454,9 @@ def run_search(question, *, top_k=None, include_privileged=None,
     """Core hybrid search. Returns the same dict as `query.py --json`.
 
     Pass open `conn`, loaded embed/rerank backends, and/or preloaded
-    vector arrays to avoid per-call cold starts (warm eval). Each call
+    vector arrays to avoid per-call cold starts (warm search-accuracy-test). Each call
     is independent: only `question` (and filters) change ranking input
-    — no chat/history state (docs/specs/warm-eval.md).
+    — no chat/history state (docs/specs/search-accuracy-test-warm-mode.md).
 
     When EMBED_IMAGES and an image index exists, fuses a third RRF
     leg of page images (kind-tagged keys); one text query vector serves
@@ -489,12 +481,16 @@ def run_search(question, *, top_k=None, include_privileged=None,
         purpose=purpose,
     )
 
-    pending = conn.execute(
-        "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL").fetchone()[0]
+    _fp = embedding_backends.current_fingerprint()
+    _, _, _, _vecs_dir = embedding_backends.index_paths(_fp)
+    _have = {int(p.stem) for p in _vecs_dir.glob("*.npy")} if _vecs_dir.is_dir() else set()
+    total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    pending = total_chunks - len(_have)
     warnings = []
     if pending:
-        warnings.append(f"{pending} chunks not yet embedded — run ingest.py --embed text; "
-                        "semantic results may be incomplete")
+        warnings.append(f"{pending} chunks not yet embedded under the current "
+                        "model — run ingest.py --embed text; semantic results "
+                        "may be incomplete")
 
     allowed = allowed_chunk_ids(conn, args)
     fts = fts_search(conn, args.question, config.FTS_CANDIDATES, allowed)
@@ -568,8 +564,8 @@ def run_search(question, *, top_k=None, include_privileged=None,
 
 class WarmResources:
     """Load embed + rerank + vectors once; each search is independent
-    (no chat history). Used by query_daemon and eval warm mode.
-    docs/specs/query-daemon.md, docs/specs/warm-eval.md."""
+    (no chat history). Used by query_daemon and search-accuracy-test warm mode.
+    docs/specs/query-daemon.md, docs/specs/search-accuracy-test-warm-mode.md."""
 
     def __init__(self, log=print):
         import rerank_backends
@@ -607,11 +603,11 @@ class WarmResources:
         )
 
     def fingerprint(self):
-        meta = {}
-        if config.VECTORS_META_JSON.exists():
-            meta = json.loads(config.VECTORS_META_JSON.read_text())
+        fp = embedding_backends.current_fingerprint()
+        _, _, meta_json, _ = embedding_backends.index_paths(fp)
+        meta = json.loads(meta_json.read_text()) if meta_json.exists() else {}
         return {
-            "embed": embedding_backends.current_fingerprint(),
+            "embed": fp,
             "rerank_model": config.MLX_MODEL_RERANK if config.RERANK_ENABLED else None,
             "rerank_enabled": config.RERANK_ENABLED,
             "index": meta,

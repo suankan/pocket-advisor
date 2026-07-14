@@ -19,6 +19,67 @@ map; open work is `R-nn`.
 
 ## 2026-07-14
 
+### `mlx_model_loader.snapshot_dir` checks disk before HF Hub call · SHIPPED
+
+Every `current_fingerprint()` call (3+ per `ingest.py --embed all`) was
+calling `huggingface_hub.snapshot_download(local_files_only=True)` even
+when the model was already fully downloaded — harmless, but printed a
+misleading `"...remote repo cannot be accessed in snapshot_download
+(None)"` warning on every call (confirmed by reading
+`huggingface_hub`'s own source: `local_files_only` deliberately skips
+the Hub API, so the "(None)" is an unattempted call, not a failure; no
+caller in this repo ever passes `local_files_only=True`, so the
+warning fired unconditionally). Now checks for `config.json` on disk
+directly first and returns immediately if present — zero Hub calls,
+zero warning noise, for the common already-downloaded case.
+`snapshot_download()` is only reached for a genuine fetch. See
+docs/LEARNINGS.md.
+
+**Also discovered while diagnosing an unrelated `--embed images`
+failure under nano text+omni:** `jina-embeddings-v5-omni-nano-mlx` has
+no working image-embedding path yet — confirmed via live test against
+Jina's own documented `load_model()` usage and by reading their
+`utils.py` wrapper source; not a packaging bug, a genuinely unfinished
+upstream feature. `omni-small-mlx` is unaffected. See docs/LEARNINGS.md.
+
+### R-15 Multi-model vector cache · SHIPPED
+
+Switching `models.mlx_model_embed_text` / `mlx_model_embed_omni` used
+to wipe the index and force a full re-embed (worse for images: the
+per-image cache was silently overwritten in place, not deleted).
+Now each (model, dim) fingerprint gets its own cache directory under
+`.state/vectors/{text,image}/<slug>/`; switching models never deletes
+another model's cache, and switching back reuses it. Verified live:
+switching text small→nano embedded fresh (161s) without touching the
+small-model cache; switching back was 1.2s with bit-identical
+retrieval quality (`search_accuracy_test.py compare`: zero rank
+deltas across the full golden set). New `scripts/wipe_index.py` is the
+only thing that deletes a cache, manual and explicit only; refuses the
+active index without `--force`. One-time migration folded the
+pre-existing flat index (9087 text + 2116 image vectors) in place with
+zero re-embedding. Image-side model switching not verified live in
+this environment (omni-nano not downloaded, no network) — same code
+path as the verified text side. **Same-day follow-up:** unified the
+text/image layout — image's per-id cache moved from a separate
+`page_images/_vecs/<slug>/` root into `vectors/image/<slug>/vecs/`,
+matching text exactly (`vectors.npy`/`vectors_ids.npy`/`meta.json`/
+`vecs/` in both); moved 2116 vectors with zero re-embedding, sampled
+checksums verified identical before/after. Spec:
+[multi-model-vector-cache.md](specs/multi-model-vector-cache.md).
+
+### `eval.py` renamed to `search_accuracy_test.py` · SHIPPED
+
+"Eval" collided with the `eval()` builtin and didn't say what was being
+measured. Renamed throughout: script (`scripts/search_accuracy_test.py`,
+test `scripts/test_search_accuracy_test.py`), specs
+(`search-accuracy-test.md`, `search-accuracy-test-warm-mode.md`),
+`config.py` constants (`SEARCH_ACCURACY_TEST_DIR` /
+`_GOLDEN_DIR` / `_RESULTS_DIR`), and the on-disk workspace folder
+(`workspaces/<ws>/eval/` → `workspaces/<ws>/search-accuracy-test/`,
+moved in place — existing golden sets and results carried over
+untouched). CLI/behavior unchanged (`run` / `compare` / `list`, warm
+default, fingerprinting).
+
 ### Engine store path `workspaces/state` → `workspaces/.state` · SHIPPED
 
 Regenerable engine tree is a dot-dir (less bulk-browse surface). Code
@@ -72,8 +133,8 @@ current key names (`mlx_model_embed_*`, `ingestion.embed_*`).
 
 `query.include_privileged_by_default: true`. Own-solicitor often carries
 opposing-counsel forwards/attachments; exclude is opt-in
-(`--exclude-privileged`). Results still flag privilege. Eval defaults
-to include-privileged too (opt out per golden entry). Commits: `77a827b`,
+(`--exclude-privileged`). Results still flag privilege. Search accuracy
+test defaults to include-privileged too (opt out per golden entry). Commits: `77a827b`,
 `5ca43ff`.
 
 ### R-03 visual pipeline (opt-in) · SHIPPED
@@ -82,7 +143,7 @@ Alignment smoke **PASS**. Full path: `embed_images.py` (pdftoppm + omni
 embed + `img_vectors.npy`), query third RRF leg with `("chunk"|"img", id)`
 keys, `ingest.py --embed images` (gated by `ingestion.embed_images`).
 Full-page embed needs long-side downscale (`IMG_MAX_SIDE`). Follow-on:
-**R-03b** visual eval / RRF weights. Spec:
+**R-03b** visual search accuracy test / RRF weights. Spec:
 [visual-retrieval.md](specs/visual-retrieval.md). (Omni path later
 moved to MLX — see 2026-07-14.)
 
@@ -151,7 +212,7 @@ Specs: [source-blob-index.md](specs/source-blob-index.md),
 
 ### Jina MLX default embed + rerank · SHIPPED
 
-Default `jina_mlx` stack; eval-gated isolated then combined swaps
+Default `jina_mlx` stack; search-accuracy-test-gated isolated then combined swaps
 (reranker-only, embedder-only, combined — embedder-only hit@5 regression
 not shipped alone); `local_files_only` offline fix so queries do not
 re-hit HuggingFace. Mean query wall ~18s → ~12s vs prior llama_cpp stack
@@ -161,12 +222,12 @@ for this migration and for visual retrieval.
 
 Spec: [jina-mlx-migration.md](specs/jina-mlx-migration.md).
 
-### Warm eval + session query daemon · SHIPPED
+### Warm search accuracy test + session query daemon · SHIPPED
 
-`eval.py --mode warm` (default); `query_daemon.py` Unix socket under
-`.state/`; `query.py` auto-uses daemon.
+`search_accuracy_test.py --mode warm` (default); `query_daemon.py` Unix
+socket under `.state/`; `query.py` auto-uses daemon.
 
-Specs: [warm-eval.md](specs/warm-eval.md),
+Specs: [search-accuracy-test-warm-mode.md](specs/search-accuracy-test-warm-mode.md),
 [query-daemon.md](specs/query-daemon.md).
 
 ### User-data root under `workspaces/` · SHIPPED
@@ -195,7 +256,7 @@ and collections layout (ongoing as layout evolved).
 
 (Historical labels 1a–1d remain on some spec titles; not a living program.)
 
-- Eval harness + golden baseline — [eval-harness.md](specs/eval-harness.md)  
+- Search accuracy test harness + golden baseline — [search-accuracy-test.md](specs/search-accuracy-test.md)  
 - Pre-filter + reranker + transliteration — net mrr +28% vs
   baseline-pre-1b; transliteration null on its sample, kept as infra —
   [pre-filtered-retrieval.md](specs/pre-filtered-retrieval.md),

@@ -104,10 +104,14 @@ ingestion:
 
 models:
   # Apple-Silicon MLX only — no GGUF / llama.cpp. Matched pairs only:
-  #   text-nano-mlx  ↔ omni-nano-mlx   (768-d)
+  #   text-nano-mlx  ↔ omni-nano-mlx   (768-d) — omni-nano has no
+  #     working image support yet (Jina's own utils.py wrapper doesn't
+  #     expose encode_image(); text-only for now, docs/LEARNINGS.md)
   #   text-small-mlx ↔ omni-small-mlx  (1024-d)
-  # INDEX-INVALIDATING: changing text/omni repo wipes + re-embeds on
-  # next `ingest.py --embed text` / `--embed images`. Reranker is not.
+  # INDEX-INVALIDATING: changing text/omni repo resolves to a different
+  # per-model cache on next `ingest.py --embed text` / `--embed images`
+  # — never deletes another model's cache (docs/specs/multi-model-vector-cache.md).
+  # Reranker is not index-invalidating.
   # Requires: pip install -r scripts/requirements.txt (includes MLX).
   # Fetch once: venv/bin/python scripts/fetch_model.py
   #

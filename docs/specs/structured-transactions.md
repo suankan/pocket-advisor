@@ -23,7 +23,7 @@ venv/bin/python scripts/extract_transactions.py
 ## Non-goals (this slice)
 
 - Bank-specific statement parsers / transfer reconciliation  
-- Eval harness extraction metrics  
+- Search accuracy test harness extraction metrics  
 - Automatic run on every ingest (call explicitly or via future stage)
 
 ## Next

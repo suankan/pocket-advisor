@@ -3,12 +3,15 @@
 - Chunks ~1500 chars with ~200 overlap, splitting on paragraph
   boundaries where possible; every document yields >=1 chunk so every
   email is individually citable.
-- Incremental: only chunks with embedded_at IS NULL are embedded; a
-  failed chunk stays NULL and is retried next run.
-- Vector store: full matrix rebuild each run into vectors.npy (float32
-  [N x EMBED_DIM]) + vectors_ids.npy (aligned chunk ids) + meta.json.
-- Fingerprint change (model repo / dim vs meta.json) wipes and
-  re-embeds everything — mixed-model indexes are never allowed.
+- Incremental: a chunk is pending for the CURRENT model whenever its
+  id has no `<cache-dir>/vecs/<id>.npy` file yet; a failed chunk is
+  retried next run (source of truth is the per-chunk cache file, not
+  a DB column).
+- Vector store: one cache directory per (model, dim) fingerprint
+  (docs/specs/multi-model-vector-cache.md) — switching models never
+  deletes another model's cache; switching back reuses it. Each run
+  rebuilds vectors.npy (float32 [N x EMBED_DIM]) + vectors_ids.npy
+  from that directory's per-chunk cache.
 """
 import json
 import sys
@@ -83,25 +86,56 @@ def sync_chunks(conn):
     return created
 
 
+def _migrate_legacy_flat_index():
+    """One-time: fold the pre-multi-model flat vectors.npy/vectors_ids.npy/
+    vectors.meta.json (if present) into the cache directory matching
+    THEIR OWN recorded fingerprint — not necessarily the currently
+    configured one. Backfills the per-chunk vecs/ cache by exploding
+    the matrix row-by-row, so no re-embedding is triggered by this
+    migration alone."""
+    legacy_npy = config.VECTORS_DIR / "vectors.npy"
+    legacy_ids = config.VECTORS_DIR / "vectors_ids.npy"
+    legacy_meta = config.VECTORS_DIR / "vectors.meta.json"
+    if not (legacy_npy.is_file() and legacy_ids.is_file() and legacy_meta.is_file()):
+        return
+    try:
+        meta = json.loads(legacy_meta.read_text())
+        fp = embedding_backends.meta_fingerprint(meta)
+        if fp.get("model") is None or fp.get("dim") is None:
+            return
+        dst_npy, dst_ids, dst_meta, dst_vecs = embedding_backends.index_paths(fp)
+        if dst_npy.exists():
+            return  # a cache dir already exists for this fingerprint; leave legacy alone
+        mat = np.load(legacy_npy)
+        ids = np.load(legacy_ids)
+        dst_vecs.mkdir(parents=True, exist_ok=True)
+        for n, cid in enumerate(ids):
+            np.save(dst_vecs / f"{int(cid)}.npy", mat[n])
+        legacy_npy.rename(dst_npy)
+        legacy_ids.rename(dst_ids)
+        legacy_meta.rename(dst_meta)
+        print(f"embed: migrated legacy flat index ({len(ids)} vectors) -> {dst_npy.parent}")
+    except Exception as e:
+        print(f"embed: WARNING legacy index migration skipped: "
+             f"{type(e).__name__}: {e}")
+
+
 def check_fingerprint(conn):
-    """If the configured backend/model no longer matches the existing
-    index, wipe it: mixed-backend vectors are incomparable (LEARNINGS:
-    re-embed everything on model change). Chunking config drift is
-    reported but NOT auto-fixed — no automated re-chunk pipeline exists
-    (docs/specs/config-yaml.md); existing chunks keep their original
-    size, only new content uses the new config."""
+    """Resolve the current model's cache directory. Never deletes
+    another model's cache — switching models just means the resolved
+    paths point somewhere else (docs/specs/multi-model-vector-cache.md).
+    Chunking config drift is reported but NOT auto-fixed — no automated
+    re-chunk pipeline exists (docs/specs/config-yaml.md); existing
+    chunks keep their original size, only new content uses the new
+    config. The chunking baseline is adopted in-place in this
+    fingerprint's own meta.json (unchanged behavior, just per-slug)."""
+    _migrate_legacy_flat_index()
     fp = embedding_backends.current_fingerprint()
-    if config.VECTORS_META_JSON.exists():
-        meta = json.loads(config.VECTORS_META_JSON.read_text())
+    vectors_npy, vectors_ids_npy, meta_json, vecs_dir = embedding_backends.index_paths(fp)
+    if meta_json.exists():
+        meta = json.loads(meta_json.read_text())
         old = embedding_backends.meta_fingerprint(meta)
-        if embedding_backends.embedding_fields_changed(old, fp):
-            print(f"embed: fingerprint changed {old} -> {fp}; full re-embed")
-            conn.execute("UPDATE chunks SET embedded_at=NULL")
-            conn.commit()
-            for p in (config.VECTORS_NPY, config.VECTORS_IDS_NPY,
-                      config.VECTORS_META_JSON):
-                p.unlink(missing_ok=True)
-        elif embedding_backends.chunking_fields_changed(old, fp):
+        if embedding_backends.chunking_fields_changed(old, fp):
             print(f"embed: WARNING chunking config changed (chars "
                  f"{old['chunk_chars']}->{fp['chunk_chars']}, overlap "
                  f"{old['chunk_overlap']}->{fp['chunk_overlap']}) but "
@@ -110,67 +144,62 @@ def check_fingerprint(conn):
                  "old chunks keep their original size until manually "
                  "re-ingested.")
             meta["chunk_chars"], meta["chunk_overlap"] = fp["chunk_chars"], fp["chunk_overlap"]
-            config.VECTORS_META_JSON.write_text(json.dumps(meta, indent=2))
+            meta_json.write_text(json.dumps(meta, indent=2))
         elif old["chunk_chars"] is None:
             # meta.json predates this field: establish a real baseline
             # silently — missing data, not evidence of an actual change.
             meta["chunk_chars"], meta["chunk_overlap"] = fp["chunk_chars"], fp["chunk_overlap"]
-            config.VECTORS_META_JSON.write_text(json.dumps(meta, indent=2))
-    return fp
+            meta_json.write_text(json.dumps(meta, indent=2))
+    return fp, (vectors_npy, vectors_ids_npy, meta_json, vecs_dir)
 
 
-def embed_pending(conn, backend):
-    pending = conn.execute(
-        "SELECT id, text FROM chunks WHERE embedded_at IS NULL").fetchall()
+def embed_pending(conn, backend, vecs_dir):
+    """Pending = chunk ids with no <vecs_dir>/<id>.npy file yet — the
+    per-chunk cache is the durable source of truth, so a crash mid-run
+    loses at most the current chunk (matches embed_images.py's
+    per-image commit discipline)."""
+    vecs_dir.mkdir(parents=True, exist_ok=True)
+    have = {int(p.stem) for p in vecs_dir.glob("*.npy")}
+    rows = conn.execute("SELECT id, text FROM chunks").fetchall()
+    pending = [r for r in rows if r["id"] not in have]
     done, failed = 0, 0
-    vectors = {}
     for row in pending:
         try:
-            vectors[row["id"]] = backend.embed_one(row["text"])
-            conn.execute("UPDATE chunks SET embedded_at=? WHERE id=?",
-                         (datetime.now(timezone.utc).isoformat(), row["id"]))
+            vec = backend.embed_one(row["text"])
+            np.save(vecs_dir / f"{row['id']}.npy", vec)
             done += 1
             if done % 200 == 0:
-                conn.commit()
                 print(f"  embedded {done}/{len(pending)}")
         except Exception as e:
             failed += 1
             db.log_issue(conn, f"chunk:{row['id']}", "embed", "error",
                          f"{type(e).__name__}: {e}")
     conn.commit()
-    return vectors, done, failed
+    return done, failed
 
 
-def rebuild_matrix(conn, backend, new_vectors, fingerprint):
-    """Full rebuild: re-embed nothing, but rewrite the matrix from all
-    embedded chunks. Existing vectors are reused from the previous
-    matrix (same fingerprint guaranteed by check_fingerprint); new ones
-    come from this run."""
-    old = {}
-    if config.VECTORS_NPY.exists() and config.VECTORS_IDS_NPY.exists():
-        mat = np.load(config.VECTORS_NPY)
-        ids = np.load(config.VECTORS_IDS_NPY)
-        old = {int(i): mat[n] for n, i in enumerate(ids)}
-    old.update(new_vectors)
+def rebuild_matrix(conn, vectors_npy, vectors_ids_npy, meta_json, vecs_dir, fingerprint):
+    """Rebuild the matrix from the per-chunk cache directory — the
+    cache dir is the source of truth, not the previous matrix."""
+    chunk_ids = [r["id"] for r in conn.execute("SELECT id FROM chunks ORDER BY id")]
+    vecs, ids = [], []
+    for cid in chunk_ids:
+        p = vecs_dir / f"{cid}.npy"
+        if not p.is_file():
+            continue  # not embedded yet (or failed) — retried next run
+        vecs.append(np.load(p))
+        ids.append(cid)
 
-    chunk_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM chunks WHERE embedded_at IS NOT NULL ORDER BY id")]
-    missing = [cid for cid in chunk_ids if cid not in old]
-    for cid in missing:  # vector lost (e.g. deleted .npy) -> re-embed
-        text = conn.execute("SELECT text FROM chunks WHERE id=?", (cid,)).fetchone()["text"]
-        old[cid] = backend.embed_one(text)
-
-    config.VECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    matrix = np.stack([old[cid] for cid in chunk_ids]) if chunk_ids else \
-        np.zeros((0, config.EMBED_DIM), dtype=np.float32)
-    np.save(config.VECTORS_NPY, matrix)
-    np.save(config.VECTORS_IDS_NPY, np.asarray(chunk_ids, dtype=np.int64))
-    config.VECTORS_META_JSON.write_text(json.dumps({
+    vectors_npy.parent.mkdir(parents=True, exist_ok=True)
+    matrix = np.stack(vecs) if vecs else np.zeros((0, config.EMBED_DIM), dtype=np.float32)
+    np.save(vectors_npy, matrix)
+    np.save(vectors_ids_npy, np.asarray(ids, dtype=np.int64))
+    meta_json.write_text(json.dumps({
         **fingerprint,
-        "count": len(chunk_ids),
+        "count": len(ids),
         "built_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2))
-    return len(chunk_ids)
+    return len(ids)
 
 
 def backfill_translit_shadow(conn):
@@ -194,17 +223,18 @@ def run():
     backfilled = backfill_translit_shadow(conn)
     if backfilled:
         print(f"embed: {backfilled} chunks backfilled with translit_shadow")
-    fingerprint = check_fingerprint(conn)
-    pending_count = conn.execute(
-        "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL").fetchone()[0]
-    if pending_count == 0 and config.VECTORS_NPY.exists():
-        print("embed: nothing pending, vector index up to date")
+    fingerprint, (vectors_npy, vectors_ids_npy, meta_json, vecs_dir) = check_fingerprint(conn)
+    vecs_dir.mkdir(parents=True, exist_ok=True)
+    have = {int(p.stem) for p in vecs_dir.glob("*.npy")}
+    total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    if len(have) >= total_chunks and vectors_npy.exists():
+        print(f"embed: nothing pending, vector index up to date ({vecs_dir.parent.name})")
         conn.close()
         return 0
     backend = embedding_backends.get_backend()
-    new_vectors, done, failed = embed_pending(conn, backend)
-    total = rebuild_matrix(conn, backend, new_vectors, fingerprint)
-    print(f"embed: {done} embedded, {failed} failed, index size {total}")
+    done, failed = embed_pending(conn, backend, vecs_dir)
+    total = rebuild_matrix(conn, vectors_npy, vectors_ids_npy, meta_json, vecs_dir, fingerprint)
+    print(f"embed: {done} embedded, {failed} failed, index size {total} ({vecs_dir.parent.name})")
     conn.close()
     return 1 if failed else 0
 

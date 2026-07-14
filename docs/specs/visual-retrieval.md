@@ -195,7 +195,7 @@ fts/vec), so it earns at most one RRF term vs. a chunk's possible two
 — expected, but means a visual-only match must rank near the top of
 the (much smaller) image pool to compete. New free knob
 `IMG_RRF_WEIGHT` (default 1.0, no-op) — do not hand-pick a non-1.0
-value without an `eval.py compare`. New `IMG_VEC_CANDIDATES` (default
+value without an `search_accuracy_test.py compare`. New `IMG_VEC_CANDIDATES` (default
 20).
 
 ### Citation shape
@@ -227,11 +227,11 @@ reranked chunks into their original slots while `("img", ...)` entries
 stay pinned at their RRF position. O(n), no cross-encoder-vs-RRF score
 comparison, zero change to `reranker.py`. An alternative `"ocr_proxy"`
 mode (rerank images using `ocr_text` as a stand-in) is kept as a
-documented, config-selectable option for a later `eval.py compare` —
+documented, config-selectable option for a later `search_accuracy_test.py compare` —
 not shipped as default, since it risks suppressing exactly the class
 of structural/visual-only match this channel exists to surface.
 
-### Config + eval
+### Config + search accuracy test
 
 New knobs: `IMG_LEG_ENABLED=False` (free, master switch),
 `IMG_EMBED_BACKEND="jina_omni_torch"` / `IMG_EMBED_MODEL_REPO=
@@ -240,7 +240,7 @@ EMBED_DIM` / `IMG_PAGE_DPI=150` (index-invalidating),
 `IMG_VEC_CANDIDATES=20` / `IMG_RRF_WEIGHT=1.0` /
 `IMG_RERANK_MODE="skip"` (free). All registered in `YAML_KEYS` —
 unregistered keys abort config loading loudly, don't skip this.
-`eval.py::build_fingerprint()`: add `img_index` (=
+`search_accuracy_test.py::build_fingerprint()`: add `img_index` (=
 `img_vectors.meta.json` if present), extend `corpus` with
 `page_images`/`img_embedded` counts, add the `IMG_*` knobs to
 `retrieval_config`. No change needed to `score_question`/`aggregate`
@@ -264,7 +264,7 @@ get tagged `flags: [visual]`.
 - `scripts/fetch_model.py` — add `IMG_EMBED_MODEL_REPO` to the
   multi-model fetch dispatch; `trust_remote_code=True` handles the
   omni model's bundled code via the standard HF cache
-- `scripts/eval.py` — fingerprint extension
+- `scripts/search_accuracy_test.py` — fingerprint extension
 - `scripts/requirements-visual.txt` — new (`torch`, `transformers>=4.57`,
   `pillow`; no `pdf2image`/`pypdfium2`, Poppler already covers
   rasterization)
@@ -291,10 +291,10 @@ get tagged `flags: [visual]`.
       page confirmed excluded by default, reappears with
       `--include-privileged`.
 - [ ] Visual golden questions authored and tagged `flags: [visual]`.
-- [ ] `eval.py compare visual-off visual-on`: zero regression on
+- [ ] `search_accuracy_test.py compare visual-off visual-on`: zero regression on
       existing hit@k/mrr (watch the RRF 3rd-vote-vs-2-vote asymmetry),
       meaningful hit@k on the visual-flagged subset.
-- [ ] `eval.py compare` `IMG_RERANK_MODE=skip` vs `ocr_proxy` to pick
+- [ ] `search_accuracy_test.py compare` `IMG_RERANK_MODE=skip` vs `ocr_proxy` to pick
       the shipped default with data, not a guess.
 
 ## Sequencing
@@ -307,8 +307,8 @@ get tagged `flags: [visual]`.
 5. Wire `query.py` behind the flag; manual verification incl.
    privilege exclusion.
 6. Author visual golden questions.
-7. `eval.py run --label visual-off` vs `visual-on`, `compare`.
-8. `eval.py compare` reranking modes, pick the default.
+7. `search_accuracy_test.py run --label visual-off` vs `visual-on`, `compare`.
+8. `search_accuracy_test.py compare` reranking modes, pick the default.
 9. Docs + tests: ship R-03 → CHANGELOG; DESIGN if as-built changes.
 
 ## Verification commands
@@ -317,6 +317,6 @@ get tagged `flags: [visual]`.
 venv/bin/python /tmp/smoke_jina_omni.py          # step 1
 venv/bin/python scripts/ingest.py --embed images          # steps 2-4 (IMG_LEG_ENABLED gates cost)
 venv/bin/python scripts/query.py "<q>" --json     # step 5, IMG_LEG_ENABLED=true
-venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label visual-on
-venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*visual-off*.json workspaces/family-law/eval/results/*visual-on*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml --label visual-on
+venv/bin/python scripts/search_accuracy_test.py compare workspaces/family-law/search-accuracy-test/results/*visual-off*.json workspaces/family-law/search-accuracy-test/results/*visual-on*.json
 ```

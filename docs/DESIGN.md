@@ -30,13 +30,13 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 
 | Theme | Status | Shipped (see CHANGELOG) | Open (see ROADMAP) |
 |---|---|---|---|
-| **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents | — |
-| **Measure + accuracy** — eval, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 eval/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm eval, daemon | R-10 latency; R-14 lexical; R-13 ANN |
+| **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents; **R-15** 2026-07-14 multi-model vector cache | — |
+| **Measure + accuracy** — search accuracy test, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 search-accuracy-test/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm search-accuracy-test, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
 | **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
 | **Structured numbers** — transactions SQL, row citations | **Done (heuristic only)** | **R-04** table + regex extractor (live rows may be 0 until run / until R-04b) | **R-04b** real bank parsers |
-| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual eval; finish live image index after re-embed |
+| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual search accuracy test; finish live image index after re-embed |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |
@@ -52,8 +52,8 @@ historical labels; do not invent new Phase-N program numbers.
 
 1. **Engine** — local-first ingest + retrieval over personal corpora:
    custody, privilege, OCR confidence, threading, hybrid search,
-   citations, eval harness; later structured tables for numbers.
-2. **Workspaces** — matter layer (md, skills, journal, eval). Evidence
+   citations, search accuracy test harness; later structured tables for numbers.
+2. **Workspaces** — matter layer (md, skills, journal, search-accuracy-test). Evidence
    lives in shared **collections** mounted by reference, never copied.
 3. **Domain skills** — playbooks next to `WORKSPACE.md` (not a
    committed platform skills tree). Productisation may ship templates.
@@ -93,7 +93,8 @@ tax advice. Local-only is the product.
     verification before implement.
 13. **TypeScript target stack** — **PARKED** (see ROADMAP); not
     opportunistic dual-stack.
-14. **Measured, not vibed.** Accuracy changes need eval harness evidence.
+14. **Measured, not vibed.** Accuracy changes need search accuracy test
+    harness evidence.
 
 ---
 
@@ -111,7 +112,7 @@ workspaces/                          # gitignored user data root
     logs/
     query_daemon.sock
     cache/<collection_id>/{text,extracted}/
-  <workspace_id>/                    # matter only: WORKSPACE.md, skills, journal, chronology, eval
+  <workspace_id>/                    # matter only: WORKSPACE.md, skills, journal, chronology, search-accuracy-test
 ```
 
 Platform `config.yaml`: `workspaces.dir` + engine knobs only
@@ -165,7 +166,13 @@ Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
 `ingestion.embed_text` / `ingestion.embed_images` (explicit named
 `--embed text|images` force that channel). Low-conf OCR flagged;
 review images under `.state/` (open via DB/query, not bulk-browse of
-cache). Details: **RUNBOOK** + **specs** + **LEARNINGS**.
+cache). Vector index is cached per (model, dim) fingerprint under
+`.state/vectors/{text,image}/<slug>/` — changing
+`models.mlx_model_embed_*` never deletes another model's cache;
+switching back reuses it (R-15,
+[multi-model-vector-cache.md](specs/multi-model-vector-cache.md)).
+Deleting a cache is manual only: `scripts/wipe_index.py`. Details:
+**RUNBOOK** + **specs** + **LEARNINGS**.
 
 ### Retrieval
 
@@ -184,9 +191,9 @@ Matched text/omni pairs only (nano↔nano 768-d or small↔small 1024-d).
 Code defaults in `config.py` are nano; committed `config.yaml` may
 select small (matched pair). Universal loader:
 `scripts/mlx_model_loader.py`. No GGUF / llama.cpp. Warm multi-query:
-[query-daemon.md](specs/query-daemon.md); eval:
-[eval-harness.md](specs/eval-harness.md),
-[warm-eval.md](specs/warm-eval.md).
+[query-daemon.md](specs/query-daemon.md); search accuracy test:
+[search-accuracy-test.md](specs/search-accuracy-test.md),
+[search-accuracy-test-warm-mode.md](specs/search-accuracy-test-warm-mode.md).
 
 ### Privilege
 
@@ -249,20 +256,21 @@ that slice; this table is the map.
 | [purpose-visibility.md](specs/purpose-visibility.md) | R-05 mount purposes |
 | [instruction-layer-split.md](specs/instruction-layer-split.md) | Platform vs workspace |
 | [config-yaml.md](specs/config-yaml.md) | Platform knobs |
-| [eval-harness.md](specs/eval-harness.md) | Measurement |
+| [search-accuracy-test.md](specs/search-accuracy-test.md) | Measurement |
 | [pre-filtered-retrieval.md](specs/pre-filtered-retrieval.md) | Filter-before-rank |
 | [reranker.md](specs/reranker.md) | Historical GGUF notes; live path is MLX-only |
 | [transliteration.md](specs/transliteration.md) | FTS shadow field |
 | [embedding-backends.md](specs/embedding-backends.md) | **SUPERSEDED** multi-backend; live = `mlx_model_loader` |
 | [jina-mlx-migration.md](specs/jina-mlx-migration.md) | Historical migration; live stack is MLX-only |
-| [warm-eval.md](specs/warm-eval.md) | In-process warm eval |
+| [search-accuracy-test-warm-mode.md](specs/search-accuracy-test-warm-mode.md) | In-process warm search accuracy test |
 | [query-daemon.md](specs/query-daemon.md) | Session-warm query |
+| [multi-model-vector-cache.md](specs/multi-model-vector-cache.md) | R-15: per-model index cache, `wipe_index.py` |
 
 ### Partial / planned (see ROADMAP)
 
 | Spec | ROADMAP |
 |---|---|
-| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 shipped opt-in; R-03b eval polish open |
+| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 shipped opt-in; R-03b search accuracy test polish open |
 
 There is **no** `docs/history/`, no `PLAN.md`, and no `STATUS.md`.
 Product history is only [`CHANGELOG.md`](CHANGELOG.md).

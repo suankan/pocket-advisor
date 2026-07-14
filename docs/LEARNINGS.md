@@ -186,15 +186,17 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   the drift detection it was meant to support. Default missing
   historical fields to None/unknown and establish a baseline
   explicitly. (Found live in the chunking-fingerprint work.)
-- **Eval wall time is model load × N questions, not "KB lookup."**
-  Subprocess-per-question reloads embed + rerank weights every time
-  (~12–20 s/q cold). Warm eval (`eval.py run --mode warm`, default)
-  loads once and reuses weights + `vectors.npy` across the golden set;
-  each question is still an independent ranking call with no generative
-  chat context (docs/specs/warm-eval.md). Use `--mode cold` only when
-  you need CLI cold-start cost fidelity.
+- **Search accuracy test wall time is model load × N questions, not "KB
+  lookup."** Subprocess-per-question reloads embed + rerank weights
+  every time (~12–20 s/q cold). Warm mode
+  (`search_accuracy_test.py run --mode warm`, default) loads once and
+  reuses weights + `vectors.npy` across the golden set; each question
+  is still an independent ranking call with no generative chat context
+  (docs/specs/search-accuracy-test-warm-mode.md). Use `--mode cold`
+  only when you need CLI cold-start cost fidelity.
 - **Interactive multi-query sessions need a warm daemon, not only warm
-  eval.** Each shell `query.py` is a new process (cold load) unless
+  search accuracy test mode.** Each shell `query.py` is a new process
+  (cold load) unless
   `query_daemon.py serve` is running; then `query.py` auto-routes over
   a local Unix socket (docs/specs/query-daemon.md). Restart the daemon
   after re-embed or model config changes. Warm residency is weights
@@ -234,7 +236,7 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 - **Layout:** `workspaces/corpora/` = read-only facts; `workspaces/.state/`
   = one regenerable engine store (DB, vectors, logs, daemon socket);
   `.state/cache/<collection_id>/{text,extracted}/` = per-collection
-  extracts. Matter folders hold md/eval only — not bulk evidence.
+  extracts. Matter folders hold md/search-accuracy-test only — not bulk evidence.
   Agents open cache paths from query/DB results; do not bulk-browse
   `.state/cache/` as a library.
 - **Renaming a directory under `.state/` is not just a filesystem
@@ -259,17 +261,47 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 - **Text index fingerprint is the HF repo id string + dim**, not
   “model family.” Switching
   `…-text-small-retrieval-mlx` → `…-text-small-mlx` (multi-task)
-  wipes + re-embeds even at the same 1024-d; both are Jina small but
-  different artifacts. Matched text/omni size pairs only (nano 768 ↔
-  nano; small 1024 ↔ small).
+  resolves to a distinct cache directory even at the same 1024-d; both
+  are Jina small but different artifacts, so their vectors are never
+  mixed (R-15, docs/specs/multi-model-vector-cache.md — this used to
+  mean a destructive wipe + full re-embed; now it's just a different
+  cache dir, and the old one is retained). Matched text/omni size
+  pairs only (nano 768 ↔ nano; small 1024 ↔ small).
 - **`ingest.py --embed all` respects `ingestion.embed_text` /
   `embed_images`.** Explicit `--embed text` / `--embed images` force
   that channel. Stage `all` runs gated embed-all after parse/thread.
   Image query leg also requires `embed_images` + a built image index.
-- **`huggingface_hub.snapshot_download` can resume `*.incomplete`
-  partials** when re-run with network; we do **not** implement our own
-  multi-retry loop in `mlx_model_loader.snapshot_dir` (one offline try,
-  then one online try).
+- **`mlx_model_loader.snapshot_dir` checks disk directly (`config.json`
+  present) before ever calling `huggingface_hub.snapshot_download`** —
+  it used to always call `snapshot_download(local_files_only=True)`
+  first, which works but unconditionally prints a misleading
+  `"...remote repo cannot be accessed in snapshot_download (None)"`
+  warning even on success (verified by reading
+  `huggingface_hub/_snapshot_download.py` directly: `local_files_only`
+  deliberately skips the Hub API call, so `api_call_error` is always
+  `None` — nothing failed, nothing was offline, the check was just
+  skipped on purpose). No caller in this repo ever actually passes
+  `local_files_only=True`, so that whole first attempt was dead
+  ceremony every single `current_fingerprint()` call (3+ times per
+  `ingest.py --embed all`). `huggingface_hub.snapshot_download` can
+  resume `*.incomplete` partials when re-run with network; we still do
+  **not** implement our own multi-retry loop — a real fetch (dir
+  missing/`config.json` absent) is one direct `snapshot_download` call.
+- **`jina-embeddings-v5-omni-nano-mlx` has no working image embedding
+  path as of 2026-07** — its own `utils.py::JinaMultiTaskModel` wrapper
+  docstring says so explicitly ("text-only encoding... vision and audio
+  towers preserved for future multimodal use"), and `model.py`'s
+  `JinaOmniNanoEmbeddingModel.encode_image()` exists but is never
+  reached through the wrapper `load_model()` returns — confirmed live
+  (`hasattr(model.model, "encode_image")` True, `hasattr(model,
+  "encode_image")` False). It's not a download/packaging gap: the
+  `-mlx` repo is also missing `processing_llava_eurobert.py`, which
+  *does* exist in the base `jinaai/jina-embeddings-v5-omni-nano` repo
+  (confirmed via the HF API file listing for both) — but installing
+  that file wouldn't help either, since nothing in the documented usage
+  path calls it. `omni-small-mlx` has no such limitation (uses the
+  transformers-builtin `Qwen3VLProcessor`, not custom code). Use small
+  for the image channel until Jina ships nano image support.
 - **Avoid circular imports between `config.py` and
   `workspace_config.py`.** Loading the active workspace during config
   bootstrap must stay yaml-only / light (no importing pipeline modules

@@ -38,7 +38,7 @@ current pipeline (post-reranker-v2):
 - `cy002` — target found at rank 1 anyway; the dense leg's topical
   signal was strong enough on its own here.
 
-Added both to `eval/golden/family-law.yaml` (flag `cyrillic-only-name`)
+Added both to `search-accuracy-test/golden/family-law.yaml` (flag `cyrillic-only-name`)
 deliberately WITHOUT `expect_thread` (a first draft included it and
 gave false credit via thread-level siblings that happened to have
 separate Latin coverage — masking the exact thing being tested; fixed
@@ -125,7 +125,7 @@ way, matching the pre-filter/reranker episodes' discipline.
       corpus's established Western spelling ("Xenia"-style) finds only
       the pre-existing Latin-script chunks — confirming the predicted
       risk is real, not hypothetical.
-- [x] `eval.py compare pre-translit-v2 post-translit`: **ZERO measured
+- [x] `search_accuracy_test.py compare pre-translit-v2 post-translit`: **ZERO measured
       change** — all 26 questions have identical ranks before and
       after (hit@1/5/15/mrr all `+0.000`, exit 0). `cy001` remains a
       hard miss; `cy002` (already found via the dense leg alone) is
@@ -182,6 +182,6 @@ was built to fix, not a mechanical failure.
 ```bash
 venv/bin/python scripts/ingest.py --embed text   # runs migration + backfill
 venv/bin/python scripts/verify_integrity.py
-venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-translit
-venv/bin/python scripts/eval.py compare eval/results/*pre-translit-v2*.json eval/results/*post-translit*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden search-accuracy-test/golden/family-law.yaml --label post-translit
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/*pre-translit-v2*.json search-accuracy-test/results/*post-translit*.json
 ```

@@ -27,19 +27,27 @@ import config
 def snapshot_dir(repo_id: str, *, local_files_only: bool = False) -> Path:
     """Local directory holding repo_id's full snapshot (weights + code).
 
-    Tries local_files_only first so query/embed paths stay offline after
-    the one-time download (same allowance as historical GGUF fetches —
-    inbound weights only, no case data outbound).
+    Checks disk directly first — a snapshot is considered present once
+    `config.json` exists (matches what read_config_json() already
+    assumes; a genuinely interrupted download leaves only `*.incomplete`
+    temp files, never a final-named config.json, so this can't
+    false-positive on a partial fetch). No call into
+    huggingface_hub.snapshot_download() at all for the common
+    already-downloaded case — that avoids both an unnecessary Hub API
+    probe and its "remote repo cannot be accessed" log line, which is
+    misleading here since nothing failed, the check is just skipped on
+    purpose. snapshot_download() is only reached when a real fetch is
+    needed (same allowance as historical GGUF fetches — inbound weights
+    only, no case data outbound).
     """
     dest = config.MODELS_DIR / repo_id.split("/")[-1]
+    if (dest / "config.json").is_file():
+        return dest
     if local_files_only:
-        return Path(snapshot_download(
-            repo_id=repo_id, local_dir=dest, local_files_only=True))
-    try:
-        return Path(snapshot_download(
-            repo_id=repo_id, local_dir=dest, local_files_only=True))
-    except Exception:
-        return Path(snapshot_download(repo_id=repo_id, local_dir=dest))
+        raise FileNotFoundError(
+            f"{repo_id}: no local snapshot at {dest} and local_files_only=True "
+            "requested — fetch it first: venv/bin/python scripts/fetch_model.py")
+    return Path(snapshot_download(repo_id=repo_id, local_dir=dest))
 
 
 def load_module(module_name: str, file_path: Path):

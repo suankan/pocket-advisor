@@ -105,10 +105,12 @@ def test_model_repo_overlay():
         p.unlink()
 
 
-def test_workspace_dir_derives_eval_paths():
-    print("workspace paths derive output/eval:")
-    before = (config.WORKSPACE_DIR, config.WORKSPACES_DIR, config.EVAL_DIR,
-              config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR,
+def test_workspace_dir_derives_search_accuracy_test_paths():
+    print("workspace paths derive output/search-accuracy-test:")
+    before = (config.WORKSPACE_DIR, config.WORKSPACES_DIR,
+              config.SEARCH_ACCURACY_TEST_DIR,
+              config.SEARCH_ACCURACY_TEST_GOLDEN_DIR,
+              config.SEARCH_ACCURACY_TEST_RESULTS_DIR,
               config.INGESTION_SOURCES, config.OUTPUT_DIR, config.DB_PATH,
               getattr(config, "ACTIVE_WORKSPACE_ID", None))
     # Prefer workspaces.dir; active workspace comes from registry when present.
@@ -120,8 +122,9 @@ def test_workspace_dir_derives_eval_paths():
         # With a live workspace-config.yaml, active workspace wins.
         check("WORKSPACE_DIR under workspaces/",
               "workspaces" in config.WORKSPACE_DIR.parts)
-        check("EVAL_RESULTS_DIR under workspace",
-              config.EVAL_RESULTS_DIR == config.WORKSPACE_DIR / "eval" / "results")
+        check("SEARCH_ACCURACY_TEST_RESULTS_DIR under workspace",
+              config.SEARCH_ACCURACY_TEST_RESULTS_DIR
+              == config.WORKSPACE_DIR / "search-accuracy-test" / "results")
         # Shared corpora + state (not under matter folder)
         check("INGESTION_SOURCES shared corpora",
               config.INGESTION_SOURCES == config.WORKSPACES_DIR / "corpora")
@@ -132,8 +135,10 @@ def test_workspace_dir_derives_eval_paths():
               config.DB_PATH.name == "pocket_advisor.db"
               and config.DB_PATH.parent == config.OUTPUT_DIR)
     finally:
-        (config.WORKSPACE_DIR, config.WORKSPACES_DIR, config.EVAL_DIR,
-         config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR,
+        (config.WORKSPACE_DIR, config.WORKSPACES_DIR,
+         config.SEARCH_ACCURACY_TEST_DIR,
+         config.SEARCH_ACCURACY_TEST_GOLDEN_DIR,
+         config.SEARCH_ACCURACY_TEST_RESULTS_DIR,
          config.INGESTION_SOURCES, config.OUTPUT_DIR, config.DB_PATH,
          config.ACTIVE_WORKSPACE_ID) = before
         p.unlink()
@@ -153,7 +158,7 @@ def main():
     test_platform_privilege_document_folders_rejected()
     test_is_privileged_path()
     test_model_repo_overlay()
-    test_workspace_dir_derives_eval_paths()
+    test_workspace_dir_derives_search_accuracy_test_paths()
     test_missing_file_is_a_noop()
 
     if FAILURES:

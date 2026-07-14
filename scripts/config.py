@@ -39,10 +39,12 @@ OCR_REVIEW_DIR = OUTPUT_DIR / "ocr_review"
 LOGS_DIR = OUTPUT_DIR / "logs"
 REVIEW_QUEUE_CSV = LOGS_DIR / "review_queue.csv"
 
+# Root for per-model vector caches (docs/specs/multi-model-vector-cache.md).
+# Actual index paths are resolved per fingerprint by
+# embedding_backends.index_paths() / image_embedding_backends.index_paths()
+# — never a single fixed vectors.npy; switching models never deletes
+# another model's cache.
 VECTORS_DIR = OUTPUT_DIR / "vectors"
-VECTORS_NPY = VECTORS_DIR / "vectors.npy"
-VECTORS_IDS_NPY = VECTORS_DIR / "vectors_ids.npy"
-VECTORS_META_JSON = VECTORS_DIR / "vectors.meta.json"
 
 
 def _safe_collection_id(source_id: str | None) -> str:
@@ -163,7 +165,7 @@ DEFAULT_TOP_K = 15
 # Reranker (listwise Jina MLX): re-scores the fused RRF list before the
 # top-k cut. Transient, per-query — no index fingerprint. Truncate to
 # the opening portion (relevance signal concentrates early in email/
-# legal prose); quality measured via eval.py.
+# legal prose); quality measured via search_accuracy_test.py.
 RERANK_ENABLED = True
 RERANK_TEXT_CHARS = 600
 
@@ -180,10 +182,10 @@ QUERY_DAEMON_IDLE_SEC = 1800      # idle exit; 0 = run until stop
 # restricted pass. Product multi-tenant "safe default" is not current.
 INCLUDE_PRIVILEGED_BY_DEFAULT = True
 
-# Eval harness (docs/specs/eval-harness.md): under workspace.
-EVAL_DIR = WORKSPACE_DIR / "eval"
-EVAL_GOLDEN_DIR = EVAL_DIR / "golden"
-EVAL_RESULTS_DIR = EVAL_DIR / "results"
+# Search accuracy test harness (docs/specs/search-accuracy-test.md): under workspace.
+SEARCH_ACCURACY_TEST_DIR = WORKSPACE_DIR / "search-accuracy-test"
+SEARCH_ACCURACY_TEST_GOLDEN_DIR = SEARCH_ACCURACY_TEST_DIR / "golden"
+SEARCH_ACCURACY_TEST_RESULTS_DIR = SEARCH_ACCURACY_TEST_DIR / "results"
 
 
 # ---- config.yaml overlay (docs/specs/config-yaml.md) --------------------
@@ -204,9 +206,6 @@ IMG_VEC_CANDIDATES = 20
 IMG_RRF_WEIGHT = 1.0
 IMG_RERANK_MODE = "skip"  # skip | ocr_proxy
 PAGE_IMAGES_DIR = OUTPUT_DIR / "page_images"
-IMG_VECTORS_NPY = VECTORS_DIR / "img_vectors.npy"
-IMG_VECTORS_IDS_NPY = VECTORS_DIR / "img_vectors_ids.npy"
-IMG_VECTORS_META_JSON = VECTORS_DIR / "img_vectors.meta.json"
 
 YAML_KEYS = {
     # Preferred: only the parent directory for all workspaces.
@@ -288,7 +287,8 @@ def load_yaml_overlay(path):
 def _apply_workspace_paths():
     """Set WORKSPACE_DIR (matter layer) + shared STATE/corpora paths.
 
-    - Matter folder: active workspace.path under workspaces.dir (md, eval).
+    - Matter folder: active workspace.path under workspaces.dir (md,
+      search-accuracy-test).
     - Evidence: workspaces/corpora (shared; collection roots from registry).
     - Engine: workspaces/.state (one DB/vectors/text for all workspaces).
 
@@ -343,20 +343,14 @@ def _apply_workspace_paths():
     globals()["LOGS_DIR"] = _out / "logs"
     globals()["REVIEW_QUEUE_CSV"] = _out / "logs" / "review_queue.csv"
     globals()["VECTORS_DIR"] = _out / "vectors"
-    globals()["VECTORS_NPY"] = _out / "vectors" / "vectors.npy"
-    globals()["VECTORS_IDS_NPY"] = _out / "vectors" / "vectors_ids.npy"
-    globals()["VECTORS_META_JSON"] = _out / "vectors" / "vectors.meta.json"
     globals()["PAGE_IMAGES_DIR"] = _out / "page_images"
-    globals()["IMG_VECTORS_NPY"] = _out / "vectors" / "img_vectors.npy"
-    globals()["IMG_VECTORS_IDS_NPY"] = _out / "vectors" / "img_vectors_ids.npy"
-    globals()["IMG_VECTORS_META_JSON"] = _out / "vectors" / "img_vectors.meta.json"
     globals()["TEXT_DOCUMENTS_DIR"] = _out / "text" / "documents"
     globals()["DOCUMENTS_EXTRACTED_DIR"] = _out / "documents_extracted"
     globals()["QUERY_DAEMON_SOCKET"] = _out / "query_daemon.sock"
     globals()["QUERY_DAEMON_PID_FILE"] = _out / "query_daemon.pid"
-    globals()["EVAL_DIR"] = _ws / "eval"
-    globals()["EVAL_GOLDEN_DIR"] = _ws / "eval" / "golden"
-    globals()["EVAL_RESULTS_DIR"] = _ws / "eval" / "results"
+    globals()["SEARCH_ACCURACY_TEST_DIR"] = _ws / "search-accuracy-test"
+    globals()["SEARCH_ACCURACY_TEST_GOLDEN_DIR"] = _ws / "search-accuracy-test" / "golden"
+    globals()["SEARCH_ACCURACY_TEST_RESULTS_DIR"] = _ws / "search-accuracy-test" / "results"
 
 
 ACTIVE_WORKSPACE_ID = WORKSPACE_DIR.name

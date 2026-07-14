@@ -25,10 +25,10 @@ the user schedules them.
 
 | Demand | Engine pressure | Related open items |
 |---|---|---|
-| Family-law (live) | Eval, mounts, privileged-in-by-default | — (served) |
+| Family-law (live) | Search accuracy test, mounts, privileged-in-by-default | — (served) |
 | Duplex / multi-matter | Finer purpose rules *inside* a collection | extend R-05 (no open ID yet) |
 | Personal finance / ATO | Real statement parsers, reconciliation | **R-04b** |
-| Visual quality / eval | Golden visual questions, RRF weight tuning | **R-03b** |
+| Visual quality / search accuracy test | Golden visual questions, RRF weight tuning | **R-03b** |
 | Productisation | Clean-room package | **R-07** |
 | Stack unification | TypeScript throughout | **R-08** (parked) |
 
@@ -38,8 +38,8 @@ the user schedules them.
 
 | ID | Item | Theme | Trigger to start | Spec / notes |
 |---|---|---|---|---|
-| **R-03b** | Visual golden eval + measure `IMG_RRF_WEIGHT` / `ocr_proxy` vs skip | Visual | After live `ingest.py --embed images` produces a usable index | [visual-retrieval.md](specs/visual-retrieval.md) |
-| **R-04b** | Richer bank/statement parsers, transfer reconciliation, extraction eval | Structured numbers | Finance workspace needs sums/joins beyond regex heuristic | [structured-transactions.md](specs/structured-transactions.md) |
+| **R-03b** | Visual golden search accuracy test + measure `IMG_RRF_WEIGHT` / `ocr_proxy` vs skip | Visual | After live `ingest.py --embed images` produces a usable index | [visual-retrieval.md](specs/visual-retrieval.md) |
+| **R-04b** | Richer bank/statement parsers, transfer reconciliation, extraction search accuracy test | Structured numbers | Finance workspace needs sums/joins beyond regex heuristic | [structured-transactions.md](specs/structured-transactions.md) |
 | **R-06** | Per-collection `ocr_review` under `.state/cache/<id>/` | User data | Cleanup if shared `ocr_review` confuses | small |
 | **R-07** | Productisation — clean-room repo, packaging, stranger docs, licensing, UPL | Productisation | Explicit productisation decision only | never as case side-effect |
 | **R-08** | TypeScript engine migration (**PARKED**) | Hygiene / parked | User explicitly resumes — not opportunistic | DESIGN tenet 13 |
@@ -54,8 +54,9 @@ the user schedules them.
 
 R-01 Schema B · R-02 Schema C · R-03 visual pipeline (opt-in) · R-04
 heuristic transactions · R-05 purpose mounts · privileged-in-by-default
-(+ eval) · collections v2 / pathless / Jina MLX / warm eval / daemon ·
-docs lifecycle (DESIGN/ROADMAP/CHANGELOG).
+(+ search accuracy test) · collections v2 / pathless / Jina MLX / warm
+search-accuracy-test / daemon · R-15 multi-model vector cache · docs
+lifecycle (DESIGN/ROADMAP/CHANGELOG).
 
 ---
 

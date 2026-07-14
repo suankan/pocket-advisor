@@ -24,10 +24,15 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
   `embed_images`, thread/date-window settings): change anytime, takes
   effect on the next run (embed knobs gate `--embed all` / stage `all`
   and the query image leg).
-- **index-invalidating, auto-handled** (`models.mlx_model_embed_*`):
-  changing the text or omni MLX repo triggers wipe + full re-embed on
-  the next `ingest.py --embed text` / `--embed images` — vectors from different
-  models/dims are numerically incomparable.
+- **index-invalidating, cached per model** (`models.mlx_model_embed_*`,
+  docs/specs/multi-model-vector-cache.md): changing the text or omni
+  MLX repo resolves to a **different cache directory** on the next
+  `ingest.py --embed text` / `--embed images` — vectors from different
+  models/dims are numerically incomparable, so they're never mixed,
+  but nothing is deleted. First use of a model embeds fresh; switching
+  back to a previously-used model reuses its cache (near-instant, only
+  catches up on anything ingested since). Deleting a cached index is
+  manual only: `scripts/wipe_index.py`.
 - **index-invalidating, WARN-only** (`ingestion.chunking.*`): no
   automated re-chunk pipeline exists. Changing chunk size/overlap
   prints a warning (from both `query.py` and `ingest.py --embed text`) but
@@ -59,7 +64,7 @@ workspaces/
     query_daemon.sock
     cache/<collection_id>/{text,extracted}/
   <workspace_id>/           # matter layer only
-    WORKSPACE.md, skills, chronology, journal, eval/, …
+    WORKSPACE.md, skills, chronology, journal, search-accuracy-test/, …
 ```
 
 Schema reference (committed):
@@ -148,10 +153,13 @@ models:
 ```
 
 Use a **matched pair** only: nano↔nano (768-d) or small↔small (1024-d).
-Changing the text/omni repo is INDEX-INVALIDATING
+Changing the text/omni repo is INDEX-INVALIDATING but not destructive —
+each model gets its own cache directory
+(docs/specs/multi-model-vector-cache.md); switching back to a
+previously-used pair reuses it instead of re-embedding
 (`ingest.py --embed text` / `--embed images`, or `--embed all`).
-Reranker is not. Universal loader: `scripts/mlx_model_loader.py`.
-No GGUF / llama.cpp path remains.
+Reranker is not index-invalidating. Universal loader:
+`scripts/mlx_model_loader.py`. No GGUF / llama.cpp path remains.
 
 ```bash
 venv/bin/python scripts/fetch_model.py
@@ -161,6 +169,26 @@ venv/bin/python scripts/ingest.py --embed text
 venv/bin/python scripts/ingest.py --embed images
 venv/bin/python scripts/smoke_visual_alignment.py
 ```
+
+## Cached vector indexes (per model, retained until you wipe them)
+
+Every (model, dim) fingerprint your `config.yaml` has ever pointed at
+keeps its own cache under `.state/vectors/{text,image}/<slug>/` — text
+and image use the identical layout (`vecs/`, `vectors.npy`,
+`vectors_ids.npy`, `meta.json`) — see
+docs/specs/multi-model-vector-cache.md. Nothing in the ingest pipeline
+ever deletes one; disk space is the only cost of keeping old models
+around after experimenting.
+
+```bash
+venv/bin/python scripts/wipe_index.py list
+venv/bin/python scripts/wipe_index.py wipe --text <slug> [--yes]
+venv/bin/python scripts/wipe_index.py wipe --image <slug> [--yes]
+venv/bin/python scripts/wipe_index.py wipe --all-inactive [--yes]
+```
+
+Refuses to delete the slug matching the currently active `config.yaml`
+unless `--force` is also passed.
 
 ## Blob path cache (sha256 → file, regenerable)
 
@@ -179,33 +207,33 @@ Safe to rebuild anytime (docs/specs/source-blob-index.md). This table
 is the regenerable path cache only. Rebuild after bulk moves inside a
 collection tree.
 
-## Measuring retrieval quality (eval harness)
+## Measuring retrieval quality (search accuracy test)
 
 ```bash
 # default --mode warm: load embed+rerank once, then score all questions
-# (docs/specs/warm-eval.md). Much faster than cold; same ranking math.
-venv/bin/python scripts/eval.py run \
-  --golden workspaces/<ws>/eval/golden/<name>.yaml \
+# (docs/specs/search-accuracy-test-warm-mode.md). Much faster than cold; same ranking math.
+venv/bin/python scripts/search_accuracy_test.py run \
+  --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml \
   [--label L] [--top-k 15] [--mode warm]
 
 # optional: cold = subprocess query.py per question (CLI cold-start cost)
-venv/bin/python scripts/eval.py run \
-  --golden workspaces/<ws>/eval/golden/<name>.yaml \
+venv/bin/python scripts/search_accuracy_test.py run \
+  --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml \
   --label cold-check --mode cold
 
-venv/bin/python scripts/eval.py compare eval/results/<A>.json eval/results/<B>.json
-venv/bin/python scripts/eval.py list [--golden workspaces/<ws>/eval/golden/<name>.yaml]
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/<A>.json search-accuracy-test/results/<B>.json
+venv/bin/python scripts/search_accuracy_test.py list [--golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml]
 ```
 
-`eval/` under the active workspace is gitignored. `run` scores
-hit@1/5/15 + MRR, fingerprinting git commit, index identity, corpus
-counts, golden-set hash, and `query_mode` (warm|cold). Warm is not a
-chat LLM session — only encoder/reranker weights stay resident.
+`search-accuracy-test/` under the active workspace is gitignored. `run`
+scores hit@1/5/15 + MRR, fingerprinting git commit, index identity,
+corpus counts, golden-set hash, and `query_mode` (warm|cold). Warm is
+not a chat LLM session — only encoder/reranker weights stay resident.
 `compare` exits non-zero if any aggregate regressed between two runs of
 the *same* golden set (a golden-set change disables the exit-code gate
 and just warns). Re-baseline after any re-ingest and before/after any
 accuracy-affecting change (retrieval, chunking, model, backend).
-Golden-set format and full design: `docs/specs/eval-harness.md`.
+Golden-set format and full design: `docs/specs/search-accuracy-test.md`.
 
 ## Integrity check (before privilege logs, exports, anything sensitive)
 
@@ -218,7 +246,7 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 `workspaces/.state/` is fully derived: delete it (or wipe DB+vectors+
 cache), run `ingest.py all` (full re-embed takes minutes on Apple
 Silicon — scales with corpus size; see collection descriptions and the
-active workspace's WORKSPACE.md / eval notes). Originals under
+active workspace's WORKSPACE.md / search-accuracy-test notes). Originals under
 `workspaces/corpora/` and `models/` are untouched. **Never** delete
 `corpora/` as a rebuild shortcut.
 

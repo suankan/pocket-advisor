@@ -60,6 +60,20 @@ def embedding_fields_changed(built: dict, current: dict) -> bool:
     return False
 
 
+def index_paths(fp: dict):
+    """(vectors.npy, vectors_ids.npy, meta.json, vecs_dir) for this
+    fingerprint's cache directory — same layout as
+    embedding_backends.index_paths() (text), just under
+    VECTORS_DIR/image/<slug>/ instead of VECTORS_DIR/text/<slug>/, so
+    the two trees are structurally identical. Distinct directory per
+    (model, dim, page_dpi, max_side, aligned_text_model) combination —
+    switching the paired text model invalidates the image cache too,
+    same as today's fingerprint check, just via a new directory
+    instead of a wipe."""
+    d = config.VECTORS_DIR / "image" / embedding_backends.fingerprint_slug(fp)
+    return d / "vectors.npy", d / "vectors_ids.npy", d / "meta.json", d / "vecs"
+
+
 class MlxOmniImageBackend:
     name = "mlx"
 

@@ -4,7 +4,7 @@ Status: IMPLEMENTED 2026-07-13. Local Unix-socket process that keeps
 embed + rerank models (and the vector matrix) loaded for an interactive
 or agent session so each `query.py` call does not cold-start weights.
 
-Related: docs/specs/warm-eval.md (in-process warm for `eval.py` only).
+Related: docs/specs/search-accuracy-test-warm-mode.md (in-process warm for `search_accuracy_test.py` only).
 This daemon covers **interactive / agent multi-query** use.
 
 ## Goal
@@ -22,7 +22,7 @@ CLI `run_search`; only residency of weights changes.
   under `workspaces/.state/` (gitignored, machine-local).
 - Not required for correctness — if the daemon is down, `query.py`
   falls back to cold in-process search (unless `--require-daemon`).
-- Not a replacement for warm eval — `eval.py --mode warm` still loads
+- Not a replacement for warm search-accuracy-test — `search_accuracy_test.py --mode warm` still loads
   in-process for harness isolation (no socket dependency).
 
 ## Design
@@ -79,7 +79,7 @@ tell warm vs cold: `query: via daemon (warm)`.
 ### Shared warm load
 
 `query.WarmResources` — same object used conceptually by the daemon
-and by `eval.WarmQuerySession` (eval may wrap it). Loads:
+and by `search_accuracy_test.WarmQuerySession` (search-accuracy-test may wrap it). Loads:
 
 - DB connection (+ migrate)
 - `load_vector_index()`

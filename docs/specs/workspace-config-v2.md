@@ -35,7 +35,7 @@ copy-by-folder. We need:
 | # | Decision |
 |---|---|
 | 1 | **Collections** = physical evidence stores (`path`, privilege, description). |
-| 2 | **Workspaces** = mount lists + matter folder for semi-inferred state (`*.md`, eval). |
+| 2 | **Workspaces** = mount lists + matter folder for semi-inferred state (`*.md`, search-accuracy-test). |
 | 3 | **Share by reference only** — never copy blobs between matters. |
 | 4 | **One shared engine DB** for all collections; isolation = mount filter + privilege. |
 | 5 | **Multi-DB deferred** (not needed for shared bank collections). |
@@ -70,7 +70,7 @@ copy-by-folder. We need:
       text/                                # pipeline extracts (gated open)
       ocr_review/                          # optional
   <workspace_id>/                          # matter layer only
-    WORKSPACE.md, skills, journal, chronology, LEARNINGS, eval/
+    WORKSPACE.md, skills, journal, chronology, LEARNINGS, search-accuracy-test/
 ```
 
 Live layout matches the target above (migrated 2026-07-13).
@@ -142,7 +142,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 1. **Never write** under `corpora/`.  
 2. **Do not** `list_dir` / bulk-read `.state/cache/` as a library.  
 3. Open full bodies only via **mount- and privilege-gated** query (or gated open-by-id).  
-4. Matter notes, chronology, eval goldens: only under `workspaces/<id>/`.  
+4. Matter notes, chronology, search-accuracy-test goldens: only under `workspaces/<id>/`.  
 5. Switching `active` workspace changes mount set + which matter docs load — not a second copy of facts.
 
 ---

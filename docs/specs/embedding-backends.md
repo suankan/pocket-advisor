@@ -6,7 +6,7 @@ Historical notes below retained for why fingerprints exist.
 
 Status (historical): IMPLEMENTED 2026-07-12. llama.cpp path verified in production.
 MLX path API-fixed + smoke-tested 2026-07-12 (see Risks). **SUPERSEDED
-2026-07-13**: the "full-corpus switch pending eval-harness comparison"
+2026-07-13**: the "full-corpus switch pending search-accuracy-test comparison"
 item below was never completed for the `bge-m3`/`mlx` backend
 specifically — instead superseded by a fuller migration to
 `jina-embeddings-v5-text` (docs/specs/jina-mlx-migration.md), now the
@@ -85,9 +85,9 @@ everything on model change). Therefore backend+model+dim form the index
       `tokenizer.encode` + `model(input_ids)` + `.text_embeds`; repo id
       `mlx-community/bge-m3` (doesn't exist) -> `-mlx-fp16` variant.
 - [~] SUPERSEDED, not completed as originally scoped: this item
-      (full-corpus MLX/`bge-m3` re-embed + eval comparison) was
+      (full-corpus MLX/`bge-m3` re-embed + search accuracy test comparison) was
       overtaken by the 2026-07-13 decision to migrate straight to
-      `jina_mlx` instead, which WAS fully eval-verified before shipping
+      `jina_mlx` instead, which WAS fully search-accuracy-test-verified before shipping
       — see docs/specs/jina-mlx-migration.md's acceptance criteria.
       `mlx`/`bge-m3` itself remains unmeasured against `llama_cpp` and
       should not be treated as production-verified if ever selected.

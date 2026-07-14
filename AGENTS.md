@@ -13,7 +13,7 @@ Everything user/case-facing lives under `workspaces/` (gitignored):
 **`corpora/`** (read-only evidence collections), **`.state/`** (shared
 engine DB/vectors/text), **`workspace-config.yaml`** (collections +
 workspace mounts), and per-matter **`workspaces/<id>/`** (WORKSPACE.md,
-skills, journal, chronology, eval). Platform `config.yaml` only sets
+skills, journal, chronology, search-accuracy-test). Platform `config.yaml` only sets
 `workspaces.dir` + engine knobs. See docs/specs/workspace-config-v2.md.
 
 **Loading order for case work**: this file →
@@ -150,7 +150,7 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
     daemon socket, `cache/<collection_id>/{text,extracted}/`)
   - `workspace-config.yaml` — registry
   - `<workspace_id>/` — matter layer only (WORKSPACE.md, skills,
-    journal, chronology, eval — not bulk evidence)
+    journal, chronology, search-accuracy-test — not bulk evidence)
 - `scripts/` — the pipeline (see RUNBOOK.md)
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
   present in this repo at all — gitignored, never committed, and not
@@ -168,7 +168,7 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
 # also runs --embed all gated by ingestion.embed_text / embed_images.
 venv/bin/python scripts/ingest.py all
 
-# re-embed only (INDEX-INVALIDATING model changes wipe on next run)
+# re-embed only (INDEX-INVALIDATING model changes cache per-model, never wipe)
 venv/bin/python scripts/ingest.py --embed text      # text vectors
 venv/bin/python scripts/ingest.py --embed images    # page-image / omni
 venv/bin/python scripts/ingest.py --embed all       # text iff embed_text;

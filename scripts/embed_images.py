@@ -226,27 +226,111 @@ def sync_page_images(conn) -> int:
     return created
 
 
-def _wipe_img_index(conn):
-    conn.execute("UPDATE page_images SET img_embedded_at = NULL")
-    conn.commit()
-    for p in (config.IMG_VECTORS_NPY, config.IMG_VECTORS_IDS_NPY,
-              config.IMG_VECTORS_META_JSON):
-        Path(p).unlink(missing_ok=True)
+def _migrate_legacy_flat_index():
+    """One-time: fold the pre-multi-model flat img_vectors.npy/
+    img_vectors_ids.npy/img_vectors.meta.json and the flat
+    page_images/_vecs/ cache (if present) into the directories matching
+    THEIR OWN recorded fingerprint. dst_vecs lives *under* the legacy
+    _vecs/ dir (page_images/_vecs/<slug>/), so a whole-directory rename
+    would be a self-referential move — files are relocated
+    individually instead. No reconstruction needed, no re-embedding
+    triggered."""
+    import image_embedding_backends as ieb
+    legacy_npy = config.VECTORS_DIR / "img_vectors.npy"
+    legacy_ids = config.VECTORS_DIR / "img_vectors_ids.npy"
+    legacy_meta = config.VECTORS_DIR / "img_vectors.meta.json"
+    legacy_vecs = Path(config.PAGE_IMAGES_DIR) / "_vecs"
+    legacy_vec_files = ([p for p in legacy_vecs.glob("*.npy")]
+                        if legacy_vecs.is_dir() else [])
+    if not legacy_meta.is_file() and not legacy_vec_files:
+        return
+    try:
+        fp = None
+        if legacy_meta.is_file():
+            fp = ieb.meta_fingerprint(json.loads(legacy_meta.read_text()))
+        if fp is None or fp.get("model") is None or fp.get("dim") is None:
+            # meta already migrated (resumed run) or unreadable — the
+            # orphaned per-image files can only belong to whatever
+            # model is currently configured.
+            fp = ieb.current_fingerprint()
+        dst_npy, dst_ids, dst_meta, dst_vecs = ieb.index_paths(fp)
+        dst_meta.parent.mkdir(parents=True, exist_ok=True)
+        if legacy_npy.is_file() and not dst_npy.exists():
+            legacy_npy.rename(dst_npy)
+        if legacy_ids.is_file() and not dst_ids.exists():
+            legacy_ids.rename(dst_ids)
+        if legacy_meta.is_file():
+            if dst_meta.exists():
+                legacy_meta.unlink()
+            else:
+                legacy_meta.rename(dst_meta)
+        moved = 0
+        if legacy_vec_files:
+            dst_vecs.mkdir(parents=True, exist_ok=True)
+            for p in legacy_vec_files:
+                p.rename(dst_vecs / p.name)  # overwrite ok: same model
+                moved += 1
+        if moved:
+            print(f"embed_images: migrated legacy flat index "
+                 f"({moved} vectors) -> {dst_vecs}")
+    except Exception as e:
+        print(f"embed_images: WARNING legacy index migration skipped: "
+             f"{type(e).__name__}: {e}")
 
 
-def embed_pending(conn, backend) -> int:
+def _migrate_split_to_unified(fp):
+    """One-time: fold the initial split per-model layout (img_vectors.*
+    under vectors/image/<slug>/, per-image cache under
+    page_images/_vecs/<slug>/) into the unified layout that mirrors
+    text exactly (vectors.npy/vectors_ids.npy/meta.json + vecs/ all
+    under vectors/image/<slug>/). Moves only — a file is renamed to its
+    new location, or left in place if the destination already exists;
+    nothing with content is ever deleted."""
+    import image_embedding_backends as ieb
+    dst_npy, dst_ids, dst_meta, dst_vecs = ieb.index_paths(fp)
+    slug = dst_npy.parent.name
+    old_npy = dst_npy.parent / "img_vectors.npy"
+    old_ids = dst_npy.parent / "img_vectors_ids.npy"
+    old_vecs = Path(config.PAGE_IMAGES_DIR) / "_vecs" / slug
+    if not old_npy.is_file() and not old_ids.is_file() and not old_vecs.is_dir():
+        return
+    try:
+        renamed_matrix = False
+        if old_npy.is_file() and not dst_npy.exists():
+            old_npy.rename(dst_npy)
+            renamed_matrix = True
+        if old_ids.is_file() and not dst_ids.exists():
+            old_ids.rename(dst_ids)
+            renamed_matrix = True
+        moved = 0
+        if old_vecs.is_dir():
+            files = [p for p in old_vecs.glob("*.npy")]
+            if files:
+                dst_vecs.mkdir(parents=True, exist_ok=True)
+                for p in files:
+                    target = dst_vecs / p.name
+                    if not target.exists():
+                        p.rename(target)
+                    moved += 1
+        if moved or renamed_matrix:
+            print(f"embed_images: unified layout ({moved} per-image vectors) "
+                 f"-> {dst_vecs.parent}")
+    except Exception as e:
+        print(f"embed_images: WARNING layout unification skipped: "
+             f"{type(e).__name__}: {e}")
+
+
+def embed_pending(conn, vecs_dir: Path, backend) -> int:
+    vecs_dir.mkdir(parents=True, exist_ok=True)
+    have = {int(p.stem) for p in vecs_dir.glob("*.npy")}
     rows = conn.execute(
-        """SELECT id, image_path FROM page_images
-           WHERE img_embedded_at IS NULL
-           ORDER BY id"""
-    ).fetchall()
+        "SELECT id, image_path FROM page_images ORDER BY id").fetchall()
+    rows = [r for r in rows if r["id"] not in have]
     total = len(rows)
     print(f"embed_images: {total} page(s) still need embedding", flush=True)
     n = 0
     n_fail = 0
     n_skip = 0
-    cache = Path(config.PAGE_IMAGES_DIR) / "_vecs"
-    cache.mkdir(parents=True, exist_ok=True)
     t0 = datetime.now(timezone.utc)
     for i, r in enumerate(rows, 1):
         path = config.PROJECT_ROOT / r["image_path"]
@@ -262,12 +346,8 @@ def embed_pending(conn, backend) -> int:
             print(f"  [{i}/{total}] id={r['id']} FAIL {e}",
                   file=sys.stderr, flush=True)
             continue
-        np.save(cache / f"{r['id']}.npy", vec)
-        conn.execute(
-            "UPDATE page_images SET img_embedded_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), r["id"]))
+        np.save(vecs_dir / f"{r['id']}.npy", vec)  # durable per success
         n += 1
-        conn.commit()  # durable after each success; visible to status checks
         elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
         rate = n / elapsed if elapsed > 0 else 0
         eta = (total - i) / rate if rate > 0 else 0
@@ -285,43 +365,33 @@ def embed_pending(conn, backend) -> int:
     return n
 
 
-def rebuild_matrix(conn):
-    rows = conn.execute(
-        """SELECT id FROM page_images
-           WHERE img_embedded_at IS NOT NULL ORDER BY id"""
-    ).fetchall()
-    cache = Path(config.PAGE_IMAGES_DIR) / "_vecs"
+def rebuild_matrix(conn, vecs_dir: Path, img_vectors_npy: Path,
+                   img_vectors_ids_npy: Path, img_vectors_meta_json: Path):
+    rows = conn.execute("SELECT id FROM page_images ORDER BY id").fetchall()
     vecs, ids = [], []
     for r in rows:
-        p = cache / f"{r['id']}.npy"
+        p = vecs_dir / f"{r['id']}.npy"
         if not p.is_file():
-            conn.execute(
-                "UPDATE page_images SET img_embedded_at=NULL WHERE id=?",
-                (r["id"],))
-            continue
+            continue  # not embedded yet (or failed) — retried next run
         vecs.append(np.load(p))
         ids.append(r["id"])
-    conn.commit()
-    config.VECTORS_DIR.mkdir(parents=True, exist_ok=True)
+    img_vectors_npy.parent.mkdir(parents=True, exist_ok=True)
     if not vecs:
-        for p in (config.IMG_VECTORS_NPY, config.IMG_VECTORS_IDS_NPY,
-                  config.IMG_VECTORS_META_JSON):
-            Path(p).unlink(missing_ok=True)
         print("embed_images: no page image vectors")
         return 0
     matrix = np.stack(vecs).astype(np.float32)
     ids_arr = np.array(ids, dtype=np.int64)
-    np.save(config.IMG_VECTORS_NPY, matrix)
-    np.save(config.IMG_VECTORS_IDS_NPY, ids_arr)
+    np.save(img_vectors_npy, matrix)
+    np.save(img_vectors_ids_npy, ids_arr)
     import image_embedding_backends as ieb
     meta = {
         **ieb.current_fingerprint(),
         "count": int(len(ids)),
         "built_at": datetime.now(timezone.utc).isoformat(),
     }
-    Path(config.IMG_VECTORS_META_JSON).write_text(
+    img_vectors_meta_json.write_text(
         json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"embed_images: wrote {len(ids)} vectors → {config.IMG_VECTORS_NPY}")
+    print(f"embed_images: wrote {len(ids)} vectors → {img_vectors_npy}")
     return len(ids)
 
 
@@ -339,19 +409,18 @@ def run():
     n_new = sync_page_images(conn)
     print(f"embed_images: {n_new} new page_images rows")
 
+    _migrate_legacy_flat_index()
     fp = ieb.current_fingerprint()
-    if Path(config.IMG_VECTORS_META_JSON).is_file():
-        meta = json.loads(Path(config.IMG_VECTORS_META_JSON).read_text())
-        built = ieb.meta_fingerprint(meta)
-        if ieb.embedding_fields_changed(built, fp):
-            print("embed_images: fingerprint changed — wipe + re-embed")
-            _wipe_img_index(conn)
+    img_vectors_npy, img_vectors_ids_npy, img_vectors_meta_json, vecs_dir = \
+        ieb.index_paths(fp)
+    _migrate_split_to_unified(fp)
 
     print("embed_images: loading omni backend…")
     backend = ieb.get_backend()
-    n_emb = embed_pending(conn, backend)
-    print(f"embed_images: newly embedded {n_emb}")
-    rebuild_matrix(conn)
+    n_emb = embed_pending(conn, vecs_dir, backend)
+    print(f"embed_images: newly embedded {n_emb} ({vecs_dir.parent.name})")
+    rebuild_matrix(conn, vecs_dir, img_vectors_npy, img_vectors_ids_npy,
+                   img_vectors_meta_json)
     conn.close()
     return {"new_pages": n_new, "embedded": n_emb}
 

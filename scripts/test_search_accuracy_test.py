@@ -1,8 +1,9 @@
-"""Self-test for the eval harness (eval.py). Pure scoring math, golden
-validation, and compare exit codes — no subprocess call to query.py, no
-embedding model, no real corpus (pattern of test_ingest_documents.py).
+"""Self-test for the search accuracy test harness (search_accuracy_test.py).
+Pure scoring math, golden validation, and compare exit codes — no
+subprocess call to query.py, no embedding model, no real corpus
+(pattern of test_ingest_documents.py).
 
-    venv/bin/python scripts/test_eval.py
+    venv/bin/python scripts/test_search_accuracy_test.py
 """
 import shutil
 import sys
@@ -12,15 +13,14 @@ from pathlib import Path
 
 import config
 
-TMP = Path(tempfile.mkdtemp(prefix="pocket_advisor_eval_test_"))
+TMP = Path(tempfile.mkdtemp(prefix="pocket_advisor_search_accuracy_test_"))
 config.PROJECT_ROOT = TMP
 config.OUTPUT_DIR = TMP / "output"
 config.DB_PATH = config.OUTPUT_DIR / "test.db"
 config.VECTORS_DIR = config.OUTPUT_DIR / "vectors"
-config.VECTORS_META_JSON = config.VECTORS_DIR / "vectors.meta.json"
 
 import db     # noqa: E402
-import eval as evalmod  # noqa: E402  ('eval' shadows the builtin only as a module name)
+import search_accuracy_test as sat  # noqa: E402
 
 FAILURES = []
 
@@ -52,20 +52,20 @@ def test_score_question():
     query_json = {"results": [{"message_id": "m1", "thread_id": 1},
                                {"message_id": "m2", "thread_id": 1},
                                {"message_id": "m3", "thread_id": 1}]}
-    s = evalmod.score_question(entry, query_json)
+    s = sat.score_question(entry, query_json)
     check("rank found at correct position", s["rank"] == 2)
     check("reciprocal rank", abs(s["rr"] - 0.5) < 1e-9)
     check("hit@1 false", s["hit@1"] is False)
     check("hit@5 true", s["hit@5"] is True)
 
     entry_miss = {"id": "q2", "expect_any": ["nope"]}
-    s2 = evalmod.score_question(entry_miss, query_json)
+    s2 = sat.score_question(entry_miss, query_json)
     check("miss -> rank None", s2["rank"] is None)
     check("miss -> rr 0", s2["rr"] == 0.0)
     check("miss -> hit@15 false", s2["hit@15"] is False)
 
     entry_thread = {"id": "q3", "expect_thread": 1}
-    s3 = evalmod.score_question(entry_thread, query_json)
+    s3 = sat.score_question(entry_thread, query_json)
     check("thread match at rank 1", s3["rank"] == 1)
 
 
@@ -76,7 +76,7 @@ def test_aggregate():
         {"id": "q1", "rr": 1.0, "hit@1": True, "hit@5": True, "hit@15": True},
         {"id": "q2", "rr": 0.0, "hit@1": False, "hit@5": False, "hit@15": False},
     ]
-    agg = evalmod.aggregate(scored, golden_by_id)
+    agg = sat.aggregate(scored, golden_by_id)
     check("mean mrr", abs(agg["mrr"] - 0.5) < 1e-9)
     check("mean hit@1", abs(agg["hit@1"] - 0.5) < 1e-9)
     check("by_flag slices cross-lingual", agg["by_flag"]["cross-lingual"]["n"] == 1)
@@ -88,14 +88,14 @@ def test_validate_golden():
     conn = make_corpus()
     good = [{"id": "q1", "question": "x?", "expect_any": ["m1"]}]
     try:
-        evalmod.validate_golden(conn, good)
+        sat.validate_golden(conn, good)
         check("valid golden set passes", True)
     except SystemExit:
         check("valid golden set passes", False)
 
     bad = [{"id": "q1", "question": "x?", "expect_any": ["m1", "does-not-exist"]}]
     try:
-        evalmod.validate_golden(conn, bad)
+        sat.validate_golden(conn, bad)
         check("unknown message_id aborts", False)
     except SystemExit as e:
         check("unknown message_id aborts", "does-not-exist" in str(e))
@@ -103,14 +103,14 @@ def test_validate_golden():
     dup = [{"id": "q1", "question": "a", "expect_any": ["m1"]},
            {"id": "q1", "question": "b", "expect_any": ["m2"]}]
     try:
-        evalmod.validate_golden(conn, dup)
+        sat.validate_golden(conn, dup)
         check("duplicate id aborts", False)
     except SystemExit as e:
         check("duplicate id aborts", "duplicate id" in str(e))
 
     no_target = [{"id": "q1", "question": "x?"}]
     try:
-        evalmod.validate_golden(conn, no_target)
+        sat.validate_golden(conn, no_target)
         check("missing expect_any/expect_thread aborts", False)
     except SystemExit:
         check("missing expect_any/expect_thread aborts", True)
@@ -133,21 +133,21 @@ def test_compare():
     b_improved = _fake_result("sha1", {"emails": 10},
                               {"hit@1": 0.5, "hit@5": 1.0, "hit@15": 1.0, "mrr": 0.75},
                               [{"id": "q1", "rank": 1}, {"id": "q2", "rank": 2}])
-    _, code = evalmod.compute_comparison(a, b_improved)
+    _, code = sat.compute_comparison(a, b_improved)
     check("improvement exits 0", code == 0)
 
     # regression: hit@5 drops -> exit 1
     b_regressed = _fake_result("sha1", {"emails": 10},
                                {"hit@1": 0.0, "hit@5": 0.0, "hit@15": 0.0, "mrr": 0.0},
                                qb_same)
-    _, code = evalmod.compute_comparison(a, b_regressed)
+    _, code = sat.compute_comparison(a, b_regressed)
     check("regression exits 1", code == 1)
 
     # different golden set -> never gates, even if metrics look worse
     b_diff_golden = _fake_result("sha2", {"emails": 10},
                                  {"hit@1": 0.0, "hit@5": 0.0, "hit@15": 0.0, "mrr": 0.0},
                                  qb_same)
-    report, code = evalmod.compute_comparison(a, b_diff_golden)
+    report, code = sat.compute_comparison(a, b_diff_golden)
     check("golden mismatch never gates", code == 0)
     check("golden mismatch warns", "NOT directly comparable" in report)
 
@@ -164,7 +164,7 @@ def main():
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S): {FAILURES}")
         return 1
-    print("\nAll eval.py self-tests passed.")
+    print("\nAll search_accuracy_test.py self-tests passed.")
     return 0
 
 

@@ -8,6 +8,14 @@ of an already-fully-designed pattern (three-class knob discipline
 agreed earlier; fingerprint/mismatch mechanism already built and
 proven for the embedding backend), not new architecture.
 
+**2026-07-14 update (R-15):** the "index-invalidating, auto-handled"
+mechanism described below (`embedding_fields_changed` triggers a
+wipe + re-embed) was superseded by a cache-per-model design — a model
+fingerprint change now resolves to a different cache directory instead
+of deleting the previous one. The three-class knob discipline and the
+chunking-drift WARN-only behavior described here are unchanged. See
+[multi-model-vector-cache.md](multi-model-vector-cache.md).
+
 ## Goal
 
 Surface the config.py constants accumulated across Phase 1 into a
@@ -70,7 +78,7 @@ early pipeline design originally commented chunking fields
 enforced it. `embed.py`'s existing fingerprint check (built for the
 embedding backend) only covers backend/model/dim. Extending it to
 chunking is natural (same dict, same `vectors.meta.json` record, same
-mechanism the eval harness already reads) — but chunking mismatches
+mechanism the search accuracy test harness already reads) — but chunking mismatches
 are NOT safely auto-fixable the way a backend swap is: backend swaps
 wipe `embedded_at`/vectors and re-embed EXISTING chunk rows as-is;
 chunk-SIZE changes require re-chunking (deleting and regenerating
@@ -115,7 +123,7 @@ detection, not remediation.
 - [x] Unknown key in `config.yaml` aborts with the offending key listed
       (verified with a deliberate typo).
 - [x] Missing `config.yaml` falls back to code defaults unchanged
-      (`eval.py compare post-translit post-configyaml`: byte-identical
+      (`search_accuracy_test.py compare post-translit post-configyaml`: byte-identical
       across all 26 questions, exit 0).
 - [x] Overriding a free knob takes effect (`test_config.py`).
 - [x] Overriding an index-invalidating model field routes to the
@@ -149,8 +157,8 @@ detection, not remediation.
 
 ```bash
 venv/bin/python scripts/test_config.py
-venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-configyaml
-venv/bin/python scripts/eval.py compare eval/results/*post-translit*.json eval/results/*post-configyaml*.json
+venv/bin/python scripts/search_accuracy_test.py run --golden search-accuracy-test/golden/family-law.yaml --label post-configyaml
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/*post-translit*.json search-accuracy-test/results/*post-configyaml*.json
 git status --short   # config.yaml is tracked platform config
 ```
 

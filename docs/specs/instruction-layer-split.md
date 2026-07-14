@@ -1,8 +1,8 @@
 # Spec: instruction-layer split (Phase 1d)
 
 Status: COMPLETE 2026-07-12. All verification steps passed: self-tests
-green (config 8/8 incl. new workspace.dir derivation, eval 20/20,
-ingest-documents all), integrity clean, query.py + eval.py verified
+green (config 8/8 incl. new workspace.dir derivation, search accuracy test 20/20,
+ingest-documents all), integrity clean, query.py + search_accuracy_test.py verified
 live from the new workspace paths, DoD grep CLEAN over tracked files —
 after it caught 5 real leaks in places the file-by-file plan hadn't
 listed (code comments and test fixtures in doc_dates.py /
@@ -33,7 +33,7 @@ workspaces/family-law/            # gitignored entirely
                                   # half of the old docs/STATUS.md)
   LEARNINGS.md                    # case-specific lessons (the case
                                   # half of old docs/LEARNINGS.md)
-  eval/                           # moved from repo root (golden sets
+  search-accuracy-test/         # moved from repo root (golden sets
                                   # + results — roadmap said "moves at 1d")
   corpora/
     <one dir per ingestion-sources top-level folder>/CORPUS.md
@@ -58,15 +58,15 @@ agent to discover `workspaces/*/WORKSPACE.md` and read before case work.
 | `docs/specs/*.md` | Scrub case facts from verification write-ups (names, addresses, folder names) → generic descriptions; the measured numbers stay. |
 | `docs/ROADMAP.md` | Final-pass scrub check. |
 | `RUNBOOK.md` | Genericize the one case-flavored example path. |
-| `chronology.md`, `eval/` | Move into workspace dir. |
+| `chronology.md`, `search-accuracy-test/` | Move into workspace dir. |
 | `config.py` / `config.yaml` | Platform knobs only (committed). Matter selection is workspace-config registry, not config.yaml. |
-| `.gitignore` | `workspaces/` added; root `eval/`+`chronology.md` entries replaced. |
+| `.gitignore` | `workspaces/` added; root `search-accuracy-test/`+`chronology.md` entries replaced. |
 
 ## Verification
 
 1. `test_config.py` (extended for workspace.dir derivation),
-   `test_eval.py`, `test_ingest_documents.py` all green.
-2. `eval.py list` works against the moved results dir; `query.py`
+   `test_search_accuracy_test.py`, `test_ingest_documents.py` all green.
+2. `search_accuracy_test.py list` works against the moved results dir; `query.py`
    regression (one real query, unchanged output vs pre-split).
 3. DoD grep over tracked files: build the term list FROM THE WORKSPACE
    (party surnames/given names/children's names from WORKSPACE.md,

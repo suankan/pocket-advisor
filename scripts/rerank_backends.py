@@ -1,7 +1,7 @@
 """Reranker — single MLX path (jina-reranker-v3-mlx).
 
-Transient per-query; no index fingerprint. eval.py still records the
-active model so runs stay honestly labeled.
+Transient per-query; no index fingerprint. search_accuracy_test.py
+still records the active model so runs stay honestly labeled.
 """
 import config
 import mlx_model_loader

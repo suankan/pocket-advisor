@@ -17,7 +17,7 @@ workspaces/<name>/                 # entire user-data root (gitignored)
     additional-documents/…
     …/CORPUS.md                    # per-corpus agent specs
   output/                          # derived DB, text, vectors, logs, daemon sock
-  chronology.md, journal.md, LEARNINGS.md, eval/
+  chronology.md, journal.md, LEARNINGS.md, search-accuracy-test/
 ```
 
 Platform code (`scripts/`, `docs/`, committed `config.yaml`) stays
@@ -44,7 +44,7 @@ Those remain future ledger items if a second matter appears.
 | `OUTPUT_DIR` | `{WORKSPACE_DIR}/output` |
 
 Recomputed after every `config.yaml` overlay (same pattern as
-`EVAL_*`). Privilege convention unchanged: any ancestor directory
+`SEARCH_ACCURACY_TEST_*`). Privilege convention unchanged: any ancestor directory
 literally named `privileged` under `corpora/`.
 
 Evidence paths in the DB:

@@ -1,13 +1,13 @@
-# Spec: warm (in-process) eval query path
+# Spec: warm (in-process) search accuracy test query path
 
-Status: IMPLEMENTED 2026-07-13. Speeds up `eval.py run` by loading
+Status: IMPLEMENTED 2026-07-13. Speeds up `search_accuracy_test.py run` by loading
 embed + rerank models (and the vector matrix) once per run instead of
 once per golden question. Does **not** introduce a generative LLM or
 cross-question chat context.
 
 ## Problem
 
-`eval.py run` historically spawned `query.py` as a **subprocess per
+`search_accuracy_test.py run` historically spawned `query.py` as a **subprocess per
 golden question**. Each process cold-started:
 
 1. the embedding backend (Jina MLX / llama.cpp / …),
@@ -24,14 +24,15 @@ identical and only the **weights stay resident**.
 
 ## Non-goals / confusion to avoid
 
-- **Not** a warm generative LLM chat session. Eval still scores
-  retrieval ranks only (`hit@k`, MRR). No answer text is generated; no
-  prior question’s content is injected into the next.
+- **Not** a warm generative LLM chat session. The search accuracy test
+  still scores retrieval ranks only (`hit@k`, MRR). No answer text is
+  generated; no prior question’s content is injected into the next.
 - **Not** a long-lived socket daemon for interactive use — that is
-  `docs/specs/query-daemon.md` (`query_daemon.py`). Warm eval is
-  **one process for the duration of `eval.py run`** only (no socket).
+  `docs/specs/query-daemon.md` (`query_daemon.py`). Warm search
+  accuracy test mode is **one process for the duration of
+  `search_accuracy_test.py run`** only (no socket).
 - Interactive multi-query sessions should use the **query daemon**,
-  not eval’s in-process path.
+  not search-accuracy-test's in-process path.
 
 
 ## Design
@@ -53,9 +54,10 @@ locally for that call):
 | `vector_matrix`, `vector_ids` | loaded `vectors.npy` / `vectors_ids.npy` |
 
 CLI `query.py` continues to call `run_search` with all warm resources
-None (cold each invocation). Eval warm mode constructs them once.
+None (cold each invocation). Search accuracy test warm mode constructs
+them once.
 
-### `eval.py run --mode {warm,cold}`
+### `search_accuracy_test.py run --mode {warm,cold}`
 
 | Mode | Behavior | Default? |
 |---|---|---|
@@ -94,19 +96,19 @@ Module-level model objects are **weights only**, not chat state.
 
 ```bash
 # default: warm
-venv/bin/python scripts/eval.py run \
-  --golden workspaces/family-law/eval/golden/family-law.yaml \
+venv/bin/python scripts/search_accuracy_test.py run \
+  --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml \
   --label warm-check
 
 # optional: cold subprocess (old behavior)
-venv/bin/python scripts/eval.py run \
-  --golden workspaces/family-law/eval/golden/family-law.yaml \
+venv/bin/python scripts/search_accuracy_test.py run \
+  --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml \
   --label cold-check --mode cold
 ```
 
 ## Acceptance criteria
 
-1. `scripts/test_eval.py` still green (scoring/compare unchanged).
+1. `scripts/test_search_accuracy_test.py` still green (scoring/compare unchanged).
 2. `--mode warm` and `--mode cold` both accepted; invalid mode aborts.
 3. Result JSON records `fingerprint.retrieval_config.query_mode`.
 4. Warm run wall time on full golden set is **materially lower** than
@@ -118,17 +120,18 @@ venv/bin/python scripts/eval.py run \
 
 - `scripts/query.py` — `run_search`, CLI thin wrapper
 - `scripts/reranker.py` — optional `backend=` argument
-- `scripts/eval.py` — `--mode`, warm loop, fingerprint
-- `docs/specs/eval-harness.md` — point at this addendum
+- `scripts/search_accuracy_test.py` — `--mode`, warm loop, fingerprint
+- `docs/specs/search-accuracy-test.md` — point at this addendum
 - `RUNBOOK.md`, `docs/LEARNINGS.md`, `docs/CHANGELOG.md`, DESIGN if needed
-  row update (model load per query still true for CLI; warm for eval)
+  row update (model load per query still true for CLI; warm for
+  search-accuracy-test)
 
 ## Verification commands
 
 ```bash
-venv/bin/python scripts/test_eval.py
+venv/bin/python scripts/test_search_accuracy_test.py
 # optional full-corpus (slow, needs live index + models):
-venv/bin/python scripts/eval.py run \
-  --golden workspaces/family-law/eval/golden/family-law.yaml \
+venv/bin/python scripts/search_accuracy_test.py run \
+  --golden workspaces/family-law/search-accuracy-test/golden/family-law.yaml \
   --label warm-verify --mode warm
 ```

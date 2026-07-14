@@ -1,4 +1,4 @@
-# Spec: retrieval eval harness (Phase 1a)
+# Spec: retrieval search accuracy test harness (Phase 1a)
 
 Status: IMPLEMENTED 2026-07-12. Harness verified end-to-end; golden set
 curated (24 q) and `baseline-pre-1b` recorded — see acceptance
@@ -9,13 +9,13 @@ no Phase-1b accuracy change lands before this harness has produced a
 baseline.
 
 One deliberate deviation from this spec's original usage example:
-`--golden` has NO baked-in default path/filename in `scripts/eval.py`
+`--golden` has NO baked-in default path/filename in `scripts/search_accuracy_test.py`
 or `config.py` (the example above showed `family-law.yaml` as a
 default). Per ROADMAP tenets 10/11 (finalized after this spec's first
 draft), naming a specific workspace's golden set inside committed
 platform code would leak workspace identity into the platform layer.
 `--golden` is a required argument instead; config.py only adds the
-structural paths (EVAL_DIR/EVAL_GOLDEN_DIR/EVAL_RESULTS_DIR).
+structural paths (SEARCH_ACCURACY_TEST_DIR/SEARCH_ACCURACY_TEST_GOLDEN_DIR/SEARCH_ACCURACY_TEST_RESULTS_DIR).
 
 ## Goal
 
@@ -25,15 +25,15 @@ runs. So that "the reranker helped" becomes a number, not a feeling.
 
 ## Layout (two-layer rule applies)
 
-- `scripts/eval.py` — the harness. ENGINE code, committed, zero case
+- `scripts/search_accuracy_test.py` — the harness. ENGINE code, committed, zero case
   content.
-- `eval/` — workspace data (golden sets contain case facts, results
+- `search-accuracy-test/` — workspace data (golden sets contain case facts, results
   contain question text and hits). ENTIRE directory gitignored. Not
   under `output/` because golden sets are user-curated (not
   regenerable) and results are historical records (a rebuild must not
   erase them). Moves under `workspaces/<name>/` at Phase 1d.
-  - `eval/golden/family-law.yaml` — golden set (see format)
-  - `eval/results/<UTC-timestamp>__<label>.json` — one file per run
+  - `search-accuracy-test/golden/family-law.yaml` — golden set (see format)
+  - `search-accuracy-test/results/<UTC-timestamp>__<label>.json` — one file per run
 
 ## Golden set format (YAML list)
 
@@ -51,21 +51,21 @@ runs. So that "the reranker helped" becomes a number, not a feeling.
 Rules: presence-testing only in v1 (no absence questions — LEARNINGS
 shows absence claims are corpus-scoped and slippery). Questions must be
 answerable from the corpus as-is. `expect_any` ids MUST exist in the
-DB — eval.py validates this and aborts listing unknown ids (a re-ingest
+DB — search_accuracy_test.py validates this and aborts listing unknown ids (a re-ingest
 can change nothing silently).
 
-## eval.py behavior
+## search_accuracy_test.py behavior
 
 ```
-venv/bin/python scripts/eval.py run  --golden <path.yaml>
+venv/bin/python scripts/search_accuracy_test.py run  --golden <path.yaml>
                                      [--label L] [--top-k 15]
                                      [--mode warm|cold]
-venv/bin/python scripts/eval.py compare <resultA.json> <resultB.json>
-venv/bin/python scripts/eval.py list [--golden ...]   # table of past runs
+venv/bin/python scripts/search_accuracy_test.py compare <resultA.json> <resultB.json>
+venv/bin/python scripts/search_accuracy_test.py list [--golden ...]   # table of past runs
 ```
 
 **run**: for each golden question, run hybrid retrieval and score ranks.
-Default **`--mode warm`** (2026-07-13, docs/specs/warm-eval.md): load
+Default **`--mode warm`** (2026-07-13, docs/specs/search-accuracy-test-warm-mode.md): load
 embed + rerank models and the vector matrix **once**, then call
 `query.run_search` in-process per question (independent ranking — not
 a generative chat context). **`--mode cold`**: spawn
@@ -127,38 +127,38 @@ paraphrase-only (no keyword overlap with the source), >=2 date-window
 questions. For each: find the ground-truth message_id via query.py +
 reading `output/text/emails/<id>.txt`, verify with the user where
 uncertain, tag flags. This step is agent+user work and is NOT part of
-the eval.py implementation task.
+the search_accuracy_test.py implementation task.
 
 ## Implementation steps
 
-1. `scripts/eval.py` per above. Reuse `db.connect()` for validation
+1. `scripts/search_accuracy_test.py` per above. Reuse `db.connect()` for validation
    and corpus counts; `pyyaml` is the only new dependency (add to
    scripts/requirements.txt).
-2. `.gitignore`: add `eval/` (with comment: workspace data — golden
+2. `.gitignore`: add `search-accuracy-test/` (with comment: workspace data — golden
    sets + results contain case facts).
 3. `RUNBOOK.md`: "Measuring retrieval quality" section (run, compare,
    when to re-baseline: after any re-ingest, before/after any 1b item).
-4. Self-test: `scripts/test_eval.py` — temp fixture golden set against
+4. Self-test: `scripts/test_search_accuracy_test.py` — temp fixture golden set against
    a temp DB with known synthetic rows (pattern of
    test_ingest_documents.py; never touches real corpus), covering:
    scoring math (rank/MRR), unknown-id abort, compare exit codes.
 
 ## Acceptance criteria
 
-- [x] `eval.py run` on a 3-question smoke golden set completes, writes
+- [x] `search_accuracy_test.py run` on a 3-question smoke golden set completes, writes
       a results file matching the JSON shape above, prints aggregates.
       Verified against the real corpus/index: hit@1=hit@5=hit@15=0.67,
       mrr=0.667 on 3 real (uncurated) questions.
 - [x] Unknown message_id in golden set aborts with the offending ids
-      (verified in test_eval.py and manually).
+      (verified in test_search_accuracy_test.py and manually).
 - [x] `compare` of two identical runs prints deltas (all "unchanged,
       within noise"), exits 0; a synthetic regression case exits 1; a
       synthetic golden-sha256 mismatch warns and never gates (exit 0)
-      — all verified in test_eval.py.
-- [x] `test_eval.py` all green (20/20 checks: score_question, aggregate,
+      — all verified in test_search_accuracy_test.py.
+- [x] `test_search_accuracy_test.py` all green (20/20 checks: score_question, aggregate,
       validate_golden, compare).
-- [x] Nothing under `eval/` is git-tracked (verified: `git status`
-      shows no eval/ entries after running); `scripts/eval.py` contains
+- [x] Nothing under `search-accuracy-test/` is git-tracked (verified: `git status`
+      shows no search-accuracy-test/ entries after running); `scripts/search_accuracy_test.py` contains
       zero case content (only structural/example strings).
 - [x] Full golden set curated and baseline run recorded 2026-07-12
       (label `baseline-pre-1b`): 24 questions (4 cross-lingual, 4
@@ -176,16 +176,16 @@ the eval.py implementation task.
       pure-paraphrase query surfaced a topically-adjacent
       thread (mortgage payment) but not the exact target — expected
       paraphrase-comprehension difficulty. This is the baseline every
-      1b change must be compared against via `eval.py compare`.
+      1b change must be compared against via `search_accuracy_test.py compare`.
 
 ## Verification commands
 
 ```bash
-venv/bin/python scripts/test_eval.py
-venv/bin/python scripts/eval.py run --label smoke
-venv/bin/python scripts/eval.py run --label smoke2
-venv/bin/python scripts/eval.py compare eval/results/*smoke*.json eval/results/*smoke2*.json
-git status --short   # must show nothing under eval/
+venv/bin/python scripts/test_search_accuracy_test.py
+venv/bin/python scripts/search_accuracy_test.py run --label smoke
+venv/bin/python scripts/search_accuracy_test.py run --label smoke2
+venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/*smoke*.json search-accuracy-test/results/*smoke2*.json
+git status --short   # must show nothing under search-accuracy-test/
 ```
 
 ## Non-goals (v1)

@@ -13,7 +13,7 @@
 # - All collections ingested once into a single content index.
 # - Active workspace ⇒ mount filter (collection_id ∈ mounts).
 # - Per-workspace folders: semi-inferred matter state only
-#   (*.md, eval, journal) — not bulk evidence.
+#   (*.md, search-accuracy-test, journal) — not bulk evidence.
 #
 # On-disk layout (under platform workspaces.dir)
 # ----------------------------------------------
@@ -23,7 +23,7 @@
 #     .state/                         # regenerable engine store
 #       pocket_advisor.db, vectors/, logs/, query_daemon.sock
 #       cache/<collection_id>/{extracted,text}/
-#     <workspace_id>/                # matter: WORKSPACE.md, skills, eval…
+#     <workspace_id>/                # matter: WORKSPACE.md, skills, search-accuracy-test…
 #
 # Facts vs state
 # --------------

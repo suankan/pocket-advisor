@@ -1,5 +1,5 @@
-"""Retrieval eval harness (docs/specs/eval-harness.md, Phase 1a;
-warm path: docs/specs/warm-eval.md).
+"""Search accuracy test (docs/specs/search-accuracy-test.md, Phase 1a;
+warm path: docs/specs/search-accuracy-test-warm-mode.md).
 
 Measures query.py's retrieval quality against a golden question set and
 records every run with a full fingerprint (git commit, index identity,
@@ -7,18 +7,18 @@ corpus counts, retrieval config, golden-set hash) so any two runs are
 honestly comparable. No accuracy-affecting change (pre-filter, reranker,
 transliteration, ...) is called an improvement without a `compare` run.
 
-    eval.py run --golden eval/golden/<name>.yaml [--label L] [--top-k N]
-                [--mode warm|cold]
-    eval.py compare <result_a.json> <result_b.json>
-    eval.py list [--golden eval/golden/<name>.yaml]
+    search_accuracy_test.py run --golden search-accuracy-test/golden/<name>.yaml
+                            [--label L] [--top-k N] [--mode warm|cold]
+    search_accuracy_test.py compare <result_a.json> <result_b.json>
+    search_accuracy_test.py list [--golden search-accuracy-test/golden/<name>.yaml]
 
 Default --mode warm loads embed/rerank models once per run (not a
 generative chat context). --mode cold spawns query.py per question
 (old CLI-faithful behavior).
 
-`eval/` is workspace data (golden sets + results contain case facts) —
-entirely gitignored; see config.py for why no default path is baked in
-here.
+`search-accuracy-test/` is workspace data (golden sets + results contain
+case facts) — entirely gitignored; see config.py for why no default
+path is baked in here.
 """
 import argparse
 import hashlib
@@ -34,6 +34,7 @@ import yaml
 
 import config
 import db
+import embedding_backends
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TOP_KS = (1, 5, 15)
@@ -45,7 +46,7 @@ VALID_MODES = ("warm", "cold")
 def load_golden(path):
     data = yaml.safe_load(Path(path).read_text()) or []
     if not isinstance(data, list):
-        raise SystemExit(f"eval: golden set {path} must be a YAML list")
+        raise SystemExit(f"search_accuracy_test: golden set {path} must be a YAML list")
     return data
 
 
@@ -73,7 +74,7 @@ def validate_golden(conn, golden_list):
                     "SELECT 1 FROM threads WHERE id=?", (e["expect_thread"],)).fetchone():
                 errors.append(f"{eid}: unknown thread_id {e['expect_thread']!r}")
     if errors:
-        raise SystemExit("eval: golden set validation failed:\n" +
+        raise SystemExit("search_accuracy_test: golden set validation failed:\n" +
                          "\n".join(f"  - {x}" for x in errors))
 
 
@@ -136,18 +137,18 @@ def run_query_cold(question, top_k, include_privileged=True):
         cmd.append("--exclude-privileged")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise SystemExit(f"eval: query.py failed for {question!r}:\n{proc.stderr}")
+        raise SystemExit(f"search_accuracy_test: query.py failed for {question!r}:\n{proc.stderr}")
     return json.loads(proc.stdout)
 
 
 class WarmQuerySession:
-    """Thin wrapper around query.WarmResources for eval warm mode
-    (docs/specs/warm-eval.md). Same residency idea as query_daemon."""
+    """Thin wrapper around query.WarmResources for search-accuracy-test warm mode
+    (docs/specs/search-accuracy-test-warm-mode.md). Same residency idea as query_daemon."""
 
     def __init__(self):
         import query as querymod
         self._warm = querymod.WarmResources(
-            log=lambda m: print(f"eval: {m}", flush=True))
+            log=lambda m: print(f"search_accuracy_test: {m}", flush=True))
 
     def search(self, question, top_k, include_privileged=True):
         # Explicit bool — do not pass None (would re-resolve config).
@@ -169,13 +170,14 @@ def _git(args):
 
 
 def build_fingerprint(conn, golden_path, golden_list, top_k, query_mode):
-    index_meta = json.loads(config.VECTORS_META_JSON.read_text()) \
-        if config.VECTORS_META_JSON.exists() else {}
+    fp = embedding_backends.current_fingerprint()
+    vectors_npy, _, index_meta_json, vecs_dir = embedding_backends.index_paths(fp)
+    index_meta = json.loads(index_meta_json.read_text()) if index_meta_json.exists() else {}
+    embedded_count = len(list(vecs_dir.glob("*.npy"))) if vecs_dir.is_dir() else 0
     corpus = {
         "emails": conn.execute("SELECT COUNT(*) FROM items").fetchone()[0],
         "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
-        "embedded": conn.execute(
-            "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NOT NULL").fetchone()[0],
+        "embedded": embedded_count,
     }
     golden_bytes = Path(golden_path).read_bytes()
     return {
@@ -255,11 +257,11 @@ def compute_comparison(a, b):
 
 def cmd_run(args):
     if args.mode not in VALID_MODES:
-        raise SystemExit(f"eval: --mode must be one of {VALID_MODES}, "
+        raise SystemExit(f"search_accuracy_test: --mode must be one of {VALID_MODES}, "
                          f"got {args.mode!r}")
     golden_path = Path(args.golden)
     if not golden_path.exists():
-        raise SystemExit(f"eval: golden set not found: {golden_path}")
+        raise SystemExit(f"search_accuracy_test: golden set not found: {golden_path}")
     golden_list = load_golden(golden_path)
 
     conn = db.connect()
@@ -301,13 +303,13 @@ def cmd_run(args):
               "duration_s": round(duration, 2), "fingerprint": fingerprint,
               "aggregates": aggregates, "questions": scored}
 
-    config.EVAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    config.SEARCH_ACCURACY_TEST_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = started.strftime("%Y%m%dT%H%M%SZ")
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", args.label) or "run"
-    out_path = config.EVAL_RESULTS_DIR / f"{ts}__{slug}.json"
+    out_path = config.SEARCH_ACCURACY_TEST_RESULTS_DIR / f"{ts}__{slug}.json"
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
 
-    print(f"eval: {len(golden_list)} questions ({args.mode}) -> {out_path}")
+    print(f"search_accuracy_test: {len(golden_list)} questions ({args.mode}) -> {out_path}")
     print(f"  duration_s={duration:.1f}  "
           f"hit@1={aggregates['hit@1']:.2f} hit@5={aggregates['hit@5']:.2f} "
           f"hit@15={aggregates['hit@15']:.2f} mrr={aggregates['mrr']:.3f}")
@@ -324,7 +326,7 @@ def cmd_compare(args):
 
 
 def cmd_list(args):
-    files = sorted(config.EVAL_RESULTS_DIR.glob("*.json"))
+    files = sorted(config.SEARCH_ACCURACY_TEST_RESULTS_DIR.glob("*.json"))
     if args.golden:
         want = hashlib.sha256(Path(args.golden).read_bytes()).hexdigest()
         files = [f for f in files
@@ -352,7 +354,7 @@ def main():
         "--mode", choices=VALID_MODES, default="warm",
         help="warm (default): load embed/rerank once in-process. "
              "cold: subprocess query.py per question (CLI cold-start cost). "
-             "See docs/specs/warm-eval.md.")
+             "See docs/specs/search-accuracy-test-warm-mode.md.")
     p_run.set_defaults(func=cmd_run)
 
     p_cmp = sub.add_parser("compare", help="compare two result JSON files")

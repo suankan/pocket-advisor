@@ -1,9 +1,0 @@
-# Apple-Silicon MLX stack (text embed + omni page embed + rerank).
-# Required for pocket-advisor (GGUF / llama.cpp removed).
-mlx
-tokenizers
-mlx-lm
-safetensors
-pillow
-# Omni image preprocessing only (AutoProcessor); forward pass is MLX.
-transformers>=4.57

@@ -235,7 +235,7 @@ class MlxOmniEmbedder:
             except ImportError as e:
                 raise SystemExit(
                     "omni image embed needs transformers (processor):\n"
-                    "  venv/bin/pip install -r scripts/requirements-mlx.txt\n"
+                    "  venv/bin/pip install -r scripts/requirements.txt\n"
                     f"({e})") from e
             self._proc = AutoProcessor.from_pretrained(
                 str(self.repo_dir), trust_remote_code=True)

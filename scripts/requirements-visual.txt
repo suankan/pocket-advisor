@@ -1,4 +1,0 @@
-# Visual channel deps are now part of the main MLX stack
-# (scripts/requirements-mlx.txt). Kept as a thin redirect so older
-# RUNBOOK lines still work.
--r requirements-mlx.txt

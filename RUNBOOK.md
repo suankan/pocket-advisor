@@ -231,10 +231,10 @@ venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import db; c=db.co
 Optional structured rows (R-04): `venv/bin/python scripts/ingest.py transactions`.
 Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
 
-Visual page-image channel (R-03, opt-in after smoke PASS):
+Visual page-image channel (R-03, opt-in after smoke PASS; omni
+processor deps are already in `scripts/requirements.txt`):
 
 ```bash
-venv/bin/pip install -r scripts/requirements-mlx.txt   # omni processor deps
 venv/bin/python scripts/smoke_visual_alignment.py   # expect PASS
 # config.yaml: ingestion.embed_images: true
 venv/bin/python scripts/ingest.py --embed images            # rasterize + omni index

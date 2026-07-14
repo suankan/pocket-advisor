@@ -9,5 +9,13 @@ python-dateutil>=2.9
 huggingface_hub>=0.23
 pyyaml>=6.0
 unidecode>=1.3
-# MLX stack (required — no GGUF fallback)
--r requirements-mlx.txt
+
+# Apple-Silicon MLX stack (text embed + omni page embed + rerank).
+# Required — no GGUF/llama.cpp fallback.
+mlx
+tokenizers
+mlx-lm
+safetensors
+pillow
+# Omni image preprocessing only (AutoProcessor); forward pass is MLX.
+transformers>=4.57

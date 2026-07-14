@@ -33,7 +33,7 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents | — |
 | **Measure + accuracy** — eval, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 eval/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm eval, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
-| **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
+| **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
 | **Structured numbers** — transactions SQL, row citations | **Done (heuristic only)** | **R-04** table + regex extractor (live rows may be 0 until run / until R-04b) | **R-04b** real bank parsers |
 | **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual eval; finish live image index after re-embed |
@@ -74,7 +74,7 @@ tax advice. Local-only is the product.
    deepen, never bypass.
 4. **Store-agnostic retrieval.** `chunk_id` is the join key; vector
    store must stay swappable.
-5. **Idempotent, incremental, regenerable.** `workspaces/state/` always
+5. **Idempotent, incremental, regenerable.** `workspaces/.state/` always
    rebuildable from `corpora/`.
 6. **Boring, few dependencies.** Replace, don't accumulate zoos.
 7. **Config over code** with free / index-invalidating / safety-semantics
@@ -105,7 +105,7 @@ tax advice. Local-only is the product.
 workspaces/                          # gitignored user data root
   workspace-config.yaml              # schema_version: 2
   corpora/<collection_id>/           # READ-ONLY evidence facts
-  state/                             # ONE regenerable engine store
+  .state/                             # ONE regenerable engine store
     pocket_advisor.db
     vectors/
     logs/
@@ -164,7 +164,7 @@ Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
 `--embed text|images|all`. Stage `all` and `--embed all` honor
 `ingestion.embed_text` / `ingestion.embed_images` (explicit named
 `--embed text|images` force that channel). Low-conf OCR flagged;
-review images under `state/` (open via DB/query, not bulk-browse of
+review images under `.state/` (open via DB/query, not bulk-browse of
 cache). Details: **RUNBOOK** + **specs** + **LEARNINGS**.
 
 ### Retrieval

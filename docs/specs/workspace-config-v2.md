@@ -3,8 +3,8 @@
 Status: **SHIPPED** 2026-07-13 (loader, mounts, path layout,
 per-collection cache). Dual-read v1/v2 in `scripts/workspace_config.py`;
 query pre-filter by mounted `source_id`s; evidence under
-`workspaces/corpora/`; engine under `workspaces/state/` including
-`state/cache/<collection_id>/{text,extracted}/`.
+`workspaces/corpora/`; engine under `workspaces/.state/` including
+`.state/cache/<collection_id>/{text,extracted}/`.
 
 Live instance (gitignored): `workspaces/workspace-config.yaml`  
 Committed schema sketch: `docs/specs/workspace-config-v2.example.yaml`
@@ -40,8 +40,8 @@ copy-by-folder. We need:
 | 4 | **One shared engine DB** for all collections; isolation = mount filter + privilege. |
 | 5 | **Multi-DB deferred** (not needed for shared bank collections). |
 | 6 | **`corpora/` = read-only facts** — never write/rename/delete; no `.cache` inside. |
-| 7 | **Engine derived tree named `state`** (not `output`). Target: `workspaces/state/`. |
-| 8 | **Per-collection engine cache:** `state/cache/<collection_id>/{extracted,text}/` — engine-only, not agent free-browse. |
+| 7 | **Engine derived tree named `.state`** (not `output`). Target: `workspaces/.state/`. |
+| 8 | **Per-collection engine cache:** `.state/cache/<collection_id>/{extracted,text}/` — engine-only, not agent free-browse. |
 | 9 | **Agent-readable semi-inferred state only under** `workspaces/<workspace_id>/`. |
 | 10 | **No `kind:`** on collections — ingest dispatches **per file** by extension/MIME. |
 | 11 | **No `retrieval:`** on collections — channels from internal supported-types map (+ optional **platform** feature flags). |
@@ -60,7 +60,7 @@ copy-by-folder. We need:
   corpora/                                 # READ-ONLY facts
     <collection folders…>
     privileged/<…>/                        # optional FS privilege fail-safe
-  state/                                   # ONE regenerable engine store
+  .state/                                   # ONE regenerable engine store
     pocket_advisor.db
     vectors/
     logs/
@@ -140,7 +140,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 ## Agent / isolation rules
 
 1. **Never write** under `corpora/`.  
-2. **Do not** `list_dir` / bulk-read `state/cache/` as a library.  
+2. **Do not** `list_dir` / bulk-read `.state/cache/` as a library.  
 3. Open full bodies only via **mount- and privilege-gated** query (or gated open-by-id).  
 4. Matter notes, chronology, eval goldens: only under `workspaces/<id>/`.  
 5. Switching `active` workspace changes mount set + which matter docs load — not a second copy of facts.
@@ -151,7 +151,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 
 1. Walk each **collection** root once (all collections, or those dirty).  
 2. Per file: extension/MIME → email vs document vs skip.  
-3. Write regenerable artifacts under `state/cache/<collection_id>/…`.  
+3. Write regenerable artifacts under `.state/cache/<collection_id>/…`.  
 4. Upsert content-addressed membership; recompute privilege.  
 5. No second ingest when another workspace mounts the same collection.
 
@@ -175,7 +175,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 | Multi-DB complexity / ID namespaces | Rejected for content; one DB; portable ids = message_id + collection_id + sha |
 | Workspace isolation | Mounts + privilege + matter folders — not separate full indexes |
 | Agent reading all text under shared cache | Cache engine-only; no free browse; gated open |
-| Writable junk inside evidence | No `.cache` under `corpora/`; cache under `state/` |
+| Writable junk inside evidence | No `.cache` under `corpora/`; cache under `.state/` |
 | `kind` / `retrieval` misleading on mixed stores | Removed; per-file + internal type map |
 | Embed model per workspace | Forbidden; one text stack; visual channel separate (additive) |
 | Privilege | Collection flag + `privileged/` path segment fail-safe |
@@ -202,11 +202,11 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 - [x] Blob index: collection roots from registry; PK `(source_id, sha256)`  
 - [x] Query mount pre-filter  
 - [x] Tests: v2 loader cases in `test_workspace_config.py`  
-- [x] Paths: engine → `workspaces/state/`  
+- [x] Paths: engine → `workspaces/.state/`  
 - [x] FS move: evidence → `workspaces/corpora/…` (collection-id folder names)  
-- [x] AGENTS.md: cite cache text paths from query; no bulk browse of `state/cache`  
+- [x] AGENTS.md: cite cache text paths from query; no bulk browse of `.state/cache`  
 - [x] Live yaml v2 with `corpora/<id>` paths  
-- [x] Extracts under `state/cache/<collection_id>/{text,extracted}/`
+- [x] Extracts under `.state/cache/<collection_id>/{text,extracted}/`
 
 ---
 
@@ -214,7 +214,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 
 - [x] User agreed: collections + workspace mounts  
 - [x] User agreed: one DB  
-- [x] User agreed: corpora read-only; `state/cache/<collection_id>/`  
+- [x] User agreed: corpora read-only; `.state/cache/<collection_id>/`  
 - [x] User agreed: drop `retrieval:` and `kind:` from registry  
 - [x] Concerns table + non-goals recorded  
 - [x] Core layout + loader + mount filter + per-collection cache implemented  

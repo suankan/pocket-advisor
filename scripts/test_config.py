@@ -125,9 +125,9 @@ def test_workspace_dir_derives_eval_paths():
         # Shared corpora + state (not under matter folder)
         check("INGESTION_SOURCES shared corpora",
               config.INGESTION_SOURCES == config.WORKSPACES_DIR / "corpora")
-        check("OUTPUT_DIR is shared state",
-              config.OUTPUT_DIR == config.WORKSPACES_DIR / "state"
-              or config.OUTPUT_DIR.name in ("state", "output"))
+        check("OUTPUT_DIR is shared .state",
+              config.OUTPUT_DIR == config.WORKSPACES_DIR / ".state"
+              or config.OUTPUT_DIR.name in (".state", "state", "output"))
         check("DB_PATH under state",
               config.DB_PATH.name == "pocket_advisor.db"
               and config.DB_PATH.parent == config.OUTPUT_DIR)

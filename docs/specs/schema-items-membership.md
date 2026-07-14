@@ -58,7 +58,7 @@ items                      -- logical object (email message OR file document OR 
   title / subject
   date_utc, …
   is_privileged, privilege_override
-  body_text_path (or only via state/cache layout)
+  body_text_path (or only via .state/cache layout)
   common fields only
 
 item_memberships           -- physical blob in a collection (replaces email_files ∪ documents membership)
@@ -141,7 +141,7 @@ Live columns for reference (do not treat as target):
 | Use case | Attachment to spine |
 |---|---|
 | Sum transfers / bank analytics | `transactions.item_id` → items; filter via membership mounts |
-| Page-image retrieval | `page_images.item_id` → items; cache under `state/cache/<collection_id>/` |
+| Page-image retrieval | `page_images.item_id` → items; cache under `.state/cache/<collection_id>/` |
 | Agent isolation | Mount filter on query + AGENTS rules / gated open by item_id |
 | New document kinds | New `item_kind` + attrs/side table + ingest type-map entry |
 
@@ -185,7 +185,7 @@ Do **not** require full rename before collections v2 can ship.
 
 | Risk / limit | Note |
 |---|---|
-| DB/state disk growth | Real; wipe `state/`, watch extract cache more than SQLite alone |
+| DB/state disk growth | Real; wipe `.state/`, watch extract cache more than SQLite alone |
 | Join complexity | Mild at personal scale |
 | JSON attrs junk drawer | Discipline; promote hot fields |
 | Migration churn (Phase B) | Touch many scripts — isolate from v2 feature PR if possible |

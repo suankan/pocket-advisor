@@ -62,7 +62,8 @@ class Workspace:
     @property
     def output_dir(self) -> Path:
         """Shared engine state (not under the matter folder)."""
-        return Path(config.WORKSPACES_DIR) / "state"
+        return Path(config.WORKSPACES_DIR) / getattr(
+            config, "STATE_DIRNAME", ".state")
 
 
 @dataclass(frozen=True)

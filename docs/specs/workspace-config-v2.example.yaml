@@ -1,12 +1,74 @@
-# Schema v2 example — DESIGN LOCKED, not loaded by engine yet.
+# Schema v2 registry example (committed reference).
 # Full design: docs/specs/workspace-config-v2.md
-# Live registry is still schema v1: workspaces/workspace-config.yaml
+# Live instance (gitignored): workspaces/workspace-config.yaml
 #
-# Copy/adapt to workspaces/workspace-config.yaml only after the v2 loader ships.
+# Core idea
+# ---------
+# Filesystem paths are agnostic of matter names. Evidence lives in a
+# shared corpora tree. Workspaces are metadata + mount lists that
+# regulate *visibility*: which collections the active matter may query.
+# Share by reference only — never copy blobs between matters.
+#
+# ONE shared engine DB for all workspaces (locked):
+# - All collections ingested once into a single content index.
+# - Active workspace ⇒ mount filter (collection_id ∈ mounts).
+# - Per-workspace folders: semi-inferred matter state only
+#   (*.md, eval, journal) — not bulk evidence.
+#
+# On-disk layout (under platform workspaces.dir)
+# ----------------------------------------------
+#   workspaces/
+#     workspace-config.yaml          # this schema (gitignored live copy)
+#     corpora/<collection_id>/       # READ-ONLY facts
+#     .state/                         # regenerable engine store
+#       pocket_advisor.db, vectors/, logs/, query_daemon.sock
+#       cache/<collection_id>/{extracted,text}/
+#     <workspace_id>/                # matter: WORKSPACE.md, skills, eval…
+#
+# Facts vs state
+# --------------
+# - corpora/ = read-only facts. Never write/rename/delete evidence.
+# - .state/ = regenerable. .state/cache/<collection_id>/ = engine-only.
+# - workspaces/<id>/ = agent-readable semi-inferred matter state.
+# - Query visibility = mounts ∩ privilege.
+#
+# Collection fields (minimal)
+# ---------------------------
+# - id, title, description, path, privileged
+# - NO kind:    ingest dispatches per FILE by extension/MIME
+#               (.eml → email pipeline; pdf/docx/… → document pipeline).
+#               A collection may mix types.
+# - NO retrieval: channels from engine type map + platform flags
+#               (e.g. ingestion.embed_images).
+#
+# Path rules
+# ----------
+# - collection.path / workspace.path : relative to workspaces.dir
+# - roots non-overlapping; no `..` escape
+#
+# Privilege
+# ---------
+# - collections[].privileged (bool, required)
+# - OR path segment literally named privileged/ under a collection root
+# - privilege_override on items always wins
+# - Platform config.yaml never carries privilege folder lists
+#
+# Identity / query
+# ----------------
+# - Custody identity: (collection_id, sha256)
+# - Query: pre-filter to mounted collection_ids (+ privilege rules)
+# - Citations: message_id / filename + collection_id when useful
+#
+# Loader validation (scripts/workspace_config.py)
+# -----------------------------------------------
+# - schema_version == 2; unknown keys fail-loud (incl. kind, retrieval)
+# - collection.id / workspace.id unique; exactly one active workspace
+# - every mount id ∈ collections[]; paths under workspaces.dir; no overlap
+# - privileged required bool
+# - optional mount purposes: (R-05) restrict query.py --purpose TAG
 #
 # collections = physical facts (path under workspaces.dir)
-# workspaces  = visibility mounts + matter folder (semi-inferred state)
-# No kind: / retrieval: — engine dispatches per file / internal type map.
+# workspaces  = visibility mounts + matter folder
 
 schema_version: 2
 

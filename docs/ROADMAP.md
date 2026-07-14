@@ -40,7 +40,7 @@ the user schedules them.
 |---|---|---|---|---|
 | **R-03b** | Visual golden eval + measure `IMG_RRF_WEIGHT` / `ocr_proxy` vs skip | Visual | After live `ingest.py --embed images` produces a usable index | [visual-retrieval.md](specs/visual-retrieval.md) |
 | **R-04b** | Richer bank/statement parsers, transfer reconciliation, extraction eval | Structured numbers | Finance workspace needs sums/joins beyond regex heuristic | [structured-transactions.md](specs/structured-transactions.md) |
-| **R-06** | Per-collection `ocr_review` under `state/cache/<id>/` | User data | Cleanup if shared `ocr_review` confuses | small |
+| **R-06** | Per-collection `ocr_review` under `.state/cache/<id>/` | User data | Cleanup if shared `ocr_review` confuses | small |
 | **R-07** | Productisation — clean-room repo, packaging, stranger docs, licensing, UPL | Productisation | Explicit productisation decision only | never as case side-effect |
 | **R-08** | TypeScript engine migration (**PARKED**) | Hygiene / parked | User explicitly resumes — not opportunistic | DESIGN tenet 13 |
 | **R-09** | Git history reset (case content in old commits) | Hygiene / parked | Deliberate hygiene window | local-only repo |

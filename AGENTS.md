@@ -10,7 +10,7 @@ case-specific instructions live in the workspace layer (below).
 ## Workspaces — where the case layer lives
 
 Everything user/case-facing lives under `workspaces/` (gitignored):
-**`corpora/`** (read-only evidence collections), **`state/`** (shared
+**`corpora/`** (read-only evidence collections), **`.state/`** (shared
 engine DB/vectors/text), **`workspace-config.yaml`** (collections +
 workspace mounts), and per-matter **`workspaces/<id>/`** (WORKSPACE.md,
 skills, journal, chronology, eval). Platform `config.yaml` only sets
@@ -32,7 +32,7 @@ instructions alone.
    read-only. A changed hash is treated as tampering, not as an
    update. Locate blobs via `source_blob_index` /
    `scripts/blob_index.py` after moves inside a source. Engine derived
-   data is under `workspaces/state/` (regenerable).
+   data is under `workspaces/.state/` (regenerable).
 2. **Privilege**: a source is privileged when **either**
    (a) its registry entry has `privileged: true`, **or** (b) a physical
    copy sits under a directory segment literally named `privileged`
@@ -67,8 +67,8 @@ instructions alone.
    has no git remote and must never be pushed anywhere.
 5. **Low-confidence OCR** (`attachments.ocr_flagged_low_conf=1`) must be
    caveated when cited — the extracted text may be wrong; the original
-   image is under `workspaces/state/` (often
-   `state/cache/<collection_id>/ocr_review/` or shared `state/ocr_review/`
+   image is under `workspaces/.state/` (often
+   `.state/cache/<collection_id>/ocr_review/` or shared `.state/ocr_review/`
    depending on extract path — open via DB / query path, not by browsing).
 6. This is technical/organizational assistance, not legal advice; say
    so when the distinction matters.
@@ -146,7 +146,7 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
   example: workspace-config-v2.example.yaml)
 - `workspaces/` (gitignored) — user data:
   - `corpora/<collection_id>/` — read-only evidence (never write)
-  - `state/` — shared regenerable engine store (DB, vectors, logs,
+  - `.state/` — shared regenerable engine store (DB, vectors, logs,
     daemon socket, `cache/<collection_id>/{text,extracted}/`)
   - `workspace-config.yaml` — registry
   - `<workspace_id>/` — matter layer only (WORKSPACE.md, skills,
@@ -198,9 +198,9 @@ Answer workflow for case questions: prefer starting the query daemon for
 the session, then run `query.py` (often twice with rephrasings — English
 rephrasings, synonyms, added keywords), read the full email bodies of
 top hits from
-`workspaces/state/cache/<collection_id>/text/emails/<id>.txt` (path
+`workspaces/.state/cache/<collection_id>/text/emails/<id>.txt` (path
 from query/DB — never rely on snippets alone for anything
-consequential; do not bulk-browse `state/cache/` as a library), pull
+consequential; do not bulk-browse `.state/cache/` as a library), pull
 the whole thread when history matters (`--thread N`), then answer with
 citations.
 **Query in English even when the corpus is majority non-English —

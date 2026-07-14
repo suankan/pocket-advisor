@@ -26,12 +26,14 @@ WORKSPACE_DIR = WORKSPACES_DIR / "default"
 INGESTION_SOURCES = WORKSPACES_DIR / "corpora"
 
 # Shared engine derived data (one DB for all workspaces) — regenerable.
-# Named **state** (not output); OUTPUT_DIR kept as alias for older code.
-STATE_DIR = WORKSPACES_DIR / "state"
+# Dot-dir so it is less likely to be bulk-browsed as "user content".
+# OUTPUT_DIR kept as alias for older code.
+STATE_DIRNAME = ".state"
+STATE_DIR = WORKSPACES_DIR / STATE_DIRNAME
 OUTPUT_DIR = STATE_DIR
 DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
 # Per-collection engine cache (not agent free-browse):
-#   state/cache/<collection_id>/{text,extracted}/…
+#   .state/cache/<collection_id>/{text,extracted}/…
 CACHE_DIR = OUTPUT_DIR / "cache"
 # Legacy flat dirs (pre-cache layout) — kept as fallbacks for reads/migrate
 TEXT_EMAILS_DIR = OUTPUT_DIR / "text" / "emails"
@@ -48,14 +50,14 @@ VECTORS_META_JSON = VECTORS_DIR / "vectors.meta.json"
 
 
 def _safe_collection_id(source_id: str | None) -> str:
-    """Filesystem-safe collection folder name under state/cache/."""
+    """Filesystem-safe collection folder name under .state/cache/."""
     if not source_id:
         return "_unknown"
     return str(source_id).replace("/", "__").replace("\\", "__")
 
 
 def collection_cache_dir(source_id: str | None = None) -> Path:
-    """state/cache/<collection_id>/ — engine-only per-collection cache root."""
+    """`.state/cache/<collection_id>/` — engine-only per-collection cache."""
     return Path(globals().get("CACHE_DIR", STATE_DIR / "cache")) / _safe_collection_id(
         source_id)
 
@@ -292,7 +294,7 @@ def _apply_workspace_paths():
 
     - Matter folder: active workspace.path under workspaces.dir (md, eval).
     - Evidence: workspaces/corpora (shared; collection roots from registry).
-    - Engine: workspaces/state (one DB/vectors/text for all workspaces).
+    - Engine: workspaces/.state (one DB/vectors/text for all workspaces).
 
     Parses the registry with PyYAML only (no import of workspace_config)
     to avoid circular imports at package load time.
@@ -324,8 +326,16 @@ def _apply_workspace_paths():
     globals()["ACTIVE_WORKSPACE_ID"] = active_id
     # Shared facts + engine state (not under matter folder)
     globals()["INGESTION_SOURCES"] = ws_dir / "corpora"
-    state = ws_dir / "state"
-    # Legacy fallback if migrate not done yet
+    state_name = globals().get("STATE_DIRNAME", ".state")
+    state = ws_dir / state_name
+    # One-time rename: workspaces/state → workspaces/.state
+    legacy_state = ws_dir / "state"
+    if not state.is_dir() and legacy_state.is_dir() and not legacy_state.is_symlink():
+        try:
+            legacy_state.rename(state)
+        except OSError:
+            state = legacy_state  # fall back if rename fails (e.g. busy)
+    # Older layout: matter/output/
     if not state.is_dir() and (_ws / "output").is_dir():
         state = _ws / "output"
     globals()["STATE_DIR"] = state

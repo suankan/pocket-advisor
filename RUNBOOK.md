@@ -52,7 +52,7 @@ gitignored registry (docs/specs/workspace-config-v2.md):
 workspaces/
   workspace-config.yaml     # schema_version: 2; collections[] + workspaces[]
   corpora/<collection_id>/  # READ-ONLY evidence (never write/rename/delete)
-  state/                    # ONE regenerable engine store
+  .state/                    # ONE regenerable engine store
     pocket_advisor.db
     vectors/
     logs/                   # review_queue.csv, ingest logs
@@ -79,7 +79,7 @@ collections.
    `privileged: true` on the collection **and/or** nest under a
    directory segment literally named `privileged/`.
 2. `venv/bin/python scripts/ingest.py all`
-3. Check `workspaces/state/logs/review_queue.csv` for flags.
+3. Check `workspaces/.state/logs/review_queue.csv` for flags.
 4. After bulk moves inside a collection: `scripts/blob_index.py rebuild`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
@@ -92,8 +92,8 @@ collections.
 
 Document dates are extracted from the text; query results show
 `date_source`. Extracted text lives under
-`workspaces/state/cache/<collection_id>/text/…` (path from query/DB —
-do not bulk-browse `state/cache/` as a library).
+`workspaces/.state/cache/<collection_id>/text/…` (path from query/DB —
+do not bulk-browse `.state/cache/` as a library).
 
 ## Querying
 
@@ -109,7 +109,7 @@ Privileged items are **included by default** (config
 `--exclude-privileged` for a restricted pass. Results always flag
 privilege. Visibility is also limited to **collections mounted by the
 active workspace**. Full bodies: paths from query/DB under
-`workspaces/state/cache/<collection_id>/text/…`.
+`workspaces/.state/cache/<collection_id>/text/…`.
 
 ### Session-warm query daemon (recommended for multi-query work)
 
@@ -129,7 +129,7 @@ venv/bin/python scripts/query_daemon.py status
 venv/bin/python scripts/query_daemon.py stop
 ```
 
-Socket: `workspaces/state/query_daemon.sock` (mode 0600, local only).
+Socket: `workspaces/.state/query_daemon.sock` (mode 0600, local only).
 Restart after `ingest.py --embed text` or model config changes. See
 `docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
 `query.daemon_idle_sec`.
@@ -215,7 +215,7 @@ venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
 
 ## Rebuilding from scratch
 
-`workspaces/state/` is fully derived: delete it (or wipe DB+vectors+
+`workspaces/.state/` is fully derived: delete it (or wipe DB+vectors+
 cache), run `ingest.py all` (full re-embed takes minutes on Apple
 Silicon — scales with corpus size; see collection descriptions and the
 active workspace's WORKSPACE.md / eval notes). Originals under
@@ -243,7 +243,7 @@ venv/bin/python scripts/query.py "site plan stamp" --no-daemon
 
 ## Review points
 
-- `workspaces/state/logs/review_queue.csv` — parse/custody flags
-- `workspaces/state/` OCR review images (per-collection cache or shared
+- `workspaces/.state/logs/review_queue.csv` — parse/custody flags
+- `workspaces/.state/` OCR review images (per-collection cache or shared
   `ocr_review/` — open via DB/query, not free browse)
 - `ingestion_log` table — structured log of every issue

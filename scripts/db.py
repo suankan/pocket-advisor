@@ -479,6 +479,29 @@ def _table_exists(conn, name: str) -> bool:
     return row is not None
 
 
+def _migrate_dotstate_paths(conn):
+    """DB-side companion to the workspaces/state -> .state directory
+    rename (config.py). Stored columns are PROJECT_ROOT-relative strings
+    baked in at ingest time, so renaming the directory alone leaves old
+    rows pointing at a path that no longer exists. Idempotent: rewritten
+    rows no longer match the old-prefix LIKE pattern.
+    """
+    old_prefix, new_prefix = "workspaces/state/", "workspaces/.state/"
+    for table, cols in (
+        ("items", ("body_text_path",)),
+        ("item_file_meta", ("extracted_copy_path", "extracted_text_path")),
+        ("attachments", ("extracted_copy_path", "extracted_text_path")),
+        ("page_images", ("image_path",)),
+    ):
+        if not _table_exists(conn, table):
+            continue
+        for col in cols:
+            conn.execute(
+                f"UPDATE {table} SET {col} = ? || substr({col}, ?) "
+                f"WHERE {col} LIKE ?",
+                (new_prefix, len(old_prefix) + 1, old_prefix + "%"))
+
+
 def _migrate_schema_b_items_memberships(conn):
     """Schema B: emails→items, email_files∪documents→item_memberships,
     documents extract cols→item_file_meta, email_id→item_id on children.
@@ -731,6 +754,7 @@ def migrate(conn):
     ensure_column(conn, "item_memberships", "membership_kind",
                   "membership_kind TEXT NOT NULL DEFAULT 'email'")
     _ensure_chunks_fts_shadow_column(conn)
+    _migrate_dotstate_paths(conn)
     conn.commit()
 
 

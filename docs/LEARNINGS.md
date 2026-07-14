@@ -221,12 +221,23 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 - **Query isolation = mounts ∩ privilege.** Chunks are eligible only
   when membership `source_id` is in the active workspace's mounts
   (`query.allowed_chunk_ids`). Privilege is still a separate filter.
-- **Layout:** `workspaces/corpora/` = read-only facts; `workspaces/state/`
+- **Layout:** `workspaces/corpora/` = read-only facts; `workspaces/.state/`
   = one regenerable engine store (DB, vectors, logs, daemon socket);
-  `state/cache/<collection_id>/{text,extracted}/` = per-collection
+  `.state/cache/<collection_id>/{text,extracted}/` = per-collection
   extracts. Matter folders hold md/eval only — not bulk evidence.
   Agents open cache paths from query/DB results; do not bulk-browse
-  `state/cache/` as a library.
+  `.state/cache/` as a library.
+- **Renaming a directory under `.state/` is not just a filesystem
+  move** — `body_text_path` / `extracted_copy_path` /
+  `extracted_text_path` / `image_path` are stored as `PROJECT_ROOT`-
+  relative strings baked in at ingest time, so old rows keep the old
+  prefix after the directory itself is renamed. The `workspaces/state`
+  → `.state` rename hit this: the one-time dir rename in
+  `config.py::_apply_workspace_paths` ran fine, but `embed.py` then
+  404'd on stale `workspaces/state/...` paths from rows ingested
+  earlier. Fix pattern: pair any such rename with a DB migration in
+  `db.py::migrate()` that rewrites the stored prefix (see
+  `_migrate_dotstate_paths`) — idempotent, runs on every entrypoint.
 - **Privilege has two cooperating signals** (OR; `privilege_override`
   still wins): (1) registry `collections[].privileged: bool` —
   preferred; (2) filesystem convention: any path segment literally
@@ -260,7 +271,7 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   description over inventing parallel markdown.
 - **After re-embed or model/config change, restart `query_daemon`.**
   Stale warm weights will serve wrong vectors or abort on fingerprint
-  mismatch depending on path. Socket lives under `workspaces/state/`.
+  mismatch depending on path. Socket lives under `workspaces/.state/`.
 - **Solicitor / multi-collection corpora:** substantive answers often
   live in a non-party collection (e.g. party's own solicitor
   correspondence). Rephrase queries and do not assume one inter-party

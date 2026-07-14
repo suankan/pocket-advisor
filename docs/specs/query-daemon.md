@@ -19,7 +19,7 @@ CLI `run_search`; only residency of weights changes.
 - Not a generative LLM chat session — no conversation history, no
   answer synthesis. Each request is an independent search.
 - Not a cloud service — **localhost Unix socket only**, mode `0600`,
-  under `workspaces/state/` (gitignored, machine-local).
+  under `workspaces/.state/` (gitignored, machine-local).
 - Not required for correctness — if the daemon is down, `query.py`
   falls back to cold in-process search (unless `--require-daemon`).
 - Not a replacement for warm eval — `eval.py --mode warm` still loads
@@ -95,11 +95,11 @@ shared query history**.
 |---|---|---|
 | `query.daemon_auto` | true | Client tries daemon when socket live |
 | `query.daemon_idle_sec` | 1800 | Exit after N idle seconds; `0` = never |
-| socket/pid paths | `workspaces/state/query_daemon.sock` / `.pid` | Not user-facing names of case data |
+| socket/pid paths | `workspaces/.state/query_daemon.sock` / `.pid` | Not user-facing names of case data |
 
 ### Security / privacy
 
-- Socket only under local `workspaces/state/`; not exposed on TCP/LAN.
+- Socket only under local `workspaces/.state/`; not exposed on TCP/LAN.
 - Same privilege rules as `query.py` (default exclude privileged).
 - Case data never leaves the machine (AGENTS.md rule 4).
 

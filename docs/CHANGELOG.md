@@ -19,6 +19,17 @@ map; open work is `R-nn`.
 
 ## 2026-07-14
 
+### Engine store path `workspaces/state` → `workspaces/.state` · SHIPPED
+
+Regenerable engine tree is a dot-dir (less bulk-browse surface). Code
+auto-renames legacy `workspaces/state` on load when present.
+`config.STATE_DIRNAME = ".state"`. Directory rename alone left stored
+`PROJECT_ROOT`-relative paths pointing at the old prefix (`items.
+body_text_path`, `item_file_meta`/`attachments` extract cols,
+`page_images.image_path`), breaking embed on first post-rename
+`ingest.py all`; `db.py::_migrate_dotstate_paths` rewrites the old
+prefix in `migrate()`, idempotent, runs on every entrypoint.
+
 ### Committed platform `config.yaml` (no `.example`) · SHIPPED
 
 `config.yaml` is tracked (not gitignored): platform knobs only, full
@@ -112,8 +123,8 @@ to sit in PLAN lives in DESIGN + RUNBOOK + specs + LEARNINGS.
 ### Collections + workspaces v2 · SHIPPED
 
 Global `collections[]`, workspace mounts, one shared DB, dual-read v1/v2,
-query mount pre-filter, path hygiene (`corpora/` + `state/`),
-per-collection `state/cache/<collection_id>/{text,extracted}/`.
+query mount pre-filter, path hygiene (`corpora/` + `.state/`),
+per-collection `.state/cache/<collection_id>/{text,extracted}/`.
 
 Spec: [workspace-config-v2.md](specs/workspace-config-v2.md).  
 Commits: `840d40b`, `6fde016`, `2b6f224`, `b9e62d5` (and related).
@@ -153,7 +164,7 @@ Spec: [jina-mlx-migration.md](specs/jina-mlx-migration.md).
 ### Warm eval + session query daemon · SHIPPED
 
 `eval.py --mode warm` (default); `query_daemon.py` Unix socket under
-`state/`; `query.py` auto-uses daemon.
+`.state/`; `query.py` auto-uses daemon.
 
 Specs: [warm-eval.md](specs/warm-eval.md),
 [query-daemon.md](specs/query-daemon.md).
@@ -161,7 +172,7 @@ Specs: [warm-eval.md](specs/warm-eval.md),
 ### User-data root under `workspaces/` · SHIPPED
 
 All user data under `workspaces/`; evidence and derived paths no longer
-at repo root. Later same day refined by v2 `corpora/` + `state/` layout.
+at repo root. Later same day refined by v2 `corpora/` + `.state/` layout.
 (Older docs called this “Phase 2” — that program numbering is retired.)
 
 Spec: [workspace-user-data.md](specs/workspace-user-data.md).

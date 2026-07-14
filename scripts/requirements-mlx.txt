@@ -1,6 +1,9 @@
-# Optional: Apple-Silicon MLX backends. Not needed for the default
-# llama_cpp backend.
-mlx-embeddings         # config.EMBED_BACKEND = "mlx" (bge-m3)
-tokenizers              # config.EMBED_BACKEND = "jina_mlx"
-mlx-lm                  # config.RERANK_BACKEND = "jina_mlx"
-safetensors             # config.RERANK_BACKEND = "jina_mlx" (projector weights)
+# Apple-Silicon MLX stack (text embed + omni page embed + rerank).
+# Required for pocket-advisor (GGUF / llama.cpp removed).
+mlx
+tokenizers
+mlx-lm
+safetensors
+pillow
+# Omni image preprocessing only (AutoProcessor); forward pass is MLX.
+transformers>=4.57

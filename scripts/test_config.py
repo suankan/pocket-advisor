@@ -49,15 +49,16 @@ def test_unknown_key_aborts():
         p.unlink()
 
 
-def test_list_to_set():
-    print("list -> set conversion:")
-    before = config.DOCUMENT_FOLDERS
-    p = write_yaml("privilege:\n  document_folders: [a, b]\n")
+def test_platform_privilege_document_folders_rejected():
+    print("platform privilege.document_folders rejected:")
+    p = write_yaml("privilege:\n  document_folders: [additional-documents]\n")
     try:
         config.load_yaml_overlay(p)
-        check("converted to set", config.DOCUMENT_FOLDERS == {"a", "b"})
+        check("aborts on privilege.document_folders", False)
+    except SystemExit as e:
+        check("aborts on privilege.document_folders",
+              "privilege.document_folders" in str(e))
     finally:
-        config.DOCUMENT_FOLDERS = before
         p.unlink()
 
 
@@ -73,16 +74,34 @@ def test_is_privileged_path():
           not config.is_privileged_path("docs/privileged"))
 
 
-def test_derived_path_recomputed():
-    print("derived path recomputed on file override:")
-    before_file, before_path = config.EMBED_MODEL_FILE, config.EMBED_MODEL_PATH
-    p = write_yaml("models:\n  embed_model_file: other-model.gguf\n")
+def test_model_repo_overlay():
+    print("models.mlx_* + ingestion.embed_* overlay:")
+    before = (config.MLX_MODEL_EMBED_TEXT,
+              config.MLX_MODEL_EMBED_OMNI,
+              config.MLX_MODEL_RERANK,
+              config.EMBED_TEXT,
+              config.EMBED_IMAGES)
+    p = write_yaml(
+        "models:\n"
+        "  mlx_model_embed_text: jinaai/text-test\n"
+        "  mlx_model_embed_omni: jinaai/omni-test\n"
+        "  mlx_model_rerank: jinaai/rerank-test\n"
+        "ingestion:\n"
+        "  embed_text: false\n"
+        "  embed_images: false\n")
     try:
         config.load_yaml_overlay(p)
-        check("EMBED_MODEL_PATH updated",
-              config.EMBED_MODEL_PATH == config.MODELS_DIR / "other-model.gguf")
+        check("text repo", config.MLX_MODEL_EMBED_TEXT == "jinaai/text-test")
+        check("omni repo", config.MLX_MODEL_EMBED_OMNI == "jinaai/omni-test")
+        check("rerank repo", config.MLX_MODEL_RERANK == "jinaai/rerank-test")
+        check("embed_text", config.EMBED_TEXT is False)
+        check("embed_images", config.EMBED_IMAGES is False)
     finally:
-        config.EMBED_MODEL_FILE, config.EMBED_MODEL_PATH = before_file, before_path
+        (config.MLX_MODEL_EMBED_TEXT,
+         config.MLX_MODEL_EMBED_OMNI,
+         config.MLX_MODEL_RERANK,
+         config.EMBED_TEXT,
+         config.EMBED_IMAGES) = before
         p.unlink()
 
 
@@ -103,12 +122,15 @@ def test_workspace_dir_derives_eval_paths():
               "workspaces" in config.WORKSPACE_DIR.parts)
         check("EVAL_RESULTS_DIR under workspace",
               config.EVAL_RESULTS_DIR == config.WORKSPACE_DIR / "eval" / "results")
-        check("INGESTION_SOURCES under workspace corpora",
-              config.INGESTION_SOURCES == config.WORKSPACE_DIR / "corpora")
-        check("OUTPUT_DIR under workspace",
-              config.OUTPUT_DIR == config.WORKSPACE_DIR / "output")
-        check("DB_PATH under workspace output",
-              config.DB_PATH == config.WORKSPACE_DIR / "output" / "pocket_advisor.db")
+        # Shared corpora + state (not under matter folder)
+        check("INGESTION_SOURCES shared corpora",
+              config.INGESTION_SOURCES == config.WORKSPACES_DIR / "corpora")
+        check("OUTPUT_DIR is shared state",
+              config.OUTPUT_DIR == config.WORKSPACES_DIR / "state"
+              or config.OUTPUT_DIR.name in ("state", "output"))
+        check("DB_PATH under state",
+              config.DB_PATH.name == "pocket_advisor.db"
+              and config.DB_PATH.parent == config.OUTPUT_DIR)
     finally:
         (config.WORKSPACE_DIR, config.WORKSPACES_DIR, config.EVAL_DIR,
          config.EVAL_GOLDEN_DIR, config.EVAL_RESULTS_DIR,
@@ -128,9 +150,9 @@ def test_missing_file_is_a_noop():
 def main():
     test_overlay_applies()
     test_unknown_key_aborts()
-    test_list_to_set()
+    test_platform_privilege_document_folders_rejected()
     test_is_privileged_path()
-    test_derived_path_recomputed()
+    test_model_repo_overlay()
     test_workspace_dir_derives_eval_paths()
     test_missing_file_is_a_noop()
 

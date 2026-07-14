@@ -1,12 +1,8 @@
 """Reranker: reorders an already-fused candidate list by direct
-query-document relevance judgment rather than rank-position arithmetic.
-Scoring itself is pluggable (rerank_backends.py: llama_cpp pointwise or
-jina_mlx listwise); this module owns the text-prep shared by both
-backends. Verified mechanism: docs/specs/reranker.md.
+query-document relevance. Scoring is MLX-only (jina-reranker-v3-mlx
+listwise via rerank_backends). This module owns shared text prep.
 
-Transient, per-query operation — no persisted artifact, so unlike
-embedding_backends.py there is no fingerprint/index-invalidation
-concern here.
+Transient, per-query — no index fingerprint (unlike embedding_backends).
 """
 import re
 

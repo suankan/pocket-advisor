@@ -108,7 +108,7 @@ shared query history**.
 `status` / `ping` returns embed backend fingerprint + rerank backend
 id + vectors `built_at` so a client can detect a stale daemon after
 config/index change (daemon should be restarted after
-`ingest.py embed` or model config flips).
+`ingest.py --embed text` or model config flips).
 
 ## Acceptance criteria
 

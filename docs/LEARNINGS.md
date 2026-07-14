@@ -18,7 +18,7 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   handle every script in the corpus. English-only embedding models
   (e.g. nomic-embed-text v1) silently degrade semantic search on
   non-English content — that's why every embedder used here
-  (`bge-m3`, then `jina-embeddings-v5-text` — docs/specs/jina-mlx-migration.md)
+  (Jina v5 text/omni MLX — `models.mlx_model_embed_*`)
   was chosen for verified multilingual/cross-lingual retrieval.
   Practical implication for querying: an English question already
   retrieves non-English content correctly — never translate the
@@ -144,7 +144,8 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   a duplicate on EVERY run until the redundant copy is removed (the
   content-derived message_id cannot represent it twice).
 - Real document drop-folders nest several levels deep and contain
-  `.DS_Store` junk — the walk is scoped to `DOCUMENT_FOLDERS` and
+  `.DS_Store` junk — the walk is scoped to workspace document
+  collections (registry) and
   filters `IGNORED_FILENAMES`/dotfiles.
 - Testing anything that "tampers" with sources must use a temp fixture
   with monkeypatched config (`scripts/test_ingest_documents.py`) —
@@ -230,8 +231,24 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   still wins): (1) registry `collections[].privileged: bool` —
   preferred; (2) filesystem convention: any path segment literally
   named `privileged/` under a collection root. Platform `config.yaml`
-  still must not carry real folder names. Retrieval excludes
-  privileged by default.
+  has **no** `privilege:` section (no folder lists / document_folders).
+  Retrieval **includes** privileged by default
+  (`query.include_privileged_by_default`); use `--exclude-privileged`
+  for a restricted pass.
+- **Text index fingerprint is the HF repo id string + dim**, not
+  “model family.” Switching
+  `…-text-small-retrieval-mlx` → `…-text-small-mlx` (multi-task)
+  wipes + re-embeds even at the same 1024-d; both are Jina small but
+  different artifacts. Matched text/omni size pairs only (nano 768 ↔
+  nano; small 1024 ↔ small).
+- **`ingest.py --embed all` respects `ingestion.embed_text` /
+  `embed_images`.** Explicit `--embed text` / `--embed images` force
+  that channel. Stage `all` runs gated embed-all after parse/thread.
+  Image query leg also requires `embed_images` + a built image index.
+- **`huggingface_hub.snapshot_download` can resume `*.incomplete`
+  partials** when re-run with network; we do **not** implement our own
+  multi-retry loop in `mlx_model_loader.snapshot_dir` (one offline try,
+  then one online try).
 - **Avoid circular imports between `config.py` and
   `workspace_config.py`.** Loading the active workspace during config
   bootstrap must stay yaml-only / light (no importing pipeline modules

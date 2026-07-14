@@ -1,10 +1,4 @@
-# Optional deps for R-03 visual (page-image) channel — ingest-time omni embed.
-# Query path stays on MLX text embedder when alignment holds (smoke PASS).
-#
-#   venv/bin/pip install -r scripts/requirements-visual.txt
-#   venv/bin/python scripts/smoke_visual_alignment.py
-#
-torch
-torchvision
-transformers>=4.57
-pillow
+# Visual channel deps are now part of the main MLX stack
+# (scripts/requirements-mlx.txt). Kept as a thin redirect so older
+# RUNBOOK lines still work.
+-r requirements-mlx.txt

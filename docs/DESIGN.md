@@ -36,7 +36,7 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **User data + multi-collection** — `corpora/`/`state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
 | **Structured numbers** — transactions SQL, row citations | **Done (heuristic only)** | **R-04** table + regex extractor (live rows may be 0 until run / until R-04b) | **R-04b** real bank parsers |
-| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** pipeline + smoke PASS; `IMG_MAX_SIDE` full-page fix | **R-03b** visual eval; finish live embed index |
+| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual eval; finish live image index after re-embed |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |
@@ -114,7 +114,9 @@ workspaces/                          # gitignored user data root
   <workspace_id>/                    # matter only: WORKSPACE.md, skills, journal, chronology, eval
 ```
 
-Platform `config.yaml`: `workspaces.dir` + engine knobs only.
+Platform `config.yaml`: `workspaces.dir` + engine knobs only
+(`query.*`, `ingestion.*` including `embed_text`/`embed_images`,
+`models.mlx_*`). No privilege folder lists.
 
 **Specs:** [workspace-config-v2.md](specs/workspace-config-v2.md),
 [workspace-user-data.md](specs/workspace-user-data.md).
@@ -158,34 +160,41 @@ Platform `config.yaml`: `workspaces.dir` + engine knobs only.
 ### Pipeline
 
 Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
-`scripts/ingest.py`. Standalone documents share extract path. Low-conf
-OCR flagged; review images under `state/` (open via DB/query, not bulk
-browse of cache). Deep stage semantics and historical PLAN-era detail
-live in **RUNBOOK** + **specs** + **LEARNINGS** (no separate PLAN file).
+`scripts/ingest.py` — positional stages (`all` / `parse` / …) plus
+`--embed text|images|all`. Stage `all` and `--embed all` honor
+`ingestion.embed_text` / `ingestion.embed_images` (explicit named
+`--embed text|images` force that channel). Low-conf OCR flagged;
+review images under `state/` (open via DB/query, not bulk-browse of
+cache). Details: **RUNBOOK** + **specs** + **LEARNINGS**.
 
 ### Retrieval
 
 1. FTS5 BM25 + dense cosine  
-2. RRF fusion  
-3. Pre-filters: privilege (default off), mounts, optional date/thread  
-4. Cross-encoder **rerank**  
+2. RRF fusion (+ optional third leg: page-image vectors when
+   `ingestion.embed_images` and an image index exist)  
+3. Pre-filters: privilege (**included by default**), mounts, optional
+   date/thread  
+4. Cross-encoder **rerank** (Jina MLX listwise)  
 5. Citations: message_id / filename + date (+ `source_id`); surface
    weak `date_source` and low-conf OCR  
 
-**Default models:** Jina MLX embed + rerank (`jina_mlx`) —
-[jina-mlx-migration.md](specs/jina-mlx-migration.md). Pluggable backends
-remain. Warm multi-query: [query-daemon.md](specs/query-daemon.md);
-eval: [eval-harness.md](specs/eval-harness.md), [warm-eval.md](specs/warm-eval.md).
+**Models (MLX-only, Apple Silicon):** three HF repos under `models:` —
+`mlx_model_embed_text`, `mlx_model_embed_omni`, `mlx_model_rerank`.
+Matched text/omni pairs only (nano↔nano 768-d or small↔small 1024-d).
+Code default in `config.py` is nano; live `config.yaml` may select
+small. Universal loader: `scripts/mlx_model_loader.py`. No GGUF /
+llama.cpp. Warm multi-query: [query-daemon.md](specs/query-daemon.md);
+eval: [eval-harness.md](specs/eval-harness.md),
+[warm-eval.md](specs/warm-eval.md).
 
 ### Privilege
 
-OR of: (1) `collections[].privileged`, (2) path segment `privileged/`.
-`privilege_override` wins. **Included in retrieval by default**
-(`query.include_privileged_by_default`, true) — single-user; own-
-solicitor is often the only path for opposing-counsel material as
-forwards/PDFs. Opt out with `--exclude-privileged`. Results still show
-the privilege flag. Platform config never holds real folder names.
-Drafting hygiene remains agent-side (AGENTS hard rule 2), not silent
+OR of: (1) registry `collections[].privileged`, (2) path segment
+`privileged/`. `privilege_override` wins. **Included in retrieval by
+default** (`query.include_privileged_by_default`, true). Opt out with
+`--exclude-privileged`. Results still show the privilege flag.
+**Platform `config.yaml` has no `privilege:` section** (no folder
+lists). Drafting hygiene is agent-side (AGENTS hard rule 2), not silent
 retrieval exclusion.
 
 ### Instruction loading order
@@ -241,10 +250,10 @@ that slice; this table is the map.
 | [config-yaml.md](specs/config-yaml.md) | Platform knobs |
 | [eval-harness.md](specs/eval-harness.md) | Measurement |
 | [pre-filtered-retrieval.md](specs/pre-filtered-retrieval.md) | Filter-before-rank |
-| [reranker.md](specs/reranker.md) | llama_cpp path; default is jina |
+| [reranker.md](specs/reranker.md) | Historical GGUF notes; live path is MLX-only |
 | [transliteration.md](specs/transliteration.md) | FTS shadow field |
-| [embedding-backends.md](specs/embedding-backends.md) | Pluggable embed |
-| [jina-mlx-migration.md](specs/jina-mlx-migration.md) | Default stack |
+| [embedding-backends.md](specs/embedding-backends.md) | **SUPERSEDED** multi-backend; live = `mlx_model_loader` |
+| [jina-mlx-migration.md](specs/jina-mlx-migration.md) | Historical migration; live stack is MLX-only |
 | [warm-eval.md](specs/warm-eval.md) | In-process warm eval |
 | [query-daemon.md](specs/query-daemon.md) | Session-warm query |
 

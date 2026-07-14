@@ -208,9 +208,12 @@ END;
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DB_PATH)
+    # timeout: wait for other writers (daemon, parallel CLI) instead of
+    # failing immediately with "database is locked".
+    conn = sqlite3.connect(config.DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 60000")  # ms
     return conn
 
 

@@ -1,8 +1,9 @@
 """R-03: rasterize PDF/image pages, embed with omni, build img_vectors index.
 
-Gated by config.IMG_LEG_ENABLED — no torch import when off.
+Page-image embed channel (omni MLX). Callers decide whether to run
+(ingest.py --embed images vs gated --embed all).
 
-    venv/bin/python scripts/ingest.py images
+    venv/bin/python scripts/ingest.py --embed images
     # or
     venv/bin/python scripts/embed_images.py
 """
@@ -236,33 +237,51 @@ def _wipe_img_index(conn):
 def embed_pending(conn, backend) -> int:
     rows = conn.execute(
         """SELECT id, image_path FROM page_images
-           WHERE img_embedded_at IS NULL"""
+           WHERE img_embedded_at IS NULL
+           ORDER BY id"""
     ).fetchall()
+    total = len(rows)
+    print(f"embed_images: {total} page(s) still need embedding", flush=True)
     n = 0
-    for r in rows:
+    n_fail = 0
+    n_skip = 0
+    cache = Path(config.PAGE_IMAGES_DIR) / "_vecs"
+    cache.mkdir(parents=True, exist_ok=True)
+    t0 = datetime.now(timezone.utc)
+    for i, r in enumerate(rows, 1):
         path = config.PROJECT_ROOT / r["image_path"]
         if not path.is_file():
+            n_skip += 1
+            print(f"  [{i}/{total}] id={r['id']} SKIP missing file",
+                  flush=True)
             continue
         try:
             vec = backend.embed_image(path)
         except Exception as e:
-            print(f"  embed page_images.id={r['id']} failed: {e}",
-                  file=sys.stderr)
+            n_fail += 1
+            print(f"  [{i}/{total}] id={r['id']} FAIL {e}",
+                  file=sys.stderr, flush=True)
             continue
-        # stash vector temporarily? rebuild scans DB flags — store on disk cache
-        # We rebuild matrix from rows with img_embedded_at set; store npy sidecar
-        # keyed by id under page_images cache.
-        cache = Path(config.PAGE_IMAGES_DIR) / "_vecs"
-        cache.mkdir(parents=True, exist_ok=True)
         np.save(cache / f"{r['id']}.npy", vec)
         conn.execute(
             "UPDATE page_images SET img_embedded_at=? WHERE id=?",
             (datetime.now(timezone.utc).isoformat(), r["id"]))
         n += 1
-        if n % 10 == 0:
-            conn.commit()
-            print(f"  embedded {n}/{len(rows)} page images…")
-    conn.commit()
+        conn.commit()  # durable after each success; visible to status checks
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+        rate = n / elapsed if elapsed > 0 else 0
+        eta = (total - i) / rate if rate > 0 else 0
+        print(
+            f"  [{i}/{total}] id={r['id']} OK  "
+            f"success={n} fail={n_fail}  "
+            f"{rate:.2f}/s  ETA ~{eta/60:.0f} min",
+            flush=True,
+        )
+    print(
+        f"embed_images: embed pass done success={n} fail={n_fail} "
+        f"skip_missing={n_skip}",
+        flush=True,
+    )
     return n
 
 
@@ -307,10 +326,9 @@ def rebuild_matrix(conn):
 
 
 def run():
-    if not config.IMG_LEG_ENABLED:
-        print("embed_images: IMG_LEG_ENABLED=false — skip "
-              "(set models.img_leg_enabled: true after smoke PASS)")
-        return {"skipped": True}
+    # Channel enablement is decided by the caller (ingest.py --embed
+    # images always runs; --embed all / stage all respect
+    # ingestion.embed_images). No second gate here.
     import image_embedding_backends as ieb
 
     Path(config.PAGE_IMAGES_DIR).mkdir(parents=True, exist_ok=True)

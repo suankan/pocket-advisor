@@ -5,14 +5,12 @@
 ```bash
 brew install python@3.12 tesseract tesseract-lang poppler
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
-venv/bin/pip install -r scripts/requirements.txt      # llama-cpp-python compiles ~minutes
-venv/bin/pip install -r scripts/requirements-mlx.txt  # needed for the default jina_mlx backend
+venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
 venv/bin/python scripts/db.py init
-cp config.yaml.example config.yaml   # then edit workspace.dir etc.
-venv/bin/python scripts/fetch_model.py   # downloads whichever models the config selects
-                                          # (default: jina_mlx embed+rerank, ~1.1GB each,
-                                          # one-time); see "Choosing the embedding/reranker
-                                          # backend" below for alternatives
+cp config.yaml.example config.yaml   # then edit models.* / workspaces.dir
+venv/bin/python scripts/fetch_model.py   # downloads text + omni + rerank MLX
+                                          # repos from HuggingFace (one-time,
+                                          # inbound weights only)
 ```
 
 ## Configuring pocket-advisor
@@ -23,25 +21,27 @@ onto `scripts/config.py`'s defaults. See `config.yaml.example` for the
 full schema and comments. Unknown keys abort loudly at import time
 (typo protection). Three classes of knob:
 
-- **free** (`query.*`, `ingestion.ocr.*`, thread/date-window settings):
-  change anytime, takes effect on the next run.
-- **index-invalidating, auto-handled** (`models.embed_*`): changing the
-  embedding backend or model triggers an automatic wipe + full
-  re-embed on the next `ingest.py embed` — vectors from different
-  models/backends are numerically incomparable.
+- **free** (`query.*`, `ingestion.ocr.*`, `ingestion.embed_text` /
+  `embed_images`, thread/date-window settings): change anytime, takes
+  effect on the next run (embed knobs gate `--embed all` / stage `all`
+  and the query image leg).
+- **index-invalidating, auto-handled** (`models.mlx_model_embed_*`):
+  changing the text or omni MLX repo triggers wipe + full re-embed on
+  the next `ingest.py --embed text` / `--embed images` — vectors from different
+  models/dims are numerically incomparable.
 - **index-invalidating, WARN-only** (`ingestion.chunking.*`): no
   automated re-chunk pipeline exists. Changing chunk size/overlap
-  prints a warning (from both `query.py` and `ingest.py embed`) but
+  prints a warning (from both `query.py` and `ingest.py --embed text`) but
   does NOT rebuild existing chunks — old chunks keep their original
   size, only newly-ingested content uses the new size. `ingest.py
-  embed` acknowledges the change (updates `vectors.meta.json`) so the
-  warning fires once per actual change, not on every subsequent run;
-  `query.py`'s warning persists until that acknowledgment happens.
-- **safety-semantics** (`privilege.*`): privilege is (1) registry
-  `collections[].privileged: true` and/or (2) a path segment literally
-  named `privileged/` under a collection root (AGENTS.md hard rule 2).
-  Platform `config.yaml` never carries real folder names. The
-  auto-privilege flag only ratchets 0→1.
+  --embed text` acknowledges the change (updates `vectors.meta.json`)
+  so the warning fires once per actual change, not on every subsequent
+  run; `query.py`'s warning persists until that acknowledgment happens.
+- **safety-semantics (privilege)**: not a platform `config.yaml` key.
+  Privilege is (1) registry `collections[].privileged: true` and/or
+  (2) a path segment literally named `privileged/` under a collection
+  root (AGENTS.md hard rule 2). The auto-privilege flag only ratchets
+  0→1.
 
 ## User-data layout + workspace-config (v2)
 
@@ -131,59 +131,37 @@ venv/bin/python scripts/query_daemon.py stop
 ```
 
 Socket: `workspaces/state/query_daemon.sock` (mode 0600, local only).
-Restart after `ingest.py embed` or model config changes. See
+Restart after `ingest.py --embed text` or model config changes. See
 `docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
 `query.daemon_idle_sec`.
-## Choosing the embedding backend (Jina MLX vs bge-m3 llama.cpp vs bge-m3 MLX)
+## Models (MLX-only)
 
-Default is **`jina_mlx`** (Apple-Silicon MLX-native
-`jina-embeddings-v5-text-small-retrieval`, no llama.cpp/GGUF involved)
-— eval-gated 2026-07-13 against the prior `bge-m3`/`llama_cpp`
-baseline: combined with the `jina_mlx` reranker, mrr 0.461->0.534
-(+16%), hit@15 0.654->0.808, no aggregate regression. Full account:
-`docs/specs/jina-mlx-migration.md`.
+Config under `models:` is intentionally small:
 
-```bash
-venv/bin/pip install -r scripts/requirements-mlx.txt   # once
-venv/bin/python scripts/ingest.py embed   # first run downloads the
-                                          # model (~1.1GB, one-time)
+```yaml
+ingestion:
+  embed_text: true      # --embed all / stage all
+  embed_images: true    # also gates query image RRF + omni fetch
+models:
+  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
+  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx
+  mlx_model_rerank: jinaai/jina-reranker-v3-mlx
 ```
 
-To fall back to `bge-m3` (llama.cpp GGUF, no extra install — e.g. on
-non-Apple-Silicon):
+Use a **matched pair** only: nano↔nano (768-d) or small↔small (1024-d).
+Changing the text/omni repo is INDEX-INVALIDATING
+(`ingest.py --embed text` / `--embed images`, or `--embed all`).
+Reranker is not. Universal loader: `scripts/mlx_model_loader.py`.
+No GGUF / llama.cpp path remains.
 
 ```bash
-# config.yaml: models.embed_backend: llama_cpp
-venv/bin/python scripts/ingest.py embed   # announces fingerprint change,
-                                          # FULL re-embed (all chunks)
+venv/bin/python scripts/fetch_model.py
+venv/bin/python scripts/ingest.py --embed text
+# or both when ingestion.embed_* are true:
+# venv/bin/python scripts/ingest.py --embed all
+venv/bin/python scripts/ingest.py --embed images
+venv/bin/python scripts/smoke_visual_alignment.py
 ```
-
-`bge-m3` via Apple MLX (`mlx-embeddings`) remains available as a third
-option (`models.embed_backend: mlx`) but is superseded by `jina_mlx`
-for Apple-Silicon use — kept only as a already-verified fallback.
-
-Switching between any of the three: edit `models.embed_backend` in
-`config.yaml`, run `ingest.py embed` again. The backend is
-INDEX-INVALIDATING: vectors from different backends are incomparable,
-so embed.py wipes and re-embeds on any change, and query.py refuses
-(exits non-zero) to search an index whose recorded backend/model
-doesn't match the config. Models download from HuggingFace on first
-use (one-time, inbound-only).
-
-## Choosing the reranker backend (Jina MLX vs bge-reranker-v2-m3)
-
-Default is **`jina_mlx`** (`jina-reranker-v3-mlx`, MLX-native,
-listwise) — eval-gated 2026-07-13: reranker-only swap (embedder held
-at `bge-m3`) scored mrr 0.461->0.523, every aggregate improved, none
-regressed. Not index-invalidating (reranking is transient, no
-persisted artifact) — takes effect on the very next query.
-
-```bash
-# config.yaml: models.rerank_backend: llama_cpp   # to revert
-```
-
-First use of `jina_mlx` downloads the model (~1.1GB, one-time). See
-`docs/specs/jina-mlx-migration.md` for the full measured comparison.
 
 ## Blob path cache (sha256 → file, regenerable)
 
@@ -257,10 +235,10 @@ Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
 Visual page-image channel (R-03, opt-in after smoke PASS):
 
 ```bash
-venv/bin/pip install -r scripts/requirements-visual.txt
+venv/bin/pip install -r scripts/requirements-mlx.txt   # omni processor deps
 venv/bin/python scripts/smoke_visual_alignment.py   # expect PASS
-# config.yaml: models.img_leg_enabled: true
-venv/bin/python scripts/ingest.py images            # rasterize + omni index
+# config.yaml: ingestion.embed_images: true
+venv/bin/python scripts/ingest.py --embed images            # rasterize + omni index
 venv/bin/python scripts/query.py "site plan stamp" --no-daemon
 ```
 

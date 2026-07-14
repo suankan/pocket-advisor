@@ -1,19 +1,16 @@
-"""Image embedding backends for R-03 visual retrieval.
+"""Page-image embedding — same MLX stack as text (Jina omni repo).
 
 Contract: embed_image(path) -> float32 L2-normalized vector of length
-IMG_EMBED_DIM. Confirmed API (smoke_visual_alignment.py PASS):
-AutoProcessor + model.embed(**inputs) with Document: vision placeholders.
+EMBED_DIM. Full A4 pages are downscaled (IMG_MAX_SIDE) so vision-token
+count stays within the processor budget.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-
 import config
 import embedding_backends
-
-_DOC_IMAGE_PROMPT = "Document: <|vision_start|><|image_pad|><|vision_end|>"
+import mlx_model_loader
 
 _backend = None
 
@@ -21,13 +18,14 @@ _backend = None
 def current_fingerprint() -> dict:
     text_fp = embedding_backends.current_fingerprint()
     return {
-        "backend": config.IMG_EMBED_BACKEND,
-        "model": config.IMG_EMBED_MODEL_REPO,
-        "dim": config.IMG_EMBED_DIM,
+        "backend": "mlx",
+        "model": config.MLX_MODEL_EMBED_OMNI,
+        "dim": text_fp["dim"],
         "page_dpi": config.IMG_PAGE_DPI,
+        "max_side": getattr(config, "IMG_MAX_SIDE", 1024),
         "aligned_text_model": {
             "backend": text_fp.get("backend"),
-            "model": text_fp.get("model") or text_fp.get("model_repo"),
+            "model": text_fp.get("model"),
             "dim": text_fp.get("dim", config.EMBED_DIM),
         },
     }
@@ -39,77 +37,49 @@ def meta_fingerprint(meta: dict) -> dict:
         "model": meta.get("model"),
         "dim": meta.get("dim"),
         "page_dpi": meta.get("page_dpi"),
+        "max_side": meta.get("max_side"),
         "aligned_text_model": meta.get("aligned_text_model") or {},
     }
 
 
 def embedding_fields_changed(built: dict, current: dict) -> bool:
-    for k in ("backend", "model", "dim", "page_dpi"):
+    for k in ("backend", "model", "dim", "page_dpi", "max_side"):
+        # backend rename jina_omni_torch -> mlx still invalidates via model
+        if k == "backend":
+            continue
         if built.get(k) != current.get(k):
             return True
+    # If model path changed from torch omni to mlx omni, model string differs.
+    if built.get("model") != current.get("model"):
+        return True
     b_align = built.get("aligned_text_model") or {}
     c_align = current.get("aligned_text_model") or {}
-    for k in ("backend", "model", "dim"):
+    for k in ("model", "dim"):
         if b_align.get(k) != c_align.get(k):
             return True
     return False
 
 
-class JinaOmniTorchBackend:
-    name = "jina_omni_torch"
+class MlxOmniImageBackend:
+    name = "mlx"
 
     def __init__(self):
-        import torch
-        from transformers import AutoModel, AutoProcessor
-
+        if config.IMG_EMBED_DIM != config.EMBED_DIM:
+            # Align dims from text fingerprint first
+            embedding_backends.current_fingerprint()
         if config.IMG_EMBED_DIM != config.EMBED_DIM:
             raise SystemExit(
                 f"IMG_EMBED_DIM ({config.IMG_EMBED_DIM}) must equal "
                 f"EMBED_DIM ({config.EMBED_DIM}) for cross-modal alignment")
-        self._torch = torch
-        self._model = AutoModel.from_pretrained(
-            config.IMG_EMBED_MODEL_REPO,
-            trust_remote_code=True,
-            modality="vision",
-        ).eval()
-        self._proc = AutoProcessor.from_pretrained(
-            config.IMG_EMBED_MODEL_REPO, trust_remote_code=True)
-        self._device = next(self._model.parameters()).device
-        self._dtype = next(self._model.parameters()).dtype
+        self._inner = mlx_model_loader.load_omni_embedder(
+            config.MLX_MODEL_EMBED_OMNI)
 
-    def embed_image(self, image_path: str | Path) -> np.ndarray:
-        from PIL import Image
-
-        path = Path(image_path)
-        inputs = self._proc(
-            images=Image.open(path).convert("RGB"),
-            text=_DOC_IMAGE_PROMPT,
-            return_tensors="pt",
-        )
-        inputs = {
-            k: (v.to(self._device) if hasattr(v, "to") else v)
-            for k, v in inputs.items()
-        }
-        if "pixel_values" in inputs:
-            inputs["pixel_values"] = inputs["pixel_values"].to(dtype=self._dtype)
-        with self._torch.no_grad():
-            v = self._model.embed(**inputs)
-        arr = v.detach().cpu().float().numpy().reshape(-1).astype(np.float32)
-        if arr.shape[0] != config.IMG_EMBED_DIM:
-            raise RuntimeError(
-                f"image embed dim {arr.shape[0]} != IMG_EMBED_DIM "
-                f"{config.IMG_EMBED_DIM}")
-        n = float(np.linalg.norm(arr))
-        if n > 0:
-            arr = arr / n
-        return arr
+    def embed_image(self, image_path: str | Path):
+        return self._inner.embed_image(image_path)
 
 
 def get_backend():
     global _backend
     if _backend is None:
-        if config.IMG_EMBED_BACKEND != "jina_omni_torch":
-            raise SystemExit(
-                f"unknown IMG_EMBED_BACKEND={config.IMG_EMBED_BACKEND!r}")
-        _backend = JinaOmniTorchBackend()
+        _backend = MlxOmniImageBackend()
     return _backend

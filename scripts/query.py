@@ -193,7 +193,7 @@ def vector_search(question, limit, allowed=None, backend=None,
 
 def allowed_page_image_ids(conn, args):
     """page_images ids passing privilege/date/thread/mount/purpose filters."""
-    if not config.IMG_LEG_ENABLED:
+    if not config.EMBED_IMAGES:
         return set()
     conds, params = [], []
     if not args.include_privileged:
@@ -228,7 +228,7 @@ def allowed_page_image_ids(conn, args):
 
 def img_vector_search(query_vec, limit, allowed=None):
     """Visual dense leg — same query vector as text (alignment claim)."""
-    if not config.IMG_LEG_ENABLED:
+    if not config.EMBED_IMAGES:
         return []
     if not (Path(config.IMG_VECTORS_NPY).is_file()
             and Path(config.IMG_VECTORS_IDS_NPY).is_file()
@@ -242,7 +242,7 @@ def img_vector_search(query_vec, limit, allowed=None):
         raise SystemExit(
             "query: image index fingerprint mismatch vs config "
             f"(built={built}, current={cur}). "
-            "Run `venv/bin/python scripts/ingest.py images` to rebuild.")
+            "Run `venv/bin/python scripts/ingest.py --embed images` to rebuild.")
     matrix = np.load(config.IMG_VECTORS_NPY)
     ids = np.load(config.IMG_VECTORS_IDS_NPY)
     if allowed is not None:
@@ -466,7 +466,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
     is independent: only `question` (and filters) change ranking input
     — no chat/history state (docs/specs/warm-eval.md).
 
-    When IMG_LEG_ENABLED and an image index exists, fuses a third RRF
+    When EMBED_IMAGES and an image index exists, fuses a third RRF
     leg of page images (kind-tagged keys); one text query vector serves
     both dense legs (alignment claim).
     """
@@ -493,7 +493,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
         "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL").fetchone()[0]
     warnings = []
     if pending:
-        warnings.append(f"{pending} chunks not yet embedded — run ingest.py embed; "
+        warnings.append(f"{pending} chunks not yet embedded — run ingest.py --embed text; "
                         "semantic results may be incomplete")
 
     allowed = allowed_chunk_ids(conn, args)
@@ -509,7 +509,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
                         vector_matrix=vector_matrix, vector_ids=vector_ids,
                         query_vec=query_vec)
 
-    use_img = bool(config.IMG_LEG_ENABLED)
+    use_img = bool(config.EMBED_IMAGES)
     img = []
     if use_img:
         try:
@@ -583,8 +583,8 @@ class WarmResources:
         self.rerank_backend = (rerank_backends.get_backend()
                                if config.RERANK_ENABLED else None)
         log(f"warm: ready in {time.time() - t0:.1f}s "
-            f"(embed={config.EMBED_BACKEND}, "
-            f"rerank={config.RERANK_BACKEND if config.RERANK_ENABLED else 'off'})")
+            f"(embed={config.MLX_MODEL_EMBED_TEXT}, "
+            f"rerank={config.MLX_MODEL_RERANK if config.RERANK_ENABLED else 'off'})")
 
     def search(self, question, *, top_k=None, include_privileged=None,
                after=None, before=None, thread=None, no_thread_context=False,
@@ -612,7 +612,7 @@ class WarmResources:
             meta = json.loads(config.VECTORS_META_JSON.read_text())
         return {
             "embed": embedding_backends.current_fingerprint(),
-            "rerank_backend": config.RERANK_BACKEND if config.RERANK_ENABLED else None,
+            "rerank_model": config.MLX_MODEL_RERANK if config.RERANK_ENABLED else None,
             "rerank_enabled": config.RERANK_ENABLED,
             "index": meta,
         }

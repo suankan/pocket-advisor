@@ -102,7 +102,7 @@ way, matching the pre-filter/reranker episodes' discipline.
    `_ensure_chunks_fts_shadow_column()` migration function per Design.
 3. `scripts/embed.py`: `sync_chunks` computes `translit_shadow` at
    chunk-creation time; new backfill pass for existing
-   `translit_shadow IS NULL` rows, run once as part of `ingest.py embed`.
+   `translit_shadow IS NULL` rows, run once as part of `ingest.py --embed text`.
 4. `scripts/requirements.txt`: add `unidecode`.
 5. No `query.py` changes (multi-column MATCH is automatic).
 
@@ -180,7 +180,7 @@ was built to fix, not a mechanical failure.
 ## Verification commands
 
 ```bash
-venv/bin/python scripts/ingest.py embed   # runs migration + backfill
+venv/bin/python scripts/ingest.py --embed text   # runs migration + backfill
 venv/bin/python scripts/verify_integrity.py
 venv/bin/python scripts/eval.py run --golden eval/golden/family-law.yaml --label post-translit
 venv/bin/python scripts/eval.py compare eval/results/*pre-translit-v2*.json eval/results/*post-translit*.json

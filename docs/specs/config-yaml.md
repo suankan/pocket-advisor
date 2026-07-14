@@ -18,20 +18,16 @@ validation and mismatch warnings extending the fingerprint mechanism
 
 ## Two-layer discipline applies to the file itself
 
-`config.yaml` (real, workspace-specific) is gitignored — it will carry
-`PRIVILEGED_FOLDERS`, a case-identifying value currently sitting in
-committed `config.py` (a known, ledgered gap). `config.yaml.example`
-(committed, platform layer) documents the schema with placeholder
-values. `config.py` keeps `PRIVILEGED_FOLDERS`/`DOCUMENT_FOLDERS` as
-empty-set defaults with a comment that real values must come from
-`config.yaml` — closes part of the Phase 1d migration ahead of time.
+`config.yaml` is platform-layer only: no case-identifying folder names
+or privilege lists. Evidence collections + `privileged` flags live in
+the gitignored `workspaces/workspace-config.yaml` registry.
+`config.yaml.example` (committed) documents the platform schema.
 
 ## Schema (mapped against actual current config.py values)
 
 ```yaml
-privilege:                        # SAFETY-SEMANTICS — loud, top-level
-  privileged_folders: [own-solicitor-folder]
-  document_folders: [additional-documents]
+# No privilege: section — use workspace-config collections[].privileged
+# and/or a path segment named privileged/.
 
 query:                            # FREE — safe to change anytime
   fts_candidates: 50
@@ -54,20 +50,18 @@ ingestion:
   thread_fallback_window_days: 60
   doc_date_header_window_chars: 6000
 
+ingestion:
+  embed_text: true       # free — --embed all / stage all
+  embed_images: true     # free — also query image leg + omni fetch
 models:
-  embed_backend: llama_cpp         # INDEX-INVALIDATING
-  embed_model_repo: gpustack/bge-m3-GGUF        # INDEX-INVALIDATING
-  embed_model_file: bge-m3-Q8_0.gguf            # INDEX-INVALIDATING
-  mlx_embed_model_repo: mlx-community/bge-m3-mlx-fp16  # INDEX-INVALIDATING (if backend=mlx)
-  rerank_model_repo: gpustack/bge-reranker-v2-m3-GGUF  # free (transient, no persisted index)
-  rerank_model_file: bge-reranker-v2-m3-Q8_0.gguf      # free
+  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx  # INDEX-INVALIDATING
+  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx  # INDEX-INVALIDATING
+  mlx_model_rerank: jinaai/jina-reranker-v3-mlx   # free (transient)
 ```
 
-Mechanical mapping: yaml key -> `config.PY_ATTR`, dotted path ->
-underscore-joined section prefix stripped (e.g. `ingestion.chunking.chars`
--> `CHUNK_CHARS`). `EMBED_MODEL_PATH`/`RERANK_MODEL_PATH` are DERIVED
-(`MODELS_DIR / FILE`) — must be recomputed after overlay if the
-corresponding `_FILE` key was overridden, not left stale.
+Mechanical mapping: yaml key -> `config.PY_ATTR`. MLX-only stack —
+no GGUF / backend selector. (`models.img_leg_enabled` still accepted
+as a deprecated alias for `ingestion.embed_images`.)
 
 ## A real gap found while scoping this: chunking was never fingerprinted
 
@@ -147,7 +141,7 @@ detection, not remediation.
       on first encounter, then genuinely warns AND persists the
       acknowledgment on real drift (so the warning fires once per
       actual change, not forever); `query.py`'s separate warning nags
-      on every query until `ingest.py embed` is run to acknowledge.
+      on every query until `ingest.py --embed text` is run to acknowledge.
       Re-verified end-to-end after the fix: warn on change (query.py
       and embed.py both), quiet after acknowledgment, warn again on
       revert (genuine drift in the other direction) — all confirmed
@@ -177,22 +171,16 @@ convention — content is privileged iff its path under
 `ingestion-sources/` passes through a directory literally named
 `privileged` (`config.PRIVILEGED_DIR_NAME`, `config.is_privileged_path`).
 
-- `privilege.privileged_folders` is REMOVED from `YAML_KEYS` — setting
-  it in `config.yaml` now aborts as an unknown key.
-- `privilege.document_folders` is unchanged (still identifies which
-  folders are scanned for standalone documents — orthogonal to
-  privilege). A document drop-folder is made privileged by nesting it
-  under `privileged/` and listing that nested path, e.g.
-  `privileged/additional-documents`.
-- `config.py`'s `PRIVILEGED_FOLDERS` constant and both
-  `recompute_privilege()` functions (`parse_eml.py`,
-  `ingest_documents.py`) are replaced by a path check against
-  `source_path`, run every ingest as before (idempotent full rescan,
-  ratchets 0->1 only).
-- Net effect: `config.yaml` no longer carries any case-identifying
-  value at all — real correspondent/firm folder names never need to
-  appear in it, closing the gap this spec's "Two-layer discipline"
-  section flagged as a known, ledgered gap.
+- `privilege.privileged_folders` and `privilege.document_folders` are
+  REMOVED from platform `YAML_KEYS` — setting either in `config.yaml`
+  aborts as an unknown key.
+- Document collections are declared only in
+  `workspaces/workspace-config.yaml` (`collections[]` + mounts).
+  Privilege is registry `collections[].privileged` OR path segment
+  `privileged/` (`config.is_privileged_path`). `privilege_override`
+  still wins.
+- Net effect: platform `config.yaml` carries no case-identifying
+  folder names or privilege lists.
 - Existing ingested workspaces migrate by physically moving the real
   privileged folder(s) under `ingestion-sources/privileged/` (a
   one-time, user-directed filesystem move — AGENTS.md hard rule 1

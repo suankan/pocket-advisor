@@ -184,7 +184,7 @@ this migration an improvement.
 venv/bin/python scripts/test_rerank_backends.py
 venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label jina-rerank-only
 venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*post-refactor-baseline*.json workspaces/family-law/eval/results/*jina-rerank-only*.json
-venv/bin/python scripts/ingest.py embed   # full re-embed after EMBED_BACKEND=jina_mlx
+venv/bin/python scripts/ingest.py --embed text   # full re-embed after EMBED_BACKEND=jina_mlx
 venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label jina-embed-only
 venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*post-refactor-baseline*.json workspaces/family-law/eval/results/*jina-embed-only*.json
 ```

@@ -1,4 +1,4 @@
-"""Stage 4: chunk extracted text and embed via llama.cpp (bge-m3 GGUF).
+"""Stage 4: chunk extracted text and embed via Jina MLX.
 
 - Chunks ~1500 chars with ~200 overlap, splitting on paragraph
   boundaries where possible; every document yields >=1 chunk so every
@@ -6,11 +6,9 @@
 - Incremental: only chunks with embedded_at IS NULL are embedded; a
   failed chunk stays NULL and is retried next run.
 - Vector store: full matrix rebuild each run into vectors.npy (float32
-  [N x 1024]) + vectors_ids.npy (aligned chunk ids) + meta.json.
-  bge-m3 needs no query/document prefixes.
-- Backend (llama_cpp | mlx) is pluggable via config.EMBED_BACKEND; a
-  fingerprint change (backend/model/dim vs meta.json) wipes and
-  re-embeds everything — mixed-backend indexes are never allowed.
+  [N x EMBED_DIM]) + vectors_ids.npy (aligned chunk ids) + meta.json.
+- Fingerprint change (model repo / dim vs meta.json) wipes and
+  re-embeds everything — mixed-model indexes are never allowed.
 """
 import json
 import sys

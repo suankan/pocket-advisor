@@ -138,7 +138,9 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
   one. Case-specific lessons go to the workspace's own LEARNINGS.md
 - `RUNBOOK.md` — setup + how to run each stage
 - `config.yaml` (gitignored; schema + docs in `config.yaml.example`) —
-  `workspaces.dir` + engine knobs only (not active matter / collections)
+  `workspaces.dir` + engine knobs only (models, query, ingestion).
+  **Not** privilege lists or document-folder names — those are registry
+  / path-convention only (hard rule 2)
 - `workspaces/workspace-config.yaml` (gitignored) — schema_version 2:
   `collections[]` + workspace mounts (docs/specs/workspace-config-v2.md;
   example: workspace-config-v2.example.yaml)
@@ -162,11 +164,22 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
 
 ```bash
 # ingest new emails AND standalone documents (idempotent — drop new
-# files under the source roots declared in workspace-config.yaml)
+# files under collection roots in workspace-config.yaml). Stage `all`
+# also runs --embed all gated by ingestion.embed_text / embed_images.
 venv/bin/python scripts/ingest.py all
+
+# re-embed only (INDEX-INVALIDATING model changes wipe on next run)
+venv/bin/python scripts/ingest.py --embed text      # text vectors
+venv/bin/python scripts/ingest.py --embed images    # page-image / omni
+venv/bin/python scripts/ingest.py --embed all       # text iff embed_text;
+                                                    # images iff embed_images
+
+# one-time model fetch (inbound weights only)
+venv/bin/python scripts/fetch_model.py
 
 # optional: keep embed+rerank warm for a multi-query agent/user session
 # (docs/specs/query-daemon.md). query.py auto-uses it when running.
+# Restart daemon after re-embed or model config changes.
 venv/bin/python scripts/query_daemon.py serve    # foreground; or background
 # venv/bin/python scripts/query_daemon.py status|stop
 

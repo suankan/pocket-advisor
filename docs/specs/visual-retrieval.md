@@ -2,7 +2,7 @@
 
 Status: **SHIPPED (R-03)** 2026-07-13 — pipeline complete, **off by
 default**. Alignment smoke **PASS** (cosine match 0.46 > mismatch 0.26).
-Enable with `models.img_leg_enabled: true` then `ingest.py images`.
+Enable with `models.img_leg_enabled: true` then `ingest.py --embed images`.
 
 Shipped modules: `page_images` table (`item_id`), `image_embedding_backends.py`
 (confirmed `embed`+`AutoProcessor` API), `embed_images.py` (rasterize +
@@ -315,7 +315,7 @@ get tagged `flags: [visual]`.
 
 ```bash
 venv/bin/python /tmp/smoke_jina_omni.py          # step 1
-venv/bin/python scripts/ingest.py images          # steps 2-4 (IMG_LEG_ENABLED gates cost)
+venv/bin/python scripts/ingest.py --embed images          # steps 2-4 (IMG_LEG_ENABLED gates cost)
 venv/bin/python scripts/query.py "<q>" --json     # step 5, IMG_LEG_ENABLED=true
 venv/bin/python scripts/eval.py run --golden workspaces/family-law/eval/golden/family-law.yaml --label visual-on
 venv/bin/python scripts/eval.py compare workspaces/family-law/eval/results/*visual-off*.json workspaces/family-law/eval/results/*visual-on*.json

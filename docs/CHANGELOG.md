@@ -17,7 +17,39 @@ map; open work is `R-nn`.
 
 ---
 
+## 2026-07-14
+
+### Platform config + ingest embed CLI cleanup · SHIPPED
+
+- **Models:** MLX-only via `mlx_model_loader.py`; knobs
+  `models.mlx_model_embed_text` / `mlx_model_embed_omni` /
+  `mlx_model_rerank`. GGUF / multi-backend zoo removed.
+- **Embed channels:** `ingestion.embed_text` / `ingestion.embed_images`
+  (replaces `models.img_leg_enabled`). Query image RRF + omni fetch
+  gated by `embed_images`.
+- **CLI:** `ingest.py --embed text|images|all` (`--embed all` respects
+  the two knobs; explicit named modes force the channel). Stage `all`
+  runs gated embed-all. Legacy bare `text`/`images` stages deprecated.
+- **Privilege:** platform `privilege.document_folders` **removed** —
+  collections + `privileged` only in workspace-config (+ path
+  `privileged/`). Putting `privilege.*` in platform config aborts.
+- Live config may use text/omni **small** (1024-d); code defaults remain
+  nano. Matched pairs only. Re-embed after model-repo change:
+  `ingest.py --embed text` / `--embed images` or `--embed all`.
+
+### Visual pipeline uses omni MLX (not torch) · SHIPPED
+
+Page-image embed path loads `mlx_model_embed_omni` (multi-task or
+retrieval MLX ports). Smoke: `scripts/smoke_visual_alignment.py`.
+
 ## 2026-07-13
+
+### MLX-only model stack (no GGUF) · SHIPPED
+
+Unified loader `scripts/mlx_model_loader.py` for text embed, omni
+page embed, and rerank. Initial reduction of model knobs; GGUF /
+llama.cpp / bge-m3 multi-backend zoo removed. See 2026-07-14 for
+current key names (`mlx_model_embed_*`, `ingestion.embed_*`).
 
 ### Privileged retrieval default ON · SHIPPED
 
@@ -31,11 +63,11 @@ to include-privileged too (opt out per golden entry). Commits: `77a827b`,
 
 Alignment smoke **PASS**. Full path: `embed_images.py` (pdftoppm + omni
 embed + `img_vectors.npy`), query third RRF leg with `("chunk"|"img", id)`
-keys, `ingest.py images`. Enable `models.img_leg_enabled: true` after
-`requirements-visual.txt`. Full-page embed needs long-side downscale
-(`IMG_MAX_SIDE`) + `truncation=False` (token-count fix). Follow-on:
+keys, `ingest.py --embed images` (gated by `ingestion.embed_images`).
+Full-page embed needs long-side downscale (`IMG_MAX_SIDE`). Follow-on:
 **R-03b** visual eval / RRF weights. Spec:
-[visual-retrieval.md](specs/visual-retrieval.md).
+[visual-retrieval.md](specs/visual-retrieval.md). (Omni path later
+moved to MLX — see 2026-07-14.)
 
 ### R-01 Schema B — items + memberships · SHIPPED
 

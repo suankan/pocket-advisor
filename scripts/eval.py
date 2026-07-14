@@ -190,10 +190,8 @@ def build_fingerprint(conn, golden_path, golden_list, top_k, query_mode):
             "DEFAULT_TOP_K": config.DEFAULT_TOP_K,
             "run_top_k": top_k,
             "RERANK_ENABLED": config.RERANK_ENABLED,
-            "RERANK_BACKEND": config.RERANK_BACKEND,
-            "RERANK_MODEL": config.RERANK_MODEL_FILE
-                if config.RERANK_BACKEND == "llama_cpp"
-                else config.MLX_JINA_RERANK_MODEL_REPO,
+            "RERANK_MODEL": config.MLX_MODEL_RERANK,
+            "EMBED_MODEL": config.MLX_MODEL_EMBED_TEXT,
             "query_mode": query_mode,
         },
         "golden_path": str(golden_path),

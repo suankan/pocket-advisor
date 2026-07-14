@@ -1,6 +1,10 @@
 # Spec: pluggable embedding backend (llama.cpp | MLX)
 
-Status: IMPLEMENTED 2026-07-12. llama.cpp path verified in production.
+Status: **SUPERSEDED 2026-07-13** — GGUF / multi-backend zoo removed.
+Single MLX path via `mlx_model_loader.py` + `models.mlx_model_embed_*`.
+Historical notes below retained for why fingerprints exist.
+
+Status (historical): IMPLEMENTED 2026-07-12. llama.cpp path verified in production.
 MLX path API-fixed + smoke-tested 2026-07-12 (see Risks). **SUPERSEDED
 2026-07-13**: the "full-corpus switch pending eval-harness comparison"
 item below was never completed for the `bge-m3`/`mlx` backend
@@ -60,7 +64,7 @@ everything on model change). Therefore backend+model+dim form the index
 - [x] Default config produces byte-identical retrieval behavior: same
       `query.py "…" --json` results before/after the refactor; no
       re-embed triggered on existing index (legacy meta = llama_cpp).
-- [x] `ingest.py embed` with unchanged config on a current index:
+- [x] `ingest.py --embed text` with unchanged config on a current index:
       no-op in seconds, no model load.
 - [x] Switching `EMBED_BACKEND` (or model) and running `ingest.py
       embed` announces the fingerprint change and re-embeds ALL chunks;
@@ -91,7 +95,7 @@ everything on model change). Therefore backend+model+dim form the index
 ## Verification commands
 
 ```bash
-venv/bin/python scripts/ingest.py embed          # expect: no-op, seconds
+venv/bin/python scripts/ingest.py --embed text          # expect: no-op, seconds
 venv/bin/python scripts/query.py "<q>" --json    # diff vs saved baseline
 # mismatch drill: edit output/vectors/vectors.meta.json "backend" ->
 # "mlx", run query.py (expect exit 2 + instructions), revert.

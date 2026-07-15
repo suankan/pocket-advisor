@@ -1,9 +1,16 @@
 # Spec: structured transactions v2 — bank parsers + reconciliation (R-04b)
 
-Status: **PLANNED** (drafted 2026-07-15). Supersedes the heuristic slice
-in [structured-transactions.md](structured-transactions.md) (R-04) when
-shipped. Per ROADMAP tenet 12, this spec must be executable by a
-smaller model without re-deriving intent.
+Status: **SHIPPED (core) 2026-07-15** — schema, assertion framework,
+westpac-v1 parser (Business One + Choice; 29 live statements, 100%
+balance_ok after the chain check exposed a negative-balance parsing bug),
+matching, coverage, report, 59-check self-test. Supersedes
+[structured-transactions.md](structured-transactions.md) (R-04).
+Remaining: AMP + Qantas Money card parsers (live unknown-format skips
+are the queue). Two as-built deviations, both found live: statements
+natural key includes period_start (one email carried 11 statements of
+one account), and `ingest.py transactions` now delegates to
+`transactions.py`. Per ROADMAP tenet 12, this spec must be executable
+by a smaller model without re-deriving intent.
 
 ## Goal
 
@@ -44,8 +51,11 @@ statements (id INTEGER PK, item_id FK->items,   -- custody/citation spine
            parsed_at TEXT,
            excluded INTEGER DEFAULT 0,          -- user-resolved overlap: out of
                                                 -- sums/matching/coverage
-           UNIQUE(item_id, account_id));        -- combined PDFs (loan+offset)
-                                                -- yield one row per account
+           UNIQUE(item_id, account_id, period_start));
+           -- combined PDFs (loan+offset) yield one row per account; the
+           -- period is in the key because one EMAIL item can carry
+           -- several statements of the same account as attachments
+           -- (found live 2026-07-15)
 statement_assertions (id INTEGER PK,            -- self-checks discovered in
            statement_id FK->statements,         -- the statement's own text
            kind TEXT CHECK(kind IN ('opening_balance','closing_balance',

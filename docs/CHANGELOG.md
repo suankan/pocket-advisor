@@ -17,6 +17,27 @@ map; open work is `R-nn`.
 
 ---
 
+## 2026-07-15
+
+**Structured transactions v2 — bank parsers + reconciliation** · `R-04b`
+· SHIPPED (core; Westpac parser first) ·
+Replaced the R-04 regex heuristic with a real statement pipeline:
+`holders/accounts/statements/statement_assertions/transactions/
+transfer_links` schema (signed minor units), per-format parsers
+(`statement_parsers.py`: westpac-v1 covers Business One + Choice, 29
+live statements incl. email attachments), discovered self-check
+assertions (opening+Σ=closing, totals, txn count, carried-forward,
+running-balance chain — the chain check caught a real negative-balance
+parser bug on first live run), cross-statement continuity/overlap
+checks, exact/fee-adjusted transfer matching with ambiguity-to-review,
+coverage buckets (external/suspicious/unknown), PDF tamper signals,
+counterparty watch-list. Workspace YAML (accounts/reconciliation/
+counterparties, gitignored) re-applied on rebuild — tenet 5 holds.
+Live: 29/29 statements balance_ok, 62 auto links, 1 real coverage gap
+found (details in workspace journal). `transactions.py parse|link|report`;
+59-check self-test. AMP + Qantas Money formats remain (logged skips).
+Spec: [structured-transactions-v2.md](specs/structured-transactions-v2.md).
+
 ## 2026-07-14
 
 ### `mlx_model_loader.snapshot_dir` checks disk before HF Hub call · SHIPPED

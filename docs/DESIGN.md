@@ -35,7 +35,7 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
 | **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
-| **Structured numbers** — transactions SQL, row citations | **Done (heuristic only)** | **R-04** table + regex extractor (live rows may be 0 until run / until R-04b) | **R-04b** real bank parsers |
+| **Structured numbers** — transactions SQL, row citations | **Done (Westpac)** | **R-04b** 2026-07-15: statement parsers + assertions + transfer reconciliation (`transactions.py parse/link/report`) | **R-04c** AMP + Qantas Money parsers |
 | **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual search accuracy test; finish live image index after re-embed |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |

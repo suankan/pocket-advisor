@@ -235,6 +235,66 @@ and just warns). Re-baseline after any re-ingest and before/after any
 accuracy-affecting change (retrieval, chunking, model, backend).
 Golden-set format and full design: `docs/specs/search-accuracy-test.md`.
 
+## Bank statements & reconciliation (R-04b)
+
+Parse statement PDFs (standalone docs AND email attachments) into the
+`transactions` tables, link cross-account transfers, report integrity:
+
+```bash
+venv/bin/python scripts/transactions.py parse    # detect+parse+validate
+venv/bin/python scripts/transactions.py link     # auto-match + overrides
+venv/bin/python scripts/transactions.py report   # coverage, balance_ok,
+                                                 # buckets, tamper, watch-list
+```
+
+Run order: ingest → parse → link → report. Re-run parse after any
+re-ingest or after editing the workspace YAML files (all gitignored,
+in the active matter folder):
+
+- `accounts.yaml` — account registry (holder/bank/number/kind). A
+  statement whose account isn't listed parses as UNASSIGNED.
+- `reconciliation.yaml` — `links:` (manual transfer confirmations),
+  `assign:` (force statement→account), `exclude:` (resolve period
+  overlaps; excluded statements leave sums/matching/coverage).
+- `counterparties.yaml` — optional watch-list; adds a cited hits
+  section to the report.
+
+Every statement validates against its own printed self-checks
+(opening+Σ=closing, totals, txn count, running-balance chain).
+`balance_ok=0` statements stay queryable but are flagged; treat their
+sums as suspect. Unknown-format statements are logged skips — a pile
+of the same format is the signal to write the next parser
+(`scripts/statement_parsers.py`).
+
+**SQL cookbook** (always exclude `excluded=1` statements; quote
+`balance_ok` caveats with any sum):
+
+```sql
+-- transfers business -> same-holder accounts, with citations
+SELECT t.txn_date, -t.amount_minor/100.0 AS aud, s.item_id, t.page_no
+FROM transactions t
+JOIN accounts af ON af.id=t.account_id
+JOIN transfer_links l ON l.from_txn_id=t.id
+JOIN transactions t2 ON t2.id=l.to_txn_id
+JOIN accounts at2 ON at2.id=t2.account_id
+JOIN statements s ON s.id=t.statement_id
+WHERE af.kind='business' AND af.holder_id=at2.holder_id;
+
+-- unmatched transfer-like egress (money leaving held accounts)
+SELECT t.txn_date, -t.amount_minor/100.0 AS aud, t.description_raw,
+       s.item_id, t.page_no
+FROM transactions t JOIN statements s ON s.id=t.statement_id
+WHERE s.excluded=0 AND t.amount_minor<0
+  AND t.id NOT IN (SELECT from_txn_id FROM transfer_links)
+  AND (t.description_raw LIKE '%Tfr%' OR t.description_raw
+       LIKE '%Transfer%' OR t.description_raw LIKE '%Withdrawal Online%');
+
+-- per-account coverage (which periods we actually hold)
+SELECT a.label, s.period_start, s.period_end, s.balance_ok
+FROM statements s JOIN accounts a ON a.id=s.account_id
+WHERE s.excluded=0 ORDER BY a.label, s.period_start;
+```
+
 ## Integrity check (before privilege logs, exports, anything sensitive)
 
 ```bash

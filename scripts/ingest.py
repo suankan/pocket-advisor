@@ -163,8 +163,15 @@ def main(argv: list[str] | None = None) -> int:
     if stage == "all":
         _run_embed("all", respect_config=True)
     if stage == "transactions":
-        import extract_transactions
-        extract_transactions.run()
+        # R-04b: structured transactions moved to scripts/transactions.py
+        # (parse + link are explicit steps, never auto-run on ingest)
+        import transactions
+        conn = db.connect()
+        try:
+            transactions.run_parse(conn, transactions.workspace_dir())
+            transactions.run_link(conn, transactions.workspace_dir())
+        finally:
+            conn.close()
 
     # Explicit --embed (and legacy mapped modes); may follow a stage
     if embed_mode is not None:

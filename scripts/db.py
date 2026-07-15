@@ -126,22 +126,102 @@ CREATE TABLE IF NOT EXISTS page_images (
     UNIQUE (source_kind, attachment_id, item_id, page_number)
 );
 
-CREATE TABLE IF NOT EXISTS transactions (
-    id              INTEGER PRIMARY KEY,
-    item_id         INTEGER NOT NULL REFERENCES items(id),
-    collection_id   TEXT,
-    txn_date        TEXT,
-    amount          REAL,
-    currency        TEXT DEFAULT 'AUD',
-    description     TEXT,
-    account_hint    TEXT,
-    row_index       INTEGER,
-    source_page     INTEGER,
-    raw_line        TEXT,
-    extracted_at    TEXT NOT NULL
+-- R-04b structured transactions (docs/specs/structured-transactions-v2.md).
+-- Money is signed integer minor units everywhere; negative = egress.
+
+CREATE TABLE IF NOT EXISTS holders (
+    id           INTEGER PRIMARY KEY,
+    display_name TEXT UNIQUE NOT NULL,
+    notes        TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item_id);
+
+CREATE TABLE IF NOT EXISTS accounts (
+    id                INTEGER PRIMARY KEY,
+    holder_id         INTEGER REFERENCES holders(id),
+    bank              TEXT NOT NULL,
+    account_no_masked TEXT NOT NULL,
+    kind              TEXT CHECK(kind IN ('personal','business','offset','card')),
+    currency          TEXT NOT NULL DEFAULT 'AUD',
+    label             TEXT,
+    UNIQUE(bank, account_no_masked)
+);
+
+CREATE TABLE IF NOT EXISTS statements (
+    id                    INTEGER PRIMARY KEY,
+    item_id               INTEGER NOT NULL REFERENCES items(id),
+    account_id            INTEGER REFERENCES accounts(id),
+    period_start          TEXT,
+    period_end            TEXT,
+    opening_balance_minor INTEGER,
+    closing_balance_minor INTEGER,
+    parser_id             TEXT,
+    balance_ok            INTEGER,   -- derived: 1 all assertions pass, 0 any
+                                     -- fail, NULL none discovered
+    pdf_producer          TEXT,
+    pdf_created           TEXT,
+    pdf_modified          TEXT,
+    parsed_at             TEXT,
+    excluded              INTEGER NOT NULL DEFAULT 0,
+    -- one email item can carry SEVERAL statements of the same account
+    -- as attachments, so the natural key includes the period
+    UNIQUE(item_id, account_id, period_start)
+);
+
+CREATE TABLE IF NOT EXISTS statement_assertions (
+    id             INTEGER PRIMARY KEY,
+    statement_id   INTEGER NOT NULL REFERENCES statements(id),
+    kind           TEXT NOT NULL CHECK(kind IN (
+                       'opening_balance','closing_balance','total_credits',
+                       'total_debits','txn_count','carried_forward',
+                       'running_balance_chain')),
+    as_of_date     TEXT,
+    amount_minor   INTEGER,
+    count          INTEGER,
+    page_no        INTEGER,
+    raw_line       TEXT,
+    passed         INTEGER,          -- NULL = not checkable
+    observed_minor INTEGER,
+    observed_count INTEGER,
+    UNIQUE(statement_id, kind, page_no)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id                  INTEGER PRIMARY KEY,
+    statement_id        INTEGER NOT NULL REFERENCES statements(id),
+    account_id          INTEGER REFERENCES accounts(id),
+    txn_date            TEXT,     -- booking date; matching windows use this
+    value_date          TEXT,
+    amount_minor        INTEGER NOT NULL,
+    currency            TEXT NOT NULL DEFAULT 'AUD',
+    description_raw     TEXT,
+    counterparty_raw    TEXT,
+    balance_after_minor INTEGER,
+    page_no             INTEGER,
+    row_index           INTEGER NOT NULL,
+    raw_line            TEXT,
+    UNIQUE(statement_id, row_index)
+);
+
+CREATE TABLE IF NOT EXISTS transfer_links (
+    id                 INTEGER PRIMARY KEY,
+    from_txn_id        INTEGER NOT NULL REFERENCES transactions(id),
+    to_txn_id          INTEGER NOT NULL REFERENCES transactions(id),
+    match_kind         TEXT NOT NULL CHECK(match_kind IN
+                           ('exact','fee_adjusted','manual')),
+    date_delta_days    INTEGER,
+    amount_delta_minor INTEGER,
+    source             TEXT NOT NULL CHECK(source IN ('auto','override')),
+    UNIQUE(from_txn_id, to_txn_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_statements_account ON statements(account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_stmt ON transactions(statement_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_acct_date
+    ON transactions(account_id, txn_date);
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(txn_date);
+CREATE INDEX IF NOT EXISTS idx_transactions_amount ON transactions(amount_minor);
+CREATE INDEX IF NOT EXISTS idx_assertions_stmt
+    ON statement_assertions(statement_id);
 
 CREATE TABLE IF NOT EXISTS ingestion_log (
     id          INTEGER PRIMARY KEY,
@@ -726,6 +806,39 @@ def _migrate_schema_b_items_memberships(conn):
     conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migrate_transactions_v2(conn):
+    """R-04b: replace the R-04 heuristic transactions table (drop-and-
+    recreate per docs/specs/structured-transactions-v2.md; the R-04 table
+    was verified empty in every known DB). Refuses to drop a non-empty
+    old table — that would need a real migration decision, not a silent
+    wipe."""
+    if not _table_exists(conn, "transactions"):
+        return
+    if _table_has_column(conn, "transactions", "statement_id"):
+        return  # already v2
+    n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    if n:
+        raise SystemExit(
+            f"db: legacy transactions table has {n} rows; refusing to "
+            "drop it automatically. Export or delete them first "
+            "(R-04 heuristic rows are regenerable).")
+    conn.execute("DROP TABLE transactions")
+
+
+def _migrate_statements_period_key(conn):
+    """v2 key change: statements natural key gained period_start (one
+    email item can carry several statements of one account). The four
+    R-04b tables are fully regenerable via `transactions.py parse+link`,
+    so a shape mismatch just drops them; BASE_SCHEMA recreates."""
+    if not _table_exists(conn, "statements"):
+        return
+    uniqs = [sorted(u) for u in _unique_column_sets(conn, "statements")]
+    if uniqs and not any("period_start" in u for u in uniqs):
+        for t in ("transfer_links", "statement_assertions",
+                  "transactions", "statements"):
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+
+
 def migrate(conn):
     """Apply schema + guarded column additions. Idempotent and silent —
     safe to call from any entrypoint (ingest stages, query.py)."""
@@ -745,6 +858,8 @@ def migrate(conn):
         _migrate_collection_identity_phase_a(conn)
         _migrate_schema_b_items_memberships(conn)
 
+    _migrate_transactions_v2(conn)
+    _migrate_statements_period_key(conn)
     conn.executescript(BASE_SCHEMA)
     ensure_column(conn, "chunks", "translit_shadow", "translit_shadow TEXT")
     ensure_column(conn, "item_memberships", "workspace_id", "workspace_id TEXT")

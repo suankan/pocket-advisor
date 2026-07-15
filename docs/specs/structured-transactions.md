@@ -3,6 +3,9 @@
 Status: **SHIPPED (minimal heuristic)** 2026-07-13. Full bank-statement
 quality extraction is future work; this slice creates the table + a
 regex line extractor so sums/joins are possible with `item_id` citations.
+R-04b spec drafted 2026-07-15:
+[structured-transactions-v2.md](structured-transactions-v2.md) —
+supersedes this slice (including the `transactions` table) when it ships.
 
 ## Schema
 

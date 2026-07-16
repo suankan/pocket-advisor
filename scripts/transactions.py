@@ -12,7 +12,6 @@ re-applied on every rebuild (tenet 5).
 """
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import re
 import subprocess
@@ -56,62 +55,61 @@ def _load_yaml(path: Path):
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def load_accounts_registry(conn, ws_dir: Path) -> list[dict]:
-    """Seed holders/accounts from accounts.yaml (idempotent upsert).
-    Returns entries with normalized digits for statement matching."""
-    data = _load_yaml(ws_dir / "accounts.yaml") or []
-    entries = []
-    for row in data:
-        holder = (row.get("holder") or "").strip()
-        bank = (row.get("bank") or "").strip()
-        masked = (row.get("account_no_masked") or "").strip()
-        if not (holder and bank and masked):
-            raise SystemExit(f"accounts.yaml: holder/bank/account_no_masked "
-                             f"all required, got: {sorted(row)}")
-        conn.execute("INSERT OR IGNORE INTO holders(display_name) VALUES (?)",
-                     (holder,))
-        hid = conn.execute("SELECT id FROM holders WHERE display_name=?",
-                           (holder,)).fetchone()[0]
+def registry_scope():
+    """Bank accounts mounted on the ACTIVE workspace. Statement
+    ingestion scope is EXPLICIT user marking: collections with
+    `ingestion-type: bank-transactions` in workspace-config.yaml (one
+    account = one collection). Active-mount scoping matches ingest —
+    an unmounted account's files are never ingested, so parsing it
+    would only produce misleading NOT INGESTED noise."""
+    import workspace_config
+    reg = workspace_config.get_registry()
+    mounted = reg.active().collection_ids
+    return [ba for ba in reg.bank_accounts if ba.id in mounted]
+
+
+def seed_accounts(conn, accounts) -> dict:
+    """holders/accounts/account_owners from the config entries
+    (idempotent upsert). Returns {config_id: accounts.id}."""
+    ids = {}
+    for a in accounts:
         conn.execute(
-            """INSERT INTO accounts(holder_id, bank, account_no_masked,
-                                    kind, currency, label)
-               VALUES (?,?,?,?,?,?)
-               ON CONFLICT(bank, account_no_masked) DO UPDATE SET
-                 holder_id=excluded.holder_id, kind=excluded.kind,
-                 currency=excluded.currency, label=excluded.label""",
-            (hid, bank, masked, row.get("kind"),
-             row.get("currency", "AUD"), row.get("label")))
-        aid = conn.execute(
-            "SELECT id FROM accounts WHERE bank=? AND account_no_masked=?",
-            (bank, masked)).fetchone()[0]
-        entries.append({"account_id": aid, "bank": bank.lower(),
-                        "digits": sp.normalize_account_no(masked)})
-    return entries
+            """INSERT INTO accounts(config_id, bsb, account_number, type,
+                                    currency, label)
+               VALUES (?,?,?,?,'AUD',?)
+               ON CONFLICT(config_id) DO UPDATE SET
+                 bsb=excluded.bsb, account_number=excluded.account_number,
+                 type=excluded.type, label=excluded.label""",
+            (a.id, a.bsb, a.account_number, a.type, a.description or a.id))
+        aid = conn.execute("SELECT id FROM accounts WHERE config_id=?",
+                           (a.id,)).fetchone()[0]
+        conn.execute("DELETE FROM account_owners WHERE account_id=?", (aid,))
+        for owner in a.owners:
+            conn.execute(
+                "INSERT OR IGNORE INTO holders(display_name) VALUES (?)",
+                (owner,))
+            hid = conn.execute("SELECT id FROM holders WHERE display_name=?",
+                               (owner,)).fetchone()[0]
+            conn.execute(
+                """INSERT OR IGNORE INTO account_owners(account_id, holder_id)
+                   VALUES (?,?)""", (aid, hid))
+        ids[a.id] = aid
+    return ids
 
 
 def load_reconciliation(ws_dir: Path) -> dict:
     data = _load_yaml(ws_dir / "reconciliation.yaml") or {}
+    if data.get("assign"):
+        raise SystemExit(
+            "reconciliation.yaml: 'assign:' is retired — accounts are "
+            "declared in workspace-config.yaml bank-accounts: (a file in "
+            "the wrong folder should be moved, not remapped)")
     return {"links": data.get("links") or [],
-            "assign": data.get("assign") or [],
             "exclude": data.get("exclude") or []}
 
 
 def load_counterparties(ws_dir: Path) -> list[dict]:
     return _load_yaml(ws_dir / "counterparties.yaml") or []
-
-
-def resolve_account(registry: list[dict], bank: str, digits: str,
-                    assign_account_id: int | None) -> int | None:
-    """assign: override wins; else registry suffix match on digits +
-    same bank (case-insensitive)."""
-    if assign_account_id is not None:
-        return assign_account_id
-    if not digits:
-        return None
-    hits = [e for e in registry
-            if e["bank"] == bank.lower() and e["digits"]
-            and digits.endswith(e["digits"])]
-    return hits[0]["account_id"] if len(hits) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -235,98 +233,114 @@ def derive_balance_ok(asserts: list[sp.Assertion]) -> int | None:
 # ---------------------------------------------------------------------------
 # parse
 
-def _candidate_texts(conn):
-    """(item_id, text_path, pdf_path) for standalone documents AND email
-    attachments — statements arrive both ways. Mounted-collection scope
-    comes free: only ingested items are in the DB."""
-    for r in conn.execute(
-            """SELECT item_id, extracted_text_path, extracted_copy_path
-               FROM item_file_meta
-               WHERE extracted_text_path IS NOT NULL AND is_skipped=0"""):
-        yield r["item_id"], r["extracted_text_path"], r["extracted_copy_path"]
-    for r in conn.execute(
-            """SELECT item_id, extracted_text_path, extracted_copy_path
-               FROM attachments
-               WHERE extracted_text_path IS NOT NULL AND is_skipped=0"""):
-        yield r["item_id"], r["extracted_text_path"], r["extracted_copy_path"]
+def _account_files(conn, acct):
+    """Files in the account's collection (the marked folder IS the
+    collection root), via source_blob_index (sha->relpath cache;
+    survives users reorganising files) joined to memberships (pathless
+    identity) for the extracted text."""
+    rows = conn.execute(
+        """SELECT b.relpath_within_source AS relpath, b.sha256,
+                  m.item_id, f.extracted_text_path, f.extracted_copy_path
+           FROM source_blob_index b
+           LEFT JOIN item_memberships m
+                  ON m.collection_id = b.source_id AND m.sha256 = b.sha256
+           LEFT JOIN item_file_meta f ON f.item_id = m.item_id
+           WHERE b.source_id = ?
+           ORDER BY b.relpath_within_source""", (acct.id,)).fetchall()
+    return [dict(r) for r in rows]
 
 
-def _delete_item_statements(conn, item_id: int):
-    stmt_ids = [r[0] for r in conn.execute(
-        "SELECT id FROM statements WHERE item_id=?", (item_id,))]
-    for sid in stmt_ids:
-        conn.execute("""DELETE FROM transfer_links WHERE from_txn_id IN
-                        (SELECT id FROM transactions WHERE statement_id=?)
-                        OR to_txn_id IN
-                        (SELECT id FROM transactions WHERE statement_id=?)""",
-                     (sid, sid))
-        conn.execute("DELETE FROM transactions WHERE statement_id=?", (sid,))
-        conn.execute("DELETE FROM statement_assertions WHERE statement_id=?",
-                     (sid,))
-        conn.execute("DELETE FROM statements WHERE id=?", (sid,))
-
-
-def run_parse(conn, ws_dir: Path, log=print) -> dict:
+def run_parse(conn, ws_dir: Path, accounts=None,
+              refresh_blob_index=True, log=print) -> dict:
+    """Wipe + refill the transactions tables from the EXPLICITLY marked
+    account collections (workspace-config.yaml collections with
+    `ingestion-type: bank-transactions`). Every PDF in a marked
+    collection is expected to be a statement — anything that doesn't
+    parse is reported loudly, never silently skipped."""
     db.migrate(conn)
-    registry = load_accounts_registry(conn, ws_dir)
+    if accounts is None:
+        accounts = registry_scope()
+    if not accounts:
+        log("transactions: no bank-transactions collections mounted on the "
+            "active workspace — nothing to do")
+        return {"parsed": 0}
+    if refresh_blob_index:
+        import blob_index
+        blob_index.rebuild_all(conn)
     recon = load_reconciliation(ws_dir)
-    assign_by_item = {}
-    for a in recon["assign"]:
-        acct = a.get("account") or {}
-        row = conn.execute(
-            "SELECT id FROM accounts WHERE bank=? AND account_no_masked=?",
-            (acct.get("bank"), acct.get("account_no_masked"))).fetchone()
-        if not row:
-            raise SystemExit(f"reconciliation.yaml assign: unknown account "
-                             f"{acct} (define it in accounts.yaml first)")
-        assign_by_item[a["item_id"]] = row[0]
     excluded_items = {e["item_id"] for e in recon["exclude"]}
+    acct_ids = seed_accounts(conn, accounts)
 
-    stats = {"parsed": 0, "skipped_unknown": 0, "unassigned": 0, "errors": 0}
-    seen_items = set()
-    seen_stmt_keys = set()   # (item, account, period) — attachment dupes
-    for item_id, text_path, pdf_path in _candidate_texts(conn):
-        path = config.PROJECT_ROOT / text_path
-        if not path.is_file():
+    # deterministic scope -> deterministic rebuild: full wipe + refill
+    for t in ("transfer_links", "statement_assertions", "transactions",
+              "statements"):
+        conn.execute(f"DELETE FROM {t}")
+
+    stats = {"parsed": 0, "unparsed": 0, "not_ingested": 0,
+             "mismatched": 0}
+    seen_stmt_keys = set()   # (item, account, period) duplicate guard
+    for acct in accounts:
+        aid = acct_ids[acct.id]
+        cfg_digits = sp.normalize_account_no(
+            (acct.bsb or "") + acct.account_number)
+        files = _account_files(conn, acct)
+        pdfs = [f for f in files if f["relpath"].lower().endswith(".pdf")]
+        if not pdfs:
+            log(f"transactions: {acct.id}: no PDFs found under {acct.path}")
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        parser = sp.detect_parser(text)
-        if parser is None:
-            if looks_like_pdf(pdf_path) and sp.looks_statementish(text):
-                first = next((l.strip() for l in text.splitlines()
-                              if l.strip()), "")[:60]
-                log(f"transactions: skip unknown format item {item_id} "
-                    f"({first!r})")
-                stats["skipped_unknown"] += 1
-            continue
-        parsed = parser.parse(text)
-        statements = parsed if isinstance(parsed, list) else [parsed]
-        statements = [s for s in statements if s.rows]
-        if not statements:
-            log(f"transactions: item {item_id} matched {parser.parser_id} "
-                f"but has no transaction table — skipped")
-            continue
-        if item_id not in seen_items:
-            _delete_item_statements(conn, item_id)
-            seen_items.add(item_id)
-        meta = pdf_metadata(config.PROJECT_ROOT / pdf_path
-                            if pdf_path else None)
-        for st in statements:
-            asserts = check_assertions(st, text)
-            balance_ok = derive_balance_ok(asserts)
-            account_id = resolve_account(registry, st.bank,
-                                         st.account_no_norm,
-                                         assign_by_item.get(item_id))
-            key = (item_id, account_id or st.account_no_norm,
-                   st.period_start)
-            if key in seen_stmt_keys:
-                log(f"transactions: item {item_id} duplicate statement "
-                    f"(same account+period twice in one item) — skipped")
+        for fr in pdfs:
+            fname = fr["relpath"].rsplit("/", 1)[-1]
+            if fr["item_id"] is None or not fr["extracted_text_path"]:
+                log(f"transactions: {acct.id}: NOT INGESTED: {fname} — "
+                    f"run `./pocket-advisor.py ingest documents` "
+                    f"then re-parse")
+                stats["not_ingested"] += 1
                 continue
-            seen_stmt_keys.add(key)
-            if account_id is None:
-                stats["unassigned"] += 1
-            cur = conn.execute(
+            item_id = fr["item_id"]
+            path = config.PROJECT_ROOT / fr["extracted_text_path"]
+            if not path.is_file():
+                log(f"transactions: {acct.id}: text cache missing for "
+                    f"{fname} — re-ingest")
+                stats["not_ingested"] += 1
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            parser = sp.detect_parser(text)
+            statements = []
+            if parser is not None:
+                parsed = parser.parse(text)
+                statements = parsed if isinstance(parsed, list) else [parsed]
+                statements = [s for s in statements if s.rows]
+            if not statements:
+                why = ("no parser knows this format" if parser is None
+                       else f"{parser.parser_id} found no transaction table")
+                log(f"transactions: {acct.id}: UNPARSED: {fname} — {why}")
+                stats["unparsed"] += 1
+                continue
+            meta = pdf_metadata(config.PROJECT_ROOT / fr["extracted_copy_path"]
+                                if fr["extracted_copy_path"] else None)
+            for st in statements:
+                # the folder decides the account; the printed number must
+                # agree with the config (misfiled-document guard)
+                if cfg_digits and st.account_no_norm and not (
+                        st.account_no_norm.endswith(cfg_digits)
+                        or cfg_digits.endswith(st.account_no_norm)):
+                    log(f"transactions: {acct.id}: ACCOUNT MISMATCH: "
+                        f"{fname} prints {st.account_no_display!r} but "
+                        f"config says {acct.bsb} {acct.account_number} — "
+                        f"NOT inserted; file may be misfiled")
+                    stats["mismatched"] += 1
+                    continue
+                asserts = check_assertions(st, text)
+                balance_ok = derive_balance_ok(asserts)
+                account_id = aid
+                key = (item_id, account_id, st.period_start)
+                if key in seen_stmt_keys:
+                    log(f"transactions: {acct.id}: duplicate statement "
+                        f"(same account+period twice in item {item_id}) — "
+                        f"skipped")
+                    continue
+                seen_stmt_keys.add(key)
+                cur = conn.execute(
                 """INSERT INTO statements(item_id, account_id, period_start,
                      period_end, opening_balance_minor, closing_balance_minor,
                      parser_id, balance_ok, pdf_producer, pdf_created,
@@ -338,44 +352,40 @@ def run_parse(conn, ws_dir: Path, log=print) -> dict:
                  st.parser_id, balance_ok, meta["producer"], meta["created"],
                  meta["modified"], now_iso(),
                  1 if item_id in excluded_items else 0))
-            sid = cur.lastrowid
-            for r in st.rows:
-                conn.execute(
-                    """INSERT INTO transactions(statement_id, account_id,
-                         txn_date, value_date, amount_minor, currency,
-                         description_raw, counterparty_raw,
-                         balance_after_minor, page_no, row_index, raw_line)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sid, account_id, r.txn_date, r.value_date,
-                     r.amount_minor, st.currency, r.description_raw,
-                     r.counterparty_raw, r.balance_after_minor, r.page_no,
-                     r.row_index, r.raw_line))
-            for a in asserts:
-                conn.execute(
-                    """INSERT INTO statement_assertions(statement_id, kind,
-                         as_of_date, amount_minor, count, page_no, raw_line,
-                         passed, observed_minor, observed_count)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (sid, a.kind, a.as_of_date, a.amount_minor, a.count,
-                     a.page_no, a.raw_line, a.passed, a.observed_minor,
-                     a.observed_count))
-            stats["parsed"] += 1
-            flag = {1: "ok", 0: "ASSERTIONS FAILED", None: "no assertions"}
-            log(f"transactions: item {item_id} -> statement {sid} "
-                f"[{st.parser_id}] rows={len(st.rows)} "
-                f"balance={flag[balance_ok]}"
-                + ("" if account_id else " UNASSIGNED-ACCOUNT"))
-            for issue in st.parse_issues:
-                log(f"transactions:   parse issue: {issue}")
+                sid = cur.lastrowid
+                for r in st.rows:
+                    conn.execute(
+                        """INSERT INTO transactions(statement_id, account_id,
+                             txn_date, value_date, amount_minor, currency,
+                             description_raw, counterparty_raw,
+                             balance_after_minor, page_no, row_index,
+                             raw_line)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (sid, account_id, r.txn_date, r.value_date,
+                         r.amount_minor, st.currency, r.description_raw,
+                         r.counterparty_raw, r.balance_after_minor, r.page_no,
+                         r.row_index, r.raw_line))
+                for a in asserts:
+                    conn.execute(
+                        """INSERT INTO statement_assertions(statement_id,
+                             kind, as_of_date, amount_minor, count, page_no,
+                             raw_line, passed, observed_minor, observed_count)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (sid, a.kind, a.as_of_date, a.amount_minor, a.count,
+                         a.page_no, a.raw_line, a.passed, a.observed_minor,
+                         a.observed_count))
+                stats["parsed"] += 1
+                flag = {1: "ok", 0: "ASSERTIONS FAILED", None: "no assertions"}
+                log(f"transactions: {acct.id}: {fname} -> statement {sid} "
+                    f"[{st.parser_id}] rows={len(st.rows)} "
+                    f"balance={flag[balance_ok]}")
+                for issue in st.parse_issues:
+                    log(f"transactions:   parse issue: {issue}")
     conn.commit()
-    log(f"transactions: parse done — {stats['parsed']} statements, "
-        f"{stats['skipped_unknown']} unknown-format skips, "
-        f"{stats['unassigned']} unassigned")
+    log(f"transactions: parse done — {stats['parsed']} statements; "
+        f"{stats['unparsed']} UNPARSED, {stats['not_ingested']} not "
+        f"ingested, {stats['mismatched']} account mismatches")
     return stats
-
-
-def looks_like_pdf(pdf_path) -> bool:
-    return bool(pdf_path) and str(pdf_path).lower().endswith(".pdf")
 
 
 def _first_amount(asserts, kind):
@@ -519,13 +529,16 @@ def _covered(conn, account_id: int, date: str) -> bool:
 def run_report(conn, ws_dir: Path, log=print) -> dict:
     out = {"continuity_breaks": [], "coverage_gaps": [], "overlaps": [],
            "buckets": {"external": 0, "suspicious": [], "unknown": []},
-           "tamper": [], "watchlist": {}, "unassigned": [], "ambiguous": 0}
+           "tamper": [], "watchlist": {}, "ambiguous": 0}
 
     stmts = [dict(r) for r in conn.execute(
-        """SELECT s.*, a.label, a.bank AS acct_bank, h.display_name AS holder
+        """SELECT s.*, a.config_id, a.label,
+                  (SELECT group_concat(h.display_name, '+')
+                   FROM account_owners ao JOIN holders h
+                     ON h.id = ao.holder_id
+                   WHERE ao.account_id = a.id) AS owners
            FROM statements s
            LEFT JOIN accounts a ON a.id = s.account_id
-           LEFT JOIN holders h ON h.id = a.holder_id
            ORDER BY s.account_id, s.period_start""")]
     n_ok = sum(1 for s in stmts if s["balance_ok"] == 1)
     n_fail = sum(1 for s in stmts if s["balance_ok"] == 0)
@@ -535,15 +548,12 @@ def run_report(conn, ws_dir: Path, log=print) -> dict:
         f"no-assertions {n_none} (no-assertion statements are second-class "
         f"evidence)")
     for s in stmts:
-        who = s["label"] or (f"{s['acct_bank']} ?" if s["acct_bank"]
-                             else "UNASSIGNED")
         flag = {1: "ok", 0: "FAIL", None: "n/a"}[s["balance_ok"]]
         log(f"  stmt {s['id']} item {s['item_id']} [{s['parser_id']}] "
-            f"{s['period_start']}..{s['period_end']} acct={who} "
-            f"holder={s['holder'] or '?'} balance={flag}"
+            f"{s['period_start']}..{s['period_end']} "
+            f"acct={s['config_id']} owners={s['owners'] or '?'} "
+            f"balance={flag}"
             + (" EXCLUDED" if s["excluded"] else ""))
-        if s["account_id"] is None:
-            out["unassigned"].append(s["id"])
         for a in conn.execute(
                 """SELECT * FROM statement_assertions
                    WHERE statement_id=? AND passed=0""", (s["id"],)):
@@ -551,9 +561,6 @@ def run_report(conn, ws_dir: Path, log=print) -> dict:
                 f"{_fmt(a['amount_minor'], a['count'])}, our rows give "
                 f"{_fmt(a['observed_minor'], a['observed_count'])} "
                 f"(page {a['page_no']}: {a['raw_line'][:70]!r})")
-    if out["unassigned"]:
-        log(f"  UNASSIGNED accounts on {len(out['unassigned'])} statement(s) "
-            f"— add accounts.yaml entries or reconciliation.yaml assign:")
 
     # continuity / gaps / overlaps per account
     by_acct = defaultdict(list)
@@ -564,7 +571,7 @@ def run_report(conn, ws_dir: Path, log=print) -> dict:
     log("\nCONTINUITY / COVERAGE (per account):")
     for aid, group in sorted(by_acct.items()):
         group.sort(key=lambda s: s["period_start"])
-        label = group[0]["label"] or f"account {aid}"
+        label = group[0]["config_id"] or f"account {aid}"
         for prev, nxt in zip(group, group[1:]):
             gap_days = (dt.date.fromisoformat(nxt["period_start"])
                         - dt.date.fromisoformat(prev["period_end"])).days
@@ -684,23 +691,18 @@ def _fmt(minor, count):
 
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("command", choices=["parse", "link", "report"])
-    args = ap.parse_args()
+def cli(command: str) -> int:
+    """CLI body — the parser lives in pocket-advisor.py.
+    command: parse | link | report."""
     conn = db.connect()
     ws = workspace_dir()
     try:
-        if args.command == "parse":
+        if command == "parse":
             run_parse(conn, ws)
-        elif args.command == "link":
+        elif command == "link":
             run_link(conn, ws)
         else:
             run_report(conn, ws)
     finally:
         conn.close()
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

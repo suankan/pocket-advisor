@@ -1,7 +1,4 @@
-"""SQLite schema and connection helpers.
-
-Usage: python db.py init
-"""
+"""SQLite schema and connection helpers (./pocket-advisor.py db init)."""
 import sqlite3
 import sys
 
@@ -135,15 +132,24 @@ CREATE TABLE IF NOT EXISTS holders (
     notes        TEXT
 );
 
+-- accounts come from workspace-config.yaml `bank-accounts:` entries
+-- (explicit user marking, 2026-07-16) — config_id is the yaml id.
+-- Ownership is a junction (joint accounts have several owners).
 CREATE TABLE IF NOT EXISTS accounts (
-    id                INTEGER PRIMARY KEY,
-    holder_id         INTEGER REFERENCES holders(id),
-    bank              TEXT NOT NULL,
-    account_no_masked TEXT NOT NULL,
-    kind              TEXT CHECK(kind IN ('personal','business','offset','card')),
-    currency          TEXT NOT NULL DEFAULT 'AUD',
-    label             TEXT,
-    UNIQUE(bank, account_no_masked)
+    id             INTEGER PRIMARY KEY,
+    config_id      TEXT UNIQUE NOT NULL,
+    bsb            TEXT,
+    account_number TEXT NOT NULL,
+    type           TEXT NOT NULL,     -- config vocabulary: business,
+                                      -- daily-transactions, home-loan, ...
+    currency       TEXT NOT NULL DEFAULT 'AUD',
+    label          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS account_owners (
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    holder_id  INTEGER NOT NULL REFERENCES holders(id),
+    UNIQUE(account_id, holder_id)
 );
 
 CREATE TABLE IF NOT EXISTS statements (
@@ -826,16 +832,24 @@ def _migrate_transactions_v2(conn):
 
 
 def _migrate_statements_period_key(conn):
-    """v2 key change: statements natural key gained period_start (one
-    email item can carry several statements of one account). The four
-    R-04b tables are fully regenerable via `transactions.py parse+link`,
-    so a shape mismatch just drops them; BASE_SCHEMA recreates."""
-    if not _table_exists(conn, "statements"):
-        return
-    uniqs = [sorted(u) for u in _unique_column_sets(conn, "statements")]
-    if uniqs and not any("period_start" in u for u in uniqs):
+    """R-04b shape migrations. All these tables are fully regenerable
+    via `transactions.py parse+link`, so a shape mismatch just drops
+    them; BASE_SCHEMA recreates.
+    (a) statements natural key gained period_start (one email item can
+        carry several statements of one account).
+    (b) accounts became config-driven with an owners junction
+        (2026-07-16 explicit-marking change)."""
+    if _table_exists(conn, "statements"):
+        uniqs = [sorted(u) for u in _unique_column_sets(conn, "statements")]
+        if uniqs and not any("period_start" in u for u in uniqs):
+            for t in ("transfer_links", "statement_assertions",
+                      "transactions", "statements"):
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+    if _table_exists(conn, "accounts") and \
+            not _table_has_column(conn, "accounts", "config_id"):
         for t in ("transfer_links", "statement_assertions",
-                  "transactions", "statements"):
+                  "transactions", "statements", "account_owners",
+                  "accounts"):
             conn.execute(f"DROP TABLE IF EXISTS {t}")
 
 
@@ -889,10 +903,3 @@ def log_issue(conn, file_path, stage, severity, message):
         (str(file_path), stage, severity, message,
          datetime.now(timezone.utc).isoformat()),
     )
-
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "init":
-        init()
-    else:
-        print(__doc__)

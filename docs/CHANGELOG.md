@@ -17,6 +17,35 @@ map; open work is `R-nn`.
 
 ---
 
+## 2026-07-16
+
+**Transactions scope: explicit bank-account marking** · `R-04b` (as-built
+rework) · SHIPPED ·
+Ingestion scope moved from corpus-wide statement auto-detection to
+explicit user marking: one bank account = one collection with
+`ingestion-type: bank-transactions` in workspace-config.yaml (bsb,
+account_number — quoted strings, owners, type; folder = collection
+root). Bank collections ingest/mount/search like any other; `parse`
+covers accounts mounted on the active workspace. Per-account failures
+are loud work queues (UNPARSED / NOT INGESTED / ACCOUNT MISMATCH with
+printed-number cross-check). Parsers now do *structure* detection only.
+Loader gained per-collection `ingestion-type` (+ `BankAccount` mirror);
+accounts became config-driven with an `account_owners` junction (joint
+accounts); accounts.yaml and reconciliation `assign:` retired; item
+resolution via `source_blob_index` (survives file reorganisation).
+Live: 15/15 marked Westpac statements balance_ok; 16 UNPARSED files =
+the R-04c parser queue (CBA, Revolut, AMP, NAB, Qantas Money).
+New single-entrypoint CLI `./pocket-advisor.py` (db, fetch-model,
+ingest, transactions, query, daemon, wipe, blob-index, verify,
+accuracy, smoke-visual, test) — owns ALL argument parsing (the only
+argparse in the codebase; self-executes under the repo venv);
+everything in scripts/ is now a pure module (no argparse, no
+`__main__`), tests excepted. RUNBOOK commands rewritten to it.
+`wipe_index.py` folded into `scripts/wipe.py` (`wipe list|index`) plus
+new guarded `wipe state`: full wipe of `workspaces/.state/` (stops
+daemon, lists sizes, confirms) for from-scratch re-ingests.
+Spec: [structured-transactions-v2.md](specs/structured-transactions-v2.md).
+
 ## 2026-07-15
 
 **Structured transactions v2 — bank parsers + reconciliation** · `R-04b`

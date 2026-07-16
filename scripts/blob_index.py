@@ -12,7 +12,6 @@ See docs/specs/source-blob-index.md.
 """
 from __future__ import annotations
 
-import argparse
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -251,29 +250,3 @@ def cmd_list_sources(_args):
     for s in list_sources():
         print(f"{s.workspace_id}\t{s.source_id}\t{s.root}")
     return 0
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    sub.add_parser("rebuild", help="rebuild cache for all known sources") \
-        .set_defaults(func=cmd_rebuild)
-    sub.add_parser("list-sources", help="show workspace_id, source_id, root") \
-        .set_defaults(func=cmd_list_sources)
-
-    p_look = sub.add_parser("lookup", help="resolve path for a sha256")
-    p_look.add_argument("--workspace", "-w", required=True)
-    p_look.add_argument("--source", "-s", required=True)
-    p_look.add_argument("--sha256", required=True)
-    p_look.add_argument("--no-verify", action="store_true",
-                        help="skip re-hash of resolved file")
-    p_look.set_defaults(func=cmd_lookup)
-
-    args = ap.parse_args()
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main() or 0)

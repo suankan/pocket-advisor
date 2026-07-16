@@ -22,8 +22,16 @@ _TOP_V2 = frozenset({"schema_version", "collections", "workspaces"})
 _WS_V1 = frozenset({"id", "workspace_id", "active", "path", "title", "sources"})
 _WS_V2 = frozenset({"id", "workspace_id", "active", "path", "title", "collections"})
 _SRC_V1 = frozenset({"id", "description", "path", "kind", "privileged"})
-_COLL_V2 = frozenset({"id", "title", "description", "path", "privileged"})
+_COLL_V2 = frozenset({"id", "title", "description", "path", "privileged",
+                      "ingestion-type"})
 _MOUNT_V2 = frozenset({"id", "purposes"})
+# a collection with `ingestion-type: bank-transactions` is a REAL
+# collection (ingested / mounted / searched like any other) that also
+# declares the statement-ingestion scope for exactly one bank account:
+# its folder holds that account's statement PDFs (R-04b explicit
+# marking; unified per-account collections 2026-07-16)
+_BANKCOLL_V2 = _COLL_V2 | frozenset({"bsb", "account_number", "owners",
+                                     "type"})
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,21 @@ class Mount:
     """Workspace → collection mount (R-05 purpose tags optional)."""
     collection: Source
     purposes: tuple[str, ...] = ()  # empty = unrestricted (all purposes)
+
+
+@dataclass(frozen=True)
+class BankAccount:
+    """Explicitly marked statement-ingestion scope: one bank account
+    whose collection folder holds its statement PDFs. Mirrors a
+    `ingestion-type: bank-transactions` collection (same id/path/root)."""
+    id: str
+    account_number: str
+    owners: tuple[str, ...]
+    type: str                 # user vocabulary: daily-transactions, ...
+    path: str                 # as written in yaml
+    root: Path                # absolute resolved folder
+    bsb: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -72,6 +95,7 @@ class Registry:
     schema_version: int
     workspaces: tuple[Workspace, ...]
     collections: tuple[Source, ...] = field(default_factory=tuple)
+    bank_accounts: tuple[BankAccount, ...] = field(default_factory=tuple)
 
     def active(self) -> Workspace:
         for w in self.workspaces:
@@ -219,6 +243,33 @@ def _load_v1(data: dict, ws_dir: Path) -> Registry:
     )
 
 
+def _load_bank_account(craw: dict, cl: str, coll: Source) -> BankAccount:
+    """Bank-account fields of a `ingestion-type: bank-transactions`
+    collection. Only PDFs in these collections are ever parsed into the
+    transactions tables. bsb/account_number must be QUOTED yaml strings:
+    unquoted digit runs risk octal/leading-zero mangling (YAML 1.1)."""
+    acct_no = craw.get("account_number")
+    if not acct_no or not isinstance(acct_no, str):
+        _die(f"{cl}: account_number is required and must be a quoted "
+             f"string, got {acct_no!r}")
+    bsb = craw.get("bsb", "")
+    if not isinstance(bsb, str):
+        _die(f"{cl}: bsb must be a quoted string (\"\" for cards), "
+             f"got {bsb!r}")
+    owners_raw = craw.get("owners")
+    if not isinstance(owners_raw, list) or not owners_raw or \
+            not all(isinstance(o, str) and o.strip() for o in owners_raw):
+        _die(f"{cl}: owners must be a non-empty list of strings")
+    atype = craw.get("type")
+    if not atype or not isinstance(atype, str):
+        _die(f"{cl}: type is required (string)")
+    return BankAccount(
+        id=coll.id, account_number=acct_no.strip(),
+        owners=tuple(o.strip() for o in owners_raw),
+        type=atype.strip(), path=coll.path, root=coll.root,
+        bsb=bsb.strip(), description=coll.description)
+
+
 def _load_v2(data: dict, ws_dir: Path) -> Registry:
     _check_keys(data, _TOP_V2, "root")
     coll_raw = data.get("collections")
@@ -226,12 +277,18 @@ def _load_v2(data: dict, ws_dir: Path) -> Registry:
         _die("collections must be a non-empty list")
 
     collections: list[Source] = []
+    bank_accounts: list[BankAccount] = []
     seen_c: set[str] = set()
     for i, craw in enumerate(coll_raw):
         cl = f"collections[{i}]"
         if not isinstance(craw, dict):
             _die(f"{cl} must be a mapping")
-        _check_keys(craw, _COLL_V2, cl)
+        itype = craw.get("ingestion-type", "general")
+        if itype not in ("general", "bank-transactions"):
+            _die(f"{cl}: ingestion-type must be 'general' or "
+                 f"'bank-transactions', got {itype!r}")
+        bank = itype == "bank-transactions"
+        _check_keys(craw, _BANKCOLL_V2 if bank else _COLL_V2, cl)
         cid = craw.get("id")
         if not cid or not isinstance(cid, str):
             _die(f"{cl}: id is required")
@@ -249,14 +306,17 @@ def _load_v2(data: dict, ws_dir: Path) -> Registry:
             _die(f"{cl}: path is required")
         if ".." in PurePosixPath(cpath).parts:
             _die(f"{cl}: path must not contain '..'")
-        if "privileged" not in craw:
+        if "privileged" not in craw and not bank:
             _die(f"{cl}: privileged (bool) is required")
-        priv = bool(craw["privileged"])
+        priv = bool(craw.get("privileged", False))
         # paths relative to workspaces.dir (not matter folder)
         croot = _safe_under(ws_dir / cpath, ws_dir)
-        collections.append(Source(
+        coll = Source(
             id=cid, description=desc.strip(), path=cpath, kind=None,
-            privileged=priv, root=croot, title=title.strip()))
+            privileged=priv, root=croot, title=title.strip())
+        collections.append(coll)
+        if bank:
+            bank_accounts.append(_load_bank_account(craw, cl, coll))
 
     _check_root_overlap(collections, "collections")
     coll_by_id = {c.id: c for c in collections}
@@ -334,6 +394,7 @@ def _load_v2(data: dict, ws_dir: Path) -> Registry:
         schema_version=SCHEMA_V2,
         workspaces=tuple(workspaces),
         collections=tuple(collections),
+        bank_accounts=tuple(bank_accounts),
     )
 
 

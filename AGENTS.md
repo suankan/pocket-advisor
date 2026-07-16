@@ -31,7 +31,7 @@ instructions alone.
    `(source_id, sha256)` ≈ `(collection_id, sha256)`, not a path. Open
    read-only. A changed hash is treated as tampering, not as an
    update. Locate blobs via `source_blob_index` /
-   `scripts/blob_index.py` after moves inside a source. Engine derived
+   `./pocket-advisor.py blob-index` after moves inside a source. Engine derived
    data is under `workspaces/.state/` (regenerable).
 2. **Privilege**: a source is privileged when **either**
    (a) its registry entry has `privileged: true`, **or** (b) a physical
@@ -41,8 +41,8 @@ instructions alone.
    `config.yaml` never carries real folder names for privilege.
    **Retrieval includes privileged by default** (single-user engine:
    own-solicitor often carries opposing-counsel forwards/attachments
-   that exist nowhere else). Use `query.py --exclude-privileged` for a
-   restricted pass. Results always show the privilege flag.
+   that exist nowhere else). Use `./pocket-advisor.py query
+   --exclude-privileged` for a restricted pass. Results always show the privilege flag.
    **Drafting still matters**: nothing that originated in a privileged
    channel — advice, strategy, assessments, or the existence/content
    of the communication — should go into an outward-facing draft
@@ -143,7 +143,11 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
   / path-convention only (hard rule 2)
 - `workspaces/workspace-config.yaml` (gitignored) — schema_version 2:
   `collections[]` + workspace mounts (docs/specs/workspace-config-v2.md;
-  example: workspace-config-v2.example.yaml)
+  example: workspace-config-v2.example.yaml). A collection may declare
+  `ingestion-type: bank-transactions` — one bank account per
+  collection (bsb/account_number as QUOTED yaml strings, owners,
+  type); its folder of statement PDFs is ingested like any other
+  collection AND parsed into the transactions tables
 - `workspaces/` (gitignored) — user data:
   - `corpora/<collection_id>/` — read-only evidence (never write)
   - `.state/` — shared regenerable engine store (DB, vectors, logs,
@@ -151,7 +155,12 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
   - `workspace-config.yaml` — registry
   - `<workspace_id>/` — matter layer only (WORKSPACE.md, skills,
     journal, chronology, search-accuracy-test — not bulk evidence)
-- `scripts/` — the pipeline (see RUNBOOK.md)
+- `./pocket-advisor.py` — the SINGLE CLI entrypoint for every
+  operation (the only argparse in the codebase; self-executes under
+  the repo venv). `./pocket-advisor.py --help` lists all commands
+- `scripts/` — the pipeline as pure Python modules (no argparse, no
+  `__main__`; see RUNBOOK.md). Never grow a new standalone script
+  CLI — add a subcommand to pocket-advisor.py instead
 - `.claude/` (and any future tool-specific dir, e.g. `.cursor/`): not
   present in this repo at all — gitignored, never committed, and not
   kept on disk either. Recreate hooks/permissions/trigger-stub
@@ -166,36 +175,43 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
 # ingest new emails AND standalone documents (idempotent — drop new
 # files under collection roots in workspace-config.yaml). Stage `all`
 # also runs --embed all gated by ingestion.embed_text / embed_images.
-venv/bin/python scripts/ingest.py all
+./pocket-advisor.py ingest all
 
 # re-embed only (INDEX-INVALIDATING model changes cache per-model, never wipe)
-venv/bin/python scripts/ingest.py --embed text      # text vectors
-venv/bin/python scripts/ingest.py --embed images    # page-image / omni
-venv/bin/python scripts/ingest.py --embed all       # text iff embed_text;
-                                                    # images iff embed_images
+./pocket-advisor.py ingest --embed text      # text vectors
+./pocket-advisor.py ingest --embed images    # page-image / omni
+./pocket-advisor.py ingest --embed all       # text iff embed_text;
+                                             # images iff embed_images
+
+# bank statements (accounts marked in workspace-config.yaml)
+./pocket-advisor.py transactions parse|link|report
 
 # one-time model fetch (inbound weights only)
-venv/bin/python scripts/fetch_model.py
+./pocket-advisor.py fetch-model
 
 # optional: keep embed+rerank warm for a multi-query agent/user session
-# (docs/specs/query-daemon.md). query.py auto-uses it when running.
+# (docs/specs/query-daemon.md). query auto-uses it when running.
 # Restart daemon after re-embed or model config changes.
-venv/bin/python scripts/query_daemon.py serve    # foreground; or background
-# venv/bin/python scripts/query_daemon.py status|stop
+./pocket-advisor.py daemon serve    # foreground; or background
+# ./pocket-advisor.py daemon status|stop
 
 # answer a question from the corpus (privileged INCLUDED by default)
 # uses warm daemon when live; --no-daemon forces cold; --require-daemon
 # fails if daemon is down (good for sessions that expect warm)
-venv/bin/python scripts/query.py "the question" [--json] [--after 2026-01-01]
-                                 [--exclude-privileged] [--thread N]
-                                 [--no-daemon] [--require-daemon]
+./pocket-advisor.py query "the question" [--json] [--after 2026-01-01]
+                          [--exclude-privileged] [--thread N]
+                          [--no-daemon] [--require-daemon]
+
+# delete derived state (NOTHING else ever deletes): single vector index
+# or the guarded full .state wipe for a from-scratch re-ingest
+./pocket-advisor.py wipe list|index|state
 
 # verify evidence integrity (run before anything sensitive)
-venv/bin/python scripts/verify_integrity.py
+./pocket-advisor.py verify
 ```
 
 Answer workflow for case questions: prefer starting the query daemon for
-the session, then run `query.py` (often twice with rephrasings — English
+the session, then run `query` (often twice with rephrasings — English
 rephrasings, synonyms, added keywords), read the full email bodies of
 top hits from
 `workspaces/.state/cache/<collection_id>/text/emails/<id>.txt` (path

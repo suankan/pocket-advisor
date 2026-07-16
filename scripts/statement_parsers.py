@@ -417,20 +417,15 @@ class TestbankV1Parser:
 
 PARSERS = [WestpacParser(), TestbankV1Parser()]
 
-_STATEMENTISH_RE = re.compile(r"\bstatement\b", re.I)
-
 
 def detect_parser(text: str):
-    """Exactly one parser may claim a document; ambiguity is a hard
-    error listing both parser_ids (spec). None -> None (caller logs a
-    skip only if the text looks statement-ish)."""
+    """STRUCTURE detection only (which format is this?) — never scope
+    detection: scope is the explicit bank-accounts marking in
+    workspace-config.yaml (2026-07-16). Exactly one parser may claim a
+    document; ambiguity is a hard error listing both parser_ids."""
     hits = [p for p in PARSERS if p.detect(text)]
     if len(hits) > 1:
         raise ParserConflict(
             "ambiguous statement detection: "
             + ", ".join(p.parser_id for p in hits))
     return hits[0] if hits else None
-
-
-def looks_statementish(text: str) -> bool:
-    return bool(_STATEMENTISH_RE.search(text[:4000]))

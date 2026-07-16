@@ -158,10 +158,19 @@ Platform `config.yaml`: `workspaces.dir` + engine knobs only
 
 **Spec:** [schema-items-membership.md](specs/schema-items-membership.md).
 
+### CLI
+
+`./pocket-advisor.py` is the SINGLE entrypoint for every operation
+(2026-07-16): the only argparse in the codebase lives there; it
+self-executes under the repo venv and dispatches to `scripts/`
+modules, which are pure Python (functions only — no argparse, no
+`__main__`; `test_*.py` excepted). New operations get a subcommand
+there, never a new standalone script CLI.
+
 ### Pipeline
 
 Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
-`scripts/ingest.py` — positional stages (`all` / `parse` / …) plus
+`ingest` — positional stages (`all` / `parse` / …) plus
 `--embed text|images|all`. Stage `all` and `--embed all` honor
 `ingestion.embed_text` / `ingestion.embed_images` (explicit named
 `--embed text|images` force that channel). Low-conf OCR flagged;
@@ -171,7 +180,8 @@ cache). Vector index is cached per (model, dim) fingerprint under
 `models.mlx_model_embed_*` never deletes another model's cache;
 switching back reuses it (R-15,
 [multi-model-vector-cache.md](specs/multi-model-vector-cache.md)).
-Deleting a cache is manual only: `scripts/wipe_index.py`. Details:
+Deleting a cache is manual only: `pocket-advisor.py wipe index` (or
+`wipe state` for the full derived-state wipe). Details:
 **RUNBOOK** + **specs** + **LEARNINGS**.
 
 ### Retrieval
@@ -264,7 +274,7 @@ that slice; this table is the map.
 | [jina-mlx-migration.md](specs/jina-mlx-migration.md) | Historical migration; live stack is MLX-only |
 | [search-accuracy-test-warm-mode.md](specs/search-accuracy-test-warm-mode.md) | In-process warm search accuracy test |
 | [query-daemon.md](specs/query-daemon.md) | Session-warm query |
-| [multi-model-vector-cache.md](specs/multi-model-vector-cache.md) | R-15: per-model index cache, `wipe_index.py` |
+| [multi-model-vector-cache.md](specs/multi-model-vector-cache.md) | R-15: per-model index cache, `wipe.py` |
 
 ### Partial / planned (see ROADMAP)
 

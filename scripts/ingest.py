@@ -2,31 +2,32 @@
 
 Pipeline stages (positional):
 
-    ingest.py all              # parse + documents + attachments + thread
-                               # + --embed all (gated by ingestion.embed_*)
-    ingest.py parse            # .eml -> DB + body text + attachment copies
-    ingest.py documents        # standalone documents
-    ingest.py attachments      # attachment text extraction / OCR
-    ingest.py thread           # thread reconstruction (full recompute)
-    ingest.py transactions     # heuristic transaction extraction
+    ingest all              # parse + documents + attachments + thread
+                            # + --embed all (gated by ingestion.embed_*)
+    ingest parse            # .eml -> DB + body text + attachment copies
+    ingest documents        # standalone documents
+    ingest attachments      # attachment text extraction / OCR
+    ingest thread           # thread reconstruction (full recompute)
+    ingest transactions     # heuristic transaction extraction
 
 Embedding channels (--embed):
 
-    ingest.py --embed text     # chunk + text embed + vector index
-    ingest.py --embed images   # page-image rasterize + omni embed
-    ingest.py --embed all      # text iff ingestion.embed_text;
-                               # images iff ingestion.embed_images
+    ingest --embed text     # chunk + text embed + vector index
+    ingest --embed images   # page-image rasterize + omni embed
+    ingest --embed all      # text iff ingestion.embed_text;
+                            # images iff ingestion.embed_images
 
 Stages and --embed may be combined, e.g.:
 
-    ingest.py all --embed images   # full pipeline + force image index
-    ingest.py --embed all          # re-embed only (no re-parse)
+    ingest all --embed images   # full pipeline + force image index
+    ingest --embed all          # re-embed only (no re-parse)
+
+(All spellings via the single entrypoint: ./pocket-advisor.py ingest …)
 
 Safe to re-run: already-ingested files / embedded units are skipped.
 """
 from __future__ import annotations
 
-import argparse
 import sys
 
 import config
@@ -87,59 +88,29 @@ def _run_embed(mode: str, *, respect_config: bool) -> None:
     raise SystemExit(f"unknown --embed mode {mode!r}")
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="ingest.py",
-        description="Ingestion orchestrator (parse / thread / embed).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    p.add_argument(
-        "stage",
-        nargs="?",
-        default=None,
-        help="Pipeline stage: all | parse | documents | attachments | "
-             "thread | transactions. Default: all when no --embed; "
-             "omitted when only --embed is used.",
-    )
-    p.add_argument(
-        "--embed",
-        choices=("text", "images", "all"),
-        default=None,
-        metavar="MODE",
-        help="Embedding channel: text | images | all "
-             "(all respects ingestion.embed_text / embed_images).",
-    )
-    return p
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    stage = args.stage
-    embed_mode = args.embed
-
-    # Legacy: `ingest.py text|embed|images` → --embed …
+def cli(stage: str | None, embed_mode: str | None) -> int:
+    """CLI body — the parser lives in pocket-advisor.py.
+    stage: one of _STAGES (or a legacy embed stage name) or None;
+    embed_mode: text | images | all | None."""
+    # Legacy: `ingest text|embed|images` → --embed …
     if stage in _LEGACY_EMBED_STAGES:
         if embed_mode is not None:
-            parser.error(
-                f"do not combine legacy stage {stage!r} with --embed "
-                f"(use: ingest.py --embed {_LEGACY_EMBED_STAGES[stage]})")
+            raise SystemExit(
+                f"ingest: do not combine legacy stage {stage!r} with --embed "
+                f"(use: ingest --embed {_LEGACY_EMBED_STAGES[stage]})")
         legacy = stage
         embed_mode = _LEGACY_EMBED_STAGES[stage]
         stage = None
         print(
-            f"note: 'ingest.py {legacy}' is deprecated; "
-            f"use 'ingest.py --embed {embed_mode}'",
+            f"note: 'ingest {legacy}' is deprecated; "
+            f"use 'ingest --embed {embed_mode}'",
             file=sys.stderr,
         )
 
     if stage is not None and stage not in _STAGES:
-        parser.error(
-            f"unknown stage {stage!r}; choose from {', '.join(_STAGES)} "
-            f"or --embed text|images|all")
+        raise SystemExit(
+            f"ingest: unknown stage {stage!r}; choose from "
+            f"{', '.join(_STAGES)} or --embed text|images|all")
 
     # Default: full core pipeline when nothing specified
     if stage is None and embed_mode is None:
@@ -190,7 +161,3 @@ def main(argv: list[str] | None = None) -> int:
             _run_embed(embed_mode, respect_config=respect)
 
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -312,12 +312,37 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   disk; do not re-require it for ingest. Prefer updating the registry
   description over inventing parallel markdown.
 - **After re-embed or model/config change, restart `query_daemon`.**
-  Stale warm weights will serve wrong vectors or abort on fingerprint
-  mismatch depending on path. Socket lives under `workspaces/.state/`.
+Stale warm weights will serve wrong vectors or abort on fingerprint
+mismatch depending on path. Socket lives under `workspaces/.state/`.
 - **Solicitor / multi-collection corpora:** substantive answers often
-  live in a non-party collection (e.g. party's own solicitor
-  correspondence). Rephrase queries and do not assume one inter-party
-  email folder alone is sufficient — registry `description` should
-  state what each collection evidences.
+live in a non-party collection (e.g. party's own solicitor
+correspondence). Rephrase queries and do not assume one inter-party
+email folder alone is sufficient — registry `description` should
+state what each collection evidences.
+- **Hybrid PDFs (selectable text + non-selectable embedded image
+  portions) are silently incompletely extracted by a pdftotext-only
+  pipeline.** The original `extract_pdf()` returned early when
+  pdftotext extracted ≥40 non-whitespace characters — but those 40+
+  chars could come entirely from the selectable portions, leaving the
+  non-selectable parts (embedded images, redaction-like blanks)
+  completely missing from the extracted text. Discovered on a Shore
+  Lawyers letter where the reference "129 Warnervale" (purpose of
+  $1,400 transfers to Stanislav Vitovski), the $3,500 "Mum loan" from
+  Anna Li, and the "Westpac Bus" account clarification item were all
+  invisible to pdftotext but visible in the PDF. Fixed 2026-07-16:
+  `extraction.extract_pdf()` now always runs both pdftotext AND
+  tesseract OCR (via pdftoppm rasterization), then returns whichever
+  yields more non-whitespace characters. This handles all three PDF
+  types correctly without classification logic:
+  - Clean text PDFs → pdftotext wins (perfect, no OCR noise)
+  - Scanned/image PDFs → OCR wins (pdftotext returns near-nothing)
+  - Hybrid PDFs → OCR wins (captures more total chars)
+  Run tesseract with the configured `OCR_LANGS` (eng+rus for this
+  corpus). The old `PDF_NATIVE_TEXT_MIN_CHARS` config value is no
+  longer used as a short-circuit threshold (kept for compatibility).
+  Downside: OCR output may have run-together words from tight letter
+  spacing (e.g. `Atransfer`, `Weunderstand`) — an acceptable trade-off
+  vs silently losing content. `ocrmypdf` was evaluated as an
+  alternative but produced worse artifacts and 10× file bloat.
 
 

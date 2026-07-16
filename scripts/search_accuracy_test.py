@@ -20,7 +20,6 @@ generative chat context). --mode cold spawns query.py per question
 case facts) — entirely gitignored; see config.py for why no default
 path is baked in here.
 """
-import argparse
 import hashlib
 import json
 import re
@@ -129,15 +128,15 @@ def run_query_cold(question, top_k, include_privileged=True):
     corpus). Pass include_privileged=False for an entry that needs a
     restricted pass (--exclude-privileged).
     """
-    cmd = [sys.executable, str(SCRIPT_DIR / "query.py"), question,
-           "--json", "--top-k", str(top_k)]
+    cmd = [sys.executable, str(config.PROJECT_ROOT / "pocket-advisor.py"),
+           "query", question, "--json", "--top-k", str(top_k)]
     if include_privileged:
         cmd.append("--include-privileged")
     else:
         cmd.append("--exclude-privileged")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise SystemExit(f"search_accuracy_test: query.py failed for {question!r}:\n{proc.stderr}")
+        raise SystemExit(f"search_accuracy_test: query failed for {question!r}:\n{proc.stderr}")
     return json.loads(proc.stdout)
 
 
@@ -256,6 +255,8 @@ def compute_comparison(a, b):
 # ---- CLI ---------------------------------------------------------------
 
 def cmd_run(args):
+    if args.top_k is None:
+        args.top_k = config.DEFAULT_TOP_K
     if args.mode not in VALID_MODES:
         raise SystemExit(f"search_accuracy_test: --mode must be one of {VALID_MODES}, "
                          f"got {args.mode!r}")
@@ -339,36 +340,3 @@ def cmd_list(args):
         print(f"{d['started_utc']:22} {d['label']:16} {commit:9} "
               f"{fp['golden_count']:>3} {d['aggregates']['hit@5']:>6.2f} "
               f"{d['aggregates']['mrr']:>6.3f}")
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p_run = sub.add_parser("run", help="run the golden set through query and score it")
-    p_run.add_argument("--golden", required=True, help="path to golden set YAML")
-    p_run.add_argument("--label", default="run")
-    p_run.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
-    p_run.add_argument(
-        "--mode", choices=VALID_MODES, default="warm",
-        help="warm (default): load embed/rerank once in-process. "
-             "cold: subprocess query.py per question (CLI cold-start cost). "
-             "See docs/specs/search-accuracy-test-warm-mode.md.")
-    p_run.set_defaults(func=cmd_run)
-
-    p_cmp = sub.add_parser("compare", help="compare two result JSON files")
-    p_cmp.add_argument("result_a")
-    p_cmp.add_argument("result_b")
-    p_cmp.set_defaults(func=cmd_compare)
-
-    p_list = sub.add_parser("list", help="list past runs")
-    p_list.add_argument("--golden", help="filter to runs of this golden set")
-    p_list.set_defaults(func=cmd_list)
-
-    args = ap.parse_args()
-    args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

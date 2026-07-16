@@ -6,9 +6,9 @@
 brew install python@3.12 tesseract tesseract-lang poppler
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
 venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
-venv/bin/python scripts/db.py init
+./pocket-advisor.py db init
 # config.yaml is committed platform config — edit models / knobs as needed
-venv/bin/python scripts/fetch_model.py   # downloads text + omni + rerank MLX
+./pocket-advisor.py fetch-model   # downloads text + omni + rerank MLX
                                           # repos from HuggingFace (one-time,
                                           # inbound weights only)
 ```
@@ -27,18 +27,19 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
 - **index-invalidating, cached per model** (`models.mlx_model_embed_*`,
   docs/specs/multi-model-vector-cache.md): changing the text or omni
   MLX repo resolves to a **different cache directory** on the next
-  `ingest.py --embed text` / `--embed images` — vectors from different
+  `pocket-advisor.py ingest --embed text` / `--embed images` — vectors from different
   models/dims are numerically incomparable, so they're never mixed,
   but nothing is deleted. First use of a model embeds fresh; switching
   back to a previously-used model reuses its cache (near-instant, only
-  catches up on anything ingested since). Deleting a cached index is
-  manual only: `scripts/wipe_index.py`.
+  catches up on anything ingested since). Deleting anything derived is
+  manual only: `pocket-advisor.py wipe` (`index` = single vector index,
+  `state` = full derived-state wipe for re-ingest).
 - **index-invalidating, WARN-only** (`ingestion.chunking.*`): no
   automated re-chunk pipeline exists. Changing chunk size/overlap
-  prints a warning (from both `query.py` and `ingest.py --embed text`) but
+  prints a warning (from both `query.py` and `pocket-advisor.py ingest --embed text`) but
   does NOT rebuild existing chunks — old chunks keep their original
-  size, only newly-ingested content uses the new size. `ingest.py
-  --embed text` acknowledges the change (updates `vectors.meta.json`)
+  size, only newly-ingested content uses the new size. The embed run
+  acknowledges the change (updates `vectors.meta.json`)
   so the warning fires once per actual change, not on every subsequent
   run; `query.py`'s warning persists until that acknowledgment happens.
 - **safety-semantics (privilege)**: not a platform `config.yaml` key.
@@ -83,16 +84,16 @@ collections.
    correspondent folder inside that root is fine. For privilege: set
    `privileged: true` on the collection **and/or** nest under a
    directory segment literally named `privileged/`.
-2. `venv/bin/python scripts/ingest.py all`
+2. `./pocket-advisor.py ingest all`
 3. Check `workspaces/.state/logs/review_queue.csv` for flags.
-4. After bulk moves inside a collection: `scripts/blob_index.py rebuild`.
+4. After bulk moves inside a collection: `pocket-advisor.py blob-index rebuild`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
 1. Drop files under a collection root in `workspaces/corpora/…`
    (privileged: collection `privileged: true` and/or nest under
    `privileged/`).
-2. `venv/bin/python scripts/ingest.py all` (or `documents` stage).
+2. `./pocket-advisor.py ingest all` (or `documents` stage).
 3. Check review_queue for weak dates / duplicates / unsupported types.
 
 Document dates are extracted from the text; query results show
@@ -103,7 +104,7 @@ do not bulk-browse `.state/cache/` as a library).
 ## Querying
 
 ```bash
-venv/bin/python scripts/query.py "question text" \
+./pocket-advisor.py query "question text" \
     [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--thread N] \
     [--include-privileged|--exclude-privileged] [--top-k 15] [--json] \
     [--no-daemon] [--require-daemon]
@@ -123,19 +124,19 @@ agent or interactive session with many searches, keep them warm:
 
 ```bash
 # terminal 1 (or background with nohup / &)
-venv/bin/python scripts/query_daemon.py serve
+./pocket-advisor.py daemon serve
 # optional: --idle-sec 0  (never auto-exit; default idle from config is 1800s)
 
 # terminal 2 — auto-uses daemon when socket is live
-venv/bin/python scripts/query.py "question" --json
+./pocket-advisor.py query "question" --json
 # stderr: query: via daemon (warm)
 
-venv/bin/python scripts/query_daemon.py status
-venv/bin/python scripts/query_daemon.py stop
+./pocket-advisor.py daemon status
+./pocket-advisor.py daemon stop
 ```
 
 Socket: `workspaces/.state/query_daemon.sock` (mode 0600, local only).
-Restart after `ingest.py --embed text` or model config changes. See
+Restart after `pocket-advisor.py ingest --embed text` or model config changes. See
 `docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
 `query.daemon_idle_sec`.
 ## Models (MLX-only)
@@ -157,17 +158,17 @@ Changing the text/omni repo is INDEX-INVALIDATING but not destructive —
 each model gets its own cache directory
 (docs/specs/multi-model-vector-cache.md); switching back to a
 previously-used pair reuses it instead of re-embedding
-(`ingest.py --embed text` / `--embed images`, or `--embed all`).
+(`pocket-advisor.py ingest --embed text` / `--embed images`, or `--embed all`).
 Reranker is not index-invalidating. Universal loader:
 `scripts/mlx_model_loader.py`. No GGUF / llama.cpp path remains.
 
 ```bash
-venv/bin/python scripts/fetch_model.py
-venv/bin/python scripts/ingest.py --embed text
+./pocket-advisor.py fetch-model
+./pocket-advisor.py ingest --embed text
 # or both when ingestion.embed_* are true:
-# venv/bin/python scripts/ingest.py --embed all
-venv/bin/python scripts/ingest.py --embed images
-venv/bin/python scripts/smoke_visual_alignment.py
+# ./pocket-advisor.py ingest --embed all
+./pocket-advisor.py ingest --embed images
+./pocket-advisor.py smoke-visual
 ```
 
 ## Cached vector indexes (per model, retained until you wipe them)
@@ -181,10 +182,10 @@ ever deletes one; disk space is the only cost of keeping old models
 around after experimenting.
 
 ```bash
-venv/bin/python scripts/wipe_index.py list
-venv/bin/python scripts/wipe_index.py wipe --text <slug> [--yes]
-venv/bin/python scripts/wipe_index.py wipe --image <slug> [--yes]
-venv/bin/python scripts/wipe_index.py wipe --all-inactive [--yes]
+./pocket-advisor.py wipe list
+./pocket-advisor.py wipe index --text <slug> [--yes]
+./pocket-advisor.py wipe index --image <slug> [--yes]
+./pocket-advisor.py wipe index --all-inactive [--yes]
 ```
 
 Refuses to delete the slug matching the currently active `config.yaml`
@@ -198,9 +199,9 @@ SQLite table maps hash → path for fast open after users shuffle files
 inside a collection:
 
 ```bash
-venv/bin/python scripts/blob_index.py list-sources
-venv/bin/python scripts/blob_index.py rebuild
-venv/bin/python scripts/blob_index.py lookup -w <workspace_id> -s <collection_id> --sha256 <hex>
+./pocket-advisor.py blob-index list-sources
+./pocket-advisor.py blob-index rebuild
+./pocket-advisor.py blob-index lookup -w <workspace_id> -s <collection_id> --sha256 <hex>
 ```
 
 Safe to rebuild anytime (docs/specs/source-blob-index.md). This table
@@ -212,17 +213,17 @@ collection tree.
 ```bash
 # default --mode warm: load embed+rerank once, then score all questions
 # (docs/specs/search-accuracy-test-warm-mode.md). Much faster than cold; same ranking math.
-venv/bin/python scripts/search_accuracy_test.py run \
+./pocket-advisor.py accuracy run \
   --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml \
   [--label L] [--top-k 15] [--mode warm]
 
 # optional: cold = subprocess query.py per question (CLI cold-start cost)
-venv/bin/python scripts/search_accuracy_test.py run \
+./pocket-advisor.py accuracy run \
   --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml \
   --label cold-check --mode cold
 
-venv/bin/python scripts/search_accuracy_test.py compare search-accuracy-test/results/<A>.json search-accuracy-test/results/<B>.json
-venv/bin/python scripts/search_accuracy_test.py list [--golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml]
+./pocket-advisor.py accuracy compare search-accuracy-test/results/<A>.json search-accuracy-test/results/<B>.json
+./pocket-advisor.py accuracy list [--golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml]
 ```
 
 `search-accuracy-test/` under the active workspace is gitignored. `run`
@@ -241,21 +242,30 @@ Parse statement PDFs (standalone docs AND email attachments) into the
 `transactions` tables, link cross-account transfers, report integrity:
 
 ```bash
-venv/bin/python scripts/transactions.py parse    # detect+parse+validate
-venv/bin/python scripts/transactions.py link     # auto-match + overrides
-venv/bin/python scripts/transactions.py report   # coverage, balance_ok,
+./pocket-advisor.py transactions parse    # detect+parse+validate
+./pocket-advisor.py transactions link     # auto-match + overrides
+./pocket-advisor.py transactions report   # coverage, balance_ok,
                                                  # buckets, tamper, watch-list
 ```
 
-Run order: ingest → parse → link → report. Re-run parse after any
-re-ingest or after editing the workspace YAML files (all gitignored,
-in the active matter folder):
+**Scope is explicit marking, not detection** (2026-07-16): each bank
+account is a collection with `ingestion-type: bank-transactions` in
+`workspaces/workspace-config.yaml` — bsb, account_number (both QUOTED
+yaml strings), owners, type, and its folder of statement PDFs as
+`path`. These are real collections (ingested/mounted/searched like any
+other); additionally, `pocket-advisor.py transactions parse` parses every PDF of the
+accounts mounted on the ACTIVE workspace. Unparseable files are listed
+loudly per account (UNPARSED = needs a parser in statement_parsers.py;
+NOT INGESTED = run `pocket-advisor.py ingest documents`; ACCOUNT MISMATCH = file
+likely misfiled).
 
-- `accounts.yaml` — account registry (holder/bank/number/kind). A
-  statement whose account isn't listed parses as UNASSIGNED.
+Run order: ingest → parse → link → report. Re-run parse after any
+re-ingest, after moving statement PDFs, or after editing config.
+Workspace YAML (gitignored, active matter folder):
+
 - `reconciliation.yaml` — `links:` (manual transfer confirmations),
-  `assign:` (force statement→account), `exclude:` (resolve period
-  overlaps; excluded statements leave sums/matching/coverage).
+  `exclude:` (resolve period overlaps; excluded statements leave
+  sums/matching/coverage).
 - `counterparties.yaml` — optional watch-list; adds a cited hits
   section to the report.
 
@@ -270,7 +280,8 @@ of the same format is the signal to write the next parser
 `balance_ok` caveats with any sum):
 
 ```sql
--- transfers business -> same-holder accounts, with citations
+-- transfers business -> shared-owner accounts, with citations
+-- (ownership is the account_owners junction: joint accounts)
 SELECT t.txn_date, -t.amount_minor/100.0 AS aud, s.item_id, t.page_no
 FROM transactions t
 JOIN accounts af ON af.id=t.account_id
@@ -278,7 +289,10 @@ JOIN transfer_links l ON l.from_txn_id=t.id
 JOIN transactions t2 ON t2.id=l.to_txn_id
 JOIN accounts at2 ON at2.id=t2.account_id
 JOIN statements s ON s.id=t.statement_id
-WHERE af.kind='business' AND af.holder_id=at2.holder_id;
+WHERE af.type='business' AND EXISTS (
+  SELECT 1 FROM account_owners o1
+  JOIN account_owners o2 ON o2.holder_id=o1.holder_id
+  WHERE o1.account_id=af.id AND o2.account_id=at2.id);
 
 -- unmatched transfer-like egress (money leaving held accounts)
 SELECT t.txn_date, -t.amount_minor/100.0 AS aud, t.description_raw,
@@ -298,17 +312,27 @@ WHERE s.excluded=0 ORDER BY a.label, s.period_start;
 ## Integrity check (before privilege logs, exports, anything sensitive)
 
 ```bash
-venv/bin/python scripts/verify_integrity.py   # exit 1 + details on drift
+./pocket-advisor.py verify   # exit 1 + details on drift
 ```
 
 ## Rebuilding from scratch
 
-`workspaces/.state/` is fully derived: delete it (or wipe DB+vectors+
-cache), run `ingest.py all` (full re-embed takes minutes on Apple
-Silicon — scales with corpus size; see collection descriptions and the
-active workspace's WORKSPACE.md / search-accuracy-test notes). Originals under
-`workspaces/corpora/` and `models/` are untouched. **Never** delete
-`corpora/` as a rebuild shortcut.
+`workspaces/.state/` is fully derived. Guarded full wipe (stops the
+daemon, lists sizes, confirms, deletes DB + every vector index + all
+caches):
+
+```bash
+./pocket-advisor.py wipe state [--yes]
+./pocket-advisor.py ingest all
+```
+
+Full re-embed takes minutes on Apple Silicon — scales with corpus
+size; see collection descriptions and the active workspace's
+WORKSPACE.md / search-accuracy-test notes. Originals under
+`workspaces/corpora/`, `workspace-config.yaml`, the matter folders,
+and `models/` are untouched. **Never** delete `corpora/` as a rebuild
+shortcut. For wiping a single vector index (e.g. an inactive model's
+cache) use `pocket-advisor.py wipe index` instead.
 
 After large membership/schema migrations, reclaim SQLite free pages:
 
@@ -316,17 +340,17 @@ After large membership/schema migrations, reclaim SQLite free pages:
 venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import db; c=db.connect(); c.execute('VACUUM'); c.close()"
 ```
 
-Optional structured rows (R-04): `venv/bin/python scripts/ingest.py transactions`.
+Optional structured rows (R-04): `./pocket-advisor.py ingest transactions`.
 Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
 
 Visual page-image channel (R-03, opt-in after smoke PASS; omni
 processor deps are already in `scripts/requirements.txt`):
 
 ```bash
-venv/bin/python scripts/smoke_visual_alignment.py   # expect PASS
+./pocket-advisor.py smoke-visual   # expect PASS
 # config.yaml: ingestion.embed_images: true
-venv/bin/python scripts/ingest.py --embed images            # rasterize + omni index
-venv/bin/python scripts/query.py "site plan stamp" --no-daemon
+./pocket-advisor.py ingest --embed images            # rasterize + omni index
+./pocket-advisor.py query "site plan stamp" --no-daemon
 ```
 
 ## Review points

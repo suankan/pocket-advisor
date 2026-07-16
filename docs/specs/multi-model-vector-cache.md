@@ -5,7 +5,7 @@ cached per (model, dim) fingerprint instead of a single flat path;
 switching `models.mlx_model_embed_text` / `mlx_model_embed_omni` in
 `config.yaml` never deletes another model's cache, and switching back
 to a previously-used model is near-instant (no re-embed). A separate,
-explicit CLI (`scripts/wipe_index.py`) is the only thing that deletes
+explicit CLI (`pocket-advisor.py wipe index`) is the only thing that deletes
 a cached index. **Same-day follow-up:** the first shipped version put
 the image per-id cache under a separate root
 (`page_images/_vecs/<slug>/`) while text's lived inside
@@ -152,13 +152,13 @@ Both migrations are idempotent and safe to call every run — once
 complete, the source paths no longer exist and the check is a cheap
 no-op.
 
-### `scripts/wipe_index.py` (new, manual, explicit)
+### `pocket-advisor.py wipe index` (manual, explicit; shipped as `wipe_index.py`, folded into the single-entrypoint CLI 2026-07-16)
 
 ```
-scripts/wipe_index.py list
-scripts/wipe_index.py wipe --text <slug> [--yes] [--force]
-scripts/wipe_index.py wipe --image <slug> [--yes] [--force]
-scripts/wipe_index.py wipe --all-inactive [--yes]
+pocket-advisor.py wipe list
+pocket-advisor.py wipe index --text <slug> [--yes] [--force]
+pocket-advisor.py wipe index --image <slug> [--yes] [--force]
+pocket-advisor.py wipe index --all-inactive [--yes]
 ```
 
 `list` shows every cached index (kind, model, dim, count, disk size,
@@ -171,7 +171,7 @@ else in the pipeline deletes a cache.
 ## Non-goals
 
 Automatic cache eviction/LRU (disk is cheap relative to re-embed cost;
-user decides via `wipe_index.py`). Migrating `chunks.embedded_at` /
+user decides via `pocket-advisor.py wipe index`). Migrating `chunks.embedded_at` /
 `page_images.img_embedded_at` out of the schema (left frozen, harmless,
 future cleanup). Multi-model *simultaneous* query (still exactly one
 active model pair at query time, per `config.yaml`).
@@ -196,8 +196,8 @@ active model pair at query time, per `config.yaml`).
 - [x] One-time migration of the pre-existing flat index (9087 text +
       2116 image vectors) completed with zero re-embedding — verified
       live against the real corpus.
-- [x] `wipe_index.py list` correctly flags the active slug;
-      `wipe_index.py wipe --text <inactive-slug> --yes` deletes only
+- [x] `wipe list` correctly flags the active slug;
+      `wipe index --text <inactive-slug> --yes` deletes only
       that directory — verified live (removed a stray nano cache after
       the switch-back test).
 - [x] Wipe refuses the currently active slug without `--force` — the
@@ -229,7 +229,7 @@ active model pair at query time, per `config.yaml`).
 
 ```bash
 venv/bin/python scripts/test_search_accuracy_test.py   # and the rest of test_*.py
-venv/bin/python scripts/wipe_index.py list
+venv/bin/python pocket-advisor.py wipe list
 venv/bin/python scripts/ingest.py --embed text          # after editing config.yaml's model
 venv/bin/python scripts/search_accuracy_test.py run --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml --label <L>
 venv/bin/python scripts/search_accuracy_test.py compare <before.json> <after.json>

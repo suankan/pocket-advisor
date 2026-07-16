@@ -17,7 +17,6 @@ Library: `run_search(...)` / `WarmResources` (search-accuracy-test-warm-mode + q
 If the session daemon is up (docs/specs/query-daemon.md), this CLI
 sends the search over the local Unix socket (warm); otherwise cold.
 """
-import argparse
 import json
 import re
 import socket
@@ -489,7 +488,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
     warnings = []
     if pending:
         warnings.append(f"{pending} chunks not yet embedded under the current "
-                        "model — run ingest.py --embed text; semantic results "
+                        "model — run ./pocket-advisor.py ingest --embed text; semantic results "
                         "may be incomplete")
 
     allowed = allowed_chunk_ids(conn, args)
@@ -711,30 +710,13 @@ def format_results(out, as_json=False):
             print(f"  {c['date']}  {c['from_addr']}  {c['subject']}{p}")
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("question")
-    ap.add_argument("--after")
-    ap.add_argument("--before")
-    ap.add_argument("--thread", type=int)
-    priv = ap.add_mutually_exclusive_group()
-    priv.add_argument(
-        "--include-privileged", action="store_true", default=None,
-        help="include privileged collections (default: on; see config)")
-    priv.add_argument(
-        "--exclude-privileged", action="store_true",
-        help="exclude privileged collections (restricted retrieval pass)")
-    ap.add_argument("--purpose", default=None,
-                    help="R-05: only search collections mounted for this purpose tag")
-    ap.add_argument("--top-k", type=int, default=config.DEFAULT_TOP_K)
-    ap.add_argument("--no-thread-context", action="store_true")
-    ap.add_argument("--json", action="store_true")
-    ap.add_argument("--no-daemon", action="store_true",
-                    help="force cold local search (ignore running daemon)")
-    ap.add_argument("--require-daemon", action="store_true",
-                    help="fail if the warm query daemon is not reachable")
-    args = ap.parse_args()
-
+def cli(args) -> int:
+    """CLI body — the parser lives in pocket-advisor.py; `args` is its
+    parsed namespace (question, after, before, thread, include/exclude
+    privileged, purpose, top_k, no_thread_context, json, no_daemon,
+    require_daemon)."""
+    if args.top_k is None:
+        args.top_k = config.DEFAULT_TOP_K
     if args.exclude_privileged:
         include_privileged = False
     elif args.include_privileged:
@@ -750,7 +732,7 @@ def main():
         if not daemon_available():
             raise SystemExit(
                 "query: --require-daemon but daemon is not reachable. "
-                "Start: venv/bin/python scripts/query_daemon.py serve")
+                "Start: ./pocket-advisor.py daemon serve")
         use_daemon = True
     elif not args.no_daemon and config.QUERY_DAEMON_AUTO and daemon_available():
         use_daemon = True
@@ -795,7 +777,4 @@ def main():
             purpose=args.purpose,
         )
     format_results(out, as_json=args.json)
-
-
-if __name__ == "__main__":
-    sys.exit(main() or 0)
+    return 0

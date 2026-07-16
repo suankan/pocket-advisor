@@ -237,7 +237,3 @@ def run():
     print(f"embed: {done} embedded, {failed} failed, index size {total} ({vecs_dir.parent.name})")
     conn.close()
     return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    sys.exit(run())

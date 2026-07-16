@@ -1,16 +1,18 @@
 # Spec: structured transactions v2 — bank parsers + reconciliation (R-04b)
 
-Status: **SHIPPED (core) 2026-07-15** — schema, assertion framework,
-westpac-v1 parser (Business One + Choice; 29 live statements, 100%
-balance_ok after the chain check exposed a negative-balance parsing bug),
-matching, coverage, report, 59-check self-test. Supersedes
+Status: **SHIPPED (core) 2026-07-15; scope model reworked 2026-07-16**
+— schema, assertion framework, westpac-v1 parser (15 live statements,
+100% balance_ok after the chain check exposed a negative-balance
+parsing bug), matching, coverage, report, self-test. Supersedes
 [structured-transactions.md](structured-transactions.md) (R-04).
-Remaining: AMP + Qantas Money card parsers (live unknown-format skips
-are the queue). Two as-built deviations, both found live: statements
-natural key includes period_start (one email carried 11 statements of
-one account), and `ingest.py transactions` now delegates to
-`transactions.py`. Per ROADMAP tenet 12, this spec must be executable
-by a smaller model without re-deriving intent.
+2026-07-16 (user decision): ingestion scope moved from corpus-wide
+auto-detection to EXPLICIT marking in workspace-config.yaml — one bank
+account = one collection with `ingestion-type: bank-transactions`; see
+"Scope vs structure" below. accounts.yaml and reconciliation `assign:`
+retired; accounts gained an owners junction. Remaining: per-format parsers for the marked accounts still
+UNPARSED (CBA, Revolut, AMP, NAB, Qantas Money — R-04c). Per ROADMAP
+tenet 12, this spec must be executable by a smaller model without
+re-deriving intent.
 
 ## Goal
 
@@ -234,16 +236,40 @@ checks — if unknown-format skips pile up in practice.)
 
 Statement items are found by mime/filename heuristic (PDF) + detect()
 sweep over candidate items in mounted collections; no hardcoded paths.
-Detection is deliberately signature-based, not a "looks like a
-statement" classifier: deterministic, auditable (report lists every
-detection and skip), and a false positive cannot corrupt silently —
-it would fail its assertions loudly. No detection config knob (decided
-2026-07-15): detection always runs over all mounted collections —
-statements arrive as email attachments scattered through evidence
-collections, so scope flags would miss them or blanket everything.
-Control lives where real needs are: parse is an explicit command,
-the report audits every detection/skip, and reconciliation.yaml
-`exclude:`/`assign:` veto or correct per statement.
+**Scope vs structure (as-built change 2026-07-16, reversing the
+2026-07-15 "sweep everything" decision — user call):**
+
+- **Scope is explicit user marking**, not detection. One bank account
+  = one collection with `ingestion-type: bank-transactions` in
+  workspace-config.yaml (unified 2026-07-16) — id, bsb, account_number
+  (both QUOTED yaml strings; unquoted digits risk YAML octal/
+  leading-zero mangling), owners (list; joint accounts), type (user
+  vocabulary: business, daily-transactions, home-loan, ...), and the
+  folder `path` holding that account's statement PDFs. Bank collections
+  are REAL collections — ingested, mounted, searched like any other;
+  additionally their PDFs are parsed into the transactions tables.
+  Parse covers the accounts mounted on the ACTIVE workspace (matches
+  ingest scope). Rationale: deterministic, fully user-controlled; every
+  PDF in a marked collection is *expected* to parse, so failures are
+  loud per-account work queues (UNPARSED / NOT INGESTED / ACCOUNT
+  MISMATCH), not silent skips. Consequence: statements that exist only
+  as email attachments are out of scope until their PDFs are filed
+  into an account collection.
+- **Structure stays parser detection**: within a marked folder,
+  `detect_parser()` picks which format parser owns the file
+  (signature-based, one-claim rule). The parsed account number must
+  agree with the config entry (misfiled-document guard) or the file is
+  rejected loudly.
+- Files are resolved collection->items via `source_blob_index`
+  (sha->relpath, keyed by the account's own collection id) joined to
+  memberships on sha — pathless custody survives users reorganising
+  files; `parse` refreshes the blob index first. Parse is a full
+  wipe+refill (deterministic scope makes per-item incrementalism
+  pointless; the live corpus parses in seconds).
+- Accounts/holders seed from the config (`account_owners` junction —
+  joint accounts have several owners). accounts.yaml and
+  reconciliation `assign:` are RETIRED; reconciliation keeps `links:`
+  and `exclude:`.
 
 ### Evidence-quality signals (tamper check, parse pass)
 

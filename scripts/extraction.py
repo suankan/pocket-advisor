@@ -37,24 +37,37 @@ def ocr_image(image_path: Path):
 
 
 def extract_pdf(path: Path):
-    """Returns (text, method, confidence_or_None)."""
+    """Returns (text, method, confidence_or_None).
+
+    Always runs both pdftotext and OCR, then prefers whichever yields
+    more non-whitespace characters.  This handles hybrid PDFs where
+    most text is selectable but embedded-image portions (non-selectable)
+    are invisible to pdftotext — the old short-circuit at 40 chars
+    silently dropped those portions.
+    """
     r = run_cmd(["pdftotext", "-layout", str(path), "-"])
-    text = r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else ""
-    if len("".join(text.split())) >= config.PDF_NATIVE_TEXT_MIN_CHARS:
-        return text, "native_pdftotext", None
-    # Scanned/image-only PDF: rasterize pages and OCR each
+    pt_text = r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else ""
+    pt_len = len("".join(pt_text.split()))
+
+    ocr_text, ocr_conf = "", None
     with tempfile.TemporaryDirectory() as tmp:
         run_cmd(["pdftoppm", "-r", str(config.PDF_OCR_DPI), "-png",
                  str(path), f"{tmp}/page"], timeout=300)
         pages = sorted(Path(tmp).glob("page*.png"))
-        if not pages:
-            return text, "native_pdftotext", None  # keep whatever pdftotext gave
-        texts, confs = [], []
-        for page in pages:
-            t, c = ocr_image(page)
-            texts.append(t)
-            confs.append(c)
-        return "\n\n".join(texts), "ocr_tesseract", sum(confs) / len(confs)
+        if pages:
+            texts, confs = [], []
+            for page in pages:
+                t, c = ocr_image(page)
+                texts.append(t)
+                confs.append(c)
+            ocr_text = "\n\n".join(texts)
+            ocr_conf = sum(confs) / len(confs) if confs else None
+
+    ocr_len = len("".join(ocr_text.split())) if ocr_text else 0
+
+    if ocr_len > pt_len:
+        return ocr_text, "ocr_tesseract", ocr_conf
+    return pt_text, "native_pdftotext", None
 
 
 def extract_docx(path: Path):

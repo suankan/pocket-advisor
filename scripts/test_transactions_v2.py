@@ -3,7 +3,10 @@
 Runs against a THROWAWAY temp sandbox (pattern of test_ingest_documents)
 — never touches the real corpus or DB. Fixtures are synthetic testbank-v1
 and a synthetic Westpac-layout statement (layout knowledge only; all
-names/amounts invented).
+names/amounts invented). Scope model (2026-07-16): one account = one
+collection with `ingestion-type: bank-transactions` — tests pass
+fabricated BankAccount objects; every fixture PDF lives in an account
+collection.
 
     venv/bin/python scripts/test_transactions_v2.py
 """
@@ -25,7 +28,7 @@ config.DB_PATH = config.OUTPUT_DIR / "test.db"
 import workspace_config as _wc
 _wc.clear_cache()
 
-import db                      # noqa: E402
+import db                       # noqa: E402
 import statement_parsers as sp  # noqa: E402
 import transactions as tx       # noqa: E402
 
@@ -49,18 +52,69 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-def fixture_item(conn, item_id, text, name="doc.pdf"):
+# ---------------------------------------------------------------------------
+# explicit account marking (fabricated config objects; one account =
+# one collection, so the account id doubles as the collection id)
+
+ACCT_BY_SUB = {}   # fixture handle -> BankAccount
+
+
+def _ba(cfg_id, num, owners, typ, sub, bsb="111222"):
+    ba = _wc.BankAccount(
+        id=cfg_id, account_number=num, owners=tuple(owners), type=typ,
+        path=f"corpora/{cfg_id}",
+        root=TMP / "workspaces" / "corpora" / cfg_id, bsb=bsb)
+    ACCT_BY_SUB[sub] = ba
+    return ba
+
+
+ACCTS = [
+    _ba("tb-business", "333444", ["person-a"], "business", "accts/biz"),
+    _ba("tb-personal-a", "555666", ["person-a"], "daily-transactions",
+        "accts/pa"),
+    _ba("tb-personal-b", "777888", ["person-b"], "daily-transactions",
+        "accts/pb"),
+    _ba("wp-test", "998877", ["person-w"], "business", "accts/wp"),
+]
+
+ITEM_DIRS = {}   # item_id -> fixture handle (for the rebuild pass)
+
+
+def parse(conn):
+    return tx.run_parse(conn, WS, accounts=ACCTS,
+                        refresh_blob_index=False, log=log)
+
+
+def fixture_item(conn, item_id, text, sub, ingested=True):
+    """A fixture 'PDF': text file + items/meta/membership/blob rows in
+    the account's own collection. ingested=False leaves only the blob
+    row (file on disk, never ingested)."""
+    ITEM_DIRS[item_id] = (sub, ingested)
+    acct_id = ACCT_BY_SUB[sub].id
     tdir = TMP / "texts"
     tdir.mkdir(exist_ok=True)
     tpath = tdir / f"{item_id}.txt"
     tpath.write_text(text, encoding="utf-8")
+    sha = f"sha-{item_id}"
     conn.execute(
-        """INSERT OR IGNORE INTO items(id, item_kind, message_id, ingested_at)
-           VALUES (?,?,?,datetime('now'))""",
-        (item_id, "document", f"doc-{item_id}", ))
+        """INSERT OR REPLACE INTO source_blob_index(source_id, sha256,
+             relpath_within_source, indexed_at)
+           VALUES (?, ?, ?, datetime('now'))""",
+        (acct_id, sha, f"{item_id}.pdf"))
+    if not ingested:
+        return tpath
     conn.execute(
-        """INSERT OR REPLACE INTO item_file_meta(item_id, extracted_text_path,
-             extracted_copy_path) VALUES (?,?,?)""",
+        """INSERT OR IGNORE INTO items(id, item_kind, message_id,
+             ingested_at) VALUES (?,?,?,datetime('now'))""",
+        (item_id, "document", f"doc-{item_id}"))
+    conn.execute(
+        """INSERT OR REPLACE INTO item_memberships(item_id, collection_id,
+             source_folder, filename, sha256, membership_kind, ingested_at)
+           VALUES (?,?,'',?,?,'document',datetime('now'))""",
+        (item_id, acct_id, f"{item_id}.pdf", sha))
+    conn.execute(
+        """INSERT OR REPLACE INTO item_file_meta(item_id,
+             extracted_text_path, extracted_copy_path) VALUES (?,?,?)""",
         (item_id, str(tpath.relative_to(TMP)), None))
     return tpath
 
@@ -74,6 +128,7 @@ Period: {p0} to {p1}
 Opening Balance: ${opening}
 """
 
+
 def tb_statement(acct, p0, p1, opening, txns, closing, credits, debits,
                  count=None, pagebal=None):
     """txns: list of (date, value_date, desc, amount, balance)."""
@@ -81,7 +136,6 @@ def tb_statement(acct, p0, p1, opening, txns, closing, credits, debits,
     lines = [f"TXN|{d}|{vd}|{desc}|{amt}|{bal}"
              for d, vd, desc, amt, bal in txns]
     if pagebal is not None:
-        # split rows across two pages with a carried-forward marker
         half = max(1, len(lines) // 2)
         body += "\n".join(lines[:half]) + f"\nPAGEBAL|{pagebal}\n\f"
         body += "\n".join(lines[half:]) + "\n"
@@ -134,12 +188,11 @@ def main():
     print("== schema ==")
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    check("v2 tables present", {"holders", "accounts", "statements",
-                                "statement_assertions", "transactions",
-                                "transfer_links"} <= tables)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
-    check("transactions is v2 shape", "statement_id" in cols
-          and "amount_minor" in cols)
+    check("v2 tables present", {"holders", "accounts", "account_owners",
+                                "statements", "statement_assertions",
+                                "transactions", "transfer_links"} <= tables)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+    check("accounts is config-driven shape", "config_id" in cols)
 
     print("== amount / date normalization ==")
     check("plain", sp.parse_amount_minor("1,234.56") == 123456)
@@ -152,21 +205,6 @@ def main():
     check("account norm",
           sp.normalize_account_no("111-222 99 8877") == "111222998877")
 
-    print("== accounts.yaml ==")
-    (WS / "accounts.yaml").write_text(
-        "- holder: Person A\n  bank: TestBank\n"
-        "  account_no_masked: '111-222 333444'\n  kind: business\n"
-        "  currency: AUD\n  label: A business\n"
-        "- holder: Person A\n  bank: TestBank\n"
-        "  account_no_masked: '111-222 555666'\n  kind: personal\n"
-        "  currency: AUD\n  label: A personal\n"
-        "- holder: Person B\n  bank: TestBank\n"
-        "  account_no_masked: '111-222 777888'\n  kind: personal\n"
-        "  currency: AUD\n  label: B personal\n"
-        "- holder: Test Holder\n  bank: Westpac\n"
-        "  account_no_masked: '111-222 99 8877'\n  kind: business\n"
-        "  currency: AUD\n  label: WBC test\n", encoding="utf-8")
-
     print("== parse: intact multi-page testbank statement ==")
     intact = tb_statement(
         "111-222 333444", "2026-01-01", "2026-01-31", "100.00",
@@ -175,15 +213,24 @@ def main():
          ("2026-01-20", "", "Salary Credit", "60.00", "95.00")],
         closing="95.00", credits="60.00", debits="65.00", count=3,
         pagebal="75.00")
-    fixture_item(conn, 1, intact)
+    fixture_item(conn, 1, intact, "accts/biz")
     _LOGS.clear()
-    tx.run_parse(conn, WS, log=log)
+    parse(conn)
+    check("owners seeded via junction", conn.execute(
+        """SELECT COUNT(*) FROM account_owners ao
+           JOIN accounts a ON a.id=ao.account_id
+           JOIN holders h ON h.id=ao.holder_id
+           WHERE a.config_id='tb-business' AND h.display_name='person-a'"""
+    ).fetchone()[0] == 1)
     st = conn.execute("SELECT * FROM statements WHERE item_id=1").fetchone()
     check("statement row exists", st is not None)
     check("balance_ok=1 on intact fixture", st["balance_ok"] == 1)
     check("opening/closing captured",
           st["opening_balance_minor"] == 10000
           and st["closing_balance_minor"] == 9500)
+    check("account from config marking (not guessed)", conn.execute(
+        "SELECT config_id FROM accounts WHERE id=?",
+        (st["account_id"],)).fetchone()[0] == "tb-business")
     rows = conn.execute("SELECT * FROM transactions WHERE statement_id=? "
                         "ORDER BY row_index", (st["id"],)).fetchall()
     check("3 rows, signed minor units", len(rows) == 3
@@ -204,22 +251,20 @@ def main():
           all(k["passed"] != 0 for k in kinds.values()),
           str({k: v["passed"] for k, v in kinds.items()}))
     check("scanner-only summary lines found (parser emits only "
-          "carried_forward)", kinds["total_credits"].__getitem__("amount_minor") == 6000)
+          "carried_forward)", kinds["total_credits"]["amount_minor"] == 6000)
     check("no double-count: summary lines are not txn rows",
           all("Closing Balance" not in (r["raw_line"] or "") for r in rows))
 
     print("== parse: failure localization ==")
-    # (a) drop a row -> closing/totals/count fail, carried_forward on the
-    # untouched page still passes
     dropped = tb_statement(
         "111-222 333444", "2026-02-01", "2026-02-28", "95.00",
         [("2026-02-02", "", "Coffee Shop", "-25.00", "70.00"),
          ("2026-02-20", "", "Salary Credit", "60.00", "130.00")],
         closing="105.00", credits="60.00", debits="50.00", count=3,
         pagebal="70.00")
-    fixture_item(conn, 2, dropped)
+    fixture_item(conn, 2, dropped, "accts/biz")
     _LOGS.clear()
-    tx.run_parse(conn, WS, log=log)
+    parse(conn)
     st2 = conn.execute("SELECT * FROM statements WHERE item_id=2").fetchone()
     a2 = {r["kind"]: r for r in conn.execute(
         "SELECT * FROM statement_assertions WHERE statement_id=?",
@@ -235,15 +280,14 @@ def main():
           and a2["closing_balance"]["observed_minor"] == 13000)
     check("loud report line", logged("ASSERTIONS FAILED"))
 
-    # (b) corrupt one amount -> running_balance_chain pinpoints the row
     corrupt = tb_statement(
         "111-222 777888", "2026-02-01", "2026-02-28", "10.00",
         [("2026-02-05", "", "Deposit One", "40.00", "50.00"),
          ("2026-02-06", "", "Deposit Two", "5.00", "60.00"),
          ("2026-02-07", "", "Deposit Three", "10.00", "70.00")],
         closing="70.00", credits="55.00", debits="0.00")
-    fixture_item(conn, 3, corrupt)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 3, corrupt, "accts/pb")
+    parse(conn)
     st3 = conn.execute("SELECT * FROM statements WHERE item_id=3").fetchone()
     chain = conn.execute(
         """SELECT * FROM statement_assertions WHERE statement_id=?
@@ -263,21 +307,23 @@ def main():
     bare = ("TESTBANK STATEMENT v1\nAccount: 111-222 777888\n"
             "Period: 2026-01-01 to 2026-01-31\n"
             "TXN|2026-01-02||Mystery Row|-5.00|\n")
-    fixture_item(conn, 4, bare)
+    fixture_item(conn, 4, bare, "accts/pb")
     _LOGS.clear()
-    tx.run_parse(conn, WS, log=log)
+    parse(conn)
     st4 = conn.execute("SELECT * FROM statements WHERE item_id=4").fetchone()
     check("zero-assertion statement -> balance_ok NULL",
           st4 is not None and st4["balance_ok"] is None)
     check("flagged second-class in report output", logged("no assertions"))
 
     print("== westpac layout parser (synthetic fixture) ==")
-    fixture_item(conn, 5, WP_FIX)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 5, WP_FIX, "accts/wp")
+    parse(conn)
     st5 = conn.execute("SELECT * FROM statements WHERE item_id=5").fetchone()
-    check("westpac parsed + account matched via registry",
-          st5 is not None and st5["parser_id"] == "westpac-v1"
-          and st5["account_id"] is not None)
+    check("westpac parsed under its marked folder",
+          st5 is not None and st5["parser_id"] == "westpac-v1")
+    check("westpac account from config marking", conn.execute(
+        "SELECT config_id FROM accounts WHERE id=?",
+        (st5["account_id"],)).fetchone()[0] == "wp-test")
     wrows = conn.execute("SELECT * FROM transactions WHERE statement_id=? "
                          "ORDER BY row_index", (st5["id"],)).fetchall()
     check("3 txn rows (summary rows excluded)", len(wrows) == 3)
@@ -293,31 +339,35 @@ def main():
           and wrows[2]["amount_minor"] == -15500)
     check("westpac balance_ok=1", st5["balance_ok"] == 1)
 
-    print("== detection ==")
-    check("unknown statement-ish pdf logged as skip", True)  # covered below
+    print("== scope discipline: unparsed / not-ingested / mismatch ==")
+    fixture_item(conn, 6, "SOMEBANK Account Statement\nunknown layout\n",
+                 "accts/biz")
+    fixture_item(conn, 15, "TESTBANK STATEMENT v1\nnever ingested",
+                 "accts/pa", ingested=False)
+    misfiled = tb_statement(
+        "999-999 111111", "2026-06-01", "2026-06-30", "0.00",
+        [("2026-06-02", "", "Wrong Account Row", "-1.00", "-1.00")],
+        closing="-1.00", credits="0.00", debits="1.00")
+    fixture_item(conn, 14, misfiled, "accts/biz")
     _LOGS.clear()
-    conn.execute("UPDATE item_file_meta SET extracted_copy_path='x/mystery.pdf'"
-                 " WHERE item_id=6")
-    fixture_item(conn, 6, "SOMEBANK Account Statement\nno parser knows this\n")
-    conn.execute("UPDATE item_file_meta SET extracted_copy_path='x/m.pdf' "
-                 "WHERE item_id=6")
-    tx.run_parse(conn, WS, log=log)
-    check("unknown-format skip logged with hint",
-          logged("skip unknown format item 6"))
-    check("unknown-format not inserted", conn.execute(
-        "SELECT COUNT(*) FROM statements WHERE item_id=6").fetchone()[0] == 0)
+    res = parse(conn)
+    check("unknown format under marked folder -> loud UNPARSED",
+          res["unparsed"] == 1 and logged("UNPARSED: 6.pdf"))
+    check("file on disk but not ingested -> loud NOT INGESTED",
+          res["not_ingested"] == 1 and logged("NOT INGESTED: 15.pdf"))
+    check("printed account contradicts folder -> MISMATCH, not inserted",
+          res["mismatched"] == 1 and logged("ACCOUNT MISMATCH")
+          and conn.execute("SELECT COUNT(*) FROM statements WHERE item_id=14"
+                           ).fetchone()[0] == 0)
 
     print("== link: exact / fee / ambiguity / override ==")
-    # A business (item 1, acct 333444) -40.00 on 01-10 -> A personal
-    # (acct 555666) +40.00 on 01-12: exact, same holder. Plus a
-    # fee-adjusted pair: Coffee Shop -25.00 (01-02) vs +24.00 (01-05).
     ingress = tb_statement(
         "111-222 555666", "2026-01-01", "2026-01-31", "0.00",
         [("2026-01-05", "", "Deposit Fee Adjusted", "24.00", "24.00"),
          ("2026-01-12", "", "Inward Transfer Received", "40.00", "64.00")],
         closing="64.00", credits="64.00", debits="0.00")
-    fixture_item(conn, 7, ingress)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 7, ingress, "accts/pa")
+    parse(conn)
     _LOGS.clear()
     res = tx.run_link(conn, WS, log=log)
     links = conn.execute(
@@ -334,7 +384,6 @@ def main():
           and fee[0]["dfrom"] == "Coffee Shop",
           str([dict(l) for l in fee]))
 
-    # ambiguity: two identical candidate ingresses -> NO link + report
     amb = tb_statement(
         "111-222 555666", "2026-03-01", "2026-03-31", "0.00",
         [("2026-03-05", "", "Outward Transfer Tfr", "-15.00", "-15.00")],
@@ -344,9 +393,9 @@ def main():
         [("2026-03-05", "", "Deposit A", "15.00", "85.00"),
          ("2026-03-06", "", "Deposit B", "15.00", "100.00")],
         closing="100.00", credits="30.00", debits="0.00")
-    fixture_item(conn, 8, amb)
-    fixture_item(conn, 9, amb2)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 8, amb, "accts/pa")
+    fixture_item(conn, 9, amb2, "accts/pb")
+    parse(conn)
     _LOGS.clear()
     res = tx.run_link(conn, WS, log=log)
     check("two-candidate ambiguity produces NO link",
@@ -356,7 +405,6 @@ def main():
           ).fetchone()[0] == 0)
     check("ambiguity reported", logged("AMBIGUOUS"))
 
-    # override resolves the ambiguity and wins
     amb_from = conn.execute(
         """SELECT s.item_id, t.row_index FROM transactions t JOIN statements
            s ON s.id=t.statement_id WHERE t.description_raw LIKE
@@ -370,7 +418,6 @@ def main():
                      ).fetchall()
     check("override link applied and wins", len(o) == 1
           and o[0]["match_kind"] == "manual")
-    # bad override key aborts
     (WS / "reconciliation.yaml").write_text(
         "links:\n  - from: {item_id: 999, row_index: 0}\n"
         "    to: {item_id: 9, row_index: 0}\n", encoding="utf-8")
@@ -379,30 +426,31 @@ def main():
         check("bad override key aborts", False)
     except SystemExit:
         check("bad override key aborts", True)
+    (WS / "reconciliation.yaml").write_text(
+        "assign:\n  - item_id: 1\n", encoding="utf-8")
+    try:
+        tx.run_link(conn, WS, log=log)
+        check("retired assign: key aborts with pointer to config", False)
+    except SystemExit as e:
+        check("retired assign: key aborts with pointer to config",
+              "workspace-config.yaml" in str(e))
     (WS / "reconciliation.yaml").unlink()
     tx.run_link(conn, WS, log=log)
 
     print("== continuity / gap / overlap / exclude ==")
-    # consecutive statements for acct 333444: jan (item1) closes 95.00;
-    # feb (item2) opens 95.00 -> continuity ok. Add april (gap after feb).
     apr = tb_statement(
         "111-222 333444", "2026-04-01", "2026-04-30", "105.00",
         [("2026-04-02", "", "Coffee", "-5.00", "100.00")],
         closing="100.00", credits="0.00", debits="5.00")
-    fixture_item(conn, 10, apr)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 10, apr, "accts/biz")
+    parse(conn)
+    tx.run_link(conn, WS, log=log)
     _LOGS.clear()
     rep = tx.run_report(conn, WS, log=log)
     check("period gap reported as coverage gap (not break)",
           any(g[1] == "2026-02-28" for g in rep["coverage_gaps"])
           and not any(b for b in rep["continuity_breaks"]))
-    # remove middle statement -> continuity break with both balances named
     conn.execute("UPDATE statements SET excluded=1 WHERE item_id=2")
-    conn.commit()
-    _LOGS.clear()
-    rep = tx.run_report(conn, WS, log=log)
-    # jan(95.00 close) -> apr(105.00 open) is a >7d gap, so it reports as
-    # gap; make apr adjacent to jan to force the break instead
     conn.execute("""UPDATE statements SET period_start='2026-02-01',
                     period_end='2026-02-28' WHERE item_id=10""")
     conn.commit()
@@ -415,24 +463,21 @@ def main():
     conn.execute("UPDATE statements SET excluded=0 WHERE item_id=2")
     conn.commit()
 
-    # overlap + exclude
     overlap = tb_statement(
         "111-222 333444", "2026-01-15", "2026-02-15", "35.00",
         [("2026-01-20", "", "Salary Credit", "60.00", "95.00")],
         closing="95.00", credits="60.00", debits="0.00")
-    fixture_item(conn, 11, overlap)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 11, overlap, "accts/biz")
+    parse(conn)
+    tx.run_link(conn, WS, log=log)
     _LOGS.clear()
     rep = tx.run_report(conn, WS, log=log)
     check("overlap loudly reported", len(rep["overlaps"]) >= 1
           and logged("OVERLAP"))
-    goal_before = conn.execute(
-        """SELECT COALESCE(SUM(-t.amount_minor),0) FROM transactions t
-           JOIN transfer_links l ON l.from_txn_id=t.id""").fetchone()[0]
     (WS / "reconciliation.yaml").write_text(
         "exclude:\n  - item_id: 11\n    reason: overlaps monthly\n",
         encoding="utf-8")
-    tx.run_parse(conn, WS, log=log)
+    parse(conn)
     tx.run_link(conn, WS, log=log)
     _LOGS.clear()
     rep = tx.run_report(conn, WS, log=log)
@@ -441,17 +486,13 @@ def main():
         "SELECT excluded FROM statements WHERE item_id=11").fetchone()[0] == 1)
 
     print("== coverage buckets ==")
-    # at this point 333444 and the Westpac account have no March coverage
-    # -> the ambiguous (unmatched) March transfer buckets as unknown
     check("unknown bucket names uncovered account",
           len(rep["buckets"]["unknown"]) >= 1)
-    # give EVERY other account March coverage -> same egress turns
-    # suspicious
     mar = tb_statement(
         "111-222 333444", "2026-03-01", "2026-03-31", "95.00",
         [("2026-03-10", "", "Coffee", "-1.00", "94.00")],
         closing="94.00", credits="0.00", debits="1.00")
-    fixture_item(conn, 12, mar)
+    fixture_item(conn, 12, mar, "accts/biz")
     wp_mar = (WP_FIX
               .replace("1 December 2025 - 31 January 2026",
                        "1 March 2026 - 31 March 2026")
@@ -460,8 +501,8 @@ def main():
               .replace("03/01/26", "10/03/26")
               .replace("05/01/26", "12/03/26")
               .replace("31/01/26", "31/03/26"))
-    fixture_item(conn, 13, wp_mar)
-    tx.run_parse(conn, WS, log=log)
+    fixture_item(conn, 13, wp_mar, "accts/wp")
+    parse(conn)
     tx.run_link(conn, WS, log=log)
     _LOGS.clear()
     rep = tx.run_report(conn, WS, log=log)
@@ -478,10 +519,13 @@ def main():
            JOIN transfer_links l ON l.from_txn_id=t.id
            JOIN transactions t2 ON t2.id=l.to_txn_id
            JOIN accounts at2 ON at2.id=t2.account_id
-           WHERE af.kind='business' AND af.holder_id=at2.holder_id"""
+           WHERE af.type='business' AND EXISTS (
+             SELECT 1 FROM account_owners o1
+             JOIN account_owners o2 ON o2.holder_id=o1.holder_id
+             WHERE o1.account_id=af.id AND o2.account_id=at2.id)"""
     ).fetchone()[0]
     # exact 40.00 + fee-adjusted 25.00, both A business -> A personal
-    check("goal query: same-holder business->personal transfer sum",
+    check("goal query: shared-owner business->personal transfer sum",
           goal == 6500, f"got {goal}")
 
     (WS / "counterparties.yaml").write_text(
@@ -509,11 +553,13 @@ def main():
     config.DB_PATH.unlink()
     conn = db.connect()
     db.migrate(conn)
-    for i in range(1, 14):
+    dirs = dict(ITEM_DIRS)
+    for i, (sub, ingested) in sorted(dirs.items()):
         p = TMP / "texts" / f"{i}.txt"
         if p.is_file():
-            fixture_item(conn, i, p.read_text(encoding="utf-8"))
-    tx.run_parse(conn, WS, log=log)
+            fixture_item(conn, i, p.read_text(encoding="utf-8"), sub,
+                         ingested=ingested)
+    parse(conn)
     tx.run_link(conn, WS, log=log)
     after = conn.execute(
         """SELECT COUNT(*), COALESCE(SUM(amount_minor),0) FROM transactions

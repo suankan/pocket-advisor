@@ -147,6 +147,63 @@ def main():
     except SystemExit as e:
         check("v2 unknown mount aborts", "unknown collection" in str(e).lower(), str(e))
 
+    # bank-transactions collections (explicit statement-ingestion
+    # marking; one account = one collection, unified 2026-07-16)
+    (config.WORKSPACES_DIR / "corpora" / "acct1").mkdir()
+    v2b = yaml.safe_load(yaml.dump(v2))
+    v2b["collections"][0]["ingestion-type"] = "general"
+    v2b["collections"].append({
+        "id": "acct1",
+        "ingestion-type": "bank-transactions",
+        "description": "Person A+B joint account",
+        "bsb": "111222", "account_number": "334455",
+        "owners": ["person-a", "person-b"], "type": "daily-transactions",
+        "path": "corpora/acct1",
+    })
+    v2b["workspaces"][0]["collections"].append({"id": "acct1"})
+    write_reg(v2b)
+    wc.clear_cache()
+    r2b = wc.load_registry()
+    check("bank account parsed", len(r2b.bank_accounts) == 1
+          and r2b.bank_accounts[0].id == "acct1"
+          and r2b.bank_accounts[0].owners == ("person-a", "person-b"))
+    check("bank entry IS a collection too", len(r2b.collections) == 2
+          and r2b.collection_by_id("acct1") is not None)
+    check("bank collection mountable, privileged defaults false",
+          "acct1" in r2b.by_id("matter-a").collection_ids
+          and not r2b.collection_by_id("acct1").privileged)
+    check("bank-account root resolved under workspaces.dir",
+          r2b.bank_accounts[0].root.is_dir())
+
+    bad_ba = yaml.safe_load(yaml.dump(v2b))
+    bad_ba["collections"][1]["typo_key"] = 1
+    write_reg(bad_ba)
+    try:
+        wc.load_registry()
+        check("unknown bank-collection key aborts", False)
+    except SystemExit as e:
+        check("unknown bank-collection key aborts",
+              "unknown key" in str(e).lower(), str(e))
+
+    bad_num = yaml.safe_load(yaml.dump(v2b))
+    bad_num["collections"][1]["account_number"] = 334455
+    write_reg(bad_num)
+    try:
+        wc.load_registry()
+        check("unquoted (int) account_number aborts", False)
+    except SystemExit as e:
+        check("unquoted (int) account_number aborts",
+              "quoted string" in str(e), str(e))
+
+    bad_it = yaml.safe_load(yaml.dump(v2))
+    bad_it["collections"][0]["ingestion-type"] = "banana"
+    write_reg(bad_it)
+    try:
+        wc.load_registry()
+        check("bad ingestion-type aborts", False)
+    except SystemExit as e:
+        check("bad ingestion-type aborts", "ingestion-type" in str(e), str(e))
+
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {FAILURES}")
         return 1

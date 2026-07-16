@@ -158,8 +158,3 @@ def run():
     n_threads = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
     conn.close()
     print(f"thread_linker: {n_threads} threads; link methods: {counts}")
-
-
-if __name__ == "__main__":
-    run()
-    sys.exit(0)

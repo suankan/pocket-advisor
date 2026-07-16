@@ -423,7 +423,3 @@ def run():
                    img_vectors_meta_json)
     conn.close()
     return {"new_pages": n_new, "embedded": n_emb}
-
-
-if __name__ == "__main__":
-    run()

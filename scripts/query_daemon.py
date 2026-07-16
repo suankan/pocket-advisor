@@ -4,15 +4,14 @@ Keeps embed + rerank models and the vector matrix loaded so interactive
 or agent multi-query sessions skip per-call cold starts. Local Unix
 socket only — no network exposure.
 
-    venv/bin/python scripts/query_daemon.py serve   # foreground
-    venv/bin/python scripts/query_daemon.py status
-    venv/bin/python scripts/query_daemon.py stop
+    ./pocket-advisor.py daemon serve    # foreground
+    ./pocket-advisor.py daemon status
+    ./pocket-advisor.py daemon stop
 
 query.py auto-uses the daemon when the socket is live (config
 query.daemon_auto). Each search request is independent ranking — not
 a generative chat context.
 """
-import argparse
 import json
 import os
 import select
@@ -232,26 +231,3 @@ def _kill_pid_file():
         return
     if _pid_alive(pid):
         os.kill(pid, signal.SIGTERM)
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p_serve = sub.add_parser("serve", help="run daemon in foreground")
-    p_serve.add_argument("--idle-sec", type=int, default=None,
-                         help="override config idle timeout (0=never)")
-    p_serve.set_defaults(func=lambda a: serve(idle_sec=a.idle_sec) or 0)
-
-    sub.add_parser("status", help="ping running daemon").set_defaults(
-        func=lambda a: cmd_status())
-    sub.add_parser("stop", help="ask daemon to shut down").set_defaults(
-        func=lambda a: cmd_stop())
-
-    args = ap.parse_args()
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main() or 0)

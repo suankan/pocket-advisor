@@ -29,7 +29,3 @@ def run():
         print(f"Rerank model ready: {rr}")
     else:
         print("Rerank model: skipped (query.rerank_enabled: false)")
-
-
-if __name__ == "__main__":
-    run()

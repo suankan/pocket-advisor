@@ -65,9 +65,5 @@ def run():
     for msg in problems:
         print(f"  !! {msg}")
     if unrecorded:
-        print("  (not-yet-ingested blobs are not an error; run ingest.py)")
+        print("  (not-yet-ingested blobs are not an error; run ./pocket-advisor.py ingest)")
     return 1 if problems else 0
-
-
-if __name__ == "__main__":
-    sys.exit(run())

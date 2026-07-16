@@ -7,7 +7,7 @@ Confirms:
 
 Generic non-case images only. Does not touch live corpora.
 
-    venv/bin/python scripts/smoke_visual_alignment.py
+    ./pocket-advisor.py smoke-visual
 
 Exit 0 = PASS or intentional SKIP (missing model).
 Exit 1 = models loaded but claim fails / dim mismatch.
@@ -26,7 +26,7 @@ def _skip(msg: str) -> int:
     return 0
 
 
-def main() -> int:
+def run() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         from PIL import Image, ImageDraw
@@ -79,7 +79,3 @@ def main() -> int:
         return 1
     print("PASS: alignment holds (match > mismatch)")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

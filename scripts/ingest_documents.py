@@ -315,7 +315,3 @@ def run():
     conn.close()
     print(f"ingest_documents: {stats}")
     return stats
-
-
-if __name__ == "__main__":
-    sys.exit(0 if run()["errors"] == 0 else 1)

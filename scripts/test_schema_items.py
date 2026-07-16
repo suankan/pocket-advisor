@@ -70,8 +70,14 @@ def main():
         check("item_file_meta exists", "item_file_meta" in tables)
         check("no emails table", "emails" not in tables)
         check("no documents table", "documents" not in tables)
-        check("page_images exists", "page_images" in tables)
+        check("retired page_images absent", "page_images" not in tables)
         check("transactions exists", "transactions" in tables)
+
+        conn.execute("CREATE TABLE page_images (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        db.migrate(conn)
+        check("legacy page_images dropped by migration",
+              not db._table_exists(conn, "page_images"))
 
         uq = db._unique_column_sets(conn, "item_memberships")
         check("membership UNIQUE is (collection_id, sha256)",

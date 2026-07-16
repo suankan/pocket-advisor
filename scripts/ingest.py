@@ -3,24 +3,17 @@
 Pipeline stages (positional):
 
     ingest all              # parse + documents + attachments + thread
-                            # + --embed all (gated by ingestion.embed_*)
+                            # + text embedding when enabled
     ingest parse            # .eml -> DB + body text + attachment copies
     ingest documents        # standalone documents
     ingest attachments      # attachment text extraction / OCR
     ingest thread           # thread reconstruction (full recompute)
     ingest transactions     # heuristic transaction extraction
 
-Embedding channels (--embed):
+Embedding (--embed):
 
     ingest --embed text     # chunk + text embed + vector index
-    ingest --embed images   # page-image rasterize + omni embed
-    ingest --embed all      # text iff ingestion.embed_text;
-                            # images iff ingestion.embed_images
-
-Stages and --embed may be combined, e.g.:
-
-    ingest all --embed images   # full pipeline + force image index
-    ingest --embed all          # re-embed only (no re-parse)
+    ingest --embed all      # alias that respects ingestion.embed_text
 
 (All spellings via the single entrypoint: ./pocket-advisor.py ingest …)
 
@@ -38,7 +31,6 @@ _STAGES = ("all", "parse", "documents", "attachments", "thread", "transactions")
 _LEGACY_EMBED_STAGES = {
     "text": "text",
     "embed": "text",
-    "images": "images",
 }
 
 
@@ -47,17 +39,11 @@ def _run_embed_text() -> None:
     embed.run()
 
 
-def _run_embed_images() -> None:
-    import embed_images
-    embed_images.run()
-
-
 def _run_embed(mode: str, *, respect_config: bool) -> None:
-    """mode: text | images | all.
+    """mode: text | all.
 
-    When respect_config is True (only for --embed all / stage all's
-    default embed pass), honor ingestion.embed_text / embed_images.
-    Explicit --embed text|images always runs the named channel.
+    When respect_config is True, honor ingestion.embed_text.
+    Explicit --embed text always runs the channel.
     """
     if mode == "text":
         if respect_config and not config.EMBED_TEXT:
@@ -66,23 +52,11 @@ def _run_embed(mode: str, *, respect_config: bool) -> None:
         _run_embed_text()
         return
 
-    if mode == "images":
-        if respect_config and not config.EMBED_IMAGES:
-            print("embed images: skipped (ingestion.embed_images is false)")
-            return
-        _run_embed_images()
-        return
-
     if mode == "all":
-        # Always gated by the two knobs
         if config.EMBED_TEXT:
             _run_embed_text()
         else:
             print("embed all: skipping text (ingestion.embed_text is false)")
-        if config.EMBED_IMAGES:
-            _run_embed_images()
-        else:
-            print("embed all: skipping images (ingestion.embed_images is false)")
         return
 
     raise SystemExit(f"unknown --embed mode {mode!r}")
@@ -91,8 +65,8 @@ def _run_embed(mode: str, *, respect_config: bool) -> None:
 def cli(stage: str | None, embed_mode: str | None) -> int:
     """CLI body — the parser lives in pocket-advisor.py.
     stage: one of _STAGES (or a legacy embed stage name) or None;
-    embed_mode: text | images | all | None."""
-    # Legacy: `ingest text|embed|images` → --embed …
+    embed_mode: text | all | None."""
+    # Legacy: `ingest text|embed` → --embed text.
     if stage in _LEGACY_EMBED_STAGES:
         if embed_mode is not None:
             raise SystemExit(
@@ -110,7 +84,7 @@ def cli(stage: str | None, embed_mode: str | None) -> int:
     if stage is not None and stage not in _STAGES:
         raise SystemExit(
             f"ingest: unknown stage {stage!r}; choose from "
-            f"{', '.join(_STAGES)} or --embed text|images|all")
+            f"{', '.join(_STAGES)} or --embed text|all")
 
     # Default: full core pipeline when nothing specified
     if stage is None and embed_mode is None:
@@ -130,7 +104,7 @@ def cli(stage: str | None, embed_mode: str | None) -> int:
     if stage in ("all", "thread"):
         import thread_linker
         thread_linker.run()
-    # `all` includes gated embed-all (text/images per config knobs)
+    # `all` includes the config-gated text embed pass.
     if stage == "all":
         _run_embed("all", respect_config=True)
     if stage == "transactions":
@@ -153,10 +127,8 @@ def cli(stage: str | None, embed_mode: str | None) -> int:
             # stage all already tried text (if enabled); explicit text
             # re-runs the channel even if embed_text is false
             _run_embed("text", respect_config=False)
-        elif stage == "all" and embed_mode == "images":
-            _run_embed("images", respect_config=False)
         else:
-            # Standalone --embed: `all` respects knobs; named modes force
+            # Standalone `all` respects the knob; named text forces it.
             respect = embed_mode == "all"
             _run_embed(embed_mode, respect_config=respect)
 

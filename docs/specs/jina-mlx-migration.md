@@ -1,10 +1,7 @@
 # Spec: migrate embedding + reranker to the Jina MLX stack
 
 Status: IMPLEMENTED + SHIPPED 2026-07-13. Combined jina_mlx embed+rerank
-stack is now the DEFAULT (`scripts/config.py`). Visual (page-image)
-channel is ROADMAP R-03, not started — its prerequisite (text stack
-actually running the aligned Jina v5 text model, not bge-m3) is now
-met; see `docs/ROADMAP.md` (R-03) and docs/specs/visual-retrieval.md.
+stack is now the DEFAULT (`scripts/config.py`).
 Planned by: Fable 5 (high), per ROADMAP tenet 12. Executes a design
 originally drafted in a planning-tool copy, transcribed here so it
 survives regardless of which agentic CLI continues the work (AGENTS.md
@@ -25,12 +22,6 @@ constraint; not the reason for this migration).
 - Reranking: `jinaai/jina-reranker-v3-mlx` (597M, listwise
   last-but-not-late-interaction on the same Qwen3-0.6B backbone,
   official MLX port).
-
-This is also the prerequisite for visual/page-image retrieval (R-03
-retrieval channel): `jina-embeddings-v5-omni-small-retrieval` embeds
-page images into a vector space explicitly aligned with
-`jina-embeddings-v5-text-small-retrieval` — that alignment claim only
-holds once the text stack is actually this model, not `bge-m3`.
 
 ## Verified mechanism (do not re-guess this — it was gotten wrong once
 already for the MLX embedding backend; both models here were checked

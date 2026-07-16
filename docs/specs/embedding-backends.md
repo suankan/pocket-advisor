@@ -1,7 +1,7 @@
 # Spec: pluggable embedding backend (llama.cpp | MLX)
 
 Status: **SUPERSEDED 2026-07-13** — GGUF / multi-backend zoo removed.
-Single MLX path via `mlx_model_loader.py` + `models.mlx_model_embed_*`.
+Single MLX path via `mlx_model_loader.py` + `models.mlx_model_embed_text`.
 Historical notes below retained for why fingerprints exist.
 
 Status (historical): IMPLEMENTED 2026-07-12. llama.cpp path verified in production.

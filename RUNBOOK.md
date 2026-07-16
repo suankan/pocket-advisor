@@ -8,9 +8,8 @@ brew install python@3.12 poppler ocrmypdf
 venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
 ./pocket-advisor.py db init
 # config.yaml is committed platform config — edit models / knobs as needed
-./pocket-advisor.py fetch-model   # downloads text + omni + rerank MLX
-                                          # repos from HuggingFace (one-time,
-                                          # inbound weights only)
+./pocket-advisor.py fetch-model   # downloads text + rerank MLX repos from
+                                  # HuggingFace (one-time, inbound weights only)
 ```
 
 ## Configuring pocket-advisor
@@ -20,14 +19,13 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
 `config.yaml` itself. Unknown keys abort loudly at import time
 (typo protection). Three classes of knob:
 
-- **free** (`query.*`, `ingestion.ocr.*`, `ingestion.embed_text` /
-  `embed_images`, thread/date-window settings): change anytime, takes
-  effect on the next run (embed knobs gate `--embed all` / stage `all`
-  and the query image leg).
-- **index-invalidating, cached per model** (`models.mlx_model_embed_*`,
-  docs/specs/multi-model-vector-cache.md): changing the text or omni
-  MLX repo resolves to a **different cache directory** on the next
-  `pocket-advisor.py ingest --embed text` / `--embed images` — vectors from different
+- **free** (`query.*`, `ingestion.ocr.*`, `ingestion.embed_text`,
+  thread/date-window settings): change anytime, takes effect on the
+  next run (`embed_text` gates `--embed all` / stage `all`).
+- **index-invalidating, cached per model** (`models.mlx_model_embed_text`,
+  docs/specs/multi-model-vector-cache.md): changing the text embedding
+  repo resolves to a **different cache directory** on the next
+  `pocket-advisor.py ingest --embed text` — vectors from different
   models/dims are numerically incomparable, so they're never mixed,
   but nothing is deleted. First use of a model embeds fresh; switching
   back to a previously-used model reuses its cache (near-instant, only
@@ -163,29 +161,24 @@ Config under `models:` is intentionally small:
 ```yaml
 ingestion:
   embed_text: true      # --embed all / stage all
-  embed_images: true    # also gates query image RRF + omni fetch
 models:
   mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
-  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx
 ```
 
-Use a **matched pair** only: nano↔nano (768-d) or small↔small (1024-d).
-Changing the text/omni repo is INDEX-INVALIDATING but not destructive —
+Changing the text embedding repo is INDEX-INVALIDATING but not destructive —
 each model gets its own cache directory
 (docs/specs/multi-model-vector-cache.md); switching back to a
-previously-used pair reuses it instead of re-embedding
-(`pocket-advisor.py ingest --embed text` / `--embed images`, or `--embed all`).
+previously-used model reuses it instead of re-embedding
+(`pocket-advisor.py ingest --embed text`, or `--embed all`).
 Reranker is not index-invalidating. Universal loader:
 `scripts/mlx_model_loader.py`. No GGUF / llama.cpp path remains.
 
 ```bash
 ./pocket-advisor.py fetch-model
 ./pocket-advisor.py ingest --embed text
-# or both when ingestion.embed_* are true:
+# or when ingestion.embed_text is true:
 # ./pocket-advisor.py ingest --embed all
-./pocket-advisor.py ingest --embed images
-./pocket-advisor.py smoke-visual
 ```
 
 ## Cached vector indexes (per model, retained until you wipe them)
@@ -201,7 +194,6 @@ around after experimenting.
 ```bash
 ./pocket-advisor.py wipe list
 ./pocket-advisor.py wipe index --text <slug> [--yes]
-./pocket-advisor.py wipe index --image <slug> [--yes]
 ./pocket-advisor.py wipe index --all-inactive [--yes]
 ```
 
@@ -359,16 +351,6 @@ venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import db; c=db.co
 
 Optional structured rows (R-04): `./pocket-advisor.py ingest transactions`.
 Query purpose filter (R-05): `query.py "…" --purpose disclosure`.
-
-Visual page-image channel (R-03, opt-in after smoke PASS; omni
-processor deps are already in `scripts/requirements.txt`):
-
-```bash
-./pocket-advisor.py smoke-visual   # expect PASS
-# config.yaml: ingestion.embed_images: true
-./pocket-advisor.py ingest --embed images            # rasterize + omni index
-./pocket-advisor.py query "site plan stamp" --no-daemon
-```
 
 ## Review points
 

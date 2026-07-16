@@ -88,11 +88,6 @@ def _accuracy(a):
             "list": sat.cmd_list}[a.action](a) or 0
 
 
-def _smoke_visual(a):
-    import smoke_visual_alignment
-    return smoke_visual_alignment.run()
-
-
 def _test(a):
     """Run every self-test script, PASS/FAIL per file, non-zero on any
     failure. Tests stay standalone scripts (each sandboxes its own
@@ -125,7 +120,7 @@ _HELP = {
     "fetch-model": "download the configured MLX model repos (one-time, "
                    "inbound weights only)",
     "ingest": "all | parse | documents | attachments | thread; "
-              "--embed text|images|all",
+              "--embed text|all",
     "transactions": "parse | link | report — bank-statement tables, "
                     "transfer matching, integrity report",
     "query": "one-off retrieval query (auto-uses the daemon when live)",
@@ -136,7 +131,6 @@ _HELP = {
                   "cache",
     "verify": "integrity check (run before privilege logs / exports)",
     "accuracy": "run | compare | list — golden-set search accuracy",
-    "smoke-visual": "visual page-image channel alignment smoke test",
     "test": "run every scripts/test_*.py self-test",
 }
 
@@ -144,7 +138,7 @@ _GROUPS = (("setup", ("db", "fetch-model")),
            ("pipeline", ("ingest", "transactions")),
            ("retrieval", ("query", "daemon")),
            ("maintenance", ("wipe", "blob-index", "verify")),
-           ("quality", ("accuracy", "smoke-visual", "test")))
+           ("quality", ("accuracy", "test")))
 
 
 def _epilog() -> str:
@@ -181,10 +175,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("stage", nargs="?", default=None,
                    help="all | parse | documents | attachments | thread | "
                         "transactions (default: all when no --embed)")
-    p.add_argument("--embed", choices=("text", "images", "all"),
+    p.add_argument("--embed", choices=("text", "all"),
                    default=None, metavar="MODE",
-                   help="embedding channel: text | images | all "
-                        "(all respects ingestion.embed_text / embed_images)")
+                   help="embedding mode: text | all "
+                        "(all respects ingestion.embed_text)")
     p.set_defaults(func=_ingest)
 
     p = sub.add_parser("transactions", help=_HELP["transactions"])
@@ -231,10 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
     w = wsub.add_parser("index",
                         help="delete a cached vector index (manual, explicit)")
     w.add_argument("--text", metavar="SLUG", help="delete this text index")
-    w.add_argument("--image", metavar="SLUG", help="delete this image index")
     w.add_argument("--all-inactive", action="store_true",
                    help="delete every cached index except the currently "
-                        "active pair")
+                        "active text index")
     w.add_argument("--yes", action="store_true",
                    help="skip confirmation prompt")
     w.add_argument("--force", action="store_true",
@@ -280,9 +273,6 @@ def build_parser() -> argparse.ArgumentParser:
     a = asub.add_parser("list", help="list past runs")
     a.add_argument("--golden", help="filter to runs of this golden set")
     p.set_defaults(func=_accuracy)
-
-    p = sub.add_parser("smoke-visual", help=_HELP["smoke-visual"])
-    p.set_defaults(func=_smoke_visual)
 
     p = sub.add_parser("test", help=_HELP["test"])
     p.set_defaults(func=_test)

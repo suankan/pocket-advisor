@@ -28,7 +28,6 @@ the user schedules them.
 | Family-law (live) | Search accuracy test, mounts, privileged-in-by-default | — (served) |
 | Duplex / multi-matter | Finer purpose rules *inside* a collection | extend R-05 (no open ID yet) |
 | Personal finance / ATO | Real statement parsers, reconciliation | **R-04c** (core shipped) |
-| Visual quality / search accuracy test | Golden visual questions, RRF weight tuning | **R-03b** |
 | Productisation | Clean-room package | **R-07** |
 | Stack unification | TypeScript throughout | **R-08** (parked) |
 
@@ -38,7 +37,6 @@ the user schedules them.
 
 | ID | Item | Theme | Trigger to start | Spec / notes |
 |---|---|---|---|---|
-| **R-03b** | Visual golden search accuracy test + measure `IMG_RRF_WEIGHT` / `ocr_proxy` vs skip | Visual | After live `ingest.py --embed images` produces a usable index | [visual-retrieval.md](specs/visual-retrieval.md) |
 | **R-04c** | Remaining statement parsers for marked accounts: CBA, Revolut, AMP, NAB, Qantas Money card (R-04b core shipped 2026-07-15) | Structured numbers | The 16 UNPARSED files in `transactions.py parse` output, or a case question needs those accounts | Add to [statement_parsers.py](../scripts/statement_parsers.py) registry per [structured-transactions-v2.md](specs/structured-transactions-v2.md); card parser = first sign-inversion case |
 | **R-07** | Productisation — clean-room repo, packaging, stranger docs, licensing, UPL | Productisation | Explicit productisation decision only | never as case side-effect |
 | **R-08** | TypeScript engine migration (**PARKED**) | Hygiene / parked | User explicitly resumes — not opportunistic | DESIGN tenet 13 |
@@ -55,8 +53,8 @@ the user schedules them.
 
 ### Shipped (do not re-open here — see CHANGELOG)
 
-R-01 Schema B · R-02 Schema C · R-03 visual pipeline (opt-in) · R-04
-heuristic transactions · R-05 purpose mounts · privileged-in-by-default
+R-01 Schema B · R-02 Schema C · R-04 heuristic transactions · R-05
+purpose mounts · privileged-in-by-default
 (+ search accuracy test) · collections v2 / pathless / Jina MLX / warm
 search-accuracy-test / daemon · R-15 multi-model vector cache · docs
 lifecycle (DESIGN/ROADMAP/CHANGELOG).

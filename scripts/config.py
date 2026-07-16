@@ -40,8 +40,8 @@ REVIEW_QUEUE_CSV = LOGS_DIR / "review_queue.csv"
 
 # Root for per-model vector caches (docs/specs/multi-model-vector-cache.md).
 # Actual index paths are resolved per fingerprint by
-# embedding_backends.index_paths() / image_embedding_backends.index_paths()
-# — never a single fixed vectors.npy; switching models never deletes
+# embedding_backends.index_paths() — never a single fixed vectors.npy;
+# switching models never deletes
 # another model's cache.
 VECTORS_DIR = OUTPUT_DIR / "vectors"
 
@@ -87,12 +87,9 @@ def extracted_documents_dir(source_id: str | None = None) -> Path:
 MODELS_DIR = PROJECT_ROOT / "models"
 
 # ---- MLX-only model stack (no GGUF / llama.cpp) --------------------------
-# Three HuggingFace MLX repos + visual leg toggle. INDEX-INVALIDATING:
-# changing text or omni repo (or the dim that follows) wipes + re-embeds
-# on next ingest. Matched pairs only: text-nano ↔ omni-nano (768-d) or
-# text-small ↔ omni-small (1024-d). Defaults: nano (faster on Mac).
+# Text embedding and reranking MLX repos. Changing the text model resolves
+# to another per-model vector cache. Default: nano (faster on Mac).
 MLX_MODEL_EMBED_TEXT = "jinaai/jina-embeddings-v5-text-nano-mlx"
-MLX_MODEL_EMBED_OMNI = "jinaai/jina-embeddings-v5-omni-nano-mlx"
 MLX_MODEL_RERANK = "jinaai/jina-reranker-v3-mlx"
 # Embedding width — set from the text model snapshot at load time; nano
 # defaults to 768, small to 1024. Kept here so offline code paths that
@@ -191,19 +188,8 @@ SEARCH_ACCURACY_TEST_RESULTS_DIR = SEARCH_ACCURACY_TEST_DIR / "results"
 # Dotted yaml path -> (module attribute name, type converter). Anything
 # in config.yaml not in this map aborts loudly at import time — a typo
 # in a safety-semantics key must never silently do nothing.
-# Which embedding channels run under `ingest.py --embed all` (and
-# whether the query path fuses the page-image RRF leg). FREE knobs.
-EMBED_TEXT = True          # default on — dense text index
-EMBED_IMAGES = True        # page-image / omni channel (was models.img_leg_enabled)
-IMG_EMBED_DIM = EMBED_DIM  # always equals text dim (aligned spaces)
-IMG_PAGE_DPI = 150
-# Long-side cap (px) before omni embed. Full A4@150dpi blows the
-# processor token budget; 1024 keeps layout signal.
-IMG_MAX_SIDE = 1024
-IMG_VEC_CANDIDATES = 20
-IMG_RRF_WEIGHT = 1.0
-IMG_RERANK_MODE = "skip"  # skip | ocr_proxy
-PAGE_IMAGES_DIR = OUTPUT_DIR / "page_images"
+# Whether the default full ingest builds the dense text index.
+EMBED_TEXT = True
 
 YAML_KEYS = {
     # Preferred: only the parent directory for all workspaces.
@@ -226,20 +212,9 @@ YAML_KEYS = {
     "ingestion.thread_fallback_window_days": ("THREAD_FALLBACK_WINDOW_DAYS", int),
     "ingestion.doc_date_header_window_chars": ("DOC_DATE_HEADER_WINDOW_CHARS", int),
     "ingestion.embed_text": ("EMBED_TEXT", bool),
-    "ingestion.embed_images": ("EMBED_IMAGES", bool),
     # MLX model stack (repos only under models:)
     "models.mlx_model_embed_text": ("MLX_MODEL_EMBED_TEXT", str),
-    "models.mlx_model_embed_omni": ("MLX_MODEL_EMBED_OMNI", str),
-    # Accept user's "onmi" typo as alias
-    "models.mlx_model_embed_onmi": ("MLX_MODEL_EMBED_OMNI", str),
     "models.mlx_model_rerank": ("MLX_MODEL_RERANK", str),
-    # Deprecated alias — prefer ingestion.embed_images
-    "models.img_leg_enabled": ("EMBED_IMAGES", bool),
-    "models.img_max_side": ("IMG_MAX_SIDE", int),
-    "ingestion.ocr.img_page_dpi": ("IMG_PAGE_DPI", int),
-    "query.img_vec_candidates": ("IMG_VEC_CANDIDATES", int),
-    "query.img_rrf_weight": ("IMG_RRF_WEIGHT", float),
-    "query.img_rerank_mode": ("IMG_RERANK_MODE", str),
 }
 
 
@@ -274,8 +249,6 @@ def load_yaml_overlay(path):
             "\n".join(f"  - {k}" for k in unknown) +
             f"\nValid keys: see {path.parent / 'config.yaml'}")
     globals().update(applied)
-    # Image dim always tracks text dim (shared vector space).
-    globals()["IMG_EMBED_DIM"] = globals()["EMBED_DIM"]
     _apply_workspace_paths()
 
 
@@ -337,7 +310,6 @@ def _apply_workspace_paths():
     globals()["LOGS_DIR"] = _out / "logs"
     globals()["REVIEW_QUEUE_CSV"] = _out / "logs" / "review_queue.csv"
     globals()["VECTORS_DIR"] = _out / "vectors"
-    globals()["PAGE_IMAGES_DIR"] = _out / "page_images"
     globals()["TEXT_DOCUMENTS_DIR"] = _out / "text" / "documents"
     globals()["DOCUMENTS_EXTRACTED_DIR"] = _out / "documents_extracted"
     globals()["QUERY_DAEMON_SOCKET"] = _out / "query_daemon.sock"

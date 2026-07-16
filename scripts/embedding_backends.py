@@ -20,7 +20,6 @@ def current_fingerprint():
     try:
         dim = mlx_model_loader.embed_dim_for_repo(repo)
         config.EMBED_DIM = dim
-        config.IMG_EMBED_DIM = dim
     except Exception:
         dim = config.EMBED_DIM
     return {

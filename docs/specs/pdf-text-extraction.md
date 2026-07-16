@@ -11,8 +11,7 @@ Every canonical PDF or image text extraction uses exactly one logical sequence:
    positioned text layer for text found in raster images.
 2. Poppler `pdftotext -layout` over that temporary OCR derivative.
 
-This is the only PDF or image text sequence, including per-page PDF text
-associated with the visual retrieval channel.
+This is the only PDF or image text extraction sequence.
 
 The OCR derivative is regenerable working data and is deleted after text
 extraction. Evidence originals are never modified.

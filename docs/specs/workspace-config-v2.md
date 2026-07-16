@@ -9,8 +9,8 @@ query pre-filter by mounted `source_id`s; evidence under
 Live instance (gitignored): `workspaces/workspace-config.yaml`  
 Committed schema sketch: `docs/specs/workspace-config-v2.example.yaml`
 
-Related: pathless identity (`source-blob-index.md`), visual channel
-(`visual-retrieval.md`), user-data root (`workspace-user-data.md`),
+Related: pathless identity (`source-blob-index.md`), user-data root
+(`workspace-user-data.md`),
 **DB spine migration** (`schema-items-membership.md` — items +
 membership; Phase A unblocks collection identity for this v2 work).
 
@@ -44,7 +44,7 @@ copy-by-folder. We need:
 | 8 | **Per-collection engine cache:** `.state/cache/<collection_id>/{extracted,text}/` — engine-only, not agent free-browse. |
 | 9 | **Agent-readable semi-inferred state only under** `workspaces/<workspace_id>/`. |
 | 10 | **No `kind:`** on collections — ingest dispatches **per file** by extension/MIME. |
-| 11 | **No `retrieval:`** on collections — channels from internal supported-types map (+ optional **platform** feature flags). |
+| 11 | **No `retrieval:`** on collections — searchable text is derived from supported file types. |
 | 12 | **Custody identity:** `(collection_id, sha256)` — drop `workspace_id` from blob uniqueness. |
 | 13 | **Query:** pre-filter to `collection_id ∈ active workspace mounts` (+ privilege). |
 | 14 | **Citations:** `message_id` / filename + `collection_id` (not portable integer ids). |
@@ -103,7 +103,7 @@ workspaces:
 | Not in v2 yaml | Where it lives |
 |---|---|
 | `kind: email_eml \| documents` | Engine: per-file dispatch |
-| `retrieval: { text, page_images }` | Engine type map; optional platform `features.page_images` |
+| `retrieval:` | Text retrieval is an engine concern, not a collection property |
 | Embed model per workspace/collection | Global platform embed stack only |
 | Per-workspace full DB | Deferred / rejected for shared content |
 
@@ -177,7 +177,7 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 | Agent reading all text under shared cache | Cache engine-only; no free browse; gated open |
 | Writable junk inside evidence | No `.cache` under `corpora/`; cache under `.state/` |
 | `kind` / `retrieval` misleading on mixed stores | Removed; per-file + internal type map |
-| Embed model per workspace | Forbidden; one text stack; visual channel separate (additive) |
+| Embed model per workspace | Forbidden; one global text embedding stack |
 | Privilege | Collection flag + `privileged/` path segment fail-safe |
 | Output vs state naming | **state** going forward |
 
@@ -186,7 +186,6 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 ## Explicit non-goals (this design)
 
 - Implementing v2 loader / migrate live v1 (follow-on work)  
-- Visual page_images pipeline (see `visual-retrieval.md`)  
 - Phase 3 structured bank tables  
 - Per-workspace projected `view/text/` trees (optional later hardening)  
 - Clean-room productisation  
@@ -219,4 +218,3 @@ Mount pre-filter mirrors existing privilege pre-filter (candidate pool, not post
 - [x] Concerns table + non-goals recorded  
 - [x] Core layout + loader + mount filter + per-collection cache implemented  
   (Phase B items rename still separate: `schema-items-membership.md`)
-

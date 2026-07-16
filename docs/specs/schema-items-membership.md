@@ -9,7 +9,6 @@ Related:
   `documents` / `chunks` / `attachments`
 - Collections + mounts: `docs/specs/workspace-config-v2.md`
 - Pathless blobs: `docs/specs/source-blob-index.md`
-- Visual add-on: `docs/specs/visual-retrieval.md` (hangs off parent item)
 - Structured finance (future): transaction tables FK → item (Phase 3)
 
 ---
@@ -25,10 +24,10 @@ shape fight clarity:
 | Split membership | `email_files` vs `documents` with overlapping identity ideas |
 | `source_id` + `workspace_id` on membership | v2 wants `collection_id` only on custody key |
 | Document global-sha skip | Second collection does not get a membership → breaks dual-collection / dual-mount edge cases |
-| No clear extension point | New types and Phase 3/visual need a stable parent id |
+| No clear extension point | New types and structured tables need a stable parent id |
 
 We need a **documented target spine** and a **phased migration** so
-collections v2, finance tables, and visual pages attach cleanly without
+collections v2 and finance tables attach cleanly without
 a NoSQL rewrite.
 
 ---
@@ -43,7 +42,7 @@ a NoSQL rewrite.
 | 4 | **Collection tracking** = scalar `collection_id` on **membership** rows (+ `sha256`). |
 | 5 | **Type-specific fields** = side table and/or JSON `attrs` — graduate hot filter fields to real columns later. |
 | 6 | **Chunks / vectors** hang off parent **item id** (today: `email_id`). |
-| 7 | **Add-on use cases** (transactions, page_images, agent gated open) are **separate features** that FK to item id; not part of this migration’s must-ship scope. |
+| 7 | **Add-on use cases** (transactions, agent gated open) are **separate features** that FK to item id; not part of this migration’s must-ship scope. |
 | 8 | Prefer **phased rename/evolve** of current tables over a big-bang greenfield schema when unblocking v2 mounts. |
 
 ---
@@ -130,7 +129,6 @@ Live columns for reference (do not treat as target):
 - Switching primary store to NoSQL / Mongo  
 - One wide `documents` table with every type’s columns + list of collection ids  
 - Implementing Phase 3 transaction extraction  
-- Implementing visual `page_images` pipeline (only: stable parent id for it)  
 - Per-workspace projected text views  
 - Full rewrite of query ranking math  
 
@@ -141,7 +139,6 @@ Live columns for reference (do not treat as target):
 | Use case | Attachment to spine |
 |---|---|
 | Sum transfers / bank analytics | `transactions.item_id` → items; filter via membership mounts |
-| Page-image retrieval | `page_images.item_id` → items; cache under `.state/cache/<collection_id>/` |
 | Agent isolation | Mount filter on query + AGENTS rules / gated open by item_id |
 | New document kinds | New `item_kind` + attrs/side table + ingest type-map entry |
 

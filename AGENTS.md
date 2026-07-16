@@ -174,14 +174,12 @@ ROADMAP (future IDs)  ──ship──►  CHANGELOG (unbounded)  ──condense
 ```bash
 # ingest new emails AND standalone documents (idempotent — drop new
 # files under collection roots in workspace-config.yaml). Stage `all`
-# also runs --embed all gated by ingestion.embed_text / embed_images.
+# also runs --embed all gated by ingestion.embed_text.
 ./pocket-advisor.py ingest all
 
 # re-embed only (INDEX-INVALIDATING model changes cache per-model, never wipe)
 ./pocket-advisor.py ingest --embed text      # text vectors
-./pocket-advisor.py ingest --embed images    # page-image / omni
-./pocket-advisor.py ingest --embed all       # text iff embed_text;
-                                             # images iff embed_images
+./pocket-advisor.py ingest --embed all       # text iff embed_text
 
 # bank statements (accounts marked in workspace-config.yaml)
 ./pocket-advisor.py transactions parse|link|report

@@ -113,23 +113,6 @@ CREATE TABLE IF NOT EXISTS chunks (
     translit_shadow  TEXT
 );
 
-CREATE TABLE IF NOT EXISTS page_images (
-    id                    INTEGER PRIMARY KEY,
-    item_id               INTEGER NOT NULL REFERENCES items(id),
-    source_kind           TEXT NOT NULL,
-    attachment_id         INTEGER REFERENCES attachments(id),
-    page_number           INTEGER NOT NULL,
-    image_path            TEXT NOT NULL,
-    sha256                TEXT NOT NULL,
-    page_text_method      TEXT,
-    ocr_text              TEXT,
-    ocr_confidence        REAL,
-    ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
-    rasterized_at         TEXT NOT NULL,
-    img_embedded_at       TEXT,
-    UNIQUE (source_kind, attachment_id, item_id, page_number)
-);
-
 -- R-04b structured transactions (docs/specs/structured-transactions-v2.md).
 -- Money is signed integer minor units everywhere; negative = egress.
 
@@ -254,8 +237,6 @@ CREATE INDEX IF NOT EXISTS idx_memberships_item ON item_memberships(item_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_collection ON item_memberships(collection_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments(item_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);
-CREATE INDEX IF NOT EXISTS idx_page_images_item ON page_images(item_id);
-
 CREATE TABLE IF NOT EXISTS source_blob_index (
     workspace_id          TEXT,
     source_id             TEXT NOT NULL,
@@ -584,7 +565,6 @@ def _migrate_dotstate_paths(conn):
         ("items", ("body_text_path", "body_full_text_path")),
         ("item_file_meta", ("extracted_copy_path", "extracted_text_path")),
         ("attachments", ("extracted_copy_path", "extracted_text_path")),
-        ("page_images", ("image_path",)),
     ):
         if not _table_exists(conn, table):
             continue
@@ -882,6 +862,8 @@ def migrate(conn):
     _migrate_transactions_v2(conn)
     _migrate_statements_period_key(conn)
     conn.executescript(BASE_SCHEMA)
+    # The retired image-vector channel contained only derived rows.
+    conn.execute("DROP TABLE IF EXISTS page_images")
     ensure_column(conn, "chunks", "translit_shadow", "translit_shadow TEXT")
     ensure_column(conn, "item_memberships", "workspace_id", "workspace_id TEXT")
     ensure_column(conn, "item_memberships", "collection_id", "collection_id TEXT")

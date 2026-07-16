@@ -157,8 +157,7 @@ def check_fingerprint(conn):
 def embed_pending(conn, backend, vecs_dir):
     """Pending = chunk ids with no <vecs_dir>/<id>.npy file yet — the
     per-chunk cache is the durable source of truth, so a crash mid-run
-    loses at most the current chunk (matches embed_images.py's
-    per-image commit discipline)."""
+    loses at most the current chunk."""
     vecs_dir.mkdir(parents=True, exist_ok=True)
     have = {int(p.stem) for p in vecs_dir.glob("*.npy")}
     rows = conn.execute("SELECT id, text FROM chunks").fetchall()

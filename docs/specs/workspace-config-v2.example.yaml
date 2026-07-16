@@ -38,8 +38,8 @@
 # - NO kind:    ingest dispatches per FILE by extension/MIME
 #               (.eml → email pipeline; pdf/docx/… → document pipeline).
 #               A collection may mix types.
-# - NO retrieval: channels from engine type map + platform flags
-#               (e.g. ingestion.embed_images).
+# - NO retrieval: searchable text is derived by the engine from supported
+#                 file types.
 #
 # Path rules
 # ----------

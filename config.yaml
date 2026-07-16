@@ -5,10 +5,11 @@
 #
 # Three-class knob discipline (docs/DESIGN.md):
 #   - query / ingestion.ocr / ingestion.thread_* / ingestion.doc_date_* /
-#     ingestion.embed_text|embed_images: FREE, change anytime.
-#   - ingestion.chunking / models.mlx_model_embed_*: INDEX-INVALIDATING.
-#     Model changes wipe + re-embed on next `ingest.py --embed text`
-#     (or --embed images / --embed all). Chunking only WARNs — no
+#     ingestion.embed_text: FREE, change anytime.
+#   - ingestion.chunking / models.mlx_model_embed_text: INDEX-INVALIDATING.
+#     Model changes select a separate cache on the next
+#     `pocket-advisor.py ingest --embed text` (or `--embed all`).
+#     Chunking only WARNs — no
 #     automated re-chunk pipeline (docs/specs/config-yaml.md).
 #   - Privilege is NOT configured here: collections[].privileged in
 #     workspaces/workspace-config.yaml and/or a path segment literally
@@ -85,23 +86,14 @@ ingestion:
   # Header/letterhead window (chars) for standalone document dates
   # before full-text / filename / mtime fallback.
   doc_date_header_window_chars: 6000
-  # Channels run by `ingest.py --embed all` and by stage `all`.
-  # Explicit `--embed text` / `--embed images` force that channel
-  # regardless of these flags. FREE knobs.
+  # Whether stage `all` builds the text vector index. An explicit
+  # `--embed text` forces the channel regardless of this flag.
   embed_text: true
-  # Page-image third RRF leg (omni MLX). Also gates query-time image
-  # fusion and omni model fetch. Then: ingest.py --embed images
-  # (or --embed all).
-  embed_images: true
 
 models:
-  # Apple-Silicon MLX only — no GGUF / llama.cpp. Matched pairs only:
-  #   text-nano-mlx  ↔ omni-nano-mlx   (768-d) — omni-nano has no
-  #     working image support yet (Jina's own utils.py wrapper doesn't
-  #     expose encode_image(); text-only for now, docs/LEARNINGS.md)
-  #   text-small-mlx ↔ omni-small-mlx  (1024-d)
-  # INDEX-INVALIDATING: changing text/omni repo resolves to a different
-  # per-model cache on next `ingest.py --embed text` / `--embed images`
+  # Apple-Silicon MLX only — no GGUF / llama.cpp.
+  # INDEX-INVALIDATING: changing the text repo resolves to a different
+  # per-model cache on next `ingest --embed text`
   # — never deletes another model's cache (docs/specs/multi-model-vector-cache.md).
   # Reranker is not index-invalidating.
   # Requires: pip install -r scripts/requirements.txt (includes MLX).
@@ -109,8 +101,6 @@ models:
   #
   # Nano (smaller/faster) — code defaults in scripts/config.py:
   # mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
-  # mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx
   # Small (higher quality, larger):
   mlx_model_embed_text: jinaai/jina-embeddings-v5-text-small-mlx
-  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-small-mlx
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx

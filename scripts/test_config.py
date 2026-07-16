@@ -75,34 +75,43 @@ def test_is_privileged_path():
 
 
 def test_model_repo_overlay():
-    print("models.mlx_* + ingestion.embed_* overlay:")
+    print("text/rerank models + text embedding overlay:")
     before = (config.MLX_MODEL_EMBED_TEXT,
-              config.MLX_MODEL_EMBED_OMNI,
               config.MLX_MODEL_RERANK,
-              config.EMBED_TEXT,
-              config.EMBED_IMAGES)
+              config.EMBED_TEXT)
     p = write_yaml(
         "models:\n"
         "  mlx_model_embed_text: jinaai/text-test\n"
-        "  mlx_model_embed_omni: jinaai/omni-test\n"
         "  mlx_model_rerank: jinaai/rerank-test\n"
         "ingestion:\n"
-        "  embed_text: false\n"
-        "  embed_images: false\n")
+        "  embed_text: false\n")
     try:
         config.load_yaml_overlay(p)
         check("text repo", config.MLX_MODEL_EMBED_TEXT == "jinaai/text-test")
-        check("omni repo", config.MLX_MODEL_EMBED_OMNI == "jinaai/omni-test")
         check("rerank repo", config.MLX_MODEL_RERANK == "jinaai/rerank-test")
         check("embed_text", config.EMBED_TEXT is False)
-        check("embed_images", config.EMBED_IMAGES is False)
     finally:
         (config.MLX_MODEL_EMBED_TEXT,
-         config.MLX_MODEL_EMBED_OMNI,
          config.MLX_MODEL_RERANK,
-         config.EMBED_TEXT,
-         config.EMBED_IMAGES) = before
+         config.EMBED_TEXT) = before
         p.unlink()
+
+
+def test_retired_visual_keys_rejected():
+    print("retired image-vector keys rejected:")
+    for yaml_text, expected in (
+        ("ingestion:\n  embed_images: true\n", "ingestion.embed_images"),
+        ("models:\n  mlx_model_embed_omni: jinaai/old\n",
+         "models.mlx_model_embed_omni"),
+    ):
+        p = write_yaml(yaml_text)
+        try:
+            config.load_yaml_overlay(p)
+            check(f"rejects {expected}", False)
+        except SystemExit as e:
+            check(f"rejects {expected}", expected in str(e))
+        finally:
+            p.unlink()
 
 
 def test_workspace_dir_derives_search_accuracy_test_paths():
@@ -158,6 +167,7 @@ def main():
     test_platform_privilege_document_folders_rejected()
     test_is_privileged_path()
     test_model_repo_overlay()
+    test_retired_visual_keys_rejected()
     test_workspace_dir_derives_search_accuracy_test_paths()
     test_missing_file_is_a_noop()
 

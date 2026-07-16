@@ -19,9 +19,19 @@ map; open work is `R-nn`.
 
 ## 2026-07-17
 
+**Full-page image-vector retrieval retired** · `R-03` RETIRED ·
+The separate full-page embedding channel was removed end-to-end: model
+configuration and loading, raster/vector indexing, query fusion, CLI
+modes, schema, tests, dependencies, and its open accuracy work. The
+measured golden run showed no benefit (text retrieval MRR 0.512927;
+text plus page images 0.511078, with identical hit@1/5/15), while the
+extra local model occupied about 5.4 GB and added an un-reranked,
+equal-weight retrieval leg. PDFs and ordinary images remain searchable
+through the canonical OCRmyPDF → `pdftotext -layout` text pipeline.
+
 **Layout-preserving OCRmyPDF extraction for PDFs and images** · SHIPPED ·
-All PDF and image text now follows one sequence for attachments,
-standalone documents, and visual-page text: OCRmyPDF `--redo-ocr` creates
+All PDF and image text now follows one sequence for attachments and
+standalone documents: OCRmyPDF `--redo-ocr` creates
 a temporary derived PDF, then Poppler `pdftotext -layout` writes positioned
 text. The derivative is deleted, evidence is untouched, and command
 failures become explicit ingestion errors. The former direct image OCR
@@ -48,7 +58,7 @@ Live: 15/15 marked Westpac statements balance_ok; 16 UNPARSED files =
 the R-04c parser queue (CBA, Revolut, AMP, NAB, Qantas Money).
 New single-entrypoint CLI `./pocket-advisor.py` (db, fetch-model,
 ingest, transactions, query, daemon, wipe, blob-index, verify,
-accuracy, smoke-visual, test) — owns ALL argument parsing (the only
+accuracy, test) — owns ALL argument parsing (the only
 argparse in the codebase; self-executes under the repo venv);
 everything in scripts/ is now a pure module (no argparse, no
 `__main__`), tests excepted. RUNBOOK commands rewritten to it.
@@ -57,7 +67,7 @@ new guarded `wipe state`: full wipe of `workspaces/.state/` (stops
 daemon, lists sizes, confirms) for from-scratch re-ingests.
 Interactive progress (`scripts/progress.py`, zero-dep): the five long
 pipeline loops (parse emails, ingest documents, extract attachments,
-embed text chunks, rasterize/embed page images) show a live
+embed text chunks) show a live
 count/%/rate/ETA/current-item line on a TTY, throttled plain lines
 when piped.
 Spec: [structured-transactions-v2.md](specs/structured-transactions-v2.md).
@@ -101,20 +111,12 @@ zero warning noise, for the common already-downloaded case.
 `snapshot_download()` is only reached for a genuine fetch. See
 docs/LEARNINGS.md.
 
-**Also discovered while diagnosing an unrelated `--embed images`
-failure under nano text+omni:** `jina-embeddings-v5-omni-nano-mlx` has
-no working image-embedding path yet — confirmed via live test against
-Jina's own documented `load_model()` usage and by reading their
-`utils.py` wrapper source; not a packaging bug, a genuinely unfinished
-upstream feature. `omni-small-mlx` is unaffected. See docs/LEARNINGS.md.
-
 ### R-15 Multi-model vector cache · SHIPPED
 
-Switching `models.mlx_model_embed_text` / `mlx_model_embed_omni` used
-to wipe the index and force a full re-embed (worse for images: the
-per-image cache was silently overwritten in place, not deleted).
+Switching `models.mlx_model_embed_text` used to wipe the index and
+force a full re-embed.
 Now each (model, dim) fingerprint gets its own cache directory under
-`.state/vectors/{text,image}/<slug>/`; switching models never deletes
+`.state/vectors/text/<slug>/`; switching models never deletes
 another model's cache, and switching back reuses it. Verified live:
 switching text small→nano embedded fresh (161s) without touching the
 small-model cache; switching back was 1.2s with bit-identical
@@ -122,15 +124,8 @@ retrieval quality (`search_accuracy_test.py compare`: zero rank
 deltas across the full golden set). New `scripts/wipe_index.py` is the
 only thing that deletes a cache, manual and explicit only; refuses the
 active index without `--force`. One-time migration folded the
-pre-existing flat index (9087 text + 2116 image vectors) in place with
-zero re-embedding. Image-side model switching not verified live in
-this environment (omni-nano not downloaded, no network) — same code
-path as the verified text side. **Same-day follow-up:** unified the
-text/image layout — image's per-id cache moved from a separate
-`page_images/_vecs/<slug>/` root into `vectors/image/<slug>/vecs/`,
-matching text exactly (`vectors.npy`/`vectors_ids.npy`/`meta.json`/
-`vecs/` in both); moved 2116 vectors with zero re-embedding, sampled
-checksums verified identical before/after. Spec:
+pre-existing flat text index (9087 vectors) in place with zero
+re-embedding. Spec:
 [multi-model-vector-cache.md](specs/multi-model-vector-cache.md).
 
 ### `eval.py` renamed to `search_accuracy_test.py` · SHIPPED
@@ -152,8 +147,7 @@ Regenerable engine tree is a dot-dir (less bulk-browse surface). Code
 auto-renames legacy `workspaces/state` on load when present.
 `config.STATE_DIRNAME = ".state"`. Directory rename alone left stored
 `PROJECT_ROOT`-relative paths pointing at the old prefix (`items.
-body_text_path`, `item_file_meta`/`attachments` extract cols,
-`page_images.image_path`), breaking embed on first post-rename
+body_text_path`, `item_file_meta`/`attachments` extract cols), breaking embed on first post-rename
 `ingest.py all`; `db.py::_migrate_dotstate_paths` rewrites the old
 prefix in `migrate()`, idempotent, runs on every entrypoint.
 
@@ -166,34 +160,27 @@ remains under gitignored `workspaces/`.
 ### Platform config + ingest embed CLI cleanup · SHIPPED
 
 - **Models:** MLX-only via `mlx_model_loader.py`; knobs
-  `models.mlx_model_embed_text` / `mlx_model_embed_omni` /
-  `mlx_model_rerank`. GGUF / multi-backend zoo removed.
-- **Embed channels:** `ingestion.embed_text` / `ingestion.embed_images`
-  (replaces `models.img_leg_enabled`). Query image RRF + omni fetch
-  gated by `embed_images`.
-- **CLI:** `ingest.py --embed text|images|all` (`--embed all` respects
-  the two knobs; explicit named modes force the channel). Stage `all`
-  runs gated embed-all. Legacy bare `text`/`images` stages deprecated.
+  `models.mlx_model_embed_text` / `mlx_model_rerank`. GGUF /
+  multi-backend zoo removed.
+- **Embed channel:** `ingestion.embed_text`.
+- **CLI:** `ingest.py --embed text|all` (`--embed all` respects
+  the knob; explicit text mode forces the channel). Stage `all`
+  runs gated embed-all. The legacy bare `text` stage remains deprecated.
 - **Privilege:** platform `privilege.document_folders` **removed** —
   collections + `privileged` only in workspace-config (+ path
   `privileged/`). Putting `privilege.*` in platform config aborts.
-- Live config may use text/omni **small** (1024-d); code defaults remain
-  nano. Matched pairs only. Re-embed after model-repo change:
-  `ingest.py --embed text` / `--embed images` or `--embed all`.
-
-### Visual pipeline uses omni MLX (not torch) · SHIPPED
-
-Page-image embed path loads `mlx_model_embed_omni` (multi-task or
-retrieval MLX ports). Smoke: `scripts/smoke_visual_alignment.py`.
+- Live config may use text **small** (1024-d); code defaults remain
+  nano. Re-embed after a model-repo change with
+  `ingest.py --embed text` or `--embed all`.
 
 ## 2026-07-13
 
 ### MLX-only model stack (no GGUF) · SHIPPED
 
-Unified loader `scripts/mlx_model_loader.py` for text embed, omni
-page embed, and rerank. Initial reduction of model knobs; GGUF /
+Unified loader `scripts/mlx_model_loader.py` for text embed and
+rerank. Initial reduction of model knobs; GGUF /
 llama.cpp / bge-m3 multi-backend zoo removed. See 2026-07-14 for
-current key names (`mlx_model_embed_*`, `ingestion.embed_*`).
+current text embedding and reranking key names.
 
 ### Privileged retrieval default ON · SHIPPED
 
@@ -202,16 +189,6 @@ opposing-counsel forwards/attachments; exclude is opt-in
 (`--exclude-privileged`). Results still flag privilege. Search accuracy
 test defaults to include-privileged too (opt out per golden entry). Commits: `77a827b`,
 `5ca43ff`.
-
-### R-03 visual pipeline (opt-in) · SHIPPED
-
-Alignment smoke **PASS**. Full path: `embed_images.py` (pdftoppm + omni
-embed + `img_vectors.npy`), query third RRF leg with `("chunk"|"img", id)`
-keys, `ingest.py --embed images` (gated by `ingestion.embed_images`).
-Full-page embed needs long-side downscale (`IMG_MAX_SIDE`). Follow-on:
-**R-03b** visual search accuracy test / RRF weights. Spec:
-[visual-retrieval.md](specs/visual-retrieval.md). (Omni path later
-moved to MLX — see 2026-07-14.)
 
 ### R-01 Schema B — items + memberships · SHIPPED
 
@@ -284,7 +261,7 @@ not shipped alone); `local_files_only` offline fix so queries do not
 re-hit HuggingFace. Mean query wall ~18s → ~12s vs prior llama_cpp stack
 on live corpus. Also added AGENTS hard rule 8 (persist knowledge
 in-repo, not only tool-private memory) after tool-only plans were found
-for this migration and for visual retrieval.
+for this migration.
 
 Spec: [jina-mlx-migration.md](specs/jina-mlx-migration.md).
 
@@ -351,11 +328,6 @@ Spec: [embedding-backends.md](specs/embedding-backends.md).
 Three-layer vision, interim-decision discipline, AI/tool-agnostic rule,
 plan-expensive/execute-cheap, measured-not-vibed, no-autocommit.
 Active interim rows live in DESIGN; ship notes stay here.
-
-### Visual retrieval designed (not built) · recorded only
-
-Spec written: [visual-retrieval.md](specs/visual-retrieval.md). Open
-work is ROADMAP **R-03** (not a ship).
 
 ---
 

@@ -18,7 +18,7 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   handle every script in the corpus. English-only embedding models
   (e.g. nomic-embed-text v1) silently degrade semantic search on
   non-English content — that's why every embedder used here
-  (Jina v5 text/omni MLX — `models.mlx_model_embed_*`)
+  (Jina v5 text MLX — `models.mlx_model_embed_text`)
   was chosen for verified multilingual/cross-lingual retrieval.
   Practical implication for querying: an English question already
   retrieves non-English content correctly — never translate the
@@ -288,12 +288,10 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   are Jina small but different artifacts, so their vectors are never
   mixed (R-15, docs/specs/multi-model-vector-cache.md — this used to
   mean a destructive wipe + full re-embed; now it's just a different
-  cache dir, and the old one is retained). Matched text/omni size
-  pairs only (nano 768 ↔ nano; small 1024 ↔ small).
-- **`ingest.py --embed all` respects `ingestion.embed_text` /
-  `embed_images`.** Explicit `--embed text` / `--embed images` force
-  that channel. Stage `all` runs gated embed-all after parse/thread.
-  Image query leg also requires `embed_images` + a built image index.
+  cache dir, and the old one is retained).
+- **`ingest.py --embed all` respects `ingestion.embed_text`.** Explicit
+  `--embed text` forces the channel. Stage `all` runs the gated text
+  embed after parse/thread.
 - **`mlx_model_loader.snapshot_dir` checks disk directly (`config.json`
   present) before ever calling `huggingface_hub.snapshot_download`** —
   it used to always call `snapshot_download(local_files_only=True)`
@@ -310,21 +308,13 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   resume `*.incomplete` partials when re-run with network; we still do
   **not** implement our own multi-retry loop — a real fetch (dir
   missing/`config.json` absent) is one direct `snapshot_download` call.
-- **`jina-embeddings-v5-omni-nano-mlx` has no working image embedding
-  path as of 2026-07** — its own `utils.py::JinaMultiTaskModel` wrapper
-  docstring says so explicitly ("text-only encoding... vision and audio
-  towers preserved for future multimodal use"), and `model.py`'s
-  `JinaOmniNanoEmbeddingModel.encode_image()` exists but is never
-  reached through the wrapper `load_model()` returns — confirmed live
-  (`hasattr(model.model, "encode_image")` True, `hasattr(model,
-  "encode_image")` False). It's not a download/packaging gap: the
-  `-mlx` repo is also missing `processing_llava_eurobert.py`, which
-  *does* exist in the base `jinaai/jina-embeddings-v5-omni-nano` repo
-  (confirmed via the HF API file listing for both) — but installing
-  that file wouldn't help either, since nothing in the documented usage
-  path calls it. `omni-small-mlx` has no such limitation (uses the
-  transformers-builtin `Qwen3VLProcessor`, not custom code). Use small
-  for the image channel until Jina ships nano image support.
+- **Full-page image embeddings did not improve this corpus's measured
+  retrieval.** The golden run had identical hit@1/5/15 and slightly
+  worse MRR than text-only (0.511078 vs 0.512927), while requiring an
+  additional ~5.4 GB local model and an un-reranked equal-weight RRF
+  leg. The channel was therefore retired on 2026-07-17. Searchable
+  content in PDFs and images comes from OCRmyPDF-derived positioned
+  text instead.
 - **Avoid circular imports between `config.py` and
   `workspace_config.py`.** Loading the active workspace during config
   bootstrap must stay yaml-only / light (no importing pipeline modules
@@ -349,7 +339,7 @@ state what each collection evidences.
   `pdftotext -layout`. Across 12 compatible PDFs (74 pages), it was 2.53×
   faster than the superseded extractor, kept every native token sequence,
   and changed derivative size by -1.2% to +1.8%. The same temporary
-  derivative now supplies whole-document and visual per-page text.
+  derivative supplies the whole-document searchable text.
   OCRmyPDF redo rejects some PDFs, including digitally signed fillable
   forms; this is an explicit extraction error. Do not introduce an
   alternate route. OCRmyPDF also accepts image inputs, so image files use

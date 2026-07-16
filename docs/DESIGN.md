@@ -36,7 +36,6 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | — |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
 | **Structured numbers** — transactions SQL, row citations | **Done (Westpac)** | **R-04b** 2026-07-15: statement parsers + assertions + transfer reconciliation (`transactions.py parse/link/report`) | **R-04c** AMP + Qantas Money parsers |
-| **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual search accuracy test; finish live image index after re-embed |
 | **Evidence quality extras** | **Open** | — | R-11 messenger speakers; R-12 entities/claims |
 | **Productisation** — clean-room package, stranger docs, licensing | **Open** | — | **R-07** |
 | **Hygiene / parked** | **Open** | — | R-09 git history reset; **R-08** TypeScript (parked) |
@@ -116,7 +115,7 @@ workspaces/                          # gitignored user data root
 ```
 
 Platform `config.yaml`: `workspaces.dir` + engine knobs only
-(`query.*`, `ingestion.*` including `embed_text`/`embed_images`,
+(`query.*`, `ingestion.*` including `embed_text`,
 `models.mlx_*`). No privilege folder lists.
 
 **Specs:** [workspace-config-v2.md](specs/workspace-config-v2.md),
@@ -148,7 +147,6 @@ Platform `config.yaml`: `workspaces.dir` + engine knobs only
 | `item_memberships` | Blob in a collection: UNIQUE `(collection_id, sha256)` |
 | `item_file_meta` | File extract/OCR/date (1:1 item) |
 | `chunks` / FTS / vectors | Retrieval units; FK `item_id` |
-| `page_images` | Visual channel rows (R-03; empty until leg enabled) |
 | `transactions` | Structured amounts (R-04 heuristic) |
 | `source_blob_index` | Regenerable sha → path (`source_id` ≈ collection) |
 
@@ -171,16 +169,14 @@ there, never a new standalone script CLI.
 
 Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
 `ingest` — positional stages (`all` / `parse` / …) plus
-`--embed text|images|all`. Stage `all` and `--embed all` honor
-`ingestion.embed_text` / `ingestion.embed_images` (explicit named
-`--embed text|images` force that channel). Canonical PDF and image text
+`--embed text|all`. Stage `all` and `--embed all` honor
+`ingestion.embed_text` (explicit `--embed text` forces the channel).
+Canonical PDF and image text
 has one strict path: OCRmyPDF `--redo-ocr` creates a temporary derivative,
-then Poppler `pdftotext -layout` produces the cached text; the visual
-channel uses the same derivative for per-page PDF text. Command failures
-become auditable extraction errors. Vector indexes are cached per (model,
-dim) fingerprint under
-`.state/vectors/{text,image}/<slug>/` — changing
-`models.mlx_model_embed_*` never deletes another model's cache;
+then Poppler `pdftotext -layout` produces the cached text. Command failures
+become auditable extraction errors. Text vector indexes are cached per
+(model, dim) fingerprint under `.state/vectors/text/<slug>/` — changing
+`models.mlx_model_embed_text` never deletes another model's cache;
 switching back reuses it (R-15,
 [multi-model-vector-cache.md](specs/multi-model-vector-cache.md)).
 Deleting a cache is manual only: `pocket-advisor.py wipe index` (or
@@ -190,19 +186,17 @@ Deleting a cache is manual only: `pocket-advisor.py wipe index` (or
 ### Retrieval
 
 1. FTS5 BM25 + dense cosine  
-2. RRF fusion (+ optional third leg: page-image vectors when
-   `ingestion.embed_images` and an image index exist)  
+2. RRF fusion
 3. Pre-filters: privilege (**included by default**), mounts, optional
    date/thread  
 4. Cross-encoder **rerank** (Jina MLX listwise)  
 5. Citations: message_id / filename + date (+ `source_id`); surface
    weak `date_source` and low-conf OCR  
 
-**Models (MLX-only, Apple Silicon):** three HF repos under `models:` —
-`mlx_model_embed_text`, `mlx_model_embed_omni`, `mlx_model_rerank`.
-Matched text/omni pairs only (nano↔nano 768-d or small↔small 1024-d).
-Code defaults in `config.py` are nano; committed `config.yaml` may
-select small (matched pair). Universal loader:
+**Models (MLX-only, Apple Silicon):** two HF repos under `models:` —
+`mlx_model_embed_text` and `mlx_model_rerank`. Code defaults in
+`config.py` are nano; committed `config.yaml` may select small.
+Universal loader:
 `scripts/mlx_model_loader.py`. No GGUF / llama.cpp. Warm multi-query:
 [query-daemon.md](specs/query-daemon.md); search accuracy test:
 [search-accuracy-test.md](specs/search-accuracy-test.md),
@@ -284,7 +278,6 @@ that slice; this table is the map.
 
 | Spec | ROADMAP |
 |---|---|
-| [visual-retrieval.md](specs/visual-retrieval.md) | R-03 shipped opt-in; R-03b search accuracy test polish open |
 | [quoted-reply-compaction.md](specs/quoted-reply-compaction.md) | R-19 lossless derived-body compaction |
 
 There is **no** `docs/history/`, no `PLAN.md`, and no `STATUS.md`.

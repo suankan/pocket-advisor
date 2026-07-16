@@ -57,16 +57,13 @@ ingestion:
 
 ingestion:
   embed_text: true       # free — --embed all / stage all
-  embed_images: true     # free — also query image leg + omni fetch
 models:
   mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx  # INDEX-INVALIDATING
-  mlx_model_embed_omni: jinaai/jina-embeddings-v5-omni-nano-mlx  # INDEX-INVALIDATING
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx   # free (transient)
 ```
 
 Mechanical mapping: yaml key -> `config.PY_ATTR`. MLX-only stack —
-no GGUF / backend selector. (`models.img_leg_enabled` still accepted
-as a deprecated alias for `ingestion.embed_images`.)
+no GGUF / backend selector.
 
 ## A real gap found while scoping this: chunking was never fingerprinted
 

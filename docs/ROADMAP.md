@@ -52,7 +52,7 @@ the user schedules them.
 | **R-16** | Query logging — capture real session questions as golden-set feeder | Measure + accuracy | Anytime — no dependency | small; log is workspace data (gitignored, like `search-accuracy-test/`); from [rag-metrics-and-evaluation.md](../rag-metrics-and-evaluation.md) audit |
 | **R-17** | Graded / multi-relevant golden labels → recall@k / NDCG scoring in search_accuracy_test | Measure + accuracy | hit@k/MRR stops discriminating (flat deltas on a believed-good change), or multi-source questions appear during curation | historical runs re-scorable from stored ranked lists; from rag-metrics audit |
 | **R-18** | Local LLM-judge answer eval (faithfulness / relevancy / correctness) | Measure + accuracy | Retrieval metrics plateau and answer quality is the felt bottleneck | MLX local only (tenet 1); reserved in [search-accuracy-test.md](specs/search-accuracy-test.md) non-goals; spec must include the 5 anti-bias guardrails (pairwise, order randomization, ties, forced CoT, length normalization) |
-| **R-19** | Finish rollout of implemented quoted-reply compaction: full ingest, count comparison, golden search-accuracy test | Core pipeline | User runs the remaining ingestion; email phase already verified (476 compacted) | [quoted-reply-compaction.md](specs/quoted-reply-compaction.md) |
+| **R-19** | Finish rollout of implemented quoted-reply compaction: full ingest, count comparison, golden search-accuracy test | Core pipeline | User runs the remaining ingestion; 16-token email pass measured at 490 compactable | [quoted-reply-compaction.md](specs/quoted-reply-compaction.md) |
 
 ### Shipped (do not re-open here — see CHANGELOG)
 

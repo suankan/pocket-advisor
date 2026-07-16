@@ -34,6 +34,32 @@ PARENT = """This is the earlier message.
 It remains in the parent.
 """
 
+INLINE_IMAGE_PARENT = """Dear Mr Kan,
+Please find attached our correspondence of today's date.
+
+Kind regards,
+Nataliya Stoltz
+Family Law Solicitor
+[cid:image001.png@example]
+A black and white logo Description automatically generated
+"""
+
+INLINE_IMAGE_CHILD = """Current reply.
+
+*From:* Nataliya Stoltz
+*Sent:* Friday, 12 June 2026 11:56 PM
+*To:* Child <child@example.test>
+Subject: Example
+
+Dear Mr Kan,
+Please find attached our correspondence of today's date.
+
+Kind regards,
+Nataliya Stoltz
+Family Law Solicitor
+A black and white logo Description automatically generated
+"""
+
 OUTLOOK = """Current Outlook reply.
 
 From: Parent <parent@example.test>
@@ -95,6 +121,17 @@ def main():
         os = email_bodies.find_parent_prefix(OUTLOOK, PARENT)
         check("Outlook parent head located",
               OUTLOOK[os:].startswith("This is the earlier message."), os)
+        outlook_start, outlook_method = email_bodies.find_quote_start(
+            OUTLOOK, PARENT)
+        check("Outlook wrapper removed after parent proof",
+              OUTLOOK[:outlook_start].strip() == "Current Outlook reply."
+              and outlook_method.endswith("outlook_headers"),
+              (outlook_start, outlook_method))
+        gmail_start, gmail_method = email_bodies.find_quote_start(GMAIL, PARENT)
+        check("Gmail wrapper removed after parent proof",
+              GMAIL[:gmail_start].strip().endswith("new answer.")
+              and gmail_method.endswith("gmail_wrapper"),
+              (gmail_start, gmail_method))
         check("unrelated content has no match",
               email_bodies.find_parent_prefix(
                   "Authored\n\nFrom: merely discussed in prose", PARENT) is None)
@@ -103,6 +140,12 @@ def main():
                   "Answer one\n> This is the earlier message.\nAnswer two", PARENT) is None)
         check("duplicate prefix is ambiguous",
               email_bodies.find_parent_prefix(PARENT + "\n" + PARENT, PARENT) is None)
+        image_start = email_bodies.find_parent_prefix(
+            INLINE_IMAGE_CHILD, INLINE_IMAGE_PARENT)
+        check("16-token prefix survives omitted inline-image CID",
+              image_start is not None
+              and INLINE_IMAGE_CHILD[image_start:].startswith("Dear Mr Kan"),
+              image_start)
 
         print("header-gated compaction:")
         parent_id, parent_path, _ = _insert(
@@ -125,6 +168,8 @@ def main():
         check("two imported-parent replies compacted", stats["compacted"] == 2, stats)
         check("Gmail parent content removed",
               "This is the earlier message" not in child_path.read_text())
+        check("Gmail quote wrapper removed",
+              "wrote:" not in child_path.read_text())
         check("full body preserved", child_full.read_text() == GMAIL)
         check("missing parent retains full chain", missing_path.read_text() == OUTLOOK)
         check("import order irrelevant",
@@ -139,7 +184,7 @@ def main():
               row["body_compaction_method"] == "in_reply_to"
               and row["body_compaction_parent_item_id"] == parent_id
               and row["body_compaction_removed_chars"] > 0
-              and row["body_compaction_version"] == 1, dict(row))
+              and row["body_compaction_version"] == 2, dict(row))
 
         # Idempotence: same text and same aggregate decision on a second pass.
         before = child_path.read_bytes()

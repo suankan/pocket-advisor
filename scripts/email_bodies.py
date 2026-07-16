@@ -15,10 +15,18 @@ from bs4 import BeautifulSoup
 import config
 import utils_mime
 
-COMPACTION_VERSION = 1
-PREFIX_TOKENS = 32
+COMPACTION_VERSION = 2
+PREFIX_TOKENS = 16
 MIN_PREFIX_TOKENS = 8
 _TOKEN = re.compile(r"\w+", re.UNICODE)
+_REPLY_HEADER = re.compile(
+    r"^[ \t]*>*[ \t]*\*?(From|Sent|To|Cc|Subject)[ \t]*:\*?",
+    re.IGNORECASE,
+)
+_GMAIL_WRAPPER = re.compile(
+    r"(?ims)^[ \t]*(?:>[ \t]*)?On\b.{0,1000}?\bwrote:[ \t]*\n"
+    r"(?:[ \t]*>[ \t]*)*\s*\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -59,10 +67,82 @@ def find_parent_prefix(child_full: str, parent_full: str) -> int | None:
                 return None
     if len(hits) != 1 or not child_full[:hits[0]].strip():
         return None
-    # Cut at the beginning of the containing line, removing any `>` marker
-    # attached to the first parent token. Client-generated reply headers just
-    # above it may remain; no client-specific boundary grammar is required.
+    # Return the beginning of the containing line, removing any `>` marker
+    # attached to the first parent token.
     return child_full.rfind("\n", 0, hits[0]) + 1
+
+
+def _outlook_wrapper_start(child_full: str, body_start: int) -> int | None:
+    """Find a From/Sent/To/[Cc]/Subject block immediately before body."""
+    prefix = child_full[:body_start]
+    lines = prefix.splitlines(keepends=True)
+    starts = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+
+    # Search only near the already-proven parent-body occurrence.
+    first = max(0, len(lines) - 30)
+    for i in range(len(lines) - 1, first - 1, -1):
+        m = _REPLY_HEADER.match(lines[i])
+        if not m or m.group(1).lower() != "from":
+            continue
+        wanted = ("from", "sent", "to", "subject")
+        found = []
+        subject_line = None
+        for j in range(i, len(lines)):
+            hm = _REPLY_HEADER.match(lines[j])
+            if not hm:
+                continue  # blank or wrapped header value
+            label = hm.group(1).lower()
+            if label == "cc":
+                continue
+            if len(found) < len(wanted) and label == wanted[len(found)]:
+                found.append(label)
+                if label == "subject":
+                    subject_line = j
+                    break
+            elif label in wanted:
+                break
+        if found != list(wanted) or subject_line is None:
+            continue
+        # Nothing substantive may sit between Subject and matched body.
+        remainder = "".join(lines[subject_line + 1:])
+        if re.sub(r"[>\s]", "", remainder):
+            continue
+        return starts[i]
+    return None
+
+
+def _gmail_wrapper_start(child_full: str, body_start: int) -> int | None:
+    """Find the final `On ... wrote:` wrapper before proven parent text."""
+    prefix = child_full[:body_start]
+    tail_start = max(0, len(prefix) - 1200)
+    if tail_start:
+        tail_start = prefix.rfind("\n", 0, tail_start) + 1
+    matches = list(_GMAIL_WRAPPER.finditer(prefix[tail_start:]))
+    if not matches:
+        return None
+    return tail_start + matches[-1].start()
+
+
+def find_quote_start(child_full: str, parent_full: str) -> tuple[int | None, str | None]:
+    """Find the whole quoted tail after exact parent-body confirmation.
+
+    Wrapper recognition can only expand an already-proven parent-body cut;
+    it can never independently authorize compaction.
+    """
+    body_start = find_parent_prefix(child_full, parent_full)
+    if body_start is None:
+        return None, None
+    outlook = _outlook_wrapper_start(child_full, body_start)
+    if outlook is not None:
+        return outlook, "parent_prefix_exact+outlook_headers"
+    gmail = _gmail_wrapper_start(child_full, body_start)
+    if gmail is not None:
+        return gmail, "parent_prefix_exact+gmail_wrapper"
+    return body_start, "parent_prefix_exact"
 
 
 def _part_text(part):
@@ -139,9 +219,10 @@ def compact_quoted_replies(conn) -> dict[str, int]:
         full_path, full = full_texts[row["id"]]
         parent = by_mid.get(row["in_reply_to"])
         start = None
+        method = None
         if parent is not None:
-            start = find_parent_prefix(full, full_texts[parent["id"]][1])
-        method = "parent_prefix_exact" if start is not None else None
+            start, method = find_quote_start(
+                full, full_texts[parent["id"]][1])
         if start is not None:
             stats["boundaries"] += 1
 

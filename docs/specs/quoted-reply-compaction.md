@@ -55,19 +55,24 @@ body before any compaction occurs.
 
 ## Deterministic quote location
 
-There are no Gmail/Outlook separator heuristics. Both complete bodies are
-tokenized into Unicode word tokens and case-folded, which deterministically
-ignores quote markers, punctuation, HTML formatting, and line wrapping. The
-first 32 parent tokens must appear as one exact, unique sequence in the child.
+No Gmail/Outlook separator heuristic can authorize compaction. Both complete
+bodies are tokenized into Unicode word tokens and case-folded, which
+deterministically ignores quote markers, punctuation, HTML formatting, and
+line wrapping. The first 16 parent tokens must appear as one exact, unique
+sequence in the child.
 At least 8 parent tokens are required; shorter or repeated prefixes are
 ambiguous and remain unmodified. The token match is mapped back to the
-child's original character offset for the cut.
+child's original character offset. Only after that body match proves the
+quote, the cut is expanded backwards over an immediately preceding Gmail
+`On … wrote:` wrapper or ordered Outlook `From/Sent/To/[Cc]/Subject` header
+block. Wrapper recognition can never authorize compaction by itself; without
+a recognized wrapper, the safe cut remains at the matched parent body.
 
 This is exact normalized containment, not fuzzy matching: no similarity
-threshold, embedding, hash collision policy, or client-specific grammar is
-involved. Client-generated `On … wrote:` / `From-Sent-To-Subject` wrapper
-text immediately before the matched parent body may remain, but the repeated
-substantive body and all nested history are removed.
+threshold, embedding, or hash collision policy is involved. Client-specific
+grammar is used only to expand a proven cut over redundant wrapper metadata;
+the repeated substantive body and all nested history are removed regardless
+of whether that wrapper is recognized.
 
 Signature removal is out of scope. A signature above a quoted tail remains
 part of the current searchable body.
@@ -131,3 +136,17 @@ Originals, workspace configuration, and workspace matter files are untouched.
 - The user stopped the subsequent document OCR stage and will run the full
   ingestion separately. Chunk/vector counts and golden-set accuracy therefore
   remain the R-19 ship gate; do not move R-19 to CHANGELOG yet.
+
+### 2026-07-17 prefix correction
+
+The initial 32-token prefix missed a verified cross-collection reply where
+Gmail omitted an Outlook inline-image CID after 19 otherwise identical tokens.
+The exact unique prefix was shortened to 16 tokens. Corpus measurement over
+the 528 imported direct-parent relationships found 490 unique matches and 4
+ambiguous matches (retained), versus 476 unique / 2 ambiguous at 32 tokens.
+The known cross-collection item 716 → item 784 is now covered. Parent identity
+remains strict `In-Reply-To` → `Message-ID`; no fuzzy comparison was added.
+Follow-up verification found that cutting at the parent body left its inline
+`From/Sent/To/Cc/Subject` wrapper in searchable item 716. Compaction version 2
+now removes a verified wrapper as part of the redundant tail; the lossless
+full body remains unchanged.

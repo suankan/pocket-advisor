@@ -85,9 +85,14 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   line wrapping, so raw substring/hash matching misses real copies. Exact
   case-folded Unicode word-token prefixes preserve determinism while ignoring
   those presentation changes. On the 2026-07-16 live email pass, strict
-  `In-Reply-To` parent identity + one exact 32-token parent-prefix occurrence
-  compacted 476/528 replies whose direct parent was imported; no fuzzy/vector
-  similarity or client-specific separator grammar was needed (R-19).
+  `In-Reply-To` parent identity + one exact 16-token parent-prefix occurrence
+  compacted 490/528 replies whose direct parent was imported; no fuzzy/vector
+  similarity or client-specific separator grammar was needed (R-19). The
+  initial 32-token threshold missed real replies when a client omitted an
+  inline-image CID early in the quoted copy. Parent-body matching locates the
+  substantive duplicate but may leave the client's `On … wrote:` or
+  `From/Sent/To/Subject` wrapper; remove that wrapper only *after* the exact
+  parent match has independently proven the quoted tail.
 
 - `ingest.py all` run twice back-to-back: second run must report 0 new
   / all skipped and finish in seconds. This is the standing regression

@@ -65,8 +65,10 @@ ambiguous and remain unmodified. The token match is mapped back to the
 child's original character offset. Only after that body match proves the
 quote, the cut is expanded backwards over an immediately preceding Gmail
 `On … wrote:` wrapper or ordered Outlook `From/Sent/To/[Cc]/Subject` header
-block. Wrapper recognition can never authorize compaction by itself; without
-a recognized wrapper, the safe cut remains at the matched parent body.
+block. Gmail forward wrappers (`Forwarded message` followed by
+`From/Date/Subject/To/[Cc]`) are handled the same way. Wrapper recognition can
+never authorize compaction by itself; without a recognized wrapper, the safe
+cut remains at the matched parent body.
 
 This is exact normalized containment, not fuzzy matching: no similarity
 threshold, embedding, or hash collision policy is involved. Client-specific
@@ -150,3 +152,8 @@ Follow-up verification found that cutting at the parent body left its inline
 `From/Sent/To/Cc/Subject` wrapper in searchable item 716. Compaction version 2
 now removes a verified wrapper as part of the redundant tail; the lossless
 full body remains unchanged.
+
+Item 721 exposed the analogous Gmail-forward form: its parent body was
+correctly removed, but `Forwarded message` plus `From/Date/Subject/To/Cc`
+remained. Compaction version 3 recognizes that header block only after the
+same exact parent-body proof and moves the cut back to the divider.

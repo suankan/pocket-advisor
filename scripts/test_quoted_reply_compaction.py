@@ -72,6 +72,22 @@ This is the earlier message.
 It remains in the parent.
 """
 
+FORWARDED = """Current forwarding note.
+
+Kind regards,
+Sender
+
+---------- Forwarded message ---------
+From: Parent <parent@example.test>
+Date: Mon, 18 May 2026, 10:31
+Subject: Example property correspondence
+To: child@example.test <child@example.test>
+Cc: Another Person <another@example.test>
+
+This is the earlier message.
+It remains in the parent.
+"""
+
 
 def _insert(conn, mid, body, *, in_reply_to=None, boundary=None, method=None):
     cur = conn.execute(
@@ -132,6 +148,11 @@ def main():
               GMAIL[:gmail_start].strip().endswith("new answer.")
               and gmail_method.endswith("gmail_wrapper"),
               (gmail_start, gmail_method))
+        fwd_start, fwd_method = email_bodies.find_quote_start(FORWARDED, PARENT)
+        check("Gmail forwarded wrapper removed after parent proof",
+              FORWARDED[:fwd_start].strip().endswith("Sender")
+              and fwd_method.endswith("forwarded_headers"),
+              (fwd_start, fwd_method))
         check("unrelated content has no match",
               email_bodies.find_parent_prefix(
                   "Authored\n\nFrom: merely discussed in prose", PARENT) is None)
@@ -162,10 +183,13 @@ def main():
             conn, "<late-child@example.test>", GMAIL,
             in_reply_to="<late-parent@example.test>")
         _insert(conn, "<late-parent@example.test>", PARENT)
+        fwd_id, fwd_path, fwd_full = _insert(
+            conn, "<forward-child@example.test>", FORWARDED,
+            in_reply_to="<parent@example.test>")
         conn.commit()
 
         stats = email_bodies.compact_quoted_replies(conn)
-        check("two imported-parent replies compacted", stats["compacted"] == 2, stats)
+        check("three imported-parent replies compacted", stats["compacted"] == 3, stats)
         check("Gmail parent content removed",
               "This is the earlier message" not in child_path.read_text())
         check("Gmail quote wrapper removed",
@@ -174,6 +198,10 @@ def main():
         check("missing parent retains full chain", missing_path.read_text() == OUTLOOK)
         check("import order irrelevant",
               "This is the earlier message" not in late_child_path.read_text())
+        check("forwarded wrapper removed",
+              "Forwarded message" not in fwd_path.read_text()
+              and fwd_path.read_text().rstrip().endswith("Sender"))
+        check("forwarded full body preserved", fwd_full.read_text() == FORWARDED)
         row = conn.execute(
             """SELECT body_compaction_method,
                       body_compaction_parent_item_id,
@@ -184,7 +212,7 @@ def main():
               row["body_compaction_method"] == "in_reply_to"
               and row["body_compaction_parent_item_id"] == parent_id
               and row["body_compaction_removed_chars"] > 0
-              and row["body_compaction_version"] == 2, dict(row))
+              and row["body_compaction_version"] == 3, dict(row))
 
         # Idempotence: same text and same aggregate decision on a second pass.
         before = child_path.read_bytes()

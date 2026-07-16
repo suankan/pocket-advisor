@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 import config
 import utils_mime
 
-COMPACTION_VERSION = 2
+COMPACTION_VERSION = 3
 PREFIX_TOKENS = 16
 MIN_PREFIX_TOKENS = 8
 _TOKEN = re.compile(r"\w+", re.UNICODE)
@@ -26,6 +26,14 @@ _REPLY_HEADER = re.compile(
 _GMAIL_WRAPPER = re.compile(
     r"(?ims)^[ \t]*(?:>[ \t]*)?On\b.{0,1000}?\bwrote:[ \t]*\n"
     r"(?:[ \t]*>[ \t]*)*\s*\Z"
+)
+_FORWARDED_DIVIDER = re.compile(
+    r"^[ \t]*>*[ \t]*-{2,}[ \t]*Forwarded message[ \t]*-{2,}[ \t]*$",
+    re.IGNORECASE,
+)
+_FORWARD_HEADER = re.compile(
+    r"^[ \t]*>*[ \t]*(From|Date|Subject|To|Cc)[ \t]*:",
+    re.IGNORECASE,
 )
 
 
@@ -127,6 +135,45 @@ def _gmail_wrapper_start(child_full: str, body_start: int) -> int | None:
     return tail_start + matches[-1].start()
 
 
+def _forwarded_wrapper_start(child_full: str, body_start: int) -> int | None:
+    """Find Gmail `Forwarded message` + From/Date/Subject/To/[Cc]."""
+    prefix = child_full[:body_start]
+    lines = prefix.splitlines(keepends=True)
+    starts = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+
+    first = max(0, len(lines) - 30)
+    for i in range(len(lines) - 1, first - 1, -1):
+        if not _FORWARDED_DIVIDER.match(lines[i]):
+            continue
+        required = {"from", "date", "subject", "to"}
+        found = set()
+        last_header = None
+        for j in range(i + 1, len(lines)):
+            hm = _FORWARD_HEADER.match(lines[j])
+            if hm:
+                found.add(hm.group(1).lower())
+                last_header = j
+        if not required.issubset(found) or last_header is None:
+            continue
+        # Header values can wrap, but no unrelated prose may occur before the
+        # already-proven parent body. Wrapped values begin with whitespace.
+        bad = False
+        for line in lines[i + 1:]:
+            if not line.strip() or _FORWARD_HEADER.match(line):
+                continue
+            if line[:1].isspace() or re.match(r"^[ \t]*>", line):
+                continue
+            bad = True
+            break
+        if not bad:
+            return starts[i]
+    return None
+
+
 def find_quote_start(child_full: str, parent_full: str) -> tuple[int | None, str | None]:
     """Find the whole quoted tail after exact parent-body confirmation.
 
@@ -136,6 +183,9 @@ def find_quote_start(child_full: str, parent_full: str) -> tuple[int | None, str
     body_start = find_parent_prefix(child_full, parent_full)
     if body_start is None:
         return None, None
+    forwarded = _forwarded_wrapper_start(child_full, body_start)
+    if forwarded is not None:
+        return forwarded, "parent_prefix_exact+forwarded_headers"
     outlook = _outlook_wrapper_start(child_full, body_start)
     if outlook is not None:
         return outlook, "parent_prefix_exact+outlook_headers"

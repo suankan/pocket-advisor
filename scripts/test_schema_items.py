@@ -37,7 +37,6 @@ def main():
         config.DOCUMENTS_EXTRACTED_DIR = config.OUTPUT_DIR / "documents_extracted"
         config.LOGS_DIR = config.OUTPUT_DIR / "logs"
         config.REVIEW_QUEUE_CSV = config.LOGS_DIR / "review_queue.csv"
-        config.OCR_REVIEW_DIR = config.OUTPUT_DIR / "ocr_review"
         config.INGESTION_SOURCES = tmp / "corpora"
         config.DOCUMENT_FOLDERS = {"coll-a", "coll-b"}
         config.OUTPUT_DIR.mkdir(parents=True)

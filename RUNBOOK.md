@@ -3,7 +3,7 @@
 ## One-time setup (already done 2026-07-10; repeat only on a new machine)
 
 ```bash
-brew install python@3.12 tesseract tesseract-lang poppler
+brew install python@3.12 poppler ocrmypdf
 /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
 venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
 ./pocket-advisor.py db init
@@ -97,6 +97,15 @@ short, absent, or ambiguous parent-prefix matches retain the complete searchable
 body. See `docs/specs/quoted-reply-compaction.md`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
+
+PDF and image text extraction use one strict local sequence: OCRmyPDF redo OCR into
+a temporary derived PDF, then `pdftotext -layout`. This preserves the
+positioned native text layer while adding positioned OCR for raster image
+content. There is no fallback: if OCRmyPDF rejects an input (including a
+digitally signed fillable form), ingestion records an extraction error in
+the review queue. Original evidence is never modified. Install the extra
+OCR language data required by `ingestion.ocr.langs` using the platform's
+OCRmyPDF setup instructions.
 
 1. Drop files under a collection root in `workspaces/corpora/…`
    (privileged: collection `privileged: true` and/or nest under
@@ -364,6 +373,4 @@ processor deps are already in `scripts/requirements.txt`):
 ## Review points
 
 - `workspaces/.state/logs/review_queue.csv` — parse/custody flags
-- `workspaces/.state/` OCR review images (per-collection cache or shared
-  `ocr_review/` — open via DB/query, not free browse)
 - `ingestion_log` table — structured log of every issue

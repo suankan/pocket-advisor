@@ -40,7 +40,6 @@ the user schedules them.
 |---|---|---|---|---|
 | **R-03b** | Visual golden search accuracy test + measure `IMG_RRF_WEIGHT` / `ocr_proxy` vs skip | Visual | After live `ingest.py --embed images` produces a usable index | [visual-retrieval.md](specs/visual-retrieval.md) |
 | **R-04c** | Remaining statement parsers for marked accounts: CBA, Revolut, AMP, NAB, Qantas Money card (R-04b core shipped 2026-07-15) | Structured numbers | The 16 UNPARSED files in `transactions.py parse` output, or a case question needs those accounts | Add to [statement_parsers.py](../scripts/statement_parsers.py) registry per [structured-transactions-v2.md](specs/structured-transactions-v2.md); card parser = first sign-inversion case |
-| **R-06** | Per-collection `ocr_review` under `.state/cache/<id>/` | User data | Cleanup if shared `ocr_review` confuses | small |
 | **R-07** | Productisation — clean-room repo, packaging, stranger docs, licensing, UPL | Productisation | Explicit productisation decision only | never as case side-effect |
 | **R-08** | TypeScript engine migration (**PARKED**) | Hygiene / parked | User explicitly resumes — not opportunistic | DESIGN tenet 13 |
 | **R-09** | Git history reset (case content in old commits) | Hygiene / parked | Deliberate hygiene window | local-only repo |

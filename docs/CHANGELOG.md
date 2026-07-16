@@ -17,6 +17,17 @@ map; open work is `R-nn`.
 
 ---
 
+## 2026-07-17
+
+**Layout-preserving OCRmyPDF extraction for PDFs and images** · SHIPPED ·
+All PDF and image text now follows one sequence for attachments,
+standalone documents, and visual-page text: OCRmyPDF `--redo-ocr` creates
+a temporary derived PDF, then Poppler `pdftotext -layout` writes positioned
+text. The derivative is deleted, evidence is untouched, and command
+failures become explicit ingestion errors. The former direct image OCR
+binding, confidence threshold, and review-copy configuration were removed.
+Spec: [pdf-text-extraction.md](specs/pdf-text-extraction.md).
+
 ## 2026-07-16
 
 **Transactions scope: explicit bank-account marking** · `R-04b` (as-built

@@ -35,7 +35,6 @@ DB_PATH = OUTPUT_DIR / "pocket_advisor.db"
 # Per-collection engine cache (not agent free-browse):
 #   .state/cache/<collection_id>/{text,extracted}/…
 CACHE_DIR = OUTPUT_DIR / "cache"
-OCR_REVIEW_DIR = OUTPUT_DIR / "ocr_review"
 LOGS_DIR = OUTPUT_DIR / "logs"
 REVIEW_QUEUE_CSV = LOGS_DIR / "review_queue.csv"
 
@@ -84,9 +83,6 @@ def extracted_attachments_dir(source_id: str | None = None) -> Path:
 def extracted_documents_dir(source_id: str | None = None) -> Path:
     return collection_cache_dir(source_id) / "extracted" / "documents"
 
-
-def ocr_review_dir(source_id: str | None = None) -> Path:
-    return collection_cache_dir(source_id) / "ocr_review"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -143,10 +139,7 @@ DOC_DATE_HEADER_WINDOW_CHARS = 6000
 
 # Attachment handling
 SMALL_IMAGE_BYTES = 20_000        # <= this: likely signature/logo, skip OCR
-PDF_NATIVE_TEXT_MIN_CHARS = 40    # pdftotext output below this => treat as scanned, OCR
 OCR_LANGS = "eng+rus"             # corpus is majority Russian
-OCR_LOW_CONFIDENCE = 60.0         # mean word confidence below this => flag for review
-PDF_OCR_DPI = 300
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
 
@@ -229,10 +222,7 @@ YAML_KEYS = {
     "ingestion.chunking.chars": ("CHUNK_CHARS", int),
     "ingestion.chunking.overlap": ("CHUNK_OVERLAP", int),
     "ingestion.ocr.langs": ("OCR_LANGS", str),
-    "ingestion.ocr.low_confidence": ("OCR_LOW_CONFIDENCE", float),
-    "ingestion.ocr.pdf_dpi": ("PDF_OCR_DPI", int),
     "ingestion.ocr.small_image_bytes": ("SMALL_IMAGE_BYTES", int),
-    "ingestion.ocr.pdf_native_text_min_chars": ("PDF_NATIVE_TEXT_MIN_CHARS", int),
     "ingestion.thread_fallback_window_days": ("THREAD_FALLBACK_WINDOW_DAYS", int),
     "ingestion.doc_date_header_window_chars": ("DOC_DATE_HEADER_WINDOW_CHARS", int),
     "ingestion.embed_text": ("EMBED_TEXT", bool),
@@ -344,7 +334,6 @@ def _apply_workspace_paths():
     _out = state
     globals()["CACHE_DIR"] = _out / "cache"
     globals()["DB_PATH"] = _out / "pocket_advisor.db"
-    globals()["OCR_REVIEW_DIR"] = _out / "ocr_review"
     globals()["LOGS_DIR"] = _out / "logs"
     globals()["REVIEW_QUEUE_CSV"] = _out / "logs" / "review_queue.csv"
     globals()["VECTORS_DIR"] = _out / "vectors"

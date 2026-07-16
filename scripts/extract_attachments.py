@@ -1,17 +1,14 @@
 """Stage 2: extract text from attachments (rows where extraction_method IS NULL).
 
 Routing:
-  PDF        -> pdftotext -layout; near-empty output => scanned => pdftoppm + tesseract
-  image>20KB -> tesseract eng+rus with word-confidence capture
+  PDF        -> ocrmypdf --redo-ocr -> pdftotext -layout
+  image>20KB -> direct image OCR with word-confidence capture
   image<=20KB-> skipped (signature/logo), kept + auditable, not indexed
   docx/xlsx  -> python-docx / openpyxl
   .msg       -> extract-msg; nested attachments recurse through this router
   .zip       -> members recurse through this router
 
-OCR below the confidence threshold is stored but flagged, prefixed with a
-warning marker in the sidecar, and the source image is copied to
-output/ocr_review/ for human verification. Junk is never silently indexed
-as trustworthy text.
+PDF and image OCR share the same positioned-text implementation.
 """
 import sys
 import zipfile
@@ -22,8 +19,7 @@ import db
 from progress import Progress
 import utils_hash
 import utils_mime
-from extraction import (apply_low_confidence_flag, extract_docx, extract_pdf,
-                        extract_xlsx, ocr_image)
+from extraction import extract_docx, extract_image, extract_pdf, extract_xlsx
 from utils_log import now_iso
 
 
@@ -132,8 +128,7 @@ def process(conn, row):
     if kind == "pdf":
         text, method, conf = extract_pdf(path)
     elif kind == "image":
-        text, conf = ocr_image(path)
-        method = "ocr_tesseract"
+        text, method, conf = extract_image(path)
     elif kind == "docx":
         text, method = extract_docx(path), "docx"
     elif kind == "xlsx":
@@ -142,9 +137,6 @@ def process(conn, row):
         text, method = extract_msg_nested(conn, row, path), "msg_nested"
     elif kind == "zip":
         text, method = extract_zip_nested(conn, row, path), "zip_member"
-
-    text, low_conf_flag = apply_low_confidence_flag(text, conf, path)
-    low_conf = int(low_conf_flag)
 
     text_dir = config.text_attachments_dir(sid)
     text_dir.mkdir(parents=True, exist_ok=True)
@@ -155,15 +147,14 @@ def process(conn, row):
         """UPDATE attachments SET extraction_method=?, extracted_text_path=?,
            ocr_confidence=?, ocr_flagged_low_conf=?, processed_at=? WHERE id=?""",
         (method, str(text_path.relative_to(config.PROJECT_ROOT)),
-         conf, low_conf, now_iso(), row["id"]))
+         conf, 0, now_iso(), row["id"]))
     return "ok"
 
 
 def run():
     config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    config.OCR_REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
-    stats = {"ok": 0, "skipped": 0, "errors": 0, "low_confidence": 0}
+    stats = {"ok": 0, "skipped": 0, "errors": 0}
     while True:
         rows = conn.execute(
             "SELECT * FROM attachments WHERE extraction_method IS NULL"
@@ -176,9 +167,6 @@ def run():
             try:
                 result = process(conn, row)
                 stats[result if result in stats else "ok"] += 1
-                if conn.execute("SELECT ocr_flagged_low_conf FROM attachments WHERE id=?",
-                                (row["id"],)).fetchone()[0]:
-                    stats["low_confidence"] += 1
             except Exception as e:
                 stats["errors"] += 1
                 db.log_issue(conn, row["extracted_copy_path"], "extract_attachment",

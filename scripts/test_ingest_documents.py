@@ -30,7 +30,6 @@ config.LOGS_DIR = config.OUTPUT_DIR / "logs"
 config.REVIEW_QUEUE_CSV = config.LOGS_DIR / "review_queue.csv"
 config.TEXT_DOCUMENTS_DIR = config.OUTPUT_DIR / "text" / "documents"
 config.DOCUMENTS_EXTRACTED_DIR = config.OUTPUT_DIR / "documents_extracted"
-config.OCR_REVIEW_DIR = config.OUTPUT_DIR / "ocr_review"
 config.DOCUMENT_FOLDERS = {"docs"}
 config.ACTIVE_WORKSPACE_ID = "test"
 # Avoid picking up a real workspaces/workspace-config.yaml

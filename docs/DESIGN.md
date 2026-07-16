@@ -33,7 +33,7 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 | **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done; R-19 rollout open** | 2026-07-10 pipeline; 2026-07-11 documents; **R-15** 2026-07-14 multi-model vector cache | R-19 full-ingest verification |
 | **Measure + accuracy** — search accuracy test, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 search-accuracy-test/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm search-accuracy-test, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
-| **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
+| **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | — |
 | **Schema spine** — collection custody, multi-membership; honest `items` names | **Done** | Schema A+B+C (R-01/R-02): `items` / `item_memberships` / `item_file_meta`, `item_id` FKs | — |
 | **Structured numbers** — transactions SQL, row citations | **Done (Westpac)** | **R-04b** 2026-07-15: statement parsers + assertions + transfer reconciliation (`transactions.py parse/link/report`) | **R-04c** AMP + Qantas Money parsers |
 | **Visual / page-image retrieval** | **Done (opt-in)** | **R-03** omni MLX channel; `ingestion.embed_images`; `ingest.py --embed images` | **R-03b** visual search accuracy test; finish live image index after re-embed |
@@ -173,9 +173,12 @@ Idempotent stages: parse → extract/OCR → thread → embed. Orchestrator:
 `ingest` — positional stages (`all` / `parse` / …) plus
 `--embed text|images|all`. Stage `all` and `--embed all` honor
 `ingestion.embed_text` / `ingestion.embed_images` (explicit named
-`--embed text|images` force that channel). Low-conf OCR flagged;
-review images under `.state/` (open via DB/query, not bulk-browse of
-cache). Vector index is cached per (model, dim) fingerprint under
+`--embed text|images` force that channel). Canonical PDF and image text
+has one strict path: OCRmyPDF `--redo-ocr` creates a temporary derivative,
+then Poppler `pdftotext -layout` produces the cached text; the visual
+channel uses the same derivative for per-page PDF text. Command failures
+become auditable extraction errors. Vector indexes are cached per (model,
+dim) fingerprint under
 `.state/vectors/{text,image}/<slug>/` — changing
 `models.mlx_model_embed_*` never deletes another model's cache;
 switching back reuses it (R-15,
@@ -262,6 +265,7 @@ that slice; this table is the map.
 | [workspace-user-data.md](specs/workspace-user-data.md) | Historical migrate into `workspaces/` |
 | [source-blob-index.md](specs/source-blob-index.md) | Path cache |
 | [schema-items-membership.md](specs/schema-items-membership.md) | Schema A+B+C shipped |
+| [pdf-text-extraction.md](specs/pdf-text-extraction.md) | OCRmyPDF redo → layout-preserving PDF text |
 | [structured-transactions.md](specs/structured-transactions.md) | R-04 minimal |
 | [purpose-visibility.md](specs/purpose-visibility.md) | R-05 mount purposes |
 | [instruction-layer-split.md](specs/instruction-layer-split.md) | Platform vs workspace |

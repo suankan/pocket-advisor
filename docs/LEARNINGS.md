@@ -50,9 +50,9 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   doesn't exist). `sqlite-vec` can never work there. That's why:
   Homebrew Python 3.12 venv + flat numpy vector files. Brute-force
   cosine at this corpus scale is <50ms; don't add a vector DB.
-- **Tesseract from Homebrew ships English only.** Other languages need
-  `brew install tesseract-lang`. Without the right language pack, OCR
-  produces plausible-looking garbage *silently* (no error).
+- **OCRmyPDF requires installed language data for every configured code.**
+  Without the language data named by `ingestion.ocr.langs`, OCR may fail
+  or produce plausible-looking garbage. Verify languages on a new machine.
 - **Know your embedding model's query/document asymmetry mechanism —
   they differ by family, and getting it backwards degrades retrieval
   silently.** bge-m3 (superseded, see jina-mlx-migration.md) needed no
@@ -342,31 +342,18 @@ live in a non-party collection (e.g. party's own solicitor
 correspondence). Rephrase queries and do not assume one inter-party
 email folder alone is sufficient — registry `description` should
 state what each collection evidences.
-- **Hybrid PDFs (selectable text + non-selectable embedded image
-  portions) are silently incompletely extracted by a pdftotext-only
-  pipeline.** The original `extract_pdf()` returned early when
-  pdftotext extracted ≥40 non-whitespace characters — but those 40+
-  chars could come entirely from the selectable portions, leaving the
-  non-selectable parts (embedded images, redaction-like blanks)
-  completely missing from the extracted text. Discovered on a Shore
-  Lawyers letter where the reference "129 Warnervale" (purpose of
-  $1,400 transfers to Stanislav Vitovski), the $3,500 "Mum loan" from
-  Anna Li, and the "Westpac Bus" account clarification item were all
-  invisible to pdftotext but visible in the PDF. Fixed 2026-07-16:
-  `extraction.extract_pdf()` now always runs both pdftotext AND
-  tesseract OCR (via pdftoppm rasterization), then returns whichever
-  yields more non-whitespace characters. This handles all three PDF
-  types correctly without classification logic:
-  - Clean text PDFs → pdftotext wins (perfect, no OCR noise)
-  - Scanned/image PDFs → OCR wins (pdftotext returns near-nothing)
-  - Hybrid PDFs → OCR wins (captures more total chars)
-  Run tesseract with the configured `OCR_LANGS` (eng+rus for this
-  corpus). The old `PDF_NATIVE_TEXT_MIN_CHARS` config value is no
-  longer used as a short-circuit threshold (kept for compatibility).
-  Downside: OCR output may have run-together words from tight letter
-  spacing (e.g. `Atransfer`, `Weunderstand`) — an acceptable trade-off
-  vs silently losing content. `ocrmypdf` was evaluated as an
-  alternative but produced worse artifacts and 10× file bloat.
+- **PDF text needs one positioned native+image representation.** Direct
+  `pdftotext` can omit text embedded in raster regions, while flattened
+  full-page OCR can destroy columns and introduce lookalike characters.
+  The verified sequence is OCRmyPDF `--redo-ocr` followed by Poppler
+  `pdftotext -layout`. Across 12 compatible PDFs (74 pages), it was 2.53×
+  faster than the superseded extractor, kept every native token sequence,
+  and changed derivative size by -1.2% to +1.8%. The same temporary
+  derivative now supplies whole-document and visual per-page text.
+  OCRmyPDF redo rejects some PDFs, including digitally signed fillable
+  forms; this is an explicit extraction error. Do not introduce an
+  alternate route. OCRmyPDF also accepts image inputs, so image files use
+  the identical derivative → layout-text sequence.
 
 
 - **Derived config paths must be overridden together in test

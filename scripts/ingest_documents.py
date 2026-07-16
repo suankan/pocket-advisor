@@ -69,8 +69,7 @@ def process_document(conn, item_id, copy_path, filename, collection_id=None):
         if kind == "pdf":
             text, method, conf = extraction.extract_pdf(copy_path)
         elif kind == "image":
-            text, conf = extraction.ocr_image(copy_path)
-            method = "ocr_tesseract"
+            text, method, conf = extraction.extract_image(copy_path)
         elif kind == "docx":
             text, method = extraction.extract_docx(copy_path), "docx"
         elif kind == "xlsx":
@@ -84,8 +83,6 @@ def process_document(conn, item_id, copy_path, filename, collection_id=None):
              f"document item {item_id}: extraction failed:"
              f" {type(e).__name__}: {e}")
         return
-
-    text, low_conf = extraction.apply_low_confidence_flag(text, conf, copy_path)
 
     text_dir = config.text_documents_dir(collection_id)
     text_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +100,7 @@ def process_document(conn, item_id, copy_path, filename, collection_id=None):
            doc_date_source=?, doc_date_detail=?, doc_date_raw=?,
            processed_at=? WHERE item_id=?""",
         (method, str(text_path.relative_to(config.PROJECT_ROOT)), conf,
-         int(low_conf), doc_date, source, detail, raw, now_iso(), item_id))
+         0, doc_date, source, detail, raw, now_iso(), item_id))
     conn.execute(
         "UPDATE items SET date_utc=?, date_raw=?, body_text_path=? WHERE id=?",
         (f"{doc_date}T00:00:00+00:00", raw or doc_date,

@@ -51,10 +51,7 @@ ingestion:
     overlap: 200
   ocr:                            # free (affects future ingests only)
     langs: eng+rus
-    low_confidence: 60.0
-    pdf_dpi: 300
     small_image_bytes: 20000
-    pdf_native_text_min_chars: 40
   thread_fallback_window_days: 60
   doc_date_header_window_chars: 6000
 

@@ -72,21 +72,13 @@ ingestion:
     # INDEX-INVALIDATING caveat as chars.
     overlap: 200
   ocr:
-    # Tesseract language flags, e.g. "eng+rus" for a bilingual corpus.
+    # OCR language flags, e.g. "eng+rus" for a bilingual corpus.
     # Missing a language here makes OCR on that script fail silently
     # into plausible-looking garbage — no error, just wrong text.
     langs: eng+rus
-    # Mean OCR word-confidence (0-100) below which extracted text is
-    # flagged ocr_flagged_low_conf and copied for human review.
-    low_confidence: 60.0
-    # DPI when rasterizing scanned PDF pages before OCR.
-    pdf_dpi: 300
     # Image attachments at or below this size (bytes) are treated as
     # signature/logo and skipped (not OCR'd / not indexed).
     small_image_bytes: 20000
-    # If pdftotext native extraction yields fewer than this many
-    # non-whitespace chars, treat PDF as scanned and OCR instead.
-    pdf_native_text_min_chars: 40
   # Fallback threading when headers lack In-Reply-To/References:
   # same normalized subject + ≥1 shared participant within this window.
   thread_fallback_window_days: 60

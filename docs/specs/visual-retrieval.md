@@ -16,14 +16,13 @@ FTS5+dense-text pipeline: embed page IMAGES (not their OCR'd text)
 with a multimodal model, so building plans, site diagrams, stamps,
 signatures, and tables — content that OCR structurally loses or
 mangles — become searchable by visual content, not just by whatever
-text `pdftotext`/tesseract managed to extract. Purely additive: no
+text OCRmyPDF/`pdftotext -layout` managed to extract. Purely additive: no
 change to citation, privilege, or custody behavior on the existing
 text path. Out of scope (deliberately): layout-aware document parsing
 (the target model's own benchmarks are page-level, not block-level —
 no segmentation dependency needed), downstream Vision-LLM synthesis
-(this engine's job stops at returning a citable hit), OCR tool
-changes (ocrmypdf etc. — existing pdftotext+pdftoppm+tesseract already
-covers extraction; this is a new signal, not a better OCR).
+(this engine's job stops at returning a citable hit), and changes to
+canonical OCR tooling (this is a new signal, not another OCR path).
 
 ## Why this is viable now: the alignment claim
 
@@ -57,7 +56,7 @@ CREATE TABLE IF NOT EXISTS page_images (
     page_number           INTEGER NOT NULL,     -- 1-based; 1 for a plain image
     image_path            TEXT NOT NULL,        -- project-root-relative POSIX path
     sha256                TEXT NOT NULL,
-    page_text_method      TEXT,                 -- 'native_pdftotext' | 'ocr_tesseract' | 'reused_attachment_ocr' | 'reused_document_ocr'
+    page_text_method      TEXT,                 -- 'ocrmypdf_redo_pdftotext_layout' | 'reused_attachment_ocr' | 'reused_document_ocr'
     ocr_text              TEXT,                 -- citable text for THIS page (inline, chunk-sized — mirrors chunks.text)
     ocr_confidence        REAL,
     ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
@@ -74,10 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_page_images_email ON page_images(email_id);
 `page_images.id` is the visual channel's universal join key — the
 direct analog of `chunk_id` (ROADMAP tenet 4), never conflated with
 it. Two provenance paths feed it:
-- **PDF pages**: need new persisted rasterization (below) —
-  `extraction.py::extract_pdf()` today only rasterizes scanned PDFs
-  into a `tempfile.TemporaryDirectory()` that's deleted after OCR;
-  native-text PDFs are never rasterized at all.
+- **PDF pages**: need separate persisted rasterization (below) —
+  canonical `extraction.py::extract_pdf()` does not persist page images;
+  its temporary OCRmyPDF derivative is deleted after layout extraction.
+  The visual channel therefore owns its persisted rasterization.
 - **Plain image attachments/documents** (not PDF, size >
   `SMALL_IMAGE_BYTES`): pure reuse — `image_path` = the already-
   persisted `extracted_copy_path`, `ocr_text`/`ocr_confidence`/
@@ -89,15 +88,13 @@ it. Two provenance paths feed it:
 `rasterize_pdf(pdf_path, dest_dir, dpi)` runs `pdftoppm -r {dpi} -png`
 directly into a **persisted** destination (reuses `extraction.run_cmd`
 — Poppler is already a system dependency, no `pdf2image`/`pypdfium2`
-needed). New `extraction.extract_page_text(pdf_path, page_num,
-png_path)`: single-page analog of `extract_pdf()`'s native-vs-OCR
-decision, falling back to `ocr_image()` on the already-rasterized PNG,
-reusing `apply_low_confidence_flag()` unchanged. Persisted layout:
+needed). One temporary OCRmyPDF-redone derivative supplies positioned
+per-page text via `pdftotext -layout -f/-l`; it is deleted after all pages
+are synchronized. Persisted layout:
 `output/page_images/attachment_<id>/page_<NNN>.png` and
 `.../document_<id>/page_<NNN>.png` (new `config.PAGE_IMAGES_DIR`).
 
-DPI: new knob `IMG_PAGE_DPI`, starting default 150 (separate from the
-existing `PDF_OCR_DPI=300` — different purpose) — **must be confirmed
+DPI: new knob `IMG_PAGE_DPI`, starting default 150 — **must be confirmed
 in the smoke test, not trusted**.
 
 `sync_page_images(conn)` mirrors `embed.py::sync_chunks`'s
@@ -252,7 +249,7 @@ get tagged `flags: [visual]`.
 
 - `scripts/db.py` — `page_images` table
 - `scripts/config.py`, `config.yaml` — new knobs, `YAML_KEYS`
-- `scripts/extraction.py` — `extract_page_text()`
+- `scripts/extraction.py` — shared OCRmyPDF derivative + layout helpers
 - `scripts/rasterize_pages.py` — new
 - `scripts/image_embedding_backends.py` — new
 - `scripts/embed_images.py` — new
@@ -282,7 +279,7 @@ get tagged `flags: [visual]`.
       (embed the query with the torch omni model too) must be adopted
       and documented before proceeding.
 - [ ] Rasterization verified against 3-5 real PDFs (page counts vs
-      `pdfinfo`, native-vs-OCR routing, sha256 recorded).
+      `pdfinfo`, positioned per-page text, sha256 recorded).
 - [ ] Schema + sync verified against the real corpus (row counts,
       files open).
 - [ ] Backend + index build verified (`img_vectors.npy` shape,

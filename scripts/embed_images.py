@@ -48,20 +48,6 @@ def rasterize_pdf(pdf_path: Path, dest_dir: Path, dpi: int) -> list[Path]:
     return out
 
 
-def extract_page_text(pdf_path: Path, page_num: int, png_path: Path):
-    """Single-page text: pdftotext -f -l, else OCR the PNG."""
-    r = extraction.run_cmd(
-        ["pdftotext", "-layout", "-f", str(page_num), "-l", str(page_num),
-         str(pdf_path), "-"],
-        timeout=120,
-    )
-    text = r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else ""
-    if len("".join(text.split())) >= max(20, config.PDF_NATIVE_TEXT_MIN_CHARS // 4):
-        return text, "native_pdftotext", None
-    t, conf = extraction.ocr_image(png_path)
-    return t, "ocr_tesseract", conf
-
-
 def _dest_for_attachment(att_id: int) -> Path:
     d = Path(config.PAGE_IMAGES_DIR) / f"attachment_{att_id}"
     d.mkdir(parents=True, exist_ok=True)
@@ -117,21 +103,21 @@ def sync_page_images(conn) -> int:
         dest = _dest_for_attachment(a["id"])
         if is_pdf:
             pages = rasterize_pdf(path, dest, config.IMG_PAGE_DPI)
-            for i, png in enumerate(pages, 1):
-                text, method, conf = extract_page_text(path, i, png)
-                text, low = extraction.apply_low_confidence_flag(
-                    text, conf, png)
-                rel = str(png.relative_to(config.PROJECT_ROOT))
-                sha = utils_hash.sha256_file(png)
-                conn.execute(
-                    """INSERT INTO page_images (
-                           item_id, source_kind, attachment_id, page_number,
-                           image_path, sha256, page_text_method, ocr_text,
-                           ocr_confidence, ocr_flagged_low_conf, rasterized_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (a["item_id"], "attachment", a["id"], i, rel, sha,
-                     method, text, conf, int(low), now_iso()))
-                created += 1
+            with extraction.ocrmypdf_redo_derivative(path) as ocr_pdf:
+                for i, png in enumerate(pages, 1):
+                    text = extraction.extract_pdf_layout(ocr_pdf, i)
+                    rel = str(png.relative_to(config.PROJECT_ROOT))
+                    sha = utils_hash.sha256_file(png)
+                    conn.execute(
+                        """INSERT INTO page_images (
+                               item_id, source_kind, attachment_id, page_number,
+                               image_path, sha256, page_text_method, ocr_text,
+                               ocr_confidence, ocr_flagged_low_conf, rasterized_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (a["item_id"], "attachment", a["id"], i, rel, sha,
+                         "ocrmypdf_redo_pdftotext_layout", text, None, 0,
+                         now_iso()))
+                    created += 1
         else:
             # reuse extracted image copy
             rel = a["extracted_copy_path"]
@@ -194,21 +180,21 @@ def sync_page_images(conn) -> int:
         dest = _dest_for_file_item(f["item_id"])
         if is_pdf:
             pages = rasterize_pdf(path, dest, config.IMG_PAGE_DPI)
-            for i, png in enumerate(pages, 1):
-                text, method, conf = extract_page_text(path, i, png)
-                text, low = extraction.apply_low_confidence_flag(
-                    text, conf, png)
-                rel = str(png.relative_to(config.PROJECT_ROOT))
-                sha = utils_hash.sha256_file(png)
-                conn.execute(
-                    """INSERT INTO page_images (
-                           item_id, source_kind, attachment_id, page_number,
-                           image_path, sha256, page_text_method, ocr_text,
-                           ocr_confidence, ocr_flagged_low_conf, rasterized_at)
-                       VALUES (?,?,NULL,?,?,?,?,?,?,?,?)""",
-                    (f["item_id"], "file", i, rel, sha, method, text, conf,
-                     int(low), now_iso()))
-                created += 1
+            with extraction.ocrmypdf_redo_derivative(path) as ocr_pdf:
+                for i, png in enumerate(pages, 1):
+                    text = extraction.extract_pdf_layout(ocr_pdf, i)
+                    rel = str(png.relative_to(config.PROJECT_ROOT))
+                    sha = utils_hash.sha256_file(png)
+                    conn.execute(
+                        """INSERT INTO page_images (
+                               item_id, source_kind, attachment_id, page_number,
+                               image_path, sha256, page_text_method, ocr_text,
+                               ocr_confidence, ocr_flagged_low_conf, rasterized_at)
+                           VALUES (?,?,NULL,?,?,?,?,?,?,?,?)""",
+                        (f["item_id"], "file", i, rel, sha,
+                         "ocrmypdf_redo_pdftotext_layout", text, None, 0,
+                         now_iso()))
+                    created += 1
         else:
             rel = f["extracted_copy_path"]
             text = ""

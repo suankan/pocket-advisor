@@ -72,6 +72,16 @@ This is the earlier message.
 It remains in the parent.
 """
 
+AUTHORED_ON = """Hi Parent,
+
+On the question of custody, I disagree with the proposal.
+
+On Wed, 17 June 2026, 17:25 Parent <parent@example.test> wrote:
+
+> This is the earlier message.
+> It remains in the parent.
+"""
+
 FORWARDED = """Current forwarding note.
 
 Kind regards,
@@ -148,6 +158,11 @@ def main():
               GMAIL[:gmail_start].strip().endswith("new answer.")
               and gmail_method.endswith("gmail_wrapper"),
               (gmail_start, gmail_method))
+        on_start, on_method = email_bodies.find_quote_start(AUTHORED_ON, PARENT)
+        check("authored sentence starting with 'On' is kept",
+              AUTHORED_ON[:on_start].strip().endswith("I disagree with the proposal.")
+              and on_method.endswith("gmail_wrapper"),
+              (on_start, on_method))
         fwd_start, fwd_method = email_bodies.find_quote_start(FORWARDED, PARENT)
         check("Gmail forwarded wrapper removed after parent proof",
               FORWARDED[:fwd_start].strip().endswith("Sender")
@@ -212,13 +227,25 @@ def main():
               row["body_compaction_method"] == "in_reply_to"
               and row["body_compaction_parent_item_id"] == parent_id
               and row["body_compaction_removed_chars"] > 0
-              and row["body_compaction_version"] == 3, dict(row))
+              and row["body_compaction_version"] == 4, dict(row))
 
         # Idempotence: same text and same aggregate decision on a second pass.
         before = child_path.read_bytes()
         again = email_bodies.compact_quoted_replies(conn)
         check("second pass idempotent",
               child_path.read_bytes() == before and again == stats, again)
+
+        # A compacted row whose lossless full body is lost must not be
+        # silently "backfilled" from the compacted search file.
+        saved_full = child_full.read_text()
+        child_full.unlink()
+        try:
+            email_bodies.compact_quoted_replies(conn)
+            check("missing full body for compacted item aborts", False)
+        except SystemExit as exc:
+            check("missing full body for compacted item aborts",
+                  "lossless full body missing" in str(exc), exc)
+        child_full.write_text(saved_full)
         conn.close()
     finally:
         for k, v in old.items():

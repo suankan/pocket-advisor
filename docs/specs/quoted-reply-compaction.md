@@ -157,3 +157,17 @@ Item 721 exposed the analogous Gmail-forward form: its parent body was
 correctly removed, but `Forwarded message` plus `From/Date/Subject/To/Cc`
 remained. Compaction version 3 recognizes that header block only after the
 same exact parent-body proof and moves the cut back to the divider.
+
+### 2026-07-17 wrapper-span hardening (version 4)
+
+Review found the version-2 Gmail `On … wrote:` matcher could start at an
+*authored* line beginning with "On" up to ~1200 characters above the real
+wrapper (its multi-line match was not required to begin at the wrapper), so
+that authored sentence would be dropped from the searchable body. Compaction
+version 4 accepts an `On` line only when everything from that line to the
+proven parent body is exactly the wrapper (matching the discipline the
+Outlook and forwarded finders already had), preferring the nearest
+qualifying line. Additionally, the lossless-migration backfill now refuses
+to reconstruct a missing `emails_full/` file from a search file whose row is
+already marked compacted — that copy is no longer full — and directs the
+operator to the guarded rebuild instead.

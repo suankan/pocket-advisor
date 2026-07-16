@@ -94,7 +94,10 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   `From/Sent/To/Subject` wrapper; remove that wrapper only *after* the exact
   parent match has independently proven the quoted tail. Gmail forwards use a
   third wrapper shape (`Forwarded message` + `From/Date/Subject/To/[Cc]`),
-  distinct from both Gmail replies and Outlook replies.
+  distinct from both Gmail replies and Outlook replies. A recognized wrapper
+  must also span *exactly* from its own first line to the proven parent body —
+  a multi-line `On … wrote:` match that merely ends at the body can start at
+  an authored sentence beginning with "On" and silently swallow it.
 
 - `ingest.py all` run twice back-to-back: second run must report 0 new
   / all skipped and finish in seconds. This is the standing regression

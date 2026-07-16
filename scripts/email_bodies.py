@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 import config
 import utils_mime
 
-COMPACTION_VERSION = 3
+COMPACTION_VERSION = 4
 PREFIX_TOKENS = 16
 MIN_PREFIX_TOKENS = 8
 _TOKEN = re.compile(r"\w+", re.UNICODE)
@@ -24,8 +24,7 @@ _REPLY_HEADER = re.compile(
     re.IGNORECASE,
 )
 _GMAIL_WRAPPER = re.compile(
-    r"(?ims)^[ \t]*(?:>[ \t]*)?On\b.{0,1000}?\bwrote:[ \t]*\n"
-    r"(?:[ \t]*>[ \t]*)*\s*\Z"
+    r"(?is)\A[ \t]*(?:>[ \t]*)?On\b.{0,1000}?\bwrote:[ \t]*\n[>\s]*\Z"
 )
 _FORWARDED_DIVIDER = re.compile(
     r"^[ \t]*>*[ \t]*-{2,}[ \t]*Forwarded message[ \t]*-{2,}[ \t]*$",
@@ -124,15 +123,26 @@ def _outlook_wrapper_start(child_full: str, body_start: int) -> int | None:
 
 
 def _gmail_wrapper_start(child_full: str, body_start: int) -> int | None:
-    """Find the final `On ... wrote:` wrapper before proven parent text."""
+    """Find the final `On ... wrote:` wrapper before proven parent text.
+
+    The wrapper must span exactly from an `On` line start to the proven
+    parent body, so an authored sentence that itself begins with "On"
+    above the wrapper can never be absorbed into the cut. The nearest
+    qualifying line wins.
+    """
     prefix = child_full[:body_start]
     tail_start = max(0, len(prefix) - 1200)
     if tail_start:
         tail_start = prefix.rfind("\n", 0, tail_start) + 1
-    matches = list(_GMAIL_WRAPPER.finditer(prefix[tail_start:]))
-    if not matches:
-        return None
-    return tail_start + matches[-1].start()
+    offset = tail_start
+    starts = []
+    for line in prefix[tail_start:].splitlines(keepends=True):
+        starts.append(offset)
+        offset += len(line)
+    for start in reversed(starts):
+        if _GMAIL_WRAPPER.match(prefix[start:]):
+            return start
+    return None
 
 
 def _forwarded_wrapper_start(child_full: str, body_start: int) -> int | None:
@@ -242,7 +252,7 @@ def compact_quoted_replies(conn) -> dict[str, int]:
     rows = conn.execute(
         """SELECT id, message_id, in_reply_to, body_text_path,
                   body_full_text_path, body_quote_start,
-                  body_quote_boundary_method
+                  body_quote_boundary_method, body_compaction_method
              FROM items
             WHERE item_kind='email' AND body_text_path IS NOT NULL
             ORDER BY id"""
@@ -259,6 +269,15 @@ def compact_quoted_replies(conn) -> dict[str, int]:
         full_rel = row["body_full_text_path"]
         full_path = config.PROJECT_ROOT / full_rel if full_rel else _full_path_for(search_path)
         if not full_path.is_file():
+            if row["body_compaction_method"]:
+                # The search file was already compacted; rebuilding "full"
+                # from it would silently break the lossless guarantee.
+                raise SystemExit(
+                    f"lossless full body missing for compacted item {row['id']} "
+                    f"({full_path}). Regenerate derived state from originals: "
+                    "'./pocket-advisor.py wipe state' then "
+                    "'./pocket-advisor.py ingest all'."
+                )
             # Lossless migration: the pre-feature search file is still full.
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(search_path.read_text(encoding="utf-8"), encoding="utf-8")

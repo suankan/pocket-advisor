@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 import config
 import utils_mime
 
-COMPACTION_VERSION = 4
+COMPACTION_VERSION = 5
 PREFIX_TOKENS = 16
 MIN_PREFIX_TOKENS = 8
 _TOKEN = re.compile(r"\w+", re.UNICODE)
@@ -159,24 +159,32 @@ def _forwarded_wrapper_start(child_full: str, body_start: int) -> int | None:
     for i in range(len(lines) - 1, first - 1, -1):
         if not _FORWARDED_DIVIDER.match(lines[i]):
             continue
-        required = {"from", "date", "subject", "to"}
-        found = set()
-        last_header = None
+        # Gmail may wrap a Subject value onto an unindented line. That is safe
+        # only between ordered recognized headers, never after final To/Cc
+        # where the text could be authored/body prose.
+        order = {"from": 0, "date": 1, "subject": 2, "to": 3, "cc": 4}
+        headers = []
         for j in range(i + 1, len(lines)):
             hm = _FORWARD_HEADER.match(lines[j])
             if hm:
-                found.add(hm.group(1).lower())
-                last_header = j
-        if not required.issubset(found) or last_header is None:
+                headers.append((j, hm.group(1).lower()))
+        labels = [label for _, label in headers]
+        required = ("from", "date", "subject", "to")
+        if any(label not in labels for label in required):
             continue
-        # Header values can wrap, but no unrelated prose may occur before the
-        # already-proven parent body. Wrapped values begin with whitespace.
+        if any(order[b] <= order[a] for a, b in zip(labels, labels[1:])):
+            continue
+
+        header_lines = {j for j, _ in headers}
+        last_header = headers[-1][0]
         bad = False
-        for line in lines[i + 1:]:
-            if not line.strip() or _FORWARD_HEADER.match(line):
+        for j, line in enumerate(lines[i + 1:], i + 1):
+            if not line.strip() or j in header_lines:
                 continue
             if line[:1].isspace() or re.match(r"^[ \t]*>", line):
                 continue
+            if j < last_header:
+                continue  # unindented continuation between headers
             bad = True
             break
         if not bad:

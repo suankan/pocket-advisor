@@ -171,3 +171,11 @@ qualifying line. Additionally, the lossless-migration backfill now refuses
 to reconstruct a missing `emails_full/` file from a search file whose row is
 already marked compacted — that copy is no longer full — and directs the
 operator to the guarded rebuild instead.
+
+### 2026-07-17 forwarded-header wrapping (version 5)
+
+Items 719/720 exposed unindented line wrapping inside Gmail's generated
+forward headers (`Subject: ... -` followed by `Parenting`). Version 5 accepts
+unindented continuation text only *between* recognized headers in their fixed
+`From/Date/Subject/To/[Cc]` order. Unindented text after the final header is
+never absorbed, because it could be authored/body prose.

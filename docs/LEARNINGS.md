@@ -97,7 +97,11 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
   distinct from both Gmail replies and Outlook replies. A recognized wrapper
   must also span *exactly* from its own first line to the proven parent body —
   a multi-line `On … wrote:` match that merely ends at the body can start at
-  an authored sentence beginning with "On" and silently swallow it.
+  an authored sentence beginning with "On" and silently swallow it. Gmail may
+  wrap a long forwarded-header value onto an *unindented* next line; position
+  between ordered recognized headers is safe continuation evidence, but
+  unindented text after the final header must remain potentially authored
+  prose.
 
 - `ingest.py all` run twice back-to-back: second run must report 0 new
   / all skipped and finish in seconds. This is the standing regression

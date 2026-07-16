@@ -64,6 +64,11 @@ def text_emails_dir(source_id: str | None = None) -> Path:
     return collection_cache_dir(source_id) / "text" / "emails"
 
 
+def text_full_emails_dir(source_id: str | None = None) -> Path:
+    """Lossless full bodies; `text/emails/` contains searchable bodies."""
+    return collection_cache_dir(source_id) / "text" / "emails_full"
+
+
 def text_attachments_dir(source_id: str | None = None) -> Path:
     return collection_cache_dir(source_id) / "text" / "attachments"
 

@@ -1,0 +1,164 @@
+"""R-19 quoted-reply compaction self-test."""
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import config
+import db
+import email_bodies
+
+FAILURES = []
+
+
+def check(name, cond, detail=""):
+    if cond:
+        print(f"  [ok] {name}")
+    else:
+        print(f"  [FAIL] {name}: {detail}")
+        FAILURES.append(name)
+
+
+GMAIL = """Hi Parent,
+
+This is the new answer.
+
+On Wed, 17 June 2026, 17:25 Parent <parent@example.test> wrote:
+
+> This is the earlier message.
+> It remains in the parent.
+"""
+
+PARENT = """This is the earlier message.
+It remains in the parent.
+"""
+
+OUTLOOK = """Current Outlook reply.
+
+From: Parent <parent@example.test>
+Sent: Wednesday, 17 June 2026 5:03 PM
+To: Child <child@example.test>
+Cc: Another <another@example.test>
+Subject: RE: Example
+
+This is the earlier message.
+It remains in the parent.
+"""
+
+
+def _insert(conn, mid, body, *, in_reply_to=None, boundary=None, method=None):
+    cur = conn.execute(
+        """INSERT INTO items
+              (item_kind, message_id, in_reply_to, body_text_path,
+               body_full_text_path, body_quote_start,
+               body_quote_boundary_method, ingested_at)
+             VALUES ('email',?,?,?,?,?,?, 'now')""",
+        (mid, in_reply_to, None, None, boundary, method),
+    )
+    item_id = cur.lastrowid
+    root = config.CACHE_DIR / "test" / "text" / "emails"
+    root.mkdir(parents=True, exist_ok=True)
+    search = root / f"{item_id}.txt"
+    full = root.with_name("emails_full") / f"{item_id}.txt"
+    full.parent.mkdir(parents=True, exist_ok=True)
+    search.write_text(body)
+    full.write_text(body)
+    conn.execute(
+        "UPDATE items SET body_text_path=?,body_full_text_path=? WHERE id=?",
+        (str(search.relative_to(config.PROJECT_ROOT)),
+         str(full.relative_to(config.PROJECT_ROOT)), item_id),
+    )
+    return item_id, search, full
+
+
+def main():
+    tmp = Path(tempfile.mkdtemp(prefix="pa_quoted_reply_"))
+    old = {k: getattr(config, k) for k in
+           ("PROJECT_ROOT", "WORKSPACES_DIR", "STATE_DIR", "OUTPUT_DIR",
+            "CACHE_DIR", "DB_PATH")}
+    try:
+        config.PROJECT_ROOT = tmp
+        config.WORKSPACES_DIR = tmp / "workspaces"
+        config.STATE_DIR = config.WORKSPACES_DIR / ".state"
+        config.OUTPUT_DIR = config.STATE_DIR
+        config.CACHE_DIR = config.STATE_DIR / "cache"
+        config.DB_PATH = config.STATE_DIR / "test.db"
+        db.init()
+        conn = db.connect()
+        db.migrate(conn)
+
+        print("deterministic parent-prefix location:")
+        gs = email_bodies.find_parent_prefix(GMAIL, PARENT)
+        check("Gmail quote markers/wrapping ignored",
+              GMAIL[gs:].startswith("> This is the earlier message."), gs)
+        os = email_bodies.find_parent_prefix(OUTLOOK, PARENT)
+        check("Outlook parent head located",
+              OUTLOOK[os:].startswith("This is the earlier message."), os)
+        check("unrelated content has no match",
+              email_bodies.find_parent_prefix(
+                  "Authored\n\nFrom: merely discussed in prose", PARENT) is None)
+        check("interleaved partial quote is retained",
+              email_bodies.find_parent_prefix(
+                  "Answer one\n> This is the earlier message.\nAnswer two", PARENT) is None)
+        check("duplicate prefix is ambiguous",
+              email_bodies.find_parent_prefix(PARENT + "\n" + PARENT, PARENT) is None)
+
+        print("header-gated compaction:")
+        parent_id, parent_path, _ = _insert(
+            conn, "<parent@example.test>", PARENT)
+        child_id, child_path, child_full = _insert(
+            conn, "<child@example.test>", GMAIL,
+            in_reply_to="<parent@example.test>")
+        missing_id, missing_path, _ = _insert(
+            conn, "<missing-child@example.test>", OUTLOOK,
+            in_reply_to="<not-imported@example.test>")
+        # Insert parent first or last makes no difference: the pass sees the
+        # complete table. This second child is inserted before its parent.
+        late_child_id, late_child_path, _ = _insert(
+            conn, "<late-child@example.test>", GMAIL,
+            in_reply_to="<late-parent@example.test>")
+        _insert(conn, "<late-parent@example.test>", PARENT)
+        conn.commit()
+
+        stats = email_bodies.compact_quoted_replies(conn)
+        check("two imported-parent replies compacted", stats["compacted"] == 2, stats)
+        check("Gmail parent content removed",
+              "This is the earlier message" not in child_path.read_text())
+        check("full body preserved", child_full.read_text() == GMAIL)
+        check("missing parent retains full chain", missing_path.read_text() == OUTLOOK)
+        check("import order irrelevant",
+              "This is the earlier message" not in late_child_path.read_text())
+        row = conn.execute(
+            """SELECT body_compaction_method,
+                      body_compaction_parent_item_id,
+                      body_compaction_removed_chars,
+                      body_compaction_version
+                 FROM items WHERE id=?""", (child_id,)).fetchone()
+        check("decision metadata",
+              row["body_compaction_method"] == "in_reply_to"
+              and row["body_compaction_parent_item_id"] == parent_id
+              and row["body_compaction_removed_chars"] > 0
+              and row["body_compaction_version"] == 1, dict(row))
+
+        # Idempotence: same text and same aggregate decision on a second pass.
+        before = child_path.read_bytes()
+        again = email_bodies.compact_quoted_replies(conn)
+        check("second pass idempotent",
+              child_path.read_bytes() == before and again == stats, again)
+        conn.close()
+    finally:
+        for k, v in old.items():
+            setattr(config, k, v)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if FAILURES:
+        print(f"FAIL: {len(FAILURES)}")
+        return 1
+    print("All quoted-reply compaction self-tests passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

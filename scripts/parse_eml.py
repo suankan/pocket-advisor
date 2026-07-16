@@ -17,10 +17,9 @@ import re
 import sys
 from datetime import timezone
 
-from bs4 import BeautifulSoup
-
 import config
 import db
+import email_bodies
 from progress import Progress
 import utils_hash
 import utils_mime
@@ -57,31 +56,8 @@ def addr_list(msg, header):
 
 
 def extract_body(msg):
-    """Prefer text/plain; fall back to tag-stripped text/html.
-    Returns (text, source, charset)."""
-    plain = msg.get_body(preferencelist=("plain",))
-    if plain is not None:
-        text, charset = part_text(plain)
-        if text and text.strip():
-            return text, "plain", charset
-    html = msg.get_body(preferencelist=("html",))
-    if html is not None:
-        raw, charset = part_text(html)
-        if raw:
-            text = BeautifulSoup(raw, "html.parser").get_text(separator="\n")
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-            if text:
-                return text, "html_stripped", charset
-    return "", "none", None
-
-
-def part_text(part):
-    charset = part.get_content_charset()
-    try:
-        return part.get_content(), charset
-    except (LookupError, UnicodeDecodeError):
-        payload = part.get_payload(decode=True) or b""
-        return utils_mime.decode_with_fallbacks(payload, charset), f"{charset}(fallback)"
+    """Compatibility wrapper; implementation lives in email_bodies."""
+    return email_bodies.extract_body(msg)
 
 
 def iter_attachments(msg):
@@ -127,7 +103,7 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
         subject = utils_mime.decode_maybe_encoded(str(msg.get("Subject", "")) or "(no subject)")
         from_pairs = email.utils.getaddresses([str(msg.get("From", ""))])
         from_name, from_addr = (from_pairs[0] if from_pairs else (None, None))
-        body, body_source, charset = extract_body(msg)
+        body = extract_body(msg)
 
         cur = conn.execute(
             """INSERT INTO items (item_kind, message_id, date_utc, date_raw,
@@ -142,16 +118,26 @@ def upsert_email(conn, msg, source_path, rel_path, sha, size,
              subject, utils_mime.normalize_subject(subject),
              utils_mime.normalize_message_id(msg.get("In-Reply-To")),
              msg.get("References"),
-             body_source, str(charset), has_issue, now_iso()),
+             body.source, str(body.charset), has_issue, now_iso()),
         )
         item_id = cur.lastrowid
 
         body_dir = config.text_emails_dir(collection_id)
         body_path = body_dir / f"{item_id}.txt"
         body_path.parent.mkdir(parents=True, exist_ok=True)
-        body_path.write_text(body, encoding="utf-8")
-        conn.execute("UPDATE items SET body_text_path = ? WHERE id = ?",
-                     (str(body_path.relative_to(config.PROJECT_ROOT)), item_id))
+        full_path = config.text_full_emails_dir(collection_id) / f"{item_id}.txt"
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        body_path.write_text(body.text, encoding="utf-8")
+        full_path.write_text(body.text, encoding="utf-8")
+        conn.execute(
+            """UPDATE items
+                  SET body_text_path=?, body_full_text_path=?,
+                      body_quote_start=?, body_quote_boundary_method=?
+                WHERE id=?""",
+            (str(body_path.relative_to(config.PROJECT_ROOT)),
+             str(full_path.relative_to(config.PROJECT_ROOT)),
+             None, None, item_id),
+        )
 
         for decoded_name, raw_name, ctype, payload in iter_attachments(msg):
             insert_attachment(conn, item_id, rel_path, decoded_name, raw_name,
@@ -276,8 +262,9 @@ def run():
                 conn.commit()
 
     recompute_privilege(conn)
+    compaction = email_bodies.compact_quoted_replies(conn)
     conn.commit()
     conn.close()
     prog.done()
-    print(f"parse_eml: {stats}")
+    print(f"parse_eml: {stats}; quoted replies: {compaction}")
     return stats

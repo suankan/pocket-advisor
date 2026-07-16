@@ -88,6 +88,14 @@ collections.
 3. Check `workspaces/.state/logs/review_queue.csv` for flags.
 4. After bulk moves inside a collection: `pocket-advisor.py blob-index rebuild`.
 
+Email body extraction is lossless but search-normalized (R-19): when
+`In-Reply-To` resolves to an imported parent and that parent's exact normalized
+text prefix occurs once in the reply, the repeated parent body/tail is omitted
+from `cache/<collection>/text/emails/<id>.txt`. The complete extraction remains
+at `text/emails_full/<id>.txt` and the original `.eml` is untouched. Missing,
+short, absent, or ambiguous parent-prefix matches retain the complete searchable
+body. See `docs/specs/quoted-reply-compaction.md`.
+
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
 1. Drop files under a collection root in `workspaces/corpora/…`

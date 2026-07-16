@@ -1,0 +1,188 @@
+"""Lossless email-body extraction and quoted-reply compaction (R-19).
+
+The complete extracted MIME body is always retained.  The searchable body
+may omit one *top-level* quoted tail, but only when In-Reply-To resolves to a
+separately imported Message-ID and the boundary is deterministic.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from bs4 import BeautifulSoup
+
+import config
+import utils_mime
+
+COMPACTION_VERSION = 1
+PREFIX_TOKENS = 32
+MIN_PREFIX_TOKENS = 8
+_TOKEN = re.compile(r"\w+", re.UNICODE)
+
+
+@dataclass(frozen=True)
+class ExtractedBody:
+    text: str
+    source: str
+    charset: str | None
+
+
+def _clean_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _tokens_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    return [(m.group(0).casefold(), m.start(), m.end())
+            for m in _TOKEN.finditer(text)]
+
+
+def find_parent_prefix(child_full: str, parent_full: str) -> int | None:
+    """Locate an exact normalized prefix of parent_full inside child_full.
+
+    Normalization ignores punctuation, quote markers, casing, and line wraps,
+    but the word-token sequence must be exact. There is no fuzzy score. A
+    short or multiply-occurring prefix is ambiguous and is retained.
+    """
+    parent = _tokens_with_offsets(parent_full)
+    child = _tokens_with_offsets(child_full)
+    if len(parent) < MIN_PREFIX_TOKENS:
+        return None
+    needle = tuple(t[0] for t in parent[:PREFIX_TOKENS])
+    n = len(needle)
+    hits = []
+    for i in range(0, len(child) - n + 1):
+        if tuple(t[0] for t in child[i:i + n]) == needle:
+            hits.append(child[i][1])
+            if len(hits) > 1:
+                return None
+    if len(hits) != 1 or not child_full[:hits[0]].strip():
+        return None
+    # Cut at the beginning of the containing line, removing any `>` marker
+    # attached to the first parent token. Client-generated reply headers just
+    # above it may remain; no client-specific boundary grammar is required.
+    return child_full.rfind("\n", 0, hits[0]) + 1
+
+
+def _part_text(part):
+    charset = part.get_content_charset()
+    try:
+        return part.get_content(), charset
+    except (LookupError, UnicodeDecodeError):
+        payload = part.get_payload(decode=True) or b""
+        return utils_mime.decode_with_fallbacks(payload, charset), \
+            f"{charset}(fallback)"
+
+
+def extract_body(msg) -> ExtractedBody:
+    """Prefer plain MIME text; fall back to tag-stripped HTML."""
+    plain = msg.get_body(preferencelist=("plain",))
+    if plain is not None:
+        raw, charset = _part_text(plain)
+        if raw and raw.strip():
+            text = _clean_text(raw)
+            return ExtractedBody(text, "plain", charset)
+
+    html = msg.get_body(preferencelist=("html",))
+    if html is not None:
+        raw, charset = _part_text(html)
+        if raw:
+            soup = BeautifulSoup(raw, "html.parser")
+            full = _clean_text(soup.get_text(separator="\n"))
+            if full:
+                return ExtractedBody(full, "html_stripped", charset)
+    return ExtractedBody("", "none", None)
+
+
+def _full_path_for(search_path: Path) -> Path:
+    # Searchable and full bodies deliberately use separate directories so a
+    # corpus grep over text/emails/* does not reintroduce apparent duplicates.
+    if search_path.parent.name == "emails":
+        return search_path.parent.with_name("emails_full") / search_path.name
+    return search_path.with_name(f"{search_path.stem}.full{search_path.suffix}")
+
+
+def compact_quoted_replies(conn) -> dict[str, int]:
+    """Regenerate searchable email bodies from their lossless full bodies.
+
+    If applying a changed body would invalidate existing chunks, abort before
+    changing searchable files and direct the operator to the guarded rebuild.
+    """
+    rows = conn.execute(
+        """SELECT id, message_id, in_reply_to, body_text_path,
+                  body_full_text_path, body_quote_start,
+                  body_quote_boundary_method
+             FROM items
+            WHERE item_kind='email' AND body_text_path IS NOT NULL
+            ORDER BY id"""
+    ).fetchall()
+    by_mid = {r["message_id"]: r for r in rows}
+    planned = []
+    stats = {"compacted": 0, "retained": 0, "boundaries": 0}
+
+    # First make every lossless body available. This separate pass makes a
+    # child-before-parent import order behave exactly like parent-before-child.
+    full_texts = {}
+    for row in rows:
+        search_path = config.PROJECT_ROOT / row["body_text_path"]
+        full_rel = row["body_full_text_path"]
+        full_path = config.PROJECT_ROOT / full_rel if full_rel else _full_path_for(search_path)
+        if not full_path.is_file():
+            # Lossless migration: the pre-feature search file is still full.
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(search_path.read_text(encoding="utf-8"), encoding="utf-8")
+        full_texts[row["id"]] = (full_path, full_path.read_text(encoding="utf-8"))
+
+    for row in rows:
+        search_path = config.PROJECT_ROOT / row["body_text_path"]
+        full_path, full = full_texts[row["id"]]
+        parent = by_mid.get(row["in_reply_to"])
+        start = None
+        if parent is not None:
+            start = find_parent_prefix(full, full_texts[parent["id"]][1])
+        method = "parent_prefix_exact" if start is not None else None
+        if start is not None:
+            stats["boundaries"] += 1
+
+        should_compact = parent is not None and start is not None
+        target = full[:start].rstrip() if should_compact else full
+        current = search_path.read_text(encoding="utf-8")
+        if target != current:
+            planned.append((row, search_path, target))
+
+        full_relpath = str(full_path.relative_to(config.PROJECT_ROOT))
+        removed = len(full) - len(target) if should_compact else 0
+        conn.execute(
+            """UPDATE items
+                  SET body_full_text_path=?, body_quote_start=?,
+                      body_quote_boundary_method=?, body_compaction_method=?,
+                      body_compaction_parent_item_id=?,
+                      body_compaction_removed_chars=?, body_compaction_version=?
+                WHERE id=?""",
+            (full_relpath, start, method,
+             "in_reply_to" if should_compact else None,
+             parent["id"] if should_compact else None,
+             removed, COMPACTION_VERSION, row["id"]),
+        )
+        stats["compacted" if should_compact else "retained"] += 1
+
+    if planned:
+        ids = [r[0]["id"] for r in planned]
+        marks = ",".join("?" for _ in ids)
+        n_chunks = conn.execute(
+            f"SELECT COUNT(*) FROM chunks WHERE item_id IN ({marks})", ids
+        ).fetchone()[0]
+        if n_chunks:
+            conn.rollback()
+            raise SystemExit(
+                "quoted-reply compaction would change searchable bodies for "
+                f"{len(planned)} email(s), but {n_chunks} existing chunks would "
+                "become stale. Run './pocket-advisor.py wipe state' followed by "
+                "'./pocket-advisor.py ingest all'. Originals are untouched."
+            )
+
+    for _, path, target in planned:
+        path.write_text(target, encoding="utf-8")
+    conn.commit()
+    return stats

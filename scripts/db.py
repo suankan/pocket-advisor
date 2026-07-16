@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS items (
     is_privileged       INTEGER NOT NULL DEFAULT 0,
     privilege_override  INTEGER,
     body_text_path      TEXT,
+    body_full_text_path TEXT,
+    body_quote_start    INTEGER,
+    body_quote_boundary_method TEXT,
+    body_compaction_method TEXT,
+    body_compaction_parent_item_id INTEGER REFERENCES items(id),
+    body_compaction_removed_chars INTEGER NOT NULL DEFAULT 0,
+    body_compaction_version INTEGER,
     body_source         TEXT,
     charset_detected    TEXT,
     has_parse_issue     INTEGER NOT NULL DEFAULT 0,
@@ -574,7 +581,7 @@ def _migrate_dotstate_paths(conn):
     """
     old_prefix, new_prefix = "workspaces/state/", "workspaces/.state/"
     for table, cols in (
-        ("items", ("body_text_path",)),
+        ("items", ("body_text_path", "body_full_text_path")),
         ("item_file_meta", ("extracted_copy_path", "extracted_text_path")),
         ("attachments", ("extracted_copy_path", "extracted_text_path")),
         ("page_images", ("image_path",)),
@@ -882,6 +889,20 @@ def migrate(conn):
                   "filename TEXT NOT NULL DEFAULT ''")
     ensure_column(conn, "item_memberships", "membership_kind",
                   "membership_kind TEXT NOT NULL DEFAULT 'email'")
+    ensure_column(conn, "items", "body_full_text_path",
+                  "body_full_text_path TEXT")
+    ensure_column(conn, "items", "body_quote_start",
+                  "body_quote_start INTEGER")
+    ensure_column(conn, "items", "body_quote_boundary_method",
+                  "body_quote_boundary_method TEXT")
+    ensure_column(conn, "items", "body_compaction_method",
+                  "body_compaction_method TEXT")
+    ensure_column(conn, "items", "body_compaction_parent_item_id",
+                  "body_compaction_parent_item_id INTEGER")
+    ensure_column(conn, "items", "body_compaction_removed_chars",
+                  "body_compaction_removed_chars INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "items", "body_compaction_version",
+                  "body_compaction_version INTEGER")
     _ensure_chunks_fts_shadow_column(conn)
     _migrate_dotstate_paths(conn)
     conn.commit()

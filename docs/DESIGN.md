@@ -30,7 +30,7 @@ Shipped detail → CHANGELOG (by date). Open detail → ROADMAP (by ID).
 
 | Theme | Status | Shipped (see CHANGELOG) | Open (see ROADMAP) |
 |---|---|---|---|
-| **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done** | 2026-07-10 pipeline; 2026-07-11 documents; **R-15** 2026-07-14 multi-model vector cache | — |
+| **Core pipeline** — parse, OCR, thread, embed, hybrid query, custody | **Done; R-19 rollout open** | 2026-07-10 pipeline; 2026-07-11 documents; **R-15** 2026-07-14 multi-model vector cache | R-19 full-ingest verification |
 | **Measure + accuracy** — search accuracy test, pre-filter, rerank, translit, config overlay | **Done** | 2026-07-12 search-accuracy-test/pre-filter/rerank/translit/config; 2026-07-13 jina default, warm search-accuracy-test, daemon | R-10 latency; R-14 lexical; R-13 ANN |
 | **Instruction layers** — platform vs workspace, skills in matter | **Done** | 2026-07-12 instruction-layer split; domain skills in workspace | — |
 | **User data + multi-collection** — `corpora/`/`.state/`, mounts, pathless id | **Done** | v2 cache; **R-05** purposes; privileged-in-by-default | R-06 ocr_review path |
@@ -281,6 +281,7 @@ that slice; this table is the map.
 | Spec | ROADMAP |
 |---|---|
 | [visual-retrieval.md](specs/visual-retrieval.md) | R-03 shipped opt-in; R-03b search accuracy test polish open |
+| [quoted-reply-compaction.md](specs/quoted-reply-compaction.md) | R-19 lossless derived-body compaction |
 
 There is **no** `docs/history/`, no `PLAN.md`, and no `STATUS.md`.
 Product history is only [`CHANGELOG.md`](CHANGELOG.md).

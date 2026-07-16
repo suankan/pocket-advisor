@@ -80,6 +80,15 @@ Future work → `docs/ROADMAP.md`. Shipped milestones →
 
 ## Process
 
+- **Quoted-email copies are textually the same but not raw-string equal.**
+  Gmail/Outlook add `>` markers, HTML artifacts, punctuation, and different
+  line wrapping, so raw substring/hash matching misses real copies. Exact
+  case-folded Unicode word-token prefixes preserve determinism while ignoring
+  those presentation changes. On the 2026-07-16 live email pass, strict
+  `In-Reply-To` parent identity + one exact 32-token parent-prefix occurrence
+  compacted 476/528 replies whose direct parent was imported; no fuzzy/vector
+  similarity or client-specific separator grammar was needed (R-19).
+
 - `ingest.py all` run twice back-to-back: second run must report 0 new
   / all skipped and finish in seconds. This is the standing regression
   test for incremental dedup.

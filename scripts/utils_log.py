@@ -14,7 +14,9 @@ def now_iso():
 
 
 def review_queue_append(row):
-    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    # mkdir the CSV's own parent (not LOGS_DIR) so the two can never
+    # diverge when tests/config override one but not the other
+    config.REVIEW_QUEUE_CSV.parent.mkdir(parents=True, exist_ok=True)
     new = not config.REVIEW_QUEUE_CSV.exists()
     with open(config.REVIEW_QUEUE_CSV, "a", newline="") as f:
         w = csv.writer(f)

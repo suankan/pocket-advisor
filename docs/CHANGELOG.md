@@ -44,6 +44,11 @@ everything in scripts/ is now a pure module (no argparse, no
 `wipe_index.py` folded into `scripts/wipe.py` (`wipe list|index`) plus
 new guarded `wipe state`: full wipe of `workspaces/.state/` (stops
 daemon, lists sizes, confirms) for from-scratch re-ingests.
+Interactive progress (`scripts/progress.py`, zero-dep): the five long
+pipeline loops (parse emails, ingest documents, extract attachments,
+embed text chunks, rasterize/embed page images) show a live
+count/%/rate/ETA/current-item line on a TTY, throttled plain lines
+when piped.
 Spec: [structured-transactions-v2.md](specs/structured-transactions-v2.md).
 
 ## 2026-07-15

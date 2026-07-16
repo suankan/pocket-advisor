@@ -19,6 +19,7 @@ from pathlib import Path
 
 import config
 import db
+from progress import Progress
 import utils_hash
 import utils_mime
 from extraction import (apply_low_confidence_flag, extract_docx, extract_pdf,
@@ -169,7 +170,9 @@ def run():
             " AND extracted_copy_path IS NOT NULL").fetchall()
         if not rows:
             break  # loop again because msg/zip processing inserts new pending rows
+        prog = Progress("extract attachments", total=len(rows))
         for row in rows:
+            prog.step(note=row["filename"] or f"att {row['id']}")
             try:
                 result = process(conn, row)
                 stats[result if result in stats else "ok"] += 1
@@ -185,6 +188,7 @@ def run():
                     " processed_at=? WHERE id=?",
                     (f"{type(e).__name__}: {e}"[:500], now_iso(), row["id"]))
             conn.commit()
+        prog.done()
     conn.close()
     print(f"extract_attachments: {stats}")
     return stats

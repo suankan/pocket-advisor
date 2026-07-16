@@ -11,6 +11,7 @@ from pathlib import Path
 
 import config
 import db
+from progress import Progress
 import doc_dates
 import extraction
 import utils_hash
@@ -250,6 +251,8 @@ def run():
                     continue
                 if path.name in config.IGNORED_FILENAMES or path.name.startswith("."):
                     continue
+                if path.suffix.lower() == ".eml":
+                    continue   # per-file dispatch: parse_eml owns emails
                 rel = path.relative_to(source.root)
                 jobs.append((path, rel, source.id, source.id, source.privileged))
     else:
@@ -258,7 +261,9 @@ def run():
             priv = config.PRIVILEGED_DIR_NAME in path.parts
             jobs.append((path, rel, folder, "legacy", priv))
 
+    prog = Progress("ingest documents", total=len(jobs))
     for path, rel, folder, sid, priv in jobs:
+        prog.step(note=path.name)
         raw = path.read_bytes()
         sha = utils_hash.sha256_bytes(raw)
 
@@ -310,6 +315,7 @@ def run():
                  f"{type(e).__name__}: {e}")
             conn.commit()
 
+    prog.done()
     recompute_privilege(conn)
     conn.commit()
     conn.close()

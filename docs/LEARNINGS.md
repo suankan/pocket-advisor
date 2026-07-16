@@ -346,3 +346,14 @@ state what each collection evidences.
   alternative but produced worse artifacts and 10× file bloat.
 
 
+- **Derived config paths must be overridden together in test
+  sandboxes.** `config.REVIEW_QUEUE_CSV` is derived from
+  `config.LOGS_DIR` at import; test_schema_items overrode `LOGS_DIR`
+  only, so `flag()` silently appended test rows into the REAL
+  `.state/logs/review_queue.csv` for as long as that dir existed — and
+  crashed (FileNotFoundError) the first time it didn't, right after a
+  `wipe state`. Fixed 2026-07-16: the test overrides both, and
+  `utils_log.review_queue_append` mkdirs the CSV's own parent instead
+  of `LOGS_DIR` so the two can never diverge again. When sandboxing
+  `config` in a test, grep config.py for every path derived from the
+  one you're overriding.

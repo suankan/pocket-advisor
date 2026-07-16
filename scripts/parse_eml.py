@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 
 import config
 import db
+from progress import Progress
 import utils_hash
 import utils_mime
 from utils_log import flag, now_iso
@@ -236,6 +237,9 @@ def run():
         from blob_index import SourceRoot
         email_sources = [SourceRoot(ws_id, "legacy", config.INGESTION_SOURCES)]
 
+    prog = Progress("parse emails", total=sum(
+        len(list(s.root.rglob("*.eml")))
+        for s in email_sources if s.root.is_dir()))
     for source in email_sources:
         if not source.root.is_dir():
             flag(conn, source.root, "parse", "warning",
@@ -244,6 +248,7 @@ def run():
             continue
         sid = getattr(source, "source_id", None) or source.id
         for path in sorted(source.root.rglob("*.eml")):
+            prog.step(note=path.name)
             rel = path.relative_to(source.root)
             raw = path.read_bytes()
             sha = utils_hash.sha256_bytes(raw)
@@ -273,5 +278,6 @@ def run():
     recompute_privilege(conn)
     conn.commit()
     conn.close()
+    prog.done()
     print(f"parse_eml: {stats}")
     return stats

@@ -21,6 +21,7 @@ import numpy as np
 
 import config
 import db
+from progress import Progress
 import embedding_backends
 import transliteration
 
@@ -163,17 +164,20 @@ def embed_pending(conn, backend, vecs_dir):
     rows = conn.execute("SELECT id, text FROM chunks").fetchall()
     pending = [r for r in rows if r["id"] not in have]
     done, failed = 0, 0
+    prog = Progress("embed text chunks", total=len(pending))
     for row in pending:
+        prog.step(note=f"chunk {row['id']}")
         try:
             vec = backend.embed_one(row["text"])
             np.save(vecs_dir / f"{row['id']}.npy", vec)
             done += 1
-            if done % 200 == 0:
-                print(f"  embedded {done}/{len(pending)}")
         except Exception as e:
             failed += 1
+            prog.println(f"  embed FAIL chunk {row['id']}: "
+                         f"{type(e).__name__}: {e}")
             db.log_issue(conn, f"chunk:{row['id']}", "embed", "error",
                          f"{type(e).__name__}: {e}")
+    prog.done()
     conn.commit()
     return done, failed
 

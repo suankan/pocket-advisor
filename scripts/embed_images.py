@@ -19,6 +19,7 @@ import numpy as np
 
 import config
 import db
+from progress import Progress
 import extraction
 import utils_hash
 from utils_log import now_iso
@@ -87,7 +88,9 @@ def sync_page_images(conn) -> int:
              AND a.extracted_copy_path IS NOT NULL
              AND a.extraction_method NOT IN ('error')"""
     ).fetchall()
+    prog = Progress("rasterize attachment pages", total=len(atts))
     for a in atts:
+        prog.step(note=a["filename"] or f"att {a['id']}")
         path = config.PROJECT_ROOT / a["extracted_copy_path"]
         if not path.is_file():
             continue
@@ -163,7 +166,10 @@ def sync_page_images(conn) -> int:
              AND COALESCE(fm.extraction_method, '') NOT IN ('error')
            GROUP BY i.id"""
     ).fetchall()
+    prog.done()
+    prog = Progress("rasterize document pages", total=len(files))
     for f in files:
+        prog.step(note=f["filename"] or f"item {f['item_id']}")
         path = config.PROJECT_ROOT / f["extracted_copy_path"]
         if not path.is_file():
             continue
@@ -331,32 +337,23 @@ def embed_pending(conn, vecs_dir: Path, backend) -> int:
     n = 0
     n_fail = 0
     n_skip = 0
-    t0 = datetime.now(timezone.utc)
-    for i, r in enumerate(rows, 1):
+    prog = Progress("embed page images", total=total)
+    for r in rows:
+        prog.step(note=f"page id {r['id']}")
         path = config.PROJECT_ROOT / r["image_path"]
         if not path.is_file():
             n_skip += 1
-            print(f"  [{i}/{total}] id={r['id']} SKIP missing file",
-                  flush=True)
+            prog.println(f"  id={r['id']} SKIP missing file")
             continue
         try:
             vec = backend.embed_image(path)
         except Exception as e:
             n_fail += 1
-            print(f"  [{i}/{total}] id={r['id']} FAIL {e}",
-                  file=sys.stderr, flush=True)
+            prog.println(f"  id={r['id']} FAIL {e}")
             continue
         np.save(vecs_dir / f"{r['id']}.npy", vec)  # durable per success
         n += 1
-        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
-        rate = n / elapsed if elapsed > 0 else 0
-        eta = (total - i) / rate if rate > 0 else 0
-        print(
-            f"  [{i}/{total}] id={r['id']} OK  "
-            f"success={n} fail={n_fail}  "
-            f"{rate:.2f}/s  ETA ~{eta/60:.0f} min",
-            flush=True,
-        )
+    prog.done()
     print(
         f"embed_images: embed pass done success={n} fail={n_fail} "
         f"skip_missing={n_skip}",

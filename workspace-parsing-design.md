@@ -28,6 +28,10 @@ Refactor of the ingestion pipeline around two ideas:
   cache layout. Once the new pipeline passes tests: `wipe state`
   (explicit confirmation at that moment) and re-ingest from corpora.
   One-time full re-embed is accepted.
+- **Clean break, no compat.** This is a full refactor: old CLI stage
+  spellings are removed (not deprecated), superseded modules are
+  deleted, and the DB legacy-migration chain is dropped — wipe +
+  re-ingest makes all of it dead code. Single-operator tool; no shims.
 
 ## Cache layout (target state)
 
@@ -251,14 +255,65 @@ workspace-config.
 - Chain-of-custody invariants: originals read-only, sha256 before
   parse, write-verify every copy, changed-sha alarm.
 
-## CLI mapping
+## CLI — full refactor
 
-`ingest all` = discover → emails → pdfs → embed → transactions
-(embed gated by `ingestion.embed_text`; transactions gated by
-collection marking). Stage names: `ingest discover`, `ingest emails`,
-`ingest pdfs`, `--embed text` unchanged. Old stage names (`parse`,
-`documents`, `attachments`, `thread`) accepted for one release with a
-deprecation note; `thread` remains available as an explicit recompute.
+The `ingest` subcommand maps 1:1 onto the design stages. One positional
+stage argument, no flags:
+
+```
+./pocket-advisor.py ingest [stage]
+
+  all           discover → emails → pdfs → thread → embed → transactions  (default)
+  discover      Stage 1 — build/refresh the working set
+  emails        Stage 2 — per-email folders; 2a full bodies, 2b authored bodies;
+                attachment routing; .eml/zip recursion
+  pdfs          Stage 3 — collect PDFs, ocrmypdf, pdftotext
+  thread        thread reconstruction (full recompute, carried over)
+  embed         Stage 4 — chunk + embed + rebuild vector index
+  transactions  Stage 5 — statement parsers + transfer linking
+```
+
+Rules:
+
+- In `all`, embed is gated by `ingestion.embed_text` and transactions
+  by the `bank-transactions` collection marking. Invoking a stage BY
+  NAME always runs it (no config gate).
+- A named stage assumes earlier stages' outputs exist; there is no
+  auto-chaining. `discover` is cheap — run it first when in doubt.
+- Removed outright (not deprecated): `ingest parse`, `documents`,
+  `attachments`, the legacy `text`/`embed` stage spellings, and the
+  `--embed text|all` flag. With a single text channel, "embed" is just
+  a stage name.
+
+Other top-level commands:
+
+- `transactions`: `parse` and `link` fold into `ingest transactions`;
+  only `transactions report` remains as a top-level command.
+- `blob-index`: `rebuild` is absorbed by `ingest discover` (same walk,
+  one walker); `lookup` and `list-sources` remain as custody tooling.
+- Unchanged: `db init`, `fetch-model`, `query`, `daemon`, `wipe`,
+  `verify`, `accuracy`, `test`.
+
+## Discarded — module map
+
+| current                  | fate |
+|--------------------------|------|
+| `ingest.py`              | rewritten: thin stage dispatcher for the table above |
+| `parse_eml.py`           | reshaped into `ingest_emails.py` (Stage 2) |
+| `ingest_documents.py`    | **deleted** — native PDFs are Stage 1 candidates processed by Stage 3; docx/xlsx/image extraction retired |
+| `extract_attachments.py` | **deleted** — attachment routing moves into Stage 2; PDF OCR into Stage 3 |
+| `extraction.py`          | shrinks to PDF-only (`ocrmypdf_redo_derivative`, `extract_pdf_layout`); `extract_image` / `extract_docx` / `extract_xlsx` / nested-msg deleted; zip unpack moves to Stage 2 routing |
+| *(new)* `discover.py`    | Stage 1 walker (also serves the old `blob-index rebuild`) |
+| *(new)* `pdf_to_text.py` | Stage 3 |
+| `embed.py`               | Stage 4; drop `_migrate_legacy_flat_index` (dead after wipe) |
+| `thread_linker.py`       | unchanged |
+| `transactions.py`, `statement_parsers.py` | Stage 5 engine; CLI surface shrinks to `report` |
+| `db.py`                  | drop the entire legacy-migration chain (`emails`→`items` Schema B, pathless evidence, Phase A collection identity, dot-state path rewrite, transactions v1→v2, 1-column FTS rebuild); `migrate()` = `BASE_SCHEMA` + guarded `ensure_column`s going forward |
+| `config.py`              | new layout path helpers (email folder, pdf-original/pdf-ocr/pdf-to-text); drop `DOCUMENT_FOLDERS`, `DOCUMENT_SKIP_UNSUPPORTED_EXTS`, `SMALL_IMAGE_BYTES`, `TEXT_DOCUMENTS_DIR`, `DOCUMENTS_EXTRACTED_DIR`, and the `text_*` / `extracted_*` dir helpers |
+| `test_ingest_documents.py` | replaced by tests for discover / emails / pdfs stages |
+
+Python packages that become unused in the venv: `extract-msg`,
+`python-docx`, `openpyxl` (no other importers in the codebase).
 
 ## Migration plan
 
@@ -280,5 +335,6 @@ deprecation note; `thread` remains available as an explicit recompute.
 3. `ingestion-type: bank-transactions` is a new workspace-config
    collection field — confirm the key name and whether one collection
    can be both a normal corpus and a bank-transactions source.
-4. Do `wipe` / `verify` / `blob-index` need changes beyond path
-   awareness of the new layout?
+4. Do `wipe` / `verify` need changes beyond path awareness of the new
+   layout? (`blob-index rebuild` is already absorbed by `ingest
+   discover` per the CLI section.)

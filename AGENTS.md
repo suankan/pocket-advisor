@@ -112,15 +112,17 @@ Always confirm this against `docs/workspace-parsing-design-status.md` and
 
 - foundations and Stages 1–5 are implemented and tested under `modules/`;
 - the new CLI is implemented and tested under `modules/cli.py`;
+- the retired image-OCR configuration key has been removed;
 - real retrieval commands still use the frozen adapter;
-- new ingestion/report commands refuse the existing legacy DB until cutover.
+- legacy state was wiped; discovery and emails completed, and the cutover
+  run was stopped by the user during PDFs, leaving partial new derived state.
 
 The ordered continuation is:
 
-1. remove the retired image-OCR config key;
-2. request confirmation, wipe derived state, fully re-ingest, and run the
-   golden-set accuracy/spot checks;
-3. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
+1. when directed, resume idempotently at `ingest pdfs` (or rerun
+   `ingest all`), finish the remaining stages, and run the golden-set
+   accuracy/spot checks;
+2. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
    remove `scripts/` and unused dependencies.
 
 ## Transaction-stage constraints

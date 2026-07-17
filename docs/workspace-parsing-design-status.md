@@ -14,6 +14,7 @@ Companion to workspace-parsing-design.md. Last updated: 2026-07-17.
 | `defd6dc` | **Stage 3 + thread + Stage 4**: PdfTextStage (native collect with dup-content membership linking; one OCR queue, persistent `pdf-ocr/` derivatives, docdates port); ThreadStage (JWZ port); EmbedStage (chunking over new artifacts, per-model vector cache, de-globalized MLX loader with `ModelStore`) |
 | `26a6da8` | **Stage 5 transactions**: typed statement parser registry (Westpac + synthetic fixture format); marked active-collection scope; native and email-attached PDFs; integer-minor-unit money parsing; assertion validation; loud unknown/not-ingested/account-mismatch review flags; deterministic atomic rebuild; exact/fee/manual transfer linking; report support; comprehensive temp-fixture self-test |
 | `97ee193` | **Staged pipeline CLI**: sole argparse surface in `modules/cli.py`; ordered and gated `ingest all`; named-stage execution; native database, transaction-report, and module-test commands; frozen retrieval/maintenance commands isolated behind the root transitional adapter; removed spellings rejected rather than aliased |
+| `7a9fe80` | **Config cleanup**: removed retired `ingestion.ocr.small_image_bytes`; new loader rejects it as unknown; corrected the embed-stage guidance; added regression coverage |
 
 Self-tests: `modules/tests/` — CLI, foundations, discover, emails, pdfs,
 thread_embed, transactions — all 7 passing (`./pocket-advisor.py test`).
@@ -42,19 +43,23 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   rejected, not aliased.
 - Real `query`/daemon/accuracy/wipe/verify/blob lookup commands still
   dispatch to frozen modules until the retrieval port.
-- The new ingest/report commands deliberately refuse the existing legacy
-  `.state` DB, so do not run them against live state before the supervised
-  cutover.
+- The new ingest/report commands deliberately refuse legacy databases. The
+  current partial state uses the fresh schema.
+- The retired `ingestion.ocr.small_image_bytes` key has been removed from
+  `config.yaml` and is rejected as unknown by the new loader.
+- Cutover started on 2026-07-17: the legacy `.state` was wiped, discovery
+  and email parsing completed, then ingestion was stopped by the user during
+  the PDF stage. Partial new-layout derived state remains; no ingestion/OCR
+  process is running.
 - venv is Python 3.14.6; old and new code share it.
 
 ## Next steps (in order)
 
-1. **config.yaml cleanup** — remove the deprecated
-   `ingestion.ocr.small_image_bytes` key before cutover.
-2. **Cutover** (requires explicit user confirmation before the wipe):
-   `wipe state` → `ingest` (full run incl. re-embed) → `accuracy run`
-   vs golden set → spot-check cache folders + queries.
-3. **Retrieval port (follow-up phase)** — query/daemon/reranker/
+1. **Resume cutover when directed** — either rerun `ingest all`
+   idempotently, or continue with `ingest pdfs` → `ingest thread` →
+   `ingest embed` → `ingest transactions`; then `accuracy run` vs the
+   golden set and spot-check cache folders + queries.
+2. **Retrieval port (follow-up phase)** — query/daemon/reranker/
    accuracy/verify/wipe into `modules/`; then delete `scripts/` and
    prune unused venv packages (`extract-msg`, `python-docx`,
    `openpyxl`; `beautifulsoup4` stays — used by emailbody).

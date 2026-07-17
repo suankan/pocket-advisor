@@ -65,13 +65,20 @@ def test_config(tmp: Path) -> None:
     assert folder.pdf_text_dir == folder.root / "attachments" / "pdf-to-text"
     assert cache.pdf_text_dir == cache.root / "pdf-to-text"
 
-    # yaml overlay: known keys apply, deprecated warn+ignore, unknown abort
+    # yaml overlay: known keys apply, deprecated warn+ignore, retired and
+    # unknown keys abort.
     yml = tmp / "config.yaml"
     yml.write_text(
         "ingestion:\n  chunking:\n    chars: 999\n"
-        "  ocr:\n    small_image_bytes: 123\n")  # deprecated key
+        "workspace:\n  dir: retired-single-workspace\n")
     cfg2 = Config.load(project_root=tmp, yaml_path=yml)
     assert cfg2.chunk_chars == 999
+    yml.write_text("ingestion:\n  ocr:\n    small_image_bytes: 123\n")
+    try:
+        Config.load(project_root=tmp, yaml_path=yml)
+        raise AssertionError("retired image-OCR key must abort")
+    except SystemExit as e:
+        assert "small_image_bytes" in str(e)
     yml.write_text("query:\n  no_such_knob: 1\n")
     try:
         Config.load(project_root=tmp, yaml_path=yml)

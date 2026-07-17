@@ -256,11 +256,10 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
         ("include_privileged_by_default", lambda _, v: bool(v)),
 }
 
-# Accepted-but-ignored during the transition; removed from config.yaml
-# at cutover. Warn so they don't linger silently.
+# Accepted-but-ignored during the transition. Warn so they do not linger
+# silently. Retired pipeline knobs are deliberately unknown, not deprecated.
 _DEPRECATED_KEYS: frozenset[str] = frozenset({
-    "workspace.dir",                     # legacy single-workspace pointer
-    "ingestion.ocr.small_image_bytes",   # image OCR retired (design scope)
+    "workspace.dir",  # legacy single-workspace pointer
 })
 
 

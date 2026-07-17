@@ -77,9 +77,6 @@ ingestion:
     # Missing a language here makes OCR on that script fail silently
     # into plausible-looking garbage — no error, just wrong text.
     langs: eng+rus
-    # Image attachments at or below this size (bytes) are treated as
-    # signature/logo and skipped (not OCR'd / not indexed).
-    small_image_bytes: 20000
   # Fallback threading when headers lack In-Reply-To/References:
   # same normalized subject + ≥1 shared participant within this window.
   thread_fallback_window_days: 60
@@ -87,7 +84,7 @@ ingestion:
   # before full-text / filename / mtime fallback.
   doc_date_header_window_chars: 6000
   # Whether stage `all` builds the text vector index. An explicit
-  # `--embed text` forces the channel regardless of this flag.
+  # `ingest embed` runs the stage regardless of this flag.
   embed_text: true
 
 models:

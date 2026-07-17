@@ -259,7 +259,24 @@ pdftotext -layout pdf-ocr/<name>-ocrmypdf.pdf pdf-to-text/<name>.txt
 - Native-PDF document dates: keep today's doc_dates extraction
   (text header region → filename → mtime, flagged when weak).
 
-## Stage 4 — Embedding the plain text artifacts
+## Thread reconstruction and navigation summaries
+
+Thread reconstruction retains the JWZ/reference algorithm and subject fallback,
+but thread rows are now upserted by a stable root Message-ID key instead of
+being deleted and recreated. `items.reply_parent_item_id` records only a real
+direct RFC reply edge; subject heuristics may group messages but never invent
+one.
+
+After reconstruction, the `summaries` stage generates one local-LLM navigation
+summary for each multi-email thread. It consumes chronological
+`email_message.txt` artifacts, is keyed by a digest of the complete source
+thread plus model/prompt version, and excludes stale output after a failure.
+The locked default is `mlx-community/Qwen3.5-4B-MLX-4bit` through the existing
+`mlx-lm` text-only Qwen 3.5 path. Generated summaries are retrieval aids, not
+evidence and never citation sources. Full details are in
+`docs/embedding-design.md`.
+
+## Stage 4 — Embedding the plain text artifacts and summaries
 
 Inputs are exactly the plain-text artifacts:
 
@@ -276,10 +293,17 @@ embedded; it serves lossless audit/context. `email_message.txt` is also not
 embedded; it is the readable evidence representation for humans and future
 retrieval augmentation.
 
-Chunking (~1500 chars / ~200 overlap), transliteration shadow, FTS
-triggers, and the per-model vector cache
-(docs_old/specs/multi-model-vector-cache.md) are unchanged — only the
-sources of text move.
+Chunking (~1500 chars / ~200 overlap), transliteration shadow, FTS triggers,
+and the per-model vector cache remain. Immutable leaf chunks retain their
+existing matrix. Current thread summaries are embedded into a separate matrix
+under the same model fingerprint; mutable summary text is never injected into
+historical leaf vectors.
+
+Cold query runs leaf FTS, leaf dense, summary FTS, and summary dense legs,
+fuses them with RRF/reranking, deduplicates by thread, and expands relationships
+through SQLite. Returned evidence uses the DB-addressed `email_message.txt`
+files, includes direct parent/child IDs and chronology, and visibly labels any
+generated summary as non-evidentiary navigation.
 
 ## Stage 5 — Parsing bank transactions
 
@@ -316,13 +340,15 @@ stage argument, no flags:
 ```
 ./pocket-advisor.py ingest [stage]
 
-  all           discover → emails → pdfs → thread → embed → transactions  (default)
+  all           discover → emails → pdfs → thread → summaries → embed
+                → transactions  (default)
   discover      Stage 1 — build/refresh the working set
   emails        Stage 2 — per-email folders; 2a full bodies, 2b authored bodies;
                 attachment routing; .eml/zip recursion
   pdfs          Stage 3 — collect PDFs, ocrmypdf, pdftotext
   thread        thread reconstruction (full recompute, carried over)
-  embed         Stage 4 — chunk + embed + rebuild vector index
+  summaries     local navigation summaries for complete multi-email threads
+  embed         Stage 4 — chunk + rebuild leaf and summary vector indexes
   transactions  Stage 5 — statement parsers + transfer linking
 ```
 
@@ -363,13 +389,16 @@ modules/
 ├── progress.py         # progress reporting
 ├── ocr.py              # ocrmypdf + pdftotext wrappers (PDF-only)
 ├── emailbody/          # MIME body extraction + quoted-reply compaction engine
-├── embedding/          # MLX backends, model loader, transliteration shadow
+├── embedding/          # MLX backends, model loader, dual vector namespaces
+├── summarization.py    # local Qwen thread-summary generator
+├── retrieval.py        # hybrid retrieval + relational evidence expansion
 ├── pipeline/
 │   ├── base.py         # Stage ABC: name, run(ctx) -> StageStats; shared ctx
 │   ├── discover.py     # DiscoverStage     (Stage 1; also refreshes blob index)
 │   ├── emails.py       # EmailStage        (Stage 2; sub-steps 2a/2b)
 │   ├── pdfs.py         # PdfTextStage      (Stage 3)
 │   ├── thread.py       # ThreadStage       (carried-over algorithm)
+│   ├── summaries.py    # ThreadSummaryStage
 │   ├── embed.py        # EmbedStage        (Stage 4)
 │   └── transactions.py # TransactionsStage (Stage 5 + statement parsers)
 ├── cli.py              # the ONLY argparse in the repo; dispatch to stages
@@ -396,12 +425,10 @@ legacy flat vector-index migration, `DOCUMENT_FOLDERS` and the
 `text_*`/`extracted_*` path helpers. Venv packages that become unused:
 `extract-msg`, `python-docx`, `openpyxl`.
 
-The retrieval stack (`query.py`, `query_daemon.py`, `reranker.py`,
-`rerank_backends.py`, `search_accuracy_test.py`, `verify_integrity.py`,
-`wipe.py`) is ported to `modules/` in a follow-up pass — the retrieval
-schema (items/chunks/FTS/vector cache) is unchanged, so the port is
-mechanical; until it lands, those commands keep running from the frozen
-tree. `scripts/` is deleted only after that port.
+Cold query, reranking, dual-index search, and relational evidence expansion
+are now native under `modules/`. The daemon, accuracy harness, integrity
+verification, wipe, and blob lookup remain follow-up ports and temporarily run
+from the frozen tree. `scripts/` is deleted only after those ports land.
 
 ## Migration plan
 

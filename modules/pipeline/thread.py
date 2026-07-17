@@ -19,9 +19,10 @@ _MSGID_TOKEN = re.compile(r"<[^>]+>")
 
 
 class _Container:
-    __slots__ = ("item_id", "parent", "children")
+    __slots__ = ("message_id", "item_id", "parent", "children")
 
-    def __init__(self):
+    def __init__(self, message_id: str):
+        self.message_id = message_id
         self.item_id: int | None = None
         self.parent: _Container | None = None
         self.children: list[_Container] = []
@@ -69,13 +70,13 @@ class ThreadStage(Stage):
         rows = conn.execute(
             "SELECT id, message_id, in_reply_to, references_raw,"
             " subject_normalized, from_addr, to_addrs, cc_addrs, date_utc"
-            " FROM items ORDER BY date_utc").fetchall()
+            " FROM items ORDER BY date_utc, message_id").fetchall()
 
         containers: dict[str, _Container] = {}
 
         def get(mid: str) -> _Container:
             if mid not in containers:
-                containers[mid] = _Container()
+                containers[mid] = _Container(mid)
             return containers[mid]
 
         linked_by_reference: set[int] = set()
@@ -93,17 +94,24 @@ class ThreadStage(Stage):
             for parent, child in zip(chain, chain[1:]):
                 _link(parent, child)
 
-        # Assign thread ids per root subtree (full recompute).
+        # Assign thread ids per root subtree. Relational assignments are
+        # recomputed, but stable root keys preserve durable thread identity.
         conn.execute(
-            "UPDATE items SET thread_id = NULL, thread_link_method = NULL")
-        conn.execute("DELETE FROM threads")
+            "UPDATE items SET thread_id = NULL, thread_link_method = NULL,"
+            " reply_parent_item_id = NULL")
 
         assigned: dict[_Container, int] = {}
 
         def thread_for_root(root: _Container) -> int:
             if root not in assigned:
-                cur = conn.execute("INSERT INTO threads DEFAULT VALUES")
-                assigned[root] = int(cur.lastrowid)
+                conn.execute(
+                    "INSERT INTO threads (stable_key) VALUES (?)"
+                    " ON CONFLICT(stable_key) DO NOTHING",
+                    (root.message_id,))
+                row = conn.execute(
+                    "SELECT id FROM threads WHERE stable_key = ?",
+                    (root.message_id,)).fetchone()
+                assigned[root] = int(row["id"])
             return assigned[root]
 
         for row in rows:
@@ -111,30 +119,38 @@ class ThreadStage(Stage):
             method = ("reference"
                       if row["id"] in linked_by_reference
                       or container.children else "pending")
+            reply_parent_id = container.parent.item_id \
+                if container.parent is not None else None
             conn.execute(
-                "UPDATE items SET thread_id = ?, thread_link_method = ?"
+                "UPDATE items SET thread_id = ?, thread_link_method = ?,"
+                " reply_parent_item_id = ?"
                 " WHERE id = ?",
-                (thread_for_root(container.root()), method, row["id"]))
+                (thread_for_root(container.root()), method,
+                 reply_parent_id, row["id"]))
 
         # Fallback: merge 'pending' emails into threads sharing normalized
         # subject + a participant within the window; else mark singleton.
         window = timedelta(days=self.config.thread_fallback_window_days)
         pending = conn.execute(
             "SELECT * FROM items WHERE thread_link_method = 'pending'"
-            " ORDER BY date_utc").fetchall()
+            " ORDER BY date_utc, message_id").fetchall()
         for row in pending:
             method, target = "singleton", None
             if row["subject_normalized"]:
                 candidates = conn.execute(
-                    "SELECT * FROM items WHERE subject_normalized = ?"
-                    " AND id != ? AND thread_link_method IN"
-                    " ('reference', 'subject_heuristic')",
+                    "SELECT items.*, threads.stable_key"
+                    " FROM items JOIN threads ON threads.id = items.thread_id"
+                    " WHERE subject_normalized = ?"
+                    " AND items.id != ? AND thread_link_method IN"
+                    " ('reference', 'subject_heuristic')"
+                    " ORDER BY threads.stable_key, items.message_id",
                     (row["subject_normalized"], row["id"])).fetchall()
                 mine = _participants(row)
                 try:
                     my_dt = datetime.fromisoformat(row["date_utc"])
                 except (TypeError, ValueError):
                     my_dt = None
+                eligible = []
                 for cand in candidates:
                     try:
                         cand_dt = datetime.fromisoformat(cand["date_utc"])
@@ -142,9 +158,12 @@ class ThreadStage(Stage):
                         continue
                     if my_dt and abs(my_dt - cand_dt) <= window \
                             and mine & _participants(cand):
-                        method, target = "subject_heuristic", \
-                            cand["thread_id"]
-                        break
+                        eligible.append((abs(my_dt - cand_dt),
+                                         cand["stable_key"],
+                                         cand["thread_id"]))
+                if eligible:
+                    _, _, target = min(eligible)
+                    method = "subject_heuristic"
             conn.execute(
                 "UPDATE items SET thread_link_method = ?,"
                 " thread_id = COALESCE(?, thread_id) WHERE id = ?",

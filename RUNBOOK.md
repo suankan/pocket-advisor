@@ -1,31 +1,31 @@
 # Runbook
 
-## One-time setup (already done 2026-07-10; repeat only on a new machine)
+## One-time setup (repeat only on a new machine)
 
 ```bash
-brew install python@3.12 poppler ocrmypdf
-/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv venv
+brew install python@3.14 poppler ocrmypdf
+/opt/homebrew/opt/python@3.14/bin/python3.14 -m venv venv
 venv/bin/pip install -r scripts/requirements.txt   # includes MLX stack
 ./pocket-advisor.py db init
 # config.yaml is committed platform config — edit models / knobs as needed
-./pocket-advisor.py fetch-model   # downloads text + rerank MLX repos from
-                                  # HuggingFace (one-time, inbound weights only)
+./pocket-advisor.py fetch-model   # downloads embed, rerank, and thread-summary
+                                  # MLX repos (inbound weights only)
 ```
 
 ## Configuring pocket-advisor
 
-Committed `config.yaml` (platform layer, no case content) overlays
-onto `scripts/config.py`'s defaults. Schema and comments live in
+Committed `config.yaml` (platform layer, no case content) overlays the typed
+defaults in `modules/config.py`. Schema and comments live in
 `config.yaml` itself. Unknown keys abort loudly at import time
 (typo protection). Three classes of knob:
 
 - **free** (`query.*`, `ingestion.ocr.*`, `ingestion.embed_text`,
-  thread/date-window settings): change anytime, takes effect on the
-  next run (`embed_text` gates `--embed all` / stage `all`).
+  thread/date-window settings): change anytime and take effect on the next
+  run (`embed_text` gates `ingest all`).
 - **index-invalidating, cached per model** (`models.mlx_model_embed_text`,
   docs_old/specs/multi-model-vector-cache.md): changing the text embedding
   repo resolves to a **different cache directory** on the next
-  `pocket-advisor.py ingest --embed text` — vectors from different
+  `pocket-advisor.py ingest embed` — vectors from different
   models/dims are numerically incomparable, so they're never mixed,
   but nothing is deleted. First use of a model embeds fresh; switching
   back to a previously-used model reuses its cache (near-instant, only
@@ -34,12 +34,12 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
   `state` = full derived-state wipe for re-ingest).
 - **index-invalidating, WARN-only** (`ingestion.chunking.*`): no
   automated re-chunk pipeline exists. Changing chunk size/overlap
-  prints a warning (from both `query.py` and `pocket-advisor.py ingest --embed text`) but
+  prints a warning during embedding but
   does NOT rebuild existing chunks — old chunks keep their original
   size, only newly-ingested content uses the new size. The embed run
   acknowledges the change (updates `vectors.meta.json`)
   so the warning fires once per actual change, not on every subsequent
-  run; `query.py`'s warning persists until that acknowledgment happens.
+  run.
 - **safety-semantics (privilege)**: not a platform `config.yaml` key.
   Privilege is (1) registry `collections[].privileged: true` and/or
   (2) a path segment literally named `privileged/` under a collection
@@ -113,7 +113,7 @@ OCRmyPDF setup instructions.
 
 Document dates are extracted from the text; query results show
 `date_source`. Extracted text lives under
-`workspaces/.state/cache/<collection_id>/text/…` (path from query/DB —
+`workspaces/.state/cache/<collection_id>/…` (path from query/DB —
 do not bulk-browse `.state/cache/` as a library).
 
 ## Querying
@@ -129,64 +129,51 @@ Privileged items are **included by default** (config
 `query.include_privileged_by_default`, default true). Use
 `--exclude-privileged` for a restricted pass. Results always flag
 privilege. Visibility is also limited to **collections mounted by the
-active workspace**. Full bodies: paths from query/DB under
-`workspaces/.state/cache/<collection_id>/text/…`.
+active workspace**. Full readable emails are loaded only from paths returned
+by query/DB under `workspaces/.state/cache/<collection_id>/…`.
 
-### Session-warm query daemon (recommended for multi-query work)
-
-Each cold `query.py` reloads embed + rerank models (~seconds). For an
-agent or interactive session with many searches, keep them warm:
-
-```bash
-# terminal 1 (or background with nohup / &)
-./pocket-advisor.py daemon serve
-# optional: --idle-sec 0  (never auto-exit; default idle from config is 1800s)
-
-# terminal 2 — auto-uses daemon when socket is live
-./pocket-advisor.py query "question" --json
-# stderr: query: via daemon (warm)
-
-./pocket-advisor.py daemon status
-./pocket-advisor.py daemon stop
-```
-
-Socket: `workspaces/.state/query_daemon.sock` (mode 0600, local only).
-Restart after `pocket-advisor.py ingest --embed text` or model config changes. See
-`docs_old/specs/query-daemon.md`. Config: `query.daemon_auto`,
-`query.daemon_idle_sec`.
+The native relational query currently runs cold. `--require-daemon` therefore
+fails explicitly; the daemon command remains frozen transitional tooling until
+its native port. Use repeated cold queries for verification in the meantime.
 ## Models (MLX-only)
 
-Config under `models:` is intentionally small:
+The current committed YAML remains intentionally small while frozen
+maintenance commands share its strict loader. Summary settings are typed
+defaults in `modules/config.py` during this transition:
 
-```yaml
-ingestion:
-  embed_text: true      # --embed all / stage all
-models:
-  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
-  mlx_model_rerank: jinaai/jina-reranker-v3-mlx
+```python
+Config(
+    summarize_threads=True,
+    thread_summary_max_tokens=600,
+    thread_summary_segment_chars=12000,
+    mlx_model_thread_summary="mlx-community/Qwen3.5-4B-MLX-4bit",
+    thread_context_chars=120000,
+)
 ```
 
 Changing the text embedding repo is INDEX-INVALIDATING but not destructive —
 each model gets its own cache directory
 (docs_old/specs/multi-model-vector-cache.md); switching back to a
 previously-used model reuses it instead of re-embedding
-(`pocket-advisor.py ingest --embed text`, or `--embed all`).
-Reranker is not index-invalidating. Universal loader:
-`scripts/mlx_model_loader.py`. No GGUF / llama.cpp path remains.
+(`pocket-advisor.py ingest embed`). Reranker is not index-invalidating.
+Changing the summary model regenerates thread summaries and their separate
+vectors, not leaf vectors. Qwen 3.5 runs through `mlx-lm`'s text-only path;
+no vision input is used. No GGUF / llama.cpp path remains.
 
 ```bash
 ./pocket-advisor.py fetch-model
-./pocket-advisor.py ingest --embed text
-# or when ingestion.embed_text is true:
-# ./pocket-advisor.py ingest --embed all
+./pocket-advisor.py ingest summaries
+./pocket-advisor.py ingest embed
+# or run the full ordered pipeline:
+./pocket-advisor.py ingest all
 ```
 
 ## Cached vector indexes (per model, retained until you wipe them)
 
-Every (model, dim) fingerprint your `config.yaml` has ever pointed at
-keeps its own cache under `.state/vectors/{text,image}/<slug>/` — text
-and image use the identical layout (`vecs/`, `vectors.npy`,
-`vectors_ids.npy`, `meta.json`) — see
+Every text `(model, dim, chunking)` fingerprint keeps its own cache under
+`.state/vectors/text/<slug>/`. Leaf vectors use `vecs/`, `vectors.npy`,
+`vectors_ids.npy`, and `meta.json`; thread summaries use the parallel
+`threads/` namespace below that slug. See
 docs_old/specs/multi-model-vector-cache.md. Nothing in the ingest pipeline
 ever deletes one; disk space is the only cost of keeping old models
 around after experimenting.
@@ -217,7 +204,11 @@ Safe to rebuild anytime (docs_old/specs/source-blob-index.md). This table
 is the regenerable path cache only. Rebuild after bulk moves inside a
 collection tree.
 
-## Measuring retrieval quality (search accuracy test)
+## Measuring retrieval quality (transitional)
+
+The accuracy command still uses the frozen leaf-only retrieval harness. Keep
+it for the pre/post-cutover baseline, but it does not yet exercise the new
+thread-summary legs or evidence expansion. Porting it is the next quality task.
 
 ```bash
 # default --mode warm: load embed+rerank once, then score all questions

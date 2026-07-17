@@ -87,9 +87,11 @@ Do not answer case questions from platform instructions alone.
 3. `pdfs` — verified PDF collection, persistent OCR derivative using
    `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
 4. `thread` — full thread reconstruction;
-5. `embed` — authored email bodies and PDF text only, using the per-model
-   vector cache;
-6. `transactions` — parse and link marked bank-statement collections.
+5. `summaries` — local-LLM navigation summaries for complete multi-email
+   threads;
+6. `embed` — authored email bodies/PDF text plus the separate thread-summary
+   index, using the per-model vector cache;
+7. `transactions` — parse and link marked bank-statement collections.
 
 Stages receive a shared `PipelineContext`, do not call one another, and
 return `StageStats`. A named stage assumes prerequisite artifacts already
@@ -107,28 +109,32 @@ exist; only CLI orchestration owns ordering.
 - Attached-email lineage is stored in `items.parent_item_id`.
 - PDFs retain `pdf-original/`, persistent `pdf-ocr/`, and
   `pdf-to-text/` artifacts.
-- Only authored email bodies and PDF text artifacts are chunked/embedded.
+- Only authored email bodies and PDF text artifacts are leaf-chunked.
+  Generated thread summaries have a separate vector namespace and are always
+  labeled as navigation, never evidence.
 
 ## Current implementation state
 
 Always confirm this against `docs/workspace-parsing-design-status.md` and
 `git status` before editing. At the 2026-07-17 handoff:
 
-- foundations and Stages 1–5 are implemented and tested under `modules/`;
+- foundations, Stages 1–5, stable thread relationships, thread summaries,
+  dual indexes, and cold relational query are implemented under `modules/`;
 - the new CLI is implemented and tested under `modules/cli.py`;
 - the retired image-OCR configuration key has been removed;
 - readable `email_message.txt` artifacts are implemented at `92e4f03`;
-- real retrieval commands still use the frozen adapter;
+- `query` uses the native hybrid leaf/thread retriever; daemon, accuracy,
+  verify, wipe, and blob lookup still use the frozen adapter;
 - legacy state was wiped; discovery and emails completed, and the cutover
-  run was stopped by the user during PDFs, leaving partial new derived state.
+  run was stopped by the user during PDFs, leaving partial derived state that
+  predates the new stable-thread schema and must not be resumed in place.
 
 The ordered continuation is:
 
-1. when directed, rerun `ingest emails` once to backfill
-   `email_message.txt`, then resume at `ingest pdfs` (or rerun `ingest all`),
-   finish the remaining stages, and run the golden-set accuracy/spot checks;
-2. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
-   remove `scripts/` and unused dependencies.
+1. when explicitly confirmed, wipe the incompatible partial derived state,
+   run `ingest all`, and run golden-set accuracy/spot checks;
+2. port daemon/accuracy/verify/wipe/blob lookup into `modules/`, then remove
+   `scripts/` and unused dependencies.
 
 ## Transaction-stage constraints
 

@@ -1,6 +1,6 @@
 # Platform-layer configuration — no user/workspace/case content
 # (`docs_old/DESIGN.md` tenet 10). Committed with the repo. Every key is
-# optional; omitted keys fall back to scripts/config.py. Unknown keys
+# optional; omitted keys fall back to modules/config.py. Unknown keys
 # abort loudly (typo protection).
 #
 # Three-class knob discipline (`docs_old/DESIGN.md`):
@@ -8,7 +8,7 @@
 #     ingestion.embed_text: FREE, change anytime.
 #   - ingestion.chunking / models.mlx_model_embed_text: INDEX-INVALIDATING.
 #     Model changes select a separate cache on the next
-#     `pocket-advisor.py ingest --embed text` (or `--embed all`).
+#     `pocket-advisor.py ingest embed`.
 #     Chunking only WARNs — no
 #     automated re-chunk pipeline (`docs_old/specs/config-yaml.md`).
 #   - Privilege is NOT configured here: collections[].privileged in
@@ -38,8 +38,7 @@ query:
   # weighting given to top-ranked vs lower-ranked candidates within
   # each leg; lower makes top ranks dominate more strongly.
   rrf_k: 60
-  # Number of results query.py returns by default (overridable per
-  # call with --top-k).
+  # Number of thread packets returned by default (overridable by --top-k).
   default_top_k: 15
   # Whether the cross-encoder reranker re-scores the fused RRF
   # candidate list before the top-k cut. See docs_old/specs/reranker.md
@@ -51,11 +50,10 @@ query:
   # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
   # 300 chars) — latency/thoroughness dial; see docs_old/specs/reranker.md.
   rerank_text_chars: 600
-  # Session-warm query daemon (docs_old/specs/query-daemon.md): when
-  # `query_daemon.py serve` is running, query.py sends searches over a
-  # local Unix socket so embed/rerank weights stay loaded. FREE knobs.
-  daemon_auto: true          # use daemon when socket is live
-  daemon_idle_sec: 1800      # daemon exits after N idle seconds; 0=never
+  # Reserved for the native daemon port. Cold native query does not currently
+  # consume these values; the frozen daemon command remains transitional.
+  daemon_auto: true
+  daemon_idle_sec: 1800
   # Include registry-privileged collections in retrieval by default.
   # Single-user: own-solicitor often holds opposing-counsel forwards.
   # Set false (or pass --exclude-privileged) for a restricted pass.
@@ -67,7 +65,7 @@ ingestion:
     # break, then any newline, within the last 40% of the target
     # length. INDEX-INVALIDATING for *new* chunks only — existing
     # chunks keep original size (no automated re-chunk); ingest /
-    # query WARN when config no longer matches vectors.meta.json.
+    # embed warns when config no longer matches vector metadata.
     chars: 1500
     # Overlap between adjacent chunks of the same source. Same
     # INDEX-INVALIDATING caveat as chars.
@@ -90,15 +88,18 @@ ingestion:
 models:
   # Apple-Silicon MLX only — no GGUF / llama.cpp.
   # INDEX-INVALIDATING: changing the text repo resolves to a different
-  # per-model cache on next `ingest --embed text`
+  # per-model cache on next `ingest embed`
   # — never deletes another model's cache
   # (`docs_old/specs/multi-model-vector-cache.md`).
   # Reranker is not index-invalidating.
   # Requires: pip install -r scripts/requirements.txt (includes MLX).
-  # Fetch once: venv/bin/python scripts/fetch_model.py
+  # Fetch configured snapshots: ./pocket-advisor.py fetch-model
   #
-  # Nano (smaller/faster) — code defaults in scripts/config.py:
+  # Nano (smaller/faster) — code defaults in modules/config.py:
   # mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
   # Small (higher quality, larger):
   mlx_model_embed_text: jinaai/jina-embeddings-v5-text-small-mlx
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx
+  # Thread-summary defaults currently live in modules/config.py so frozen
+  # maintenance commands can keep strict-reading this shared YAML unchanged.
+  # Locked default: mlx-community/Qwen3.5-4B-MLX-4bit (text-only via mlx-lm).

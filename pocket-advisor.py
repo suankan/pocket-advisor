@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Pocket Advisor's single executable entrypoint.
 
-The argparse surface and new pipeline live in :mod:`modules.cli`. Until the
-retrieval follow-up is complete, this file also supplies a narrow adapter for
-commands still implemented by the frozen ``scripts/`` tree. New modules never
-import legacy modules.
+The argparse surface, pipeline, and cold retrieval live in :mod:`modules.cli`.
+This file supplies a narrow adapter for maintenance and daemon commands still
+implemented by the frozen ``scripts/`` tree. New modules never import legacy
+modules.
 """
 import os
 import sys
@@ -34,9 +34,6 @@ def legacy_dispatch(args) -> int:
     if args.command == "fetch-model":
         import fetch_model
         return int(fetch_model.run() or 0)
-    if args.command == "query":
-        import query
-        return int(query.cli(args) or 0)
     if args.command == "daemon":
         import query_daemon
         if args.action == "serve":

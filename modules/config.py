@@ -160,10 +160,15 @@ class Config:
     thread_fallback_window_days: int = 60
     doc_date_header_window_chars: int = 6000
     embed_text: bool = True
+    summarize_threads: bool = True
+    thread_summary_max_tokens: int = 600
+    thread_summary_segment_chars: int = 12_000
 
     # -- MLX model stack ---------------------------------------------------
     mlx_model_embed_text: str = "jinaai/jina-embeddings-v5-text-nano-mlx"
     mlx_model_rerank: str = "jinaai/jina-reranker-v3-mlx"
+    mlx_model_thread_summary: str = \
+        "mlx-community/Qwen3.5-4B-MLX-4bit"
     embed_dim: int = 768
 
     # -- retrieval knobs (used by the retrieval port; accepted now so one
@@ -177,6 +182,7 @@ class Config:
     daemon_auto: bool = True
     daemon_idle_sec: int = 1800
     include_privileged_by_default: bool = True
+    thread_context_chars: int = 120_000
 
     # -- derived paths (shared engine state, one DB for all workspaces) ----
     @property
@@ -246,9 +252,17 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
     "ingestion.doc_date_header_window_chars":
         ("doc_date_header_window_chars", lambda _, v: int(v)),
     "ingestion.embed_text": ("embed_text", lambda _, v: bool(v)),
+    "ingestion.summarize_threads":
+        ("summarize_threads", lambda _, v: bool(v)),
+    "ingestion.thread_summary_max_tokens":
+        ("thread_summary_max_tokens", lambda _, v: int(v)),
+    "ingestion.thread_summary_segment_chars":
+        ("thread_summary_segment_chars", lambda _, v: int(v)),
     "models.mlx_model_embed_text":
         ("mlx_model_embed_text", lambda _, v: str(v)),
     "models.mlx_model_rerank": ("mlx_model_rerank", lambda _, v: str(v)),
+    "models.mlx_model_thread_summary":
+        ("mlx_model_thread_summary", lambda _, v: str(v)),
     "query.fts_candidates": ("fts_candidates", lambda _, v: int(v)),
     "query.vec_candidates": ("vec_candidates", lambda _, v: int(v)),
     "query.rrf_k": ("rrf_k", lambda _, v: int(v)),
@@ -259,6 +273,8 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
     "query.daemon_idle_sec": ("daemon_idle_sec", lambda _, v: int(v)),
     "query.include_privileged_by_default":
         ("include_privileged_by_default", lambda _, v: bool(v)),
+    "query.thread_context_chars":
+        ("thread_context_chars", lambda _, v: int(v)),
 }
 
 # Accepted-but-ignored during the transition. Warn so they do not linger

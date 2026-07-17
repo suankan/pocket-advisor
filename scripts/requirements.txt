@@ -13,5 +13,6 @@ unidecode>=1.3
 # Required — no GGUF/llama.cpp fallback.
 mlx
 tokenizers
-mlx-lm
+# Qwen 3.5 text-only support landed in 0.30.7.
+mlx-lm>=0.30.7
 safetensors

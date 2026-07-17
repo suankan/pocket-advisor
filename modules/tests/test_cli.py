@@ -1,4 +1,4 @@
-"""Self-test: new CLI grammar, orchestration, gates, legacy adapter seam."""
+"""Self-test: new CLI grammar, orchestration, and adapter seams."""
 import contextlib
 import io
 import subprocess
@@ -32,9 +32,10 @@ class FakeRegistry:
         return self._collections
 
 
-def fake_context(*, embed: bool, bank: bool):
+def fake_context(*, embed: bool, bank: bool, summaries: bool = True):
     return SimpleNamespace(
-        config=SimpleNamespace(embed_text=embed),
+        config=SimpleNamespace(embed_text=embed,
+                               summarize_threads=summaries),
         registry=FakeRegistry(bank),
         conn=FakeConnection(),
     )
@@ -77,13 +78,13 @@ def test_orchestration() -> None:
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name: executed.append(name)):
         assert cli.run_ingest("all") == 0
-    assert executed == ["discover", "emails", "pdfs", "thread", "embed",
-                        "transactions"]
+    assert executed == ["discover", "emails", "pdfs", "thread",
+                        "summaries", "embed", "transactions"]
     assert context.conn.closed
 
     # Config gates apply only to `all`.
     executed.clear()
-    context = fake_context(embed=False, bank=False)
+    context = fake_context(embed=False, bank=False, summaries=False)
     with patch.object(cli, "_open_context", return_value=context), \
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name: executed.append(name)), \
@@ -101,12 +102,43 @@ def test_orchestration() -> None:
     assert executed == ["embed"]
 
     executed.clear()
+    context = fake_context(embed=False, bank=False, summaries=False)
+    with patch.object(cli, "_open_context", return_value=context), \
+            patch.object(cli, "_execute_stage",
+                         side_effect=lambda _, name: executed.append(name)):
+        cli.run_ingest("summaries")
+    assert executed == ["summaries"]
+
+    executed.clear()
     context = fake_context(embed=False, bank=False)
     with patch.object(cli, "_open_context", return_value=context), \
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name: executed.append(name)):
         cli.run_ingest("transactions")
     assert executed == ["transactions"]
+
+
+def test_native_query_seam() -> None:
+    context = fake_context(embed=False, bank=False)
+    context.config.include_privileged_by_default = True
+    context.config.default_top_k = 15
+    received = []
+    with patch.object(cli, "_open_context", return_value=context), \
+            patch("modules.retrieval.run_search",
+                  side_effect=lambda _ctx, question, options:
+                  received.append((question, options)) or {
+                      "question": question, "results": [], "warnings": [],
+                      "retrieval": {},
+                  }), \
+            patch("modules.retrieval.format_results"):
+        result = cli.main(
+            ["query", "synthetic question", "--top-k", "3"],
+            legacy_dispatch=lambda _: 7,
+        )
+    assert result == 0
+    assert received[0][0] == "synthetic question"
+    assert received[0][1].top_k == 3
+    assert context.conn.closed
 
 
 def test_legacy_dispatch_seam() -> None:
@@ -116,14 +148,9 @@ def test_legacy_dispatch_seam() -> None:
         received.append(args)
         return 7
 
-    result = cli.main(
-        ["query", "synthetic question", "--top-k", "3"],
-        legacy_dispatch=dispatch,
-    )
+    result = cli.main(["verify"], legacy_dispatch=dispatch)
     assert result == 7
-    assert received[0].command == "query"
-    assert received[0].question == "synthetic question"
-    assert received[0].top_k == 3
+    assert received[0].command == "verify"
 
 
 def test_entrypoint_bootstrap() -> None:
@@ -142,6 +169,7 @@ def test_entrypoint_bootstrap() -> None:
 def main() -> int:
     test_grammar()
     test_orchestration()
+    test_native_query_seam()
     test_legacy_dispatch_seam()
     test_entrypoint_bootstrap()
     print("test_cli: all ok")

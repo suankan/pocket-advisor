@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS items (
     item_kind           TEXT NOT NULL DEFAULT 'email',
     message_id          TEXT UNIQUE NOT NULL,
     parent_item_id      INTEGER REFERENCES items(id),  -- attached-email lineage
+    reply_parent_item_id INTEGER REFERENCES items(id), -- conversation edge
     date_utc            TEXT,
     date_raw            TEXT,
     from_name           TEXT,
@@ -122,10 +123,22 @@ CREATE TABLE IF NOT EXISTS attachments (
 
 CREATE TABLE IF NOT EXISTS threads (
     id                     INTEGER PRIMARY KEY,
+    stable_key             TEXT NOT NULL UNIQUE,
     representative_subject TEXT,
     first_date             TEXT,
     last_date              TEXT,
     email_count            INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS thread_summaries (
+    thread_id       INTEGER PRIMARY KEY REFERENCES threads(id)
+                    ON DELETE CASCADE,
+    summary_text    TEXT NOT NULL,
+    source_digest   TEXT NOT NULL,
+    generator_model TEXT NOT NULL,
+    prompt_version  INTEGER NOT NULL,
+    is_stale        INTEGER NOT NULL DEFAULT 0,
+    generated_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -263,6 +276,8 @@ CREATE INDEX IF NOT EXISTS idx_items_thread ON items(thread_id);
 CREATE INDEX IF NOT EXISTS idx_items_privileged ON items(is_privileged);
 CREATE INDEX IF NOT EXISTS idx_items_kind ON items(item_kind);
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_item_id);
+CREATE INDEX IF NOT EXISTS idx_items_reply_parent
+    ON items(reply_parent_item_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_item ON item_memberships(item_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_collection
     ON item_memberships(collection_id);
@@ -306,6 +321,32 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, text, translit_shadow)
     VALUES (new.id, new.text, new.translit_shadow);
 END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS thread_summaries_fts USING fts5(
+    summary_text,
+    content='thread_summaries',
+    content_rowid='thread_id'
+);
+
+CREATE TRIGGER IF NOT EXISTS thread_summaries_ai
+AFTER INSERT ON thread_summaries BEGIN
+    INSERT INTO thread_summaries_fts(rowid, summary_text)
+    VALUES (new.thread_id, new.summary_text);
+END;
+CREATE TRIGGER IF NOT EXISTS thread_summaries_ad
+AFTER DELETE ON thread_summaries BEGIN
+    INSERT INTO thread_summaries_fts(
+        thread_summaries_fts, rowid, summary_text)
+    VALUES ('delete', old.thread_id, old.summary_text);
+END;
+CREATE TRIGGER IF NOT EXISTS thread_summaries_au
+AFTER UPDATE ON thread_summaries BEGIN
+    INSERT INTO thread_summaries_fts(
+        thread_summaries_fts, rowid, summary_text)
+    VALUES ('delete', old.thread_id, old.summary_text);
+    INSERT INTO thread_summaries_fts(rowid, summary_text)
+    VALUES (new.thread_id, new.summary_text);
+END;
 """
 
 # Tables/columns that only the OLD scripts/ pipeline creates. Their
@@ -317,8 +358,8 @@ _LEGACY_TABLES = ("emails", "email_files", "documents", "page_images")
 class LegacyDatabaseError(SystemExit):
     def __init__(self, db_path: Path, marker: str):
         super().__init__(
-            f"database {db_path} was created by the old pipeline "
-            f"(found {marker}). This schema has no migration chain — "
+            f"database {db_path} is not the current fresh schema "
+            f"(found {marker}). This engine has no migration chain — "
             "run `./pocket-advisor.py wipe state` (confirmed, wipes ALL "
             "derived state) and re-ingest from corpora.")
 
@@ -357,6 +398,14 @@ class Database:
         if "items" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(items)")}
-            if "parent_item_id" not in columns:
+            required = {"parent_item_id", "reply_parent_item_id"}
+            missing = required - columns
+            if missing:
                 raise LegacyDatabaseError(
-                    self.path, "items without parent_item_id")
+                    self.path, "items missing " + ", ".join(sorted(missing)))
+        if "threads" in tables:
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(threads)")}
+            if "stable_key" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, "threads without stable_key")

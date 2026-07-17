@@ -1,9 +1,9 @@
 """Pocket Advisor's sole argparse surface and pipeline orchestrator.
 
-New ingestion commands run typed stages directly. Retrieval and maintenance
-commands remain temporarily delegated by ``pocket-advisor.py`` to the frozen
-``scripts/`` implementation; this module receives that adapter as a callback
-and never imports from the frozen tree.
+Ingestion and cold retrieval run through typed ``modules/`` code directly.
+Maintenance, daemon, and quality commands remain temporarily delegated by
+``pocket-advisor.py`` to the frozen ``scripts/`` implementation; this module
+receives that adapter as a callback and never imports from the frozen tree.
 """
 import argparse
 import subprocess
@@ -26,6 +26,7 @@ INGEST_STAGES = (
     "emails",
     "pdfs",
     "thread",
+    "summaries",
     "embed",
     "transactions",
 )
@@ -35,9 +36,9 @@ type LegacyDispatch = Callable[[argparse.Namespace], int]
 _HELP = {
     "db": "init — create the fresh SQLite schema",
     "fetch-model": "download configured MLX model repos",
-    "ingest": "all | discover | emails | pdfs | thread | embed | transactions",
+    "ingest": "all | discover | emails | pdfs | thread | summaries | embed | transactions",
     "transactions": "report — statement integrity and reconciliation report",
-    "query": "one-off retrieval query (temporarily frozen implementation)",
+    "query": "one-off hybrid leaf/thread retrieval query",
     "daemon": "serve | status | stop — session-warm query daemon",
     "wipe": "list | index | state — explicit derived-state deletion",
     "blob-index": "list-sources | lookup — custody path tooling",
@@ -91,6 +92,9 @@ def _stage_class(name: str) -> type[Stage]:
         case "thread":
             from modules.pipeline.thread import ThreadStage
             return ThreadStage
+        case "summaries":
+            from modules.pipeline.summaries import ThreadSummaryStage
+            return ThreadSummaryStage
         case "embed":
             from modules.pipeline.embed import EmbedStage
             return EmbedStage
@@ -115,6 +119,10 @@ def run_ingest(stage: str) -> int:
 
         for name in ("discover", "emails", "pdfs", "thread"):
             _execute_stage(ctx, name)
+        if ctx.config.summarize_threads:
+            _execute_stage(ctx, "summaries")
+        else:
+            print("summaries: skipped (ingestion.summarize_threads=false)")
         if ctx.config.embed_text:
             _execute_stage(ctx, "embed")
         else:
@@ -139,6 +147,28 @@ def _handle_db(_: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_fetch_model(_: argparse.Namespace) -> int:
+    from modules.embedding.loader import ModelStore
+
+    config = Config.load()
+    store = ModelStore(config.models_dir)
+    embed = store.snapshot_dir(config.mlx_model_embed_text)
+    print(f"Text embed model ready: {embed}")
+    print(f"  embed dim: {store.embed_dim_for_repo(config.mlx_model_embed_text)}")
+    if config.rerank_enabled:
+        rerank = store.snapshot_dir(config.mlx_model_rerank)
+        print(f"Rerank model ready: {rerank}")
+    else:
+        print("Rerank model: skipped (query.rerank_enabled=false)")
+    if config.summarize_threads:
+        summary = store.snapshot_dir(config.mlx_model_thread_summary)
+        print(f"Thread summary model ready: {summary}")
+    else:
+        print("Thread summary model: skipped"
+              " (ingestion.summarize_threads=false)")
+    return 0
+
+
 def _handle_ingest(args: argparse.Namespace) -> int:
     return run_ingest(args.stage)
 
@@ -149,6 +179,40 @@ def _handle_transactions(_: argparse.Namespace) -> int:
     ctx = _open_context()
     try:
         report_transactions(ctx)
+        return 0
+    finally:
+        ctx.conn.close()
+
+
+def _handle_query(args: argparse.Namespace) -> int:
+    from modules.retrieval import SearchOptions, format_results, run_search
+
+    if args.require_daemon:
+        raise SystemExit(
+            "query: the new relational retriever currently runs cold; "
+            "--require-daemon is unavailable until the daemon port lands")
+    ctx = _open_context()
+    try:
+        if args.include_privileged is True:
+            include_privileged = True
+        elif args.exclude_privileged:
+            include_privileged = False
+        else:
+            include_privileged = \
+                ctx.config.include_privileged_by_default
+        top_k = args.top_k or ctx.config.default_top_k
+        if top_k <= 0:
+            raise SystemExit("query: --top-k must be positive")
+        result = run_search(ctx, args.question, SearchOptions(
+            top_k=top_k,
+            include_privileged=include_privileged,
+            after=args.after,
+            before=args.before,
+            thread_id=args.thread,
+            purpose=args.purpose,
+            expand_thread_context=not args.no_thread_context,
+        ))
+        format_results(result, as_json=args.json)
         return 0
     finally:
         ctx.conn.close()
@@ -212,7 +276,7 @@ def build_parser(
     command.set_defaults(handler=_handle_db)
 
     command = commands.add_parser("fetch-model", help=_HELP["fetch-model"])
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_fetch_model)
 
     command = commands.add_parser(
         "ingest",
@@ -250,7 +314,7 @@ def build_parser(
     command.add_argument("--json", action="store_true")
     command.add_argument("--no-daemon", action="store_true")
     command.add_argument("--require-daemon", action="store_true")
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_query)
 
     command = commands.add_parser("daemon", help=_HELP["daemon"])
     actions = command.add_subparsers(

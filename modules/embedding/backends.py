@@ -82,6 +82,20 @@ def index_paths(config: Config, fp: dict) -> IndexPaths:
         vecs_dir=d / "vecs")
 
 
+def thread_index_paths(config: Config, fp: dict) -> IndexPaths:
+    d = config.vectors_dir / "text" / fingerprint_slug(fp) / "threads"
+    return IndexPaths(
+        vectors_npy=d / "vectors.npy",
+        vectors_ids_npy=d / "vectors_ids.npy",
+        meta_json=d / "meta.json",
+        vecs_dir=d / "vecs")
+
+
+def thread_vector_filename(thread_id: int, summary_text: str) -> str:
+    digest = hashlib.sha256(summary_text.encode("utf-8")).hexdigest()[:12]
+    return f"{thread_id}__{digest}.npy"
+
+
 class TextBackend:
     """Thin adapter: the embed_one contract for embed / query."""
 

@@ -17,9 +17,9 @@ Companion to workspace-parsing-design.md. Last updated: 2026-07-17.
 | `7a9fe80` | **Config cleanup**: removed retired `ingestion.ocr.small_image_bytes`; new loader rejects it as unknown; corrected the embed-stage guidance; added regression coverage |
 | `92e4f03` | **Readable email artifacts**: Stage 2 writes `email_message.txt` after compaction with decoded Date/From/To/Cc/Subject headers and byte-identical authored-body content; write-verified, idempotent, covers attached emails, and remains outside embedding inputs |
 
-Self-tests: `modules/tests/` — CLI, foundations, discover, emails, pdfs,
-thread_embed, transactions — all 7 passing (`./pocket-advisor.py test`).
-The frozen `scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
+Current self-tests: all 8 `modules/tests/test_*.py` pass, including the new
+embedding/thread/retrieval fixture (`./pocket-advisor.py test`). The frozen
+`scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
 
 Stage 5 is implemented in `modules/statement_parsers.py` and
 `modules/pipeline/transactions.py`, with fixture coverage in
@@ -33,19 +33,29 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Current operating state
 
+- **Uncommitted embedding/thread implementation:**
+  `docs/embedding-design.md` is the locked design. Thread IDs now use stable
+  root Message-ID keys and store real `reply_parent_item_id` edges. A local
+  `summaries` stage generates digest/versioned navigation summaries for
+  multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
+  maintains separate leaf and summary vector matrices; and cold `query` runs
+  four retrieval legs, fuses/deduplicates threads, then returns DB-addressed
+  readable email evidence. Focused synthetic tests pass.
+
 - **New CLI implemented** in `modules/cli.py` at `97ee193`;
   `pocket-advisor.py` is now the venv bootstrap plus a
   narrow transitional adapter for frozen retrieval/maintenance commands.
   Argparse lives only in `modules/cli.py`; nothing in `modules/` imports
   from `scripts/`.
-- `ingest [all|discover|emails|pdfs|thread|embed|transactions]`,
-  `transactions report`, `db init`, and the 7-test module runner are wired
+- `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
+  `transactions report`, `db init`, and the 8-test module runner are wired
   to the new engine. Removed stage spellings and `blob-index rebuild` are
   rejected, not aliased.
-- Real `query`/daemon/accuracy/wipe/verify/blob lookup commands still
-  dispatch to frozen modules until the retrieval port.
-- The new ingest/report commands deliberately refuse legacy databases. The
-  current partial state uses the fresh schema.
+- Real `query` now dispatches to the native cold relational retriever.
+  Daemon/accuracy/wipe/verify/blob lookup still dispatch to frozen modules.
+- The new ingest/report/query commands deliberately refuse older databases.
+  The current partial state predates the stable-thread/summary schema and is
+  intentionally refused; it requires a newly confirmed wipe and full ingest.
 - The retired `ingestion.ocr.small_image_bytes` key has been removed from
   `config.yaml` and is rejected as unknown by the new loader.
 - `email_message.txt` is implemented for human cache inspection and future
@@ -60,13 +70,13 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps (in order)
 
-1. **Resume cutover when directed** — first run `ingest emails` once to
-   backfill `email_message.txt` into the already-parsed partial state. Then
-   either rerun `ingest all` idempotently, or continue with `ingest pdfs` →
-   `ingest thread` → `ingest embed` → `ingest transactions`; finally run
-   `accuracy run` vs the golden set and spot-check cache folders + queries.
-2. **Retrieval port (follow-up phase)** — query/daemon/reranker/
-   accuracy/verify/wipe into `modules/`; then delete `scripts/` and
+1. **Review and commit the embedding/thread implementation when requested.**
+   The full new and frozen self-test suites pass.
+2. **Restart cutover only when explicitly confirmed** — wipe the incompatible
+   partial state, run `ingest all`, then run the golden set and spot-check
+   cache folders, generated summaries, relationships, and readable evidence.
+3. **Finish the adapter retirement** — daemon/accuracy/verify/wipe/blob lookup
+   into `modules/`; then delete `scripts/` and
    prune unused venv packages (`extract-msg`, `python-docx`,
    `openpyxl`; `beautifulsoup4` stays — used by emailbody).
 

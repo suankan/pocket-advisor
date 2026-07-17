@@ -25,7 +25,8 @@ import numpy as np
 from modules.domain import StageStats
 from modules.embedding import (IndexPaths, ModelStore,
                                chunking_fields_changed, current_fingerprint,
-                               get_backend, index_paths, meta_fingerprint)
+                               get_backend, index_paths, meta_fingerprint,
+                               thread_index_paths, thread_vector_filename)
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.transliteration import proper_noun_shadow
@@ -67,20 +68,54 @@ class EmbedStage(Stage):
         fingerprint = current_fingerprint(self.config, store)
         paths = self._resolve_index(fingerprint)
         paths.vecs_dir.mkdir(parents=True, exist_ok=True)
+        thread_paths = thread_index_paths(self.config, fingerprint)
+        thread_paths.vecs_dir.mkdir(parents=True, exist_ok=True)
 
-        have = {int(p.stem) for p in paths.vecs_dir.glob("*.npy")}
-        total = self.conn.execute(
-            "SELECT COUNT(*) FROM chunks").fetchone()[0]
-        if len(have) >= total and paths.vectors_npy.exists():
+        chunk_ids = {int(row["id"]) for row in self.conn.execute(
+            "SELECT id FROM chunks")}
+        have = {int(p.stem) for p in paths.vecs_dir.glob("*.npy")
+                if p.stem.isdigit()}
+        total = len(chunk_ids)
+        thread_rows = self._thread_rows()
+        expected_thread_files = {thread_vector_filename(
+            row["thread_id"], row["summary_text"]) for row in thread_rows}
+        existing_thread_files = {
+            path.name for path in thread_paths.vecs_dir.glob("*.npy")}
+        thread_pending = [row for row in thread_rows if not (
+            thread_paths.vecs_dir /
+            thread_vector_filename(row["thread_id"],
+                                   row["summary_text"])).is_file()]
+        chunks_current = chunk_ids.issubset(have) \
+            and paths.vectors_npy.exists() \
+            and paths.vectors_ids_npy.exists() \
+            and set(np.load(paths.vectors_ids_npy).tolist()) == chunk_ids
+        threads_current = not thread_pending and \
+            thread_paths.vectors_npy.exists() and \
+            thread_paths.vectors_ids_npy.exists() and \
+            existing_thread_files == expected_thread_files and \
+            set(np.load(thread_paths.vectors_ids_npy).tolist()) == {
+                int(row["thread_id"]) for row in thread_rows}
+        if chunks_current and threads_current:
             stats.inc("index_size", total)
+            stats.inc("thread_index_size", len(thread_rows))
             return stats
 
-        backend = get_backend(self.config, store)
-        done, failed = self._embed_pending(backend, paths.vecs_dir, have)
-        stats.inc("embedded", done)
-        stats.inc("failed", failed)
+        chunk_pending = bool(chunk_ids - have)
+        backend = get_backend(self.config, store) \
+            if chunk_pending or thread_pending else None
+        chunk_done, chunk_failed = self._embed_pending(
+            backend, paths.vecs_dir, have) if chunk_pending else (0, 0)
+        thread_done, thread_failed = self._embed_pending_threads(
+            backend, thread_paths, thread_pending) \
+            if thread_pending else (0, 0)
+        stats.inc("embedded", chunk_done + thread_done)
+        stats.inc("embedded_chunks", chunk_done)
+        stats.inc("embedded_threads", thread_done)
+        stats.inc("failed", chunk_failed + thread_failed)
         stats.inc("index_size",
                   self._rebuild_matrix(paths, fingerprint))
+        stats.inc("thread_index_size",
+                  self._rebuild_thread_matrix(thread_paths, fingerprint))
         return stats
 
     # -- chunking ------------------------------------------------------------
@@ -179,6 +214,35 @@ class EmbedStage(Stage):
         self.conn.commit()
         return done, failed
 
+    def _thread_rows(self):
+        return self.conn.execute(
+            """SELECT thread_id, summary_text FROM thread_summaries
+               WHERE is_stale = 0 ORDER BY thread_id""").fetchall()
+
+    def _embed_pending_threads(self, backend, paths: IndexPaths,
+                               pending) -> tuple[int, int]:
+        done, failed = 0, 0
+        progress = Progress("embed thread summaries", total=len(pending))
+        for row in pending:
+            progress.step(note=f"thread {row['thread_id']}")
+            target = paths.vecs_dir / thread_vector_filename(
+                row["thread_id"], row["summary_text"])
+            try:
+                vec = backend.embed_one(row["summary_text"])
+                np.save(target, vec)
+                done += 1
+            except Exception as exc:
+                failed += 1
+                progress.println(
+                    f"  embed FAIL thread {row['thread_id']}:"
+                    f" {type(exc).__name__}: {exc}")
+                self.review.flag(
+                    f"thread:{row['thread_id']}", self.name, "error",
+                    f"{type(exc).__name__}: {exc}")
+        progress.done()
+        self.conn.commit()
+        return done, failed
+
     def _rebuild_matrix(self, paths: IndexPaths, fingerprint: dict) -> int:
         """Rebuild the matrix from the per-chunk cache directory — the
         cache dir is the source of truth, not the previous matrix."""
@@ -199,6 +263,37 @@ class EmbedStage(Stage):
         np.save(paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
         paths.meta_json.write_text(json.dumps({
             **fingerprint,
+            "count": len(ids),
+            "built_at": datetime.now(timezone.utc).isoformat(),
+        }, indent=2))
+        return len(ids)
+
+    def _rebuild_thread_matrix(self, paths: IndexPaths,
+                               fingerprint: dict) -> int:
+        rows = self._thread_rows()
+        expected: set[str] = set()
+        vecs, ids = [], []
+        for row in rows:
+            filename = thread_vector_filename(
+                row["thread_id"], row["summary_text"])
+            expected.add(filename)
+            path = paths.vecs_dir / filename
+            if not path.is_file():
+                continue
+            vecs.append(np.load(path))
+            ids.append(row["thread_id"])
+
+        for path in paths.vecs_dir.glob("*.npy"):
+            if path.name not in expected:
+                path.unlink()
+
+        matrix = np.stack(vecs) if vecs else \
+            np.zeros((0, fingerprint["dim"]), dtype=np.float32)
+        np.save(paths.vectors_npy, matrix)
+        np.save(paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
+        paths.meta_json.write_text(json.dumps({
+            **fingerprint,
+            "kind": "thread_summaries",
             "count": len(ids),
             "built_at": datetime.now(timezone.utc).isoformat(),
         }, indent=2))

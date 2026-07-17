@@ -32,6 +32,12 @@ Refactor of the ingestion pipeline around two ideas:
   spellings are removed (not deprecated), superseded modules are
   deleted, and the DB legacy-migration chain is dropped — wipe +
   re-ingest makes all of it dead code. Single-operator tool; no shims.
+- **Runtime: Python 3.14.** The venv is rebuilt on python3.14 (done
+  2026-07-17: 3.14.6, MLX 0.32 wheels fine, frozen scripts/ suite
+  11/11 on it). New code uses 3.14 idiom throughout: deferred
+  annotations (no `from __future__ import annotations`), `StrEnum`,
+  frozen+slots dataclasses, PEP 695 `type` aliases, `match` where it
+  reads better.
 - **Full rewrite under `modules/`.** New code is written from scratch
   under repo-root `modules/` — OOP: typed dataclasses for domain
   objects, one class per pipeline stage behind a common Stage

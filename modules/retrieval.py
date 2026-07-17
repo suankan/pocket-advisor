@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from modules.embedding import (ModelStore, current_fingerprint, get_backend,
-                               index_paths, thread_index_paths)
+from modules.embedding import (ModelStore, chunking_fields_changed,
+                               current_fingerprint, get_backend, index_paths,
+                               meta_fingerprint, thread_index_paths)
 from modules.embedding.loader import MlxReranker
 from modules.pipeline.base import PipelineContext
 
@@ -36,7 +37,12 @@ def _load_temp_ids(conn, table: str, ids: set[int]) -> None:
 
 
 def allowed_chunk_ids(ctx: PipelineContext,
-                      options: SearchOptions) -> set[int] | None:
+                      options: SearchOptions) -> set[int]:
+    """Chunk ids satisfying the mount and date/thread filters.
+
+    Always a concrete set — the mount filter is always active, so there
+    is no unfiltered fast path; empty means nothing is searchable.
+    """
     conds, params = [], []
     if options.after:
         conds.append("items.date_utc >= ?")
@@ -86,51 +92,35 @@ def visible_item_ids(ctx: PipelineContext,
     return {int(row["id"]) for row in rows}
 
 
-def leaf_fts_search(conn, question: str, limit: int,
-                    allowed: set[int] | None) -> list[int]:
+def leaf_fts_search(conn, question: str, limit: int) -> list[int]:
+    """BM25 leg. run_search has already loaded `_allowed_chunks`."""
     expression = _fts_expression(question)
-    if not expression or allowed == set():
+    if not expression:
         return []
-    if allowed is not None:
-        _load_temp_ids(conn, "_allowed_chunks", allowed)
-        sql = """SELECT rowid FROM chunks_fts
-                  WHERE chunks_fts MATCH ?
-                    AND rowid IN (SELECT id FROM _allowed_chunks)
-                  ORDER BY bm25(chunks_fts) LIMIT ?"""
-    else:
-        sql = """SELECT rowid FROM chunks_fts
-                  WHERE chunks_fts MATCH ?
-                  ORDER BY bm25(chunks_fts) LIMIT ?"""
+    sql = """SELECT rowid FROM chunks_fts
+              WHERE chunks_fts MATCH ?
+                AND rowid IN (SELECT id FROM _allowed_chunks)
+              ORDER BY bm25(chunks_fts) LIMIT ?"""
     return [int(row["rowid"]) for row in
             conn.execute(sql, (expression, limit)).fetchall()]
 
 
 def thread_fts_search(conn, question: str, limit: int,
-                      allowed_threads: set[int] | None) -> list[int]:
+                      allowed_threads: set[int]) -> list[int]:
     expression = _fts_expression(question)
-    if not expression or allowed_threads == set():
+    if not expression or not allowed_threads:
         return []
-    if allowed_threads is not None:
-        _load_temp_ids(conn, "_allowed_threads", allowed_threads)
-        sql = """SELECT thread_summaries_fts.rowid
-                   FROM thread_summaries_fts
-                   JOIN thread_summaries
-                     ON thread_summaries.thread_id =
-                        thread_summaries_fts.rowid
-                  WHERE thread_summaries_fts MATCH ?
-                    AND thread_summaries.is_stale = 0
-                    AND thread_summaries_fts.rowid IN
-                        (SELECT id FROM _allowed_threads)
-                  ORDER BY bm25(thread_summaries_fts) LIMIT ?"""
-    else:
-        sql = """SELECT thread_summaries_fts.rowid
-                   FROM thread_summaries_fts
-                   JOIN thread_summaries
-                     ON thread_summaries.thread_id =
-                        thread_summaries_fts.rowid
-                  WHERE thread_summaries_fts MATCH ?
-                    AND thread_summaries.is_stale = 0
-                  ORDER BY bm25(thread_summaries_fts) LIMIT ?"""
+    _load_temp_ids(conn, "_allowed_threads", allowed_threads)
+    sql = """SELECT thread_summaries_fts.rowid
+               FROM thread_summaries_fts
+               JOIN thread_summaries
+                 ON thread_summaries.thread_id =
+                    thread_summaries_fts.rowid
+              WHERE thread_summaries_fts MATCH ?
+                AND thread_summaries.is_stale = 0
+                AND thread_summaries_fts.rowid IN
+                    (SELECT id FROM _allowed_threads)
+              ORDER BY bm25(thread_summaries_fts) LIMIT ?"""
     return [int(row["rowid"]) for row in
             conn.execute(sql, (expression, limit)).fetchall()]
 
@@ -143,12 +133,11 @@ def _load_matrix(paths):
 
 
 def _dense_search(matrix, ids, query_vec, limit: int,
-                  allowed: set[int] | None) -> list[int]:
+                  allowed: set[int]) -> list[int]:
     if matrix is None or ids is None:
         return []
-    if allowed is not None:
-        mask = np.isin(ids, list(allowed))
-        matrix, ids = matrix[mask], ids[mask]
+    mask = np.isin(ids, list(allowed))
+    matrix, ids = matrix[mask], ids[mask]
     if not len(ids):
         return []
     scores = matrix @ query_vec
@@ -164,8 +153,8 @@ def _rrf(lists: list[list[str]], k: int) -> list[str]:
 
 
 def _rerank(ctx: PipelineContext, question: str,
-            keys: list[str], store: ModelStore) -> list[str]:
-    if not keys or not ctx.config.rerank_enabled:
+            keys: list[str], reranker: MlxReranker | None) -> list[str]:
+    if not keys or reranker is None:
         return keys
     text_by_key: dict[str, str] = {}
     for key in keys:
@@ -182,8 +171,7 @@ def _rerank(ctx: PipelineContext, question: str,
         if row:
             text_by_key[key] = " ".join(row["text"].split())[
                 :ctx.config.rerank_text_chars]
-    backend = MlxReranker(store, ctx.config.mlx_model_rerank)
-    ranked = backend.rerank(question, text_by_key)
+    ranked = reranker.rerank(question, text_by_key)
     return ranked + [key for key in keys if key not in ranked]
 
 
@@ -231,7 +219,12 @@ def _message_rows(conn, thread_id: int, visible_items: set[int]):
 
 def _expand_messages(ctx: PipelineContext, thread_id: int,
                      matched_item_ids: set[int],
-                     visible_items: set[int]) -> list[dict]:
+                     visible_items: set[int], remaining: int,
+                     include_context: bool) -> tuple[list[dict], int]:
+    """Build the packet's message list, consuming the single per-answer
+    `thread_context_chars` budget. Matched messages are always included
+    in full and draw the budget down first; non-matched context is
+    added in priority order only while it still fits."""
     rows = _message_rows(ctx.conn, thread_id, visible_items)
     by_id = {int(row["id"]): row for row in rows}
     children: dict[int, list[int]] = {}
@@ -258,9 +251,10 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
 
     paths: dict[int, str] = {}
     content: dict[int, str] = {}
-    remaining = ctx.config.thread_context_chars
     root = ctx.config.project_root
     for item_id in ordered_priority:
+        if not include_context and item_id not in matched_item_ids:
+            continue
         row = by_id[item_id]
         path = (root / row["body_text_path"]).with_name("email_message.txt")
         if not path.is_file():
@@ -271,7 +265,7 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
             content[item_id] = text
             remaining = max(0, remaining - len(text))
 
-    return [{
+    messages = [{
         "item_id": int(row["id"]),
         "message_id": row["message_id"],
         "date": row["date_utc"],
@@ -285,14 +279,17 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
         "matched": int(row["id"]) in matched_item_ids,
         "email_message_path": paths.get(int(row["id"])),
         "email_message": content.get(int(row["id"])),
-    } for row in rows]
+    } for row in rows
+        if include_context or int(row["id"]) in matched_item_ids]
+    return messages, remaining
 
 
 def _thread_packet(ctx: PipelineContext, thread_id: int,
                    matches: list[dict], summary_hit: bool,
                    expand_context: bool,
                    visible_items: set[int],
-                   include_summary: bool) -> dict:
+                   include_summary: bool,
+                   remaining: int) -> tuple[dict, int]:
     thread = ctx.conn.execute(
         "SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
     summary = ctx.conn.execute(
@@ -300,6 +297,9 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
         " FROM thread_summaries WHERE thread_id=? AND is_stale=0",
         (thread_id,)).fetchone() if include_summary else None
     matched_items = {int(match["item_id"]) for match in matches}
+    messages, remaining = _expand_messages(
+        ctx, thread_id, matched_items, visible_items, remaining,
+        include_context=expand_context)
     return {
         "kind": "thread",
         "thread_id": thread_id,
@@ -307,65 +307,82 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
         "subject": thread["representative_subject"],
         "first_date": thread["first_date"],
         "last_date": thread["last_date"],
-        "email_count": thread["email_count"],
+        "item_count": thread["item_count"],
         "summary_hit": summary_hit,
         "generated_summary": summary["summary_text"] if summary else None,
         "summary_model": summary["generator_model"] if summary else None,
         "summary_prompt_version": summary["prompt_version"] if summary else None,
         "message_id": matches[0]["message_id"] if matches else None,
         "matches": matches,
-        "messages": _expand_messages(
-            ctx, thread_id, matched_items, visible_items)
-        if expand_context else _matched_messages(
-            ctx, thread_id, matched_items, visible_items),
-    }
+        "messages": messages,
+    }, remaining
 
 
-def _matched_messages(ctx: PipelineContext, thread_id: int,
-                      matched_item_ids: set[int],
-                      visible_items: set[int]) -> list[dict]:
-    """Use the same packet schema while omitting non-matched context."""
-    return [message for message in _expand_messages(
-        ctx, thread_id, matched_item_ids, visible_items)
-        if message["matched"]]
+def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
+    """Operational warnings: pending embeddings and chunking drift."""
+    warnings = []
+    paths = index_paths(ctx.config, fingerprint)
+    total = ctx.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    have = len(list(paths.vecs_dir.glob("*.npy"))) \
+        if paths.vecs_dir.is_dir() else 0
+    pending = max(0, total - have)
+    if pending:
+        warnings.append(
+            f"{pending} chunks not yet embedded under the current model —"
+            " run ./pocket-advisor.py ingest embed; semantic results may"
+            " be incomplete")
+    if paths.meta_json.is_file():
+        built = meta_fingerprint(json.loads(paths.meta_json.read_text()))
+        if chunking_fields_changed(built, fingerprint):
+            warnings.append(
+                "chunking config changed since the index was built (chars"
+                f" {built['chunk_chars']}->{fingerprint['chunk_chars']},"
+                f" overlap {built['chunk_overlap']}->"
+                f"{fingerprint['chunk_overlap']}) — existing chunks were"
+                " not rebuilt; results may mix chunk sizes")
+    return warnings
 
 
 def run_search(ctx: PipelineContext, question: str,
-               options: SearchOptions) -> dict:
+               options: SearchOptions, *,
+               reranker: MlxReranker | None = None) -> dict:
+    conn = ctx.conn
     allowed_chunks = allowed_chunk_ids(ctx, options)
     visible_items = visible_item_ids(ctx, options)
-    if allowed_chunks is None:
-        allowed_threads = None
-    elif not allowed_chunks:
-        allowed_threads = set()
-    else:
-        _load_temp_ids(ctx.conn, "_allowed_chunks", allowed_chunks)
-        allowed_threads = {int(row["thread_id"]) for row in ctx.conn.execute(
+    _load_temp_ids(conn, "_allowed_chunks", allowed_chunks)
+    if allowed_chunks:
+        allowed_threads = {int(row["thread_id"]) for row in conn.execute(
             "SELECT DISTINCT items.thread_id FROM chunks"
             " JOIN items ON items.id=chunks.item_id"
             " WHERE chunks.id IN (SELECT id FROM _allowed_chunks)"
             " AND items.thread_id IS NOT NULL").fetchall()}
+    else:
+        allowed_threads = set()
 
-    current_summary_threads = {int(row["thread_id"]) for row in
-                               ctx.conn.execute(
+    # Summaries are searchable only for threads whose EVERY item is
+    # visible through the active mounts (whole-thread visibility).
+    current_summary_threads = {int(row["thread_id"]) for row in conn.execute(
         "SELECT thread_id FROM thread_summaries WHERE is_stale=0").fetchall()}
-    safe_summary_threads: set[int] = set()
-    for thread_id in allowed_threads or ():
-        if thread_id not in current_summary_threads:
-            continue
-        thread_items = {int(row["id"]) for row in ctx.conn.execute(
-            "SELECT id FROM items WHERE thread_id=?", (thread_id,)).fetchall()}
-        if thread_items.issubset(visible_items):
-            safe_summary_threads.add(thread_id)
-
-    leaf_fts = leaf_fts_search(
-        ctx.conn, question, ctx.config.fts_candidates, allowed_chunks)
-    thread_fts = thread_fts_search(
-        ctx.conn, question, ctx.config.fts_candidates,
-        safe_summary_threads)
+    _load_temp_ids(conn, "_visible_items", visible_items)
+    _load_temp_ids(conn, "_summary_candidates",
+                   allowed_threads & current_summary_threads)
+    safe_summary_threads = {int(row["thread_id"]) for row in conn.execute(
+        """SELECT items.thread_id FROM items
+            WHERE items.thread_id IN (SELECT id FROM _summary_candidates)
+            GROUP BY items.thread_id
+            HAVING SUM(CASE WHEN items.id IN (SELECT id FROM _visible_items)
+                            THEN 0 ELSE 1 END) = 0""").fetchall()}
 
     store = ModelStore(ctx.config.models_dir)
     fingerprint = current_fingerprint(ctx.config, store)
+    warnings = _index_warnings(ctx, fingerprint)
+
+    leaf_fts = leaf_fts_search(
+        conn, question, ctx.config.fts_candidates) if allowed_chunks else []
+    thread_fts = thread_fts_search(
+        conn, question, ctx.config.fts_candidates,
+        safe_summary_threads)
+
     leaf_matrix, leaf_ids = _load_matrix(index_paths(ctx.config, fingerprint))
     thread_matrix, thread_ids = _load_matrix(
         thread_index_paths(ctx.config, fingerprint))
@@ -389,12 +406,18 @@ def run_search(ctx: PipelineContext, question: str,
         [f"t:{value}" for value in thread_fts],
         [f"t:{value}" for value in thread_dense],
     ], ctx.config.rrf_k)
-    keys = _rerank(ctx, question, keys, store)
+    # Rerank only up to the frozen stack's candidate ceiling; the fused
+    # tail keeps its RRF order.
+    cap = ctx.config.fts_candidates + ctx.config.vec_candidates
+    if keys and ctx.config.rerank_enabled and reranker is None:
+        reranker = MlxReranker(store, ctx.config.mlx_model_rerank)
+    keys = _rerank(ctx, question, keys[:cap], reranker) + keys[cap:]
 
     selected: list[int] = []
     matches_by_thread: dict[int, list[dict]] = {}
     summary_hits: set[int] = set()
     selected_set: set[int] = set()
+    matched_items: set[int] = set()
     for key in keys:
         kind, raw_id = key.split(":", 1)
         if kind == "t":
@@ -405,21 +428,28 @@ def run_search(ctx: PipelineContext, question: str,
             if not match or match["thread_id"] is None:
                 continue
             thread_id = int(match["thread_id"])
-            if thread_id in selected_set or len(selected) < options.top_k:
+            # One match per item: the best-ranked chunk wins.
+            if int(match["item_id"]) not in matched_items and (
+                    thread_id in selected_set
+                    or len(selected) < options.top_k):
+                matched_items.add(int(match["item_id"]))
                 matches_by_thread.setdefault(thread_id, []).append(match)
         if thread_id not in selected_set and len(selected) < options.top_k:
             selected.append(thread_id)
             selected_set.add(thread_id)
 
-    packets = [_thread_packet(
-        ctx, thread_id, matches_by_thread.get(thread_id, []),
-        thread_id in summary_hits, options.expand_thread_context,
-        visible_items, thread_id in safe_summary_threads)
-        for thread_id in selected]
+    packets = []
+    remaining = ctx.config.thread_context_chars
+    for thread_id in selected:
+        packet, remaining = _thread_packet(
+            ctx, thread_id, matches_by_thread.get(thread_id, []),
+            thread_id in summary_hits, options.expand_thread_context,
+            visible_items, thread_id in safe_summary_threads, remaining)
+        packets.append(packet)
     return {
         "question": question,
         "results": packets,
-        "warnings": [],
+        "warnings": warnings,
         "retrieval": {
             "leaf_fts": len(leaf_fts),
             "leaf_dense": len(leaf_dense),

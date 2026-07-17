@@ -3,6 +3,7 @@ import importlib
 import json
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -241,6 +242,75 @@ def main() -> int:
         assert estats2.get("embedded_threads") == 1, estats2
         files = list(tpaths.vecs_dir.glob("*.npy"))
         assert len(files) == 1 and files[0].name != old_vector
+
+        # F8.1 — ghost-root ordering: a reply referencing a root not yet
+        # imported keys its thread on the missing root; importing the
+        # root later joins the same thread, materializes the reply edge,
+        # and the digest change triggers summary generation.
+        r = insert_email(conn, root, "<r@x>", "Re: Ghost",
+                         "Boundary fence quote.",
+                         "2024-02-02T10:00:00+00:00", "a@x", "b@y",
+                         "<g@x>", "<g@x>")
+        conn.commit()
+        ThreadStage(ctx).run()
+        ghost_thread = conn.execute(
+            "SELECT thread_id FROM items WHERE id=?", (r,)).fetchone()[0]
+        assert conn.execute(
+            "SELECT stable_key FROM threads WHERE id=?",
+            (ghost_thread,)).fetchone()[0] == "<g@x>"
+        assert conn.execute(
+            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            (r,)).fetchone()[0] is None
+
+        g = insert_email(conn, root, "<g@x>", "Ghost", "Fence agreed.",
+                         "2024-02-01T10:00:00+00:00", "b@y", "a@x")
+        conn.commit()
+        ThreadStage(ctx).run()
+        assert conn.execute(
+            "SELECT thread_id FROM items WHERE id=?",
+            (r,)).fetchone()[0] == ghost_thread
+        assert conn.execute(
+            "SELECT thread_id FROM items WHERE id=?",
+            (g,)).fetchone()[0] == ghost_thread
+        assert conn.execute(
+            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            (r,)).fetchone()[0] == g
+        with patch.object(summaries_mod, "get_summary_generator",
+                          return_value=FakeSummarizer()):
+            ghost_stats = ThreadSummaryStage(ctx).run()
+        assert ghost_stats.get("generated") == 1 and \
+            ghost_stats.get("unchanged") == 1, ghost_stats
+
+        # F1 — with generation disabled, staleness maintenance still
+        # runs: a changed thread is marked stale and leaves retrieval,
+        # no model is ever loaded, and re-enabling regenerates it.
+        insert_email(conn, root, "<e@x>", "Re: Project", "Fifth message.",
+                     "2024-01-05T10:00:00+00:00", "a@x", "b@y",
+                     "<d@x>", "<a@x> <b@x> <d@x>")
+        conn.commit()
+        ThreadStage(ctx).run()
+        off_ctx = PipelineContext(
+            config=replace(cfg, summarize_threads=False),
+            registry=ctx.registry, conn=conn, review=ctx.review)
+        with patch.object(summaries_mod, "get_summary_generator",
+                          side_effect=AssertionError("must not load")):
+            off_stats = ThreadSummaryStage(off_ctx).run()
+        assert off_stats.get("generation_disabled") == 1, off_stats
+        assert not off_stats.get("generated"), off_stats
+        assert conn.execute(
+            "SELECT is_stale FROM thread_summaries WHERE thread_id=?",
+            (thread_id,)).fetchone()[0] == 1
+        with patch.object(retrieval_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)), \
+             patch.object(retrieval_mod, "get_backend",
+                          return_value=FakeEmbedder()):
+            off_query = run_search(ctx, "Opening note",
+                                   SearchOptions(top_k=3))
+        assert off_query["retrieval"]["thread_fts"] == 0, off_query
+        with patch.object(summaries_mod, "get_summary_generator",
+                          return_value=FakeSummarizer()):
+            back_on = ThreadSummaryStage(ctx).run()
+        assert back_on.get("generated") == 1, back_on
 
         conn.close()
     print("test_embedding_design: all ok")

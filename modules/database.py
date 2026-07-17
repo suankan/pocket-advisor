@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS threads (
     representative_subject TEXT,
     first_date             TEXT,
     last_date              TEXT,
-    email_count            INTEGER DEFAULT 0
+    item_count             INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS thread_summaries (

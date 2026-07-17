@@ -117,12 +117,11 @@ def run_ingest(stage: str) -> int:
             _execute_stage(ctx, stage)
             return 0
 
-        for name in ("discover", "emails", "pdfs", "thread"):
+        # summaries always runs: its staleness maintenance must see every
+        # ingest even when generation is disabled (the stage gates the
+        # generative pass on ingestion.summarize_threads itself).
+        for name in ("discover", "emails", "pdfs", "thread", "summaries"):
             _execute_stage(ctx, name)
-        if ctx.config.summarize_threads:
-            _execute_stage(ctx, "summaries")
-        else:
-            print("summaries: skipped (ingestion.summarize_threads=false)")
         if ctx.config.embed_text:
             _execute_stage(ctx, "embed")
         else:

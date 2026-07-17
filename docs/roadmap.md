@@ -1,0 +1,62 @@
+# Pocket Advisor Roadmap
+
+Ordered future work. Current state lives in `docs/status.md`; locked
+architecture in `docs/workspace-parsing-design.md` and
+`docs/embedding-design.md`.
+
+## 1. Resume cutover (requires explicit user confirmation)
+
+The partial derived state predates the stable-thread/summary schema and
+is intentionally refused by the engine. When directed:
+
+1. `wipe state` — confirmed immediately beforehand (AGENTS.md hard
+   rule 6);
+2. `ingest all` — full re-ingest from corpora, including thread
+   summaries and the dual vector index;
+3. run the golden-set accuracy checks and spot-check cache folders,
+   generated summaries, reply relationships, and readable evidence
+   packets.
+
+## 2. Adapter retirement
+
+Port the remaining frozen commands into `modules/`, then delete
+`scripts/`:
+
+- **daemon** — session-warm serving of the native relational retriever
+  (one retriever everywhere; `run_search` already accepts a prebuilt
+  reranker for warm reuse). Until then the frozen `daemon`/`accuracy`
+  commands must not run against the fresh schema — they expect
+  retired columns.
+- **accuracy** — golden-set runner over the native retriever.
+- **verify** — custody/integrity checks, plus FTS index
+  self-verification: `INSERT INTO thread_summaries_fts
+  (thread_summaries_fts) VALUES('integrity-check')` and the same for
+  `chunks_fts`, so index/content divergence is caught mechanically.
+- **wipe / blob-index lookup** — direct ports.
+- Then delete `scripts/` and prune unused venv packages
+  (`extract-msg`, `python-docx`, `openpyxl`; `beautifulsoup4` stays —
+  used by emailbody).
+- Move the thread-summary/query config defaults from `modules/config.py`
+  into committed `config.yaml` once no frozen command strict-reads it.
+
+## 3. Local answering pass
+
+The retrieval layer returns delimited evidence packets; the answering
+pass (design sketch in `docs/embedding-design.md`) feeds them to a
+local MLX model that produces a cited answer, shows readable source
+material, and never cites a generated thread summary as evidence.
+
+## 4. Experiments and watchlist
+
+- **Header-enriched leaf embeddings** — prepend envelope metadata
+  (From/To/Date/Subject; document filename/date) to the text fed to the
+  embedder and FTS, keeping `chunks.text` a faithful quote. Requires
+  its own payload-recipe fingerprint and a golden-set comparison before
+  adoption (`docs/embedding-design.md`, leaf index section).
+- **Rolling-summary quality on long threads** — a changed N-message
+  thread replays N generations and the 600-token ceiling compresses
+  early detail; revisit only if golden-set spot checks or a
+  long-thread collection show degradation.
+- **Semantic transaction search** — bank-statement rows are structured
+  but not semantically searchable; embedding normalized
+  counterparty/description rows would connect Stage 5 to retrieval.

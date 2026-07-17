@@ -9,10 +9,13 @@ parsing design under `docs/`.
 For every platform task, load these files in order:
 
 1. this file;
-2. `docs/workspace-parsing-design-status.md` — current implementation state
-   and ordered pickup point;
-3. `docs/workspace-parsing-design.md` — locked architecture and acceptance
-   decisions.
+2. `docs/status.md` — the single status-tracking document and pickup
+   point;
+3. `docs/workspace-parsing-design.md` — locked ingestion architecture
+   and acceptance decisions;
+4. `docs/embedding-design.md` — locked embedding/thread-retrieval
+   design (review-refined);
+5. `docs/roadmap.md` — ordered future work.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -64,8 +67,9 @@ and deleted at adapter retirement, not maintained.
 - Style: typed domain dataclasses, clear classes, reuse, readability, and one
   pipeline stage class behind the common `Stage` interface.
 - `scripts/` is frozen reference code. New `modules/` code must never import
-  it. Keep its tests passing until retrieval is ported; delete it only after
-  the replacement is complete.
+  it. Keep its tests passing until the remaining maintenance commands are
+  ported (adapter retirement); delete it only after the replacement is
+  complete.
 - `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
   only in `modules/cli.py`; the root entrypoint temporarily supplies the
   frozen retrieval/maintenance adapter. Stage modules never parse arguments
@@ -89,7 +93,8 @@ and deleted at adapter retirement, not maintained.
    `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
 4. `thread` — full thread reconstruction;
 5. `summaries` — local-LLM navigation summaries for complete multi-email
-   threads;
+   threads; staleness maintenance always runs, and
+   `ingestion.summarize_threads` gates only the generative pass;
 6. `embed` — authored email bodies/PDF text plus the separate thread-summary
    index, using the per-model vector cache;
 7. `transactions` — parse and link marked bank-statement collections.
@@ -116,26 +121,26 @@ exist; only CLI orchestration owns ordering.
 
 ## Current implementation state
 
-Always confirm this against `docs/workspace-parsing-design-status.md` and
-`git status` before editing. At the 2026-07-17 handoff:
+Always confirm this against `docs/status.md` and
+`git status` before editing. At the 2026-07-18 handoff:
 
 - foundations, Stages 1–5, stable thread relationships, thread summaries,
   dual indexes, and cold relational query are implemented under `modules/`;
-- the new CLI is implemented and tested under `modules/cli.py`;
-- the retired image-OCR configuration key has been removed;
-- readable `email_message.txt` artifacts are implemented at `92e4f03`;
+- the post-implementation review's actionable findings are all fixed and
+  folded into `docs/embedding-design.md` (per-answer context budget,
+  always-on summary staleness maintenance, rerank cap, match dedup,
+  warnings, ghost-root coverage);
+- the privileged-content concept is removed engine-wide;
 - `query` uses the native hybrid leaf/thread retriever; daemon, accuracy,
-  verify, wipe, and blob lookup still use the frozen adapter;
+  verify, wipe, and blob lookup still use the frozen adapter — the frozen
+  `daemon`/`accuracy` commands expect retired columns and must not run
+  against the fresh schema;
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.
 
-The ordered continuation is:
-
-1. when explicitly confirmed, wipe the incompatible partial derived state,
-   run `ingest all`, and run golden-set accuracy/spot checks;
-2. port daemon/accuracy/verify/wipe/blob lookup into `modules/`, then remove
-   `scripts/` and unused dependencies.
+The ordered continuation lives in `docs/roadmap.md` (cutover resume,
+adapter retirement, answering pass, experiments).
 
 ## Transaction-stage constraints
 
@@ -154,8 +159,9 @@ The ordered continuation is:
   citations.
 - `reconciliation.yaml` and `counterparties.yaml` remain in the active
   workspace folder, not engine state.
-- Preserve `source_type='email_body'` for native-PDF chunks until retrieval
-  is ported; the frozen query stack depends on it.
+- Preserve `source_type='email_body'` for native-PDF chunks; both the
+  native retriever and the remaining frozen commands read it. Revisit
+  only after adapter retirement.
 
 ## Verification
 

@@ -90,7 +90,8 @@ def test_orchestration() -> None:
                          side_effect=lambda _, name: executed.append(name)), \
             contextlib.redirect_stdout(io.StringIO()):
         cli.run_ingest("all")
-    assert executed == ["discover", "emails", "pdfs", "thread"]
+    # summaries always runs (staleness maintenance); only embed is gated.
+    assert executed == ["discover", "emails", "pdfs", "thread", "summaries"]
     assert context.conn.closed
 
     executed.clear()

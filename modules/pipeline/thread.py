@@ -172,8 +172,8 @@ class ThreadStage(Stage):
         # Thread stats + prune empty threads.
         conn.execute("""
             UPDATE threads SET
-              email_count = (SELECT COUNT(*) FROM items
-                             WHERE thread_id = threads.id),
+              item_count = (SELECT COUNT(*) FROM items
+                            WHERE thread_id = threads.id),
               first_date  = (SELECT MIN(date_utc) FROM items
                              WHERE thread_id = threads.id),
               last_date   = (SELECT MAX(date_utc) FROM items
@@ -182,7 +182,7 @@ class ThreadStage(Stage):
                   (SELECT subject FROM items WHERE thread_id = threads.id
                    ORDER BY date_utc LIMIT 1)
         """)
-        conn.execute("DELETE FROM threads WHERE email_count = 0")
+        conn.execute("DELETE FROM threads WHERE item_count = 0")
         conn.commit()
 
         for method, count in conn.execute(

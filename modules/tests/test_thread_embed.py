@@ -102,9 +102,9 @@ def main() -> int:
         assert threads["<a@x>"] == threads["<b@x>"] == threads["<c@x>"]
         assert threads["<d@x>"] != threads["<a@x>"]
         rep = conn.execute(
-            "SELECT representative_subject, email_count FROM threads"
+            "SELECT representative_subject, item_count FROM threads"
             " WHERE id = ?", (threads["<a@x>"],)).fetchone()
-        assert rep["email_count"] == 3 and \
+        assert rep["item_count"] == 3 and \
             rep["representative_subject"] == "Settlement"
 
         # attachment text artifact + a skipped one (never chunked)

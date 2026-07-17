@@ -1,6 +1,9 @@
-# Workspace Parsing Refactor — Status
+# Pocket Advisor — Status
 
-Companion to workspace-parsing-design.md. Last updated: 2026-07-17.
+The single status-tracking document for the platform (formerly
+`workspace-parsing-design-status.md`). Last updated: 2026-07-18.
+Locked architecture: `docs/workspace-parsing-design.md` and
+`docs/embedding-design.md`. Future work: `docs/roadmap.md`.
 
 ## Done
 
@@ -52,6 +55,19 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   maintains separate leaf and summary vector matrices; and cold `query` runs
   four retrieval legs, fuses/deduplicates threads, then returns DB-addressed
   readable email evidence. Focused synthetic tests pass.
+- **Review findings implemented (2026-07-18, uncommitted):** the
+  post-implementation review's actionable findings are all fixed —
+  always-on summary staleness maintenance (generation-only knob),
+  candidate filters as concrete sets, rerank capped at the fused
+  candidate ceiling with a warm-reranker seam, per-answer
+  `thread_context_chars` budget, one match per item, restored
+  pending/drift warnings, aggregate whole-thread summary visibility,
+  missing-artifact threads held stale and review-flagged,
+  `threads.item_count` rename, and ghost-root + disabled-generation
+  fixture coverage. The refined behaviors are folded into
+  `docs/embedding-design.md`; the separate review-findings document is
+  deleted; open items (native daemon/accuracy, verify FTS
+  integrity-check) moved to `docs/roadmap.md`.
 
 - **New CLI implemented** in `modules/cli.py` at `97ee193`;
   `pocket-advisor.py` is now the venv bootstrap plus a
@@ -79,21 +95,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   process is running.
 - venv is Python 3.14.6; old and new code share it.
 
-## Next steps (in order)
+## Next steps
 
-1. **Review and commit the embedding/thread implementation when requested.**
-   The full new and frozen self-test suites pass. Reviewed 2026-07-18:
-   findings and proposed fixes in `docs/embedding-review-findings.md`
-   (no cutover blocker; F1/F2 correctness items fix before or with the
-   re-ingest, F5 design decision before the answering pass, rest during
-   the adapter-retirement port).
-2. **Restart cutover only when explicitly confirmed** — wipe the incompatible
-   partial state, run `ingest all`, then run the golden set and spot-check
-   cache folders, generated summaries, relationships, and readable evidence.
-3. **Finish the adapter retirement** — daemon/accuracy/verify/wipe/blob lookup
-   into `modules/`; then delete `scripts/` and
-   prune unused venv packages (`extract-msg`, `python-docx`,
-   `openpyxl`; `beautifulsoup4` stays — used by emailbody).
+Future work is tracked in `docs/roadmap.md` (in order: confirmed
+cutover resume, adapter retirement, local answering pass, experiments).
 
 ## Watch-outs
 

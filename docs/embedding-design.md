@@ -1,6 +1,9 @@
 # Pocket Advisor Embedding and Thread-Retrieval Design
 
-Status: locked for implementation on 2026-07-17.
+Status: locked 2026-07-17; implemented at `0fb9f6f` and refined
+2026-07-18 by incorporating the post-implementation review findings
+(the separate review-findings document is superseded by this text; its
+still-open items live in `docs/roadmap.md`).
 
 This document defines the project-native embedding, thread-summary, and
 relational retrieval design. It supersedes the generic relational/vector
@@ -97,7 +100,9 @@ including a referenced-but-not-imported root. A headerless root already has
 a deterministic content-derived synthetic Message-ID. `ThreadStage` upserts
 by `stable_key` instead of deleting and recreating all thread rows. If new
 evidence genuinely changes a root or merges threads, the affected identity
-and derived summary are rebuilt.
+and derived summary are rebuilt. `threads.item_count` counts every member
+item (emails and documents alike); summary eligibility separately counts
+email items only.
 
 ### Thread summaries
 
@@ -149,6 +154,14 @@ For every thread with at least two email items:
    source text is silently dropped;
 6. upsert the finished summary only after all generations succeed.
 
+Staleness maintenance is unconditional: the stage always runs its
+digest comparison, marks divergent rows `is_stale=1`, and deletes rows
+for threads that are no longer eligible — even when
+`ingestion.summarize_threads` is false. The knob gates only the
+generative pass, so retrieval can never serve a summary whose sources
+have silently diverged while generation was disabled. `ingest all`
+therefore always executes this stage.
+
 The local model is loaded once per run and only if at least one thread is
 stale. Generation is greedy, bounded, disables Qwen thinking output, and uses
 the model chat template. The prompt treats email content as untrusted evidence,
@@ -159,7 +172,10 @@ Before regeneration, an existing row is marked `is_stale=1`; stale summaries
 are excluded from retrieval and embedding. A successful upsert clears the
 flag. The source email bodies remain authoritative. A failed summary is
 logged and retried on the next run; it never blocks preservation of the
-source items or exposes its previous summary as current.
+source items or exposes its previous summary as current. A thread whose
+readable `email_message.txt` artifact is missing cannot have its digest
+verified: it is review-flagged, its existing summary is held stale, and
+the stage continues with the remaining threads.
 
 ## Dense index layout
 
@@ -202,6 +218,14 @@ and a golden-set comparison before adoption.
 
 ## Retrieval
 
+Candidate visibility is computed once per query, always as concrete id
+sets — the workspace mount filter is always active, so there is no
+unfiltered fast path and no nullable filter type. Thread summaries are
+searchable only for threads whose every item is visible through the
+active mounts (whole-thread visibility, one aggregate query). The query
+also reports operational warnings: chunks not yet embedded under the
+current model, and chunking-config drift since the index was built.
+
 Run four candidate legs:
 
 1. leaf FTS (`chunks_fts`);
@@ -212,8 +236,12 @@ Run four candidate legs:
 Map leaf hits to `(item_id, thread_id)` and summary hits to `thread_id`, then
 fuse with Reciprocal Rank Fusion. The reranker may score both chunk text and
 summary text, but a summary hit is always labeled as generated navigation.
+Rerank input is capped at `fts_candidates + vec_candidates` fused keys
+(the tail keeps its RRF order), and the search entry point accepts a
+prebuilt reranker so a future warm daemon holds the model loaded.
 
-Deduplicate selected threads and perform a relational pull. Each evidence
+Deduplicate selected threads and perform a relational pull, keeping one
+match per item — the best-ranked chunk wins. Each evidence
 packet contains:
 
 - the matched email/document and match provenance;
@@ -223,10 +251,15 @@ packet contains:
 - parsed attachment text for a matched attachment, with its parent email;
 - source identity needed for citations.
 
-Short threads may be returned in full. Long threads are budgeted in this
-order: matched messages, direct parents/children, chronological neighbors,
-then remaining chronology. Relationship labels are retained; chronological
-order is not presented as proof of a direct reply edge.
+Short threads may be returned in full. Readable context is budgeted
+against a single per-answer `thread_context_chars` allowance shared
+across all returned packets (decided 2026-07-18): matched messages are
+always included in full and draw the budget down first, then direct
+parents/children, chronological neighbors, and remaining chronology are
+added in that order only while they still fit. Omitted context keeps its
+`email_message.txt` path so the reader can pull it manually.
+Relationship labels are retained; chronological order is not presented
+as proof of a direct reply edge.
 
 The future local answering pass receives these delimited evidence packets,
 shows the readable source material to the human, and produces a cited answer.
@@ -238,7 +271,8 @@ The typed engine accepts these platform knobs:
 
 ```yaml
 ingestion:
-  summarize_threads: true
+  summarize_threads: true        # gates GENERATION only; staleness
+                                 # maintenance always runs
   thread_summary_max_tokens: 600
   thread_summary_segment_chars: 12000
 
@@ -246,7 +280,7 @@ models:
   mlx_model_thread_summary: mlx-community/Qwen3.5-4B-MLX-4bit
 
 query:
-  thread_context_chars: 120000
+  thread_context_chars: 120000   # per ANSWER, shared across packets
 ```
 
 Changing the summarizer model or prompt version invalidates summaries and
@@ -278,3 +312,13 @@ loader or make it silently ignore unknown configuration.
 9. All tests use temporary synthetic fixtures. No test modifies corpus or
    live derived state.
 10. The existing and new self-test suites pass before cutover resumes.
+11. With `summarize_threads` disabled, a changed thread is still marked
+    stale and leaves both summary retrieval legs; no model is loaded;
+    re-enabling regenerates it.
+12. A reply imported before its referenced root keys the thread on the
+    missing root; importing the root later joins the same thread,
+    materializes the reply edge, and regenerates the summary (digest
+    change) — ghost-root ordering.
+13. A result packet carries at most one match per item, and readable
+    context across all packets respects the single per-answer
+    `thread_context_chars` budget with matched messages exempt.

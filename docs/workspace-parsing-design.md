@@ -24,6 +24,11 @@ Refactor of the ingestion pipeline around two ideas:
   `<original filename>__<first 8 hex of sha256>` — human-readable and
   collision-proof (two `message.eml` attachments can coexist; identity
   stays content-based, consistent with custody rules).
+- **Readable email rendering.** Each email folder also contains
+  `email_message.txt`: the final authored body prefixed by decoded Date,
+  From, To, Cc, and Subject headers. It is a derived human/LLM-facing view
+  for cache inspection and future retrieval evidence display; it is not an
+  embedded input and does not alter either body artifact.
 - **Migration: wipe + full re-ingest.** No in-place migration of the old
   cache layout. Once the new pipeline passes tests: `wipe state`
   (explicit confirmation at that moment) and re-ingest from corpora.
@@ -53,6 +58,7 @@ workspaces/.state/cache/<collection_id>/
 │   ├── email_body_full.txt                # lossless: exactly as extracted from MIME
 │   ├── email_body_authored.txt            # only what THIS sender wrote (quoted
 │   │                                      #   replies / forwarded blocks stripped)
+│   ├── email_message.txt                  # five readable headers + exact authored body
 │   └── attachments/
 │       ├── pdf-original/                  # attachment PDFs, verified copies
 │       ├── pdf-ocr/                       # persistent <name>-ocrmypdf.pdf derivatives
@@ -103,24 +109,53 @@ stays a pure custody cache; pipeline state lives only in
 For each `document_type='email'` candidate:
 
 1. Create `cache/<collection_id>/<email_basename>__<sha8>/`.
-2. Extract the body into TWO artifacts, kept side by side:
+2. Extract the body and produce THREE artifacts, kept side by side:
    - `email_body_full.txt` — the lossless body, exactly as extracted
      from MIME. Never rewritten; audit/context reference.
    - `email_body_authored.txt` — only the text this sender authored,
      produced by the existing quoted-reply compaction engine (see
      below). When no compaction is proven, the two files are identical.
+   - `email_message.txt` — a readable rendering produced after compaction:
+     five decoded single-line headers followed by a blank line and the exact
+     bytes of `email_body_authored.txt`. This file is for direct cache
+     inspection and future retrieval/augmentation evidence display; it is
+     not embedded.
 
    Compaction is part of THIS step, not a separate pipeline stage.
    Because proving a cut requires the parent's full body, step 2
-   internally runs in two sub-steps over the whole working set:
+   internally runs in three sub-steps over the whole working set:
    - **2a** — for every email: parse MIME, write `email_body_full.txt`,
      register headers in DB;
    - **2b** — for every email: resolve the parent and derive
      `email_body_authored.txt`.
+   - **2c** — for every email: write-verify `email_message.txt` from the
+     stored headers and final authored body.
    Running 2b only after 2a has covered the run keeps results
    independent of file/import order (a spec acceptance criterion).
    With the Stage 1 ↔ 2 recursion below, 2b runs after the recursion
    settles — an attached email is then a resolvable parent too.
+
+   The readable rendering is exactly:
+
+   ```text
+   Date: ...
+   From: ...
+   To: ...
+   Cc: ...
+   Subject: ...
+
+   <exact email_body_authored.txt bytes>
+   ```
+
+   Missing headers retain an empty labeled line. Header values are decoded
+   and flattened to one line so evidence cannot inject additional apparent
+   envelope fields. The rendering is deterministic and regenerated on an
+   idempotent Stage 2 rerun.
+
+   During the retrieval port, this artifact is intended to be the complete
+   matched-email representation supplied to the larger local answering LLM
+   and displayed to the user as the readable source before a summary or
+   answer. Thread-neighbor selection remains a separate retrieval concern.
 3. Route each MIME attachment by type into `attachments/pdf-original/`,
    `images/`, `zip-archives/`, or `other/`. Every copy is
    write-verified (sha256 of bytes written == sha256 recorded).
@@ -237,7 +272,9 @@ Inputs are exactly the plain-text artifacts:
 Only the **authored** body is chunked and embedded — quoted history is
 already indexed once as the original email it came from, so embedding
 it again would only duplicate hits. `email_body_full.txt` is not
-embedded; it serves audit and full-context display.
+embedded; it serves lossless audit/context. `email_message.txt` is also not
+embedded; it is the readable evidence representation for humans and future
+retrieval augmentation.
 
 Chunking (~1500 chars / ~200 overlap), transliteration shadow, FTS
 triggers, and the per-model vector cache

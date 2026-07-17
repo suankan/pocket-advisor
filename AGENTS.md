@@ -82,7 +82,8 @@ Do not answer case questions from platform instructions alone.
 1. `discover` — one read-only collection walk populates
    `ingestion_candidates` and refreshes `source_blob_index`;
 2. `emails` — MIME parsing, per-email cache folders, attachment routing,
-   attached-email/ZIP recursion, then authored-body derivation;
+   attached-email/ZIP recursion, then authored-body and readable-message
+   derivation;
 3. `pdfs` — verified PDF collection, persistent OCR derivative using
    `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
 4. `thread` — full thread reconstruction;
@@ -100,6 +101,9 @@ exist; only CLI orchestration owns ordering.
   `<basename>__<sha8>/` folder.
 - `email_body_full.txt` is lossless and never compacted.
 - `email_body_authored.txt` is the Stage 2b derived/searchable body.
+- `email_message.txt` is generated after compaction: decoded Date, From, To,
+  Cc, and Subject headers, a blank line, then the exact authored-body bytes.
+  It is write-verified and never embedded.
 - Attached-email lineage is stored in `items.parent_item_id`.
 - PDFs retain `pdf-original/`, persistent `pdf-ocr/`, and
   `pdf-to-text/` artifacts.
@@ -113,15 +117,16 @@ Always confirm this against `docs/workspace-parsing-design-status.md` and
 - foundations and Stages 1–5 are implemented and tested under `modules/`;
 - the new CLI is implemented and tested under `modules/cli.py`;
 - the retired image-OCR configuration key has been removed;
+- readable `email_message.txt` artifacts are implemented at `92e4f03`;
 - real retrieval commands still use the frozen adapter;
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial new derived state.
 
 The ordered continuation is:
 
-1. when directed, resume idempotently at `ingest pdfs` (or rerun
-   `ingest all`), finish the remaining stages, and run the golden-set
-   accuracy/spot checks;
+1. when directed, rerun `ingest emails` once to backfill
+   `email_message.txt`, then resume at `ingest pdfs` (or rerun `ingest all`),
+   finish the remaining stages, and run the golden-set accuracy/spot checks;
 2. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
    remove `scripts/` and unused dependencies.
 

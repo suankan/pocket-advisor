@@ -109,20 +109,17 @@ exist; only CLI orchestration owns ordering.
 Always confirm this against `docs/workspace-parsing-design-status.md` and
 `git status` before editing. At the 2026-07-17 handoff:
 
-- foundations and Stages 1–4 are implemented and tested under `modules/`;
-- Stage 5 transactions is the next implementation task;
+- foundations and Stages 1–5 are implemented and tested under `modules/`;
 - the old `pocket-advisor.py` still drives real queries and ingestion;
 - the new pipeline has no CLI yet and refuses the existing legacy DB.
 
 The ordered continuation is:
 
-1. port statement parsers and implement `TransactionsStage` plus report
-   support;
-2. add `modules/cli.py` and slim `pocket-advisor.py`;
-3. remove the retired image-OCR config key;
-4. request confirmation, wipe derived state, fully re-ingest, and run the
+1. add `modules/cli.py` and slim `pocket-advisor.py`;
+2. remove the retired image-OCR config key;
+3. request confirmation, wipe derived state, fully re-ingest, and run the
    golden-set accuracy/spot checks;
-5. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
+4. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
    remove `scripts/` and unused dependencies.
 
 ## Transaction-stage constraints

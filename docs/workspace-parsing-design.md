@@ -50,6 +50,31 @@ Refactor of the ingestion pipeline around two ideas:
   `scripts/` is frozen: reference-only during the build, deleted at
   cutover. Nothing under `modules/` imports from `scripts/`.
 
+## Decision (2026-07-18): no privileged-content concept
+
+The privilege concept is removed from the design and the new engine
+entirely. Rationale: the system is operated by one individual who
+already owns and has read every email and document fed into it. There
+is no second user, no multi-user or ACL concept, and therefore no
+meaningful boundary for a privilege flag to enforce — restricted
+retrieval passes only hid the operator's own material from the
+operator.
+
+Consequences (locked):
+
+- No `privileged:` key in the workspace registry; the loader rejects it
+  as an unknown key like any other typo.
+- No `is_privileged` / `privilege_override` columns in the fresh
+  schema; no path-segment convention; no auto-flag ratchet.
+- Retrieval has no include/exclude-privileged flags, no restricted
+  pass, and no privilege labels in results; visibility is governed
+  solely by workspace collection mounts (and optional mount purposes).
+- Sensitivity remains a human judgement recorded, if at all, in
+  collection titles/descriptions — free text, never engine semantics.
+- The frozen `scripts/` tree keeps its old privilege code untouched as
+  reference until it is deleted at adapter retirement; it is not
+  maintained to match this decision.
+
 ## Cache layout (target state)
 
 ```
@@ -202,7 +227,7 @@ gets a path update to the new filenames — the policy, detector, and
 acceptance criteria there remain authoritative.
 
 Duplicate Message-ID across folders: one logical `items` row, multiple
-membership rows; privilege OR'd across copies (unchanged).
+membership rows.
 
 ### Special case 1 — attached .eml files
 
@@ -327,8 +352,6 @@ workspace-config.
 ## Carried over unchanged
 
 - Thread linking (full recompute per run).
-- Privilege: source-level `privileged:` flag OR'd across memberships,
-  auto-transition 0→1 only, manual override wins.
 - Chain-of-custody invariants: originals read-only, sha256 before
   parse, write-verify every copy, changed-sha alarm.
 

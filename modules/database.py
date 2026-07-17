@@ -49,8 +49,6 @@ CREATE TABLE IF NOT EXISTS items (
     references_raw      TEXT,
     thread_id           INTEGER REFERENCES threads(id),
     thread_link_method  TEXT,
-    is_privileged       INTEGER NOT NULL DEFAULT 0,
-    privilege_override  INTEGER,
     -- body_text_path = email_body_authored.txt (searchable);
     -- body_full_text_path = email_body_full.txt (lossless). Old column
     -- names kept: the frozen retrieval stack reads them.
@@ -273,7 +271,6 @@ CREATE INDEX IF NOT EXISTS idx_candidates_type
     ON ingestion_candidates(document_type);
 CREATE INDEX IF NOT EXISTS idx_items_date ON items(date_utc);
 CREATE INDEX IF NOT EXISTS idx_items_thread ON items(thread_id);
-CREATE INDEX IF NOT EXISTS idx_items_privileged ON items(is_privileged);
 CREATE INDEX IF NOT EXISTS idx_items_kind ON items(item_kind);
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_item_id);
 CREATE INDEX IF NOT EXISTS idx_items_reply_parent

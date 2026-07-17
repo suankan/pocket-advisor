@@ -193,19 +193,11 @@ def _handle_query(args: argparse.Namespace) -> int:
             "--require-daemon is unavailable until the daemon port lands")
     ctx = _open_context()
     try:
-        if args.include_privileged is True:
-            include_privileged = True
-        elif args.exclude_privileged:
-            include_privileged = False
-        else:
-            include_privileged = \
-                ctx.config.include_privileged_by_default
         top_k = args.top_k or ctx.config.default_top_k
         if top_k <= 0:
             raise SystemExit("query: --top-k must be positive")
         result = run_search(ctx, args.question, SearchOptions(
             top_k=top_k,
-            include_privileged=include_privileged,
             after=args.after,
             before=args.before,
             thread_id=args.thread,
@@ -304,10 +296,6 @@ def build_parser(
     command.add_argument("--after", help="only items on/after YYYY-MM-DD")
     command.add_argument("--before", help="only items on/before YYYY-MM-DD")
     command.add_argument("--thread", type=int, help="restrict to one thread")
-    privilege = command.add_mutually_exclusive_group()
-    privilege.add_argument(
-        "--include-privileged", action="store_true", default=None)
-    privilege.add_argument("--exclude-privileged", action="store_true")
     command.add_argument("--purpose")
     command.add_argument("--top-k", type=int, default=None)
     command.add_argument("--no-thread-context", action="store_true")

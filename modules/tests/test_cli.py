@@ -120,7 +120,6 @@ def test_orchestration() -> None:
 
 def test_native_query_seam() -> None:
     context = fake_context(embed=False, bank=False)
-    context.config.include_privileged_by_default = True
     context.config.default_top_k = 15
     received = []
     with patch.object(cli, "_open_context", return_value=context), \

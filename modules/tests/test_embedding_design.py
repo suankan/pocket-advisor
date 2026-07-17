@@ -30,7 +30,6 @@ schema_version: 2
 collections:
   - id: mail
     path: corpora/mail
-    privileged: false
 workspaces:
   - id: matter-x
     active: true
@@ -189,21 +188,6 @@ def main() -> int:
                      if message["item_id"] == b)
         assert reply["reply_parent_item_id"] == a
         assert "Subject: Re: Project" in reply["email_message"]
-
-        # Relational expansion cannot reintroduce a restricted neighbor.
-        conn.execute("UPDATE items SET is_privileged=1 WHERE id=?", (c,))
-        conn.commit()
-        with patch.object(retrieval_mod, "current_fingerprint",
-                          return_value=dict(FINGERPRINT)), \
-             patch.object(retrieval_mod, "get_backend",
-                          return_value=FakeEmbedder()):
-            restricted = run_search(
-                ctx, "Direct reply",
-                SearchOptions(top_k=3, include_privileged=False))
-        assert len(restricted["results"]) == 1, restricted
-        assert restricted["results"][0]["generated_summary"] is None
-        assert {message["item_id"] for message in
-                restricted["results"][0]["messages"]} == {a, b}
 
         # A changed thread marks the old summary stale on failure, then
         # regenerates it and replaces only that thread vector.

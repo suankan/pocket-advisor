@@ -91,11 +91,9 @@ class PdfTextStage(Stage):
             from modules.emailbody import normalize_subject
             cur = self.conn.execute(
                 """INSERT INTO items (item_kind, message_id, subject,
-                   subject_normalized, body_source, is_privileged,
-                   ingested_at)
-                   VALUES ('file', ?, ?, ?, 'document_extracted', ?, ?)""",
-                (mid, subject, normalize_subject(subject),
-                 1 if coll.privileged else 0, now_iso()))
+                   subject_normalized, body_source, ingested_at)
+                   VALUES ('file', ?, ?, ?, 'document_extracted', ?)""",
+                (mid, subject, normalize_subject(subject), now_iso()))
             item_id = int(cur.lastrowid)
             stats.inc("native_new")
 
@@ -119,10 +117,6 @@ class PdfTextStage(Stage):
             " VALUES (?, ?, ?, ?, ?, 'file', ?, ?, ?)",
             (item_id, coll.id, cand.filename, cand.sha256, len(raw),
              now_iso(), cand.workspace_id, coll.id))
-        if coll.privileged:
-            self.conn.execute(
-                "UPDATE items SET is_privileged = 1"
-                " WHERE is_privileged = 0 AND id = ?", (item_id,))
 
     # -- 3.2 OCR + text extraction -------------------------------------------
 

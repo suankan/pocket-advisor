@@ -23,10 +23,8 @@ schema_version: 2
 collections:
   - id: mail
     path: corpora/mail
-    privileged: false
   - id: solicitor
     path: corpora/solicitor
-    privileged: true
 workspaces:
   - id: matter-x
     active: true
@@ -61,7 +59,7 @@ def build_fixtures(mail: Path, solicitor: Path) -> None:
 
     parent = base_msg("<parent@x>", "Conference", PARENT_BODY)
     (mail / "parent.eml").write_bytes(parent.as_bytes())
-    # Same bytes under the privileged collection: dup Message-ID path.
+    # Same bytes under the second collection: dup Message-ID path.
     (solicitor / "copy-of-parent.eml").write_bytes(parent.as_bytes())
 
     quoted = "\n".join("> " + line for line in PARENT_BODY.splitlines())
@@ -160,14 +158,12 @@ def main() -> int:
         assert reply["body_quote_boundary_method"] == \
             "parent_prefix_exact+gmail_wrapper"
 
-        # Duplicate Message-ID: one item, two memberships, privilege OR'd.
+        # Duplicate Message-ID: one item, multiple membership rows.
         memberships = conn.execute(
             "SELECT collection_id FROM item_memberships WHERE item_id = ?"
             " ORDER BY collection_id", (parent_row["id"],)).fetchall()
         assert [m["collection_id"] for m in memberships] == \
             ["mail", "solicitor"]
-        assert parent_row["is_privileged"] == 1
-        assert reply["is_privileged"] == 0
 
         # Attached emails: lineage + own flat folders + candidates rows.
         rich_row = conn.execute(

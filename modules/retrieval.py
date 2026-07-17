@@ -15,7 +15,6 @@ from modules.pipeline.base import PipelineContext
 @dataclass(frozen=True, slots=True)
 class SearchOptions:
     top_k: int
-    include_privileged: bool = True
     after: str | None = None
     before: str | None = None
     thread_id: int | None = None
@@ -39,10 +38,6 @@ def _load_temp_ids(conn, table: str, ids: set[int]) -> None:
 def allowed_chunk_ids(ctx: PipelineContext,
                       options: SearchOptions) -> set[int] | None:
     conds, params = [], []
-    if not options.include_privileged:
-        conds.append("(CASE WHEN items.privilege_override IS NOT NULL"
-                     " THEN items.privilege_override"
-                     " ELSE items.is_privileged END) = 0")
     if options.after:
         conds.append("items.date_utc >= ?")
         params.append(options.after)
@@ -74,22 +69,19 @@ def visible_item_ids(ctx: PipelineContext,
                      options: SearchOptions) -> set[int]:
     """Items permitted in relational expansion.
 
-    Candidate date/thread filters choose entry points; collection mounts and
-    the restricted compatibility pass remain hard visibility boundaries for
-    every neighbor pulled afterward.
+    Candidate date/thread filters choose entry points; collection mounts
+    remain the hard visibility boundary for every neighbor pulled
+    afterward.
     """
     mounts = {collection.id for collection in
               ctx.registry.active_collections(options.purpose)}
     if not mounts:
         return set()
     marks = ",".join("?" for _ in mounts)
-    cond = "" if options.include_privileged else \
-        " AND (CASE WHEN items.privilege_override IS NOT NULL" \
-        " THEN items.privilege_override ELSE items.is_privileged END) = 0"
     rows = ctx.conn.execute(
         "SELECT DISTINCT items.id FROM items JOIN item_memberships"
         " ON item_memberships.item_id=items.id"
-        f" WHERE item_memberships.collection_id IN ({marks}){cond}",
+        f" WHERE item_memberships.collection_id IN ({marks})",
         tuple(sorted(mounts))).fetchall()
     return {int(row["id"]) for row in rows}
 
@@ -202,7 +194,6 @@ def _chunk_match(conn, chunk_id: int) -> dict | None:
                   chunks.attachment_id, items.thread_id,
                   items.message_id, items.subject, items.date_utc,
                   items.from_name, items.from_addr, items.item_kind,
-                  items.is_privileged, items.privilege_override,
                   attachments.filename AS attachment_name
              FROM chunks JOIN items ON items.id=chunks.item_id
              LEFT JOIN attachments ON attachments.id=chunks.attachment_id
@@ -222,9 +213,6 @@ def _chunk_match(conn, chunk_id: int) -> dict | None:
         "source_type": row["source_type"],
         "attachment_id": row["attachment_id"],
         "attachment_name": row["attachment_name"],
-        "privileged": bool(row["privilege_override"])
-            if row["privilege_override"] is not None
-            else bool(row["is_privileged"]),
         "snippet": row["text"][:600],
     }
 
@@ -234,8 +222,7 @@ def _message_rows(conn, thread_id: int, visible_items: set[int]):
         return []
     rows = conn.execute(
         """SELECT id, message_id, date_utc, from_name, from_addr, to_addrs,
-                  cc_addrs, subject, reply_parent_item_id, body_text_path,
-                  is_privileged, privilege_override
+                  cc_addrs, subject, reply_parent_item_id, body_text_path
              FROM items
             WHERE thread_id=? AND item_kind='email'
             ORDER BY date_utc, message_id""", (thread_id,)).fetchall()
@@ -296,9 +283,6 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
         "reply_parent_item_id": row["reply_parent_item_id"],
         "direct_child_item_ids": children.get(int(row["id"]), []),
         "matched": int(row["id"]) in matched_item_ids,
-        "privileged": bool(row["privilege_override"])
-            if row["privilege_override"] is not None
-            else bool(row["is_privileged"]),
         "email_message_path": paths.get(int(row["id"])),
         "email_message": content.get(int(row["id"])),
     } for row in rows]
@@ -376,12 +360,9 @@ def run_search(ctx: PipelineContext, question: str,
 
     leaf_fts = leaf_fts_search(
         ctx.conn, question, ctx.config.fts_candidates, allowed_chunks)
-    # A restricted compatibility pass searches leaves only; this single-user
-    # design intentionally carries no alternate summary variants.
-    use_summaries = options.include_privileged
     thread_fts = thread_fts_search(
         ctx.conn, question, ctx.config.fts_candidates,
-        safe_summary_threads) if use_summaries else []
+        safe_summary_threads)
 
     store = ModelStore(ctx.config.models_dir)
     fingerprint = current_fingerprint(ctx.config, store)
@@ -389,7 +370,7 @@ def run_search(ctx: PipelineContext, question: str,
     thread_matrix, thread_ids = _load_matrix(
         thread_index_paths(ctx.config, fingerprint))
     needs_vector = (leaf_matrix is not None and len(leaf_ids)) or \
-        (use_summaries and thread_matrix is not None and len(thread_ids))
+        (thread_matrix is not None and len(thread_ids))
     if needs_vector:
         query_vec = get_backend(ctx.config, store).embed_one(
             question, is_query=True)
@@ -398,8 +379,7 @@ def run_search(ctx: PipelineContext, question: str,
             ctx.config.vec_candidates, allowed_chunks)
         thread_dense = _dense_search(
             thread_matrix, thread_ids, query_vec,
-            ctx.config.vec_candidates, safe_summary_threads) \
-            if use_summaries else []
+            ctx.config.vec_candidates, safe_summary_threads)
     else:
         leaf_dense, thread_dense = [], []
 
@@ -434,7 +414,7 @@ def run_search(ctx: PipelineContext, question: str,
     packets = [_thread_packet(
         ctx, thread_id, matches_by_thread.get(thread_id, []),
         thread_id in summary_hits, options.expand_thread_context,
-        visible_items, use_summaries and thread_id in safe_summary_threads)
+        visible_items, thread_id in safe_summary_threads)
         for thread_id in selected]
     return {
         "question": question,

@@ -33,6 +33,17 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Current operating state
 
+- **Privilege concept removed (2026-07-18, uncommitted):** per the locked
+  decision in `docs/workspace-parsing-design.md`, all privilege handling
+  was dropped from `modules/`, `config.yaml`, the user registry, tests,
+  and current docs: no registry `privileged:` key (now rejected as
+  unknown), no `is_privileged`/`privilege_override` schema columns, no
+  query flags or restricted pass, summaries always searchable within
+  mounts. Frozen `scripts/` retains its old privilege code untouched
+  (reference-only until deletion); the frozen `daemon`/`accuracy`
+  commands expect the old columns and must not be run against the
+  privilege-free fresh schema — use cold `query` until their native
+  port.
 - **Uncommitted embedding/thread implementation:**
   `docs/embedding-design.md` is the locked design. Thread IDs now use stable
   root Message-ID keys and store real `reply_parent_item_id` edges. A local

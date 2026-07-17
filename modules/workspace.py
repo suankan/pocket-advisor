@@ -6,8 +6,7 @@ schema_version 1 is no longer supported (clean-break refactor); the
 loader aborts with a migration pointer.
 
 Every validation failure aborts loudly (SystemExit) — a registry typo
-must never silently change what gets ingested or searched, especially
-`privileged:`.
+must never silently change what gets ingested or searched.
 """
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -19,7 +18,7 @@ from modules.config import Config
 INGESTION_TYPES = ("general", "bank-transactions")
 
 _TOP_KEYS = frozenset({"schema_version", "collections", "workspaces"})
-_COLL_KEYS = frozenset({"id", "title", "description", "path", "privileged",
+_COLL_KEYS = frozenset({"id", "title", "description", "path",
                         "ingestion-type"})
 # A bank-transactions collection is a REAL collection (ingested /
 # mounted / searched like any other) that also declares the
@@ -50,7 +49,6 @@ class Collection:
     title: str
     description: str
     path: str                 # as written in yaml (workspaces-dir relative)
-    privileged: bool
     root: Path                # absolute resolved root on disk
     ingestion_type: str = "general"
     bank_account: BankAccount | None = None
@@ -207,15 +205,12 @@ def _load_collection(raw: dict, label: str, ws_dir: Path) -> Collection:
     description = raw.get("description") or ""
     if not isinstance(description, str):
         _die(f"{label}: description must be a string")
-    if "privileged" not in raw and not is_bank:
-        _die(f"{label}: privileged (bool) is required")
     root = _resolve_under(ws_dir / rel_path, ws_dir, label)
     return Collection(
         id=coll_id,
         title=title.strip(),
         description=description.strip(),
         path=rel_path,
-        privileged=bool(raw.get("privileged", False)),
         root=root,
         ingestion_type=ingestion_type,
         bank_account=_load_bank_account(raw, label, coll_id)

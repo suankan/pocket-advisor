@@ -38,7 +38,6 @@ collections:
     description: Synthetic business fixture
     path: corpora/business
     ingestion-type: bank-transactions
-    privileged: false
     bsb: "111-222"
     account_number: "333444"
     owners: [person-a]
@@ -46,7 +45,6 @@ collections:
   - id: personal-a
     path: corpora/personal-a
     ingestion-type: bank-transactions
-    privileged: false
     bsb: "111-222"
     account_number: "555666"
     owners: [person-a]
@@ -54,7 +52,6 @@ collections:
   - id: personal-b
     path: corpora/personal-b
     ingestion-type: bank-transactions
-    privileged: false
     bsb: "111-222"
     account_number: "777888"
     owners: [person-b]
@@ -62,7 +59,6 @@ collections:
   - id: westpac
     path: corpora/westpac
     ingestion-type: bank-transactions
-    privileged: false
     bsb: "111-222"
     account_number: "998877"
     owners: [person-w]

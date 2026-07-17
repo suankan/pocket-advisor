@@ -19,10 +19,8 @@ schema_version: 2
 collections:
   - id: mail
     path: corpora/mail
-    privileged: false
   - id: docs
     path: corpora/docs
-    privileged: false
 workspaces:
   - id: matter-x
     active: true

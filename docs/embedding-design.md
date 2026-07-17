@@ -23,10 +23,11 @@ leaf chunks + thread summaries
       local answering LLM
 ```
 
-The corpus is owned and operated by one individual. This design does not
-create privilege-scoped summary variants, user-specific indexes, ACLs, or
-multi-tenant retrieval paths. Existing provenance and sensitivity metadata
-may remain, but it does not fork the embedding architecture.
+The corpus is owned and operated by one individual. There are no
+user-specific indexes, ACLs, or multi-tenant retrieval paths, and — per
+the 2026-07-18 decision in workspace-parsing-design.md — no
+privileged-content concept anywhere in the engine: retrieval visibility
+is governed solely by workspace collection mounts.
 
 ## Locked decisions
 

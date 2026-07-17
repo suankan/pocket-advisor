@@ -38,9 +38,6 @@ IGNORED_FILENAMES: frozenset[str] = frozenset(
     {".DS_Store", "Thumbs.db", "desktop.ini", "CORPUS.md"})
 IMAGE_EXTS: frozenset[str] = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"})
-# Path CONVENTION for privilege (AGENTS.md hard rule 2): an ancestor
-# directory literally named "privileged" marks evidence privileged.
-PRIVILEGED_DIR_NAME = "privileged"
 # Zip-bomb guards for attached-archive recursion (Stage 2).
 ZIP_MAX_DEPTH = 5
 ZIP_MAX_UNPACKED_BYTES = 1 << 30  # 1 GiB per archive
@@ -181,7 +178,6 @@ class Config:
     rerank_text_chars: int = 600
     daemon_auto: bool = True
     daemon_idle_sec: int = 1800
-    include_privileged_by_default: bool = True
     thread_context_chars: int = 120_000
 
     # -- derived paths (shared engine state, one DB for all workspaces) ----
@@ -271,8 +267,6 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
     "query.rerank_text_chars": ("rerank_text_chars", lambda _, v: int(v)),
     "query.daemon_auto": ("daemon_auto", lambda _, v: bool(v)),
     "query.daemon_idle_sec": ("daemon_idle_sec", lambda _, v: int(v)),
-    "query.include_privileged_by_default":
-        ("include_privileged_by_default", lambda _, v: bool(v)),
     "query.thread_context_chars":
         ("thread_context_chars", lambda _, v: int(v)),
 }

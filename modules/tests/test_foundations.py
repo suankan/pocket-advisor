@@ -26,14 +26,11 @@ collections:
   - id: general-mail
     title: General mailbox
     path: corpora/general-mail
-    privileged: false
   - id: own-solicitor
-    path: corpora/privileged/solicitor
-    privileged: true
+    path: corpora/solicitor
   - id: acct-daily
     path: corpora/bank/daily
     ingestion-type: bank-transactions
-    privileged: false
     bsb: "062-000"
     account_number: "12345678"
     owners: [Alex]
@@ -103,7 +100,7 @@ def test_workspace(tmp: Path) -> None:
     assert ws.collection_ids == {"general-mail", "own-solicitor",
                                  "acct-daily"}
     solicitor = reg.collection_by_id("own-solicitor")
-    assert solicitor is not None and solicitor.privileged
+    assert solicitor is not None and solicitor.path == "corpora/solicitor"
     bank = reg.collection_by_id("acct-daily")
     assert bank is not None and bank.is_bank_transactions
     assert bank.bank_account is not None

@@ -37,24 +37,25 @@ Do not answer case questions from platform instructions alone.
 2. **Preserve custody.** Hash originals before parsing, write-verify every
    derived copy, tolerate renames through `source_blob_index`, and treat a
    changed hash at a known path as a custody alarm—not an update.
-3. **Privilege is an OR rule.** A registry collection with
-   `privileged: true` or a physical path segment literally named
-   `privileged` makes the item privileged; `privilege_override` wins.
-   Retrieval includes privileged items by default and labels them. Do not
-   reveal privileged advice or communications in an outward-facing draft
-   without the user's choice.
-4. **Corpus claims require citations.** Cite emails by message ID, date, and
+3. **Corpus claims require citations.** Cite emails by message ID, date, and
    sender, adding collection/source identity when useful. Cite standalone
    documents by filename and date, and surface weak date provenance.
-5. **Case data stays local.** Never send originals, extracted text,
+4. **Case data stays local.** Never send originals, extracted text,
    embeddings, case facts, or narrative content to a cloud/API/service.
    Inbound model weights and abstract web research are allowed. This
    repository has no remote and must never be pushed.
-6. **No autocommit.** Commit only when the user's current prompt explicitly
+5. **No autocommit.** Commit only when the user's current prompt explicitly
    requests it. Permission does not carry to later prompts.
-7. **No unsupervised cutover wipe.** The clean-break migration requires
+6. **No unsupervised cutover wipe.** The clean-break migration requires
    `wipe state` followed by a complete re-ingest. Obtain explicit user
    confirmation immediately before that wipe.
+
+There is no privileged-content concept. It was removed by decision on
+2026-07-18 (docs/workspace-parsing-design.md): the sole user already owns
+every document fed into the system, so no privilege flags, restricted
+retrieval passes, or ACLs exist anywhere in the new engine. The frozen
+`scripts/` tree still contains the old privilege code; it is reference-only
+and deleted at adapter retirement, not maintained.
 
 ## New engine architecture
 

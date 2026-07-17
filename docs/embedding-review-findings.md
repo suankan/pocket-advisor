@@ -46,18 +46,12 @@ excludes divergent summaries through the existing `is_stale` filter with
 no query-time digest checks. Add a fixture step: disable the knob, add a
 message, assert the thread's summary legs return nothing.
 
-### F2 — Silent include on conflicting privilege flags (correctness)
+### F2 — Silent include on conflicting privilege flags (CLOSED)
 
-Where: `modules/cli.py` `_handle_query`.
-
-The frozen CLI let `--exclude-privileged` win; the new handler checks
-`args.include_privileged is True` first, so passing both flags silently
-includes privileged material.
-
-Proposed fix: `raise SystemExit("query: --include-privileged and
---exclude-privileged conflict")` when both are set, mirroring the
-existing `--require-daemon`/`--no-daemon` conflict error. One-line test
-in `test_cli.py`.
+Closed 2026-07-18: the privileged-content concept was removed from the
+design and engine entirely (docs/workspace-parsing-design.md, decision
+2026-07-18). The flags, config default, schema columns, and restricted
+retrieval pass no longer exist, so there is nothing to conflict.
 
 ### F3 — Dead `None` path in candidate filtering; unfiltered fast path lost (quality)
 
@@ -75,7 +69,7 @@ Proposed fix (either direction, deliberately):
 1. honesty option — change the return type to `set[int]`, delete the
    `None` branches, and load the temp table once in `run_search`,
    passing a "preloaded" flag to the leg functions; or
-2. fast-path option — return `None` when no date/thread/privilege filter
+2. fast-path option — return `None` when no date/thread filter
    is active AND the mount set covers every collection in the DB, and
    make the summary-leg derivation handle `None` explicitly
    (`allowed_threads = None` → search all `is_stale=0` summaries).
@@ -178,8 +172,8 @@ Two cheap permanent guards are worth adding:
 
 ## Suggested ordering
 
-1. F1, F2 before (or with) the confirmed wipe + full re-ingest — both
-   touch correctness/privilege semantics.
+1. F1 before (or with) the confirmed wipe + full re-ingest — it touches
+   retrieval correctness. (F2 closed by the privilege-concept removal.)
 2. F5 decision recorded in the design doc before the answering pass.
 3. F3, F4, F6, F7 during the daemon/accuracy/wipe/verify port, where the
    retrieval code is being touched anyway.

@@ -40,11 +40,10 @@ defaults in `modules/config.py`. Schema and comments live in
   acknowledges the change (updates `vectors.meta.json`)
   so the warning fires once per actual change, not on every subsequent
   run.
-- **safety-semantics (privilege)**: not a platform `config.yaml` key.
-  Privilege is (1) registry `collections[].privileged: true` and/or
-  (2) a path segment literally named `privileged/` under a collection
-  root (AGENTS.md hard rule 2). The auto-privilege flag only ratchets
-  0→1.
+
+There is no privileged-content concept (removed 2026-07-18, see
+docs/workspace-parsing-design.md) — no privilege keys, flags, or
+restricted retrieval passes exist.
 
 ## User-data layout + workspace-config (v2)
 
@@ -70,7 +69,7 @@ Schema reference (committed):
 `docs_old/specs/workspace-config-v2.example.yaml` (v1 example still at
 `workspace-config.example.yaml`; loader dual-reads both). Each
 **collection** has `id`, `title`, `description`, `path` (relative to
-`workspaces.dir`, e.g. `corpora/…`), `privileged` (bool). No `kind` /
+`workspaces.dir`, e.g. `corpora/…`). No `kind` /
 `retrieval` — ingest dispatches per file by extension. Each
 **workspace** mounts a list of collection ids; query only sees mounted
 collections.
@@ -79,9 +78,7 @@ collections.
 
 1. Export from Thunderbird as `.eml` into the matching **collection
    root** under `workspaces/corpora/…` (path in workspace-config). New
-   correspondent folder inside that root is fine. For privilege: set
-   `privileged: true` on the collection **and/or** nest under a
-   directory segment literally named `privileged/`.
+   correspondent folder inside that root is fine.
 2. `./pocket-advisor.py ingest all`
 3. Check `workspaces/.state/logs/review_queue.csv` for flags.
 4. After bulk moves inside a collection: `pocket-advisor.py blob-index rebuild`.
@@ -105,9 +102,7 @@ the review queue. Original evidence is never modified. Install the extra
 OCR language data required by `ingestion.ocr.langs` using the platform's
 OCRmyPDF setup instructions.
 
-1. Drop files under a collection root in `workspaces/corpora/…`
-   (privileged: collection `privileged: true` and/or nest under
-   `privileged/`).
+1. Drop files under a collection root in `workspaces/corpora/…`.
 2. `./pocket-advisor.py ingest all` (or `documents` stage).
 3. Check review_queue for weak dates / duplicates / unsupported types.
 
@@ -121,14 +116,11 @@ do not bulk-browse `.state/cache/` as a library).
 ```bash
 ./pocket-advisor.py query "question text" \
     [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--thread N] \
-    [--include-privileged|--exclude-privileged] [--top-k 15] [--json] \
+    [--top-k 15] [--json] \
     [--no-daemon] [--require-daemon]
 ```
 
-Privileged items are **included by default** (config
-`query.include_privileged_by_default`, default true). Use
-`--exclude-privileged` for a restricted pass. Results always flag
-privilege. Visibility is also limited to **collections mounted by the
+Visibility is limited to **collections mounted by the
 active workspace**. Full readable emails are loaded only from paths returned
 by query/DB under `workspaces/.state/cache/<collection_id>/…`.
 
@@ -309,7 +301,7 @@ FROM statements s JOIN accounts a ON a.id=s.account_id
 WHERE s.excluded=0 ORDER BY a.label, s.period_start;
 ```
 
-## Integrity check (before privilege logs, exports, anything sensitive)
+## Integrity check (before exports, anything sensitive)
 
 ```bash
 ./pocket-advisor.py verify   # exit 1 + details on drift

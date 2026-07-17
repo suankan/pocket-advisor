@@ -11,9 +11,6 @@
 #     `pocket-advisor.py ingest embed`.
 #     Chunking only WARNs — no
 #     automated re-chunk pipeline (`docs_old/specs/config-yaml.md`).
-#   - Privilege is NOT configured here: collections[].privileged in
-#     workspaces/workspace-config.yaml and/or a path segment literally
-#     named privileged/ (AGENTS.md hard rule 2).
 
 workspaces:
   # Parent directory for all matters (relative to repo root). Active
@@ -54,10 +51,6 @@ query:
   # consume these values; the frozen daemon command remains transitional.
   daemon_auto: true
   daemon_idle_sec: 1800
-  # Include registry-privileged collections in retrieval by default.
-  # Single-user: own-solicitor often holds opposing-counsel forwards.
-  # Set false (or pass --exclude-privileged) for a restricted pass.
-  include_privileged_by_default: true
 
 ingestion:
   chunking:

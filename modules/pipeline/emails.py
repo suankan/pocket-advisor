@@ -181,7 +181,6 @@ class EmailStage(Stage):
             progress.step(note=cand.filename)
             self._process_candidate(cand, stats)
         progress.done()
-        self._recompute_privilege()
         compaction = compact_authored_bodies(self.conn,
                                              self.config.project_root)
         for key, value in compaction.items():
@@ -500,20 +499,3 @@ class EmailStage(Stage):
                            coll, parent_item_id=parent_item_id, depth=0,
                            stats=stats)
         set_candidate_status(self.conn, cand_id, CandidateStatus.INGESTED)
-
-    # -- privilege -----------------------------------------------------------
-
-    def _recompute_privilege(self) -> None:
-        """OR across memberships from registry `privileged:` flags;
-        auto flag only ever goes 0 -> 1 (manual override wins)."""
-        privileged_ids = [c.id for c in self.registry.collections
-                          if c.privileged]
-        if not privileged_ids:
-            return
-        marks = ",".join("?" for _ in privileged_ids)
-        self.conn.execute(
-            f"""UPDATE items SET is_privileged = 1
-                 WHERE is_privileged = 0 AND id IN (
-                    SELECT DISTINCT item_id FROM item_memberships
-                     WHERE collection_id IN ({marks}))""",
-            privileged_ids)

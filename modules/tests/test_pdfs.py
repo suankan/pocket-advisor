@@ -30,10 +30,8 @@ schema_version: 2
 collections:
   - id: mail
     path: corpora/mail
-    privileged: false
   - id: statements
     path: corpora/statements
-    privileged: false
 workspaces:
   - id: matter-x
     active: true

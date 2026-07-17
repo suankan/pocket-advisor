@@ -71,6 +71,7 @@ def build_fixtures(mail: Path, solicitor: Path) -> None:
         f"On Mon, 1 Jan 2024 at 10:00, Alice <alice@x.com> wrote:\n"
         f"{quoted}\n",
         in_reply_to="<parent@x>")
+    reply["Cc"] = "Carol Example <carol@example.com>"
     (mail / "reply.eml").write_bytes(reply.as_bytes())
 
     rich = base_msg("<rich@x>", "Evidence pack", "See attached.")
@@ -121,7 +122,7 @@ def main() -> int:
         n_items = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         assert n_items == 5, n_items
 
-        # Folder layout: authored + full side by side.
+        # Folder layout: full, authored, and readable message side by side.
         parent_raw = (ws_dir / "corpora/mail/parent.eml").read_bytes()
         folder = (cfg.cache_dir / "mail" /
                   artifact_folder_name("parent.eml",
@@ -129,6 +130,7 @@ def main() -> int:
         assert folder.is_dir(), folder
         assert (folder / "email_body_full.txt").is_file()
         assert (folder / "email_body_authored.txt").is_file()
+        assert (folder / "email_message.txt").is_file()
 
         # Compaction: reply authored body loses the quoted parent tail.
         reply = conn.execute(
@@ -137,6 +139,19 @@ def main() -> int:
         full = (tmp / reply["body_full_text_path"]).read_text()
         assert authored.strip() == REPLY_AUTHORED, authored
         assert "settlement conference" in full.lower()
+        message_path = (tmp / reply["body_text_path"]).with_name(
+            "email_message.txt")
+        message = message_path.read_text()
+        envelope, message_body = message.split("\n\n", 1)
+        assert envelope == "\n".join((
+            "Date: Mon, 01 Jan 2024 10:00:00 +0000",
+            "From: Alice <alice@x.com>",
+            "To: Bob <bob@y.com>",
+            "Cc: Carol Example <carol@example.com>",
+            "Subject: Re: Conference",
+        )), envelope
+        assert message_body == authored
+        assert "settlement conference" not in message_body.lower()
         assert reply["body_compaction_method"] == "in_reply_to"
         assert reply["body_compaction_removed_chars"] > 0
         parent_row = conn.execute(
@@ -162,6 +177,8 @@ def main() -> int:
                 "SELECT * FROM items WHERE message_id = ?", (mid,)).fetchone()
             assert child["parent_item_id"] == rich_row["id"], mid
             assert (tmp / child["body_text_path"]).is_file()
+            assert (tmp / child["body_text_path"]).with_name(
+                "email_message.txt").is_file()
         synthetic = conn.execute(
             "SELECT relpath, status FROM ingestion_candidates"
             " WHERE relpath LIKE '%::%' ORDER BY relpath").fetchall()
@@ -193,6 +210,7 @@ def main() -> int:
 
         # Idempotent re-run: everything known/ingested, nothing new.
         DiscoverStage(ctx).run()
+        message_before = message_path.read_bytes()
         stats2 = EmailStage(ctx).run()
         assert stats2.get("new_emails") == 0, stats2
         assert stats2.get("attached_emails") == 0, stats2
@@ -207,6 +225,7 @@ def main() -> int:
             " WHERE document_type = ? AND status = ?",
             (DocumentType.EMAIL, CandidateStatus.INGESTED)).fetchone()[0]
         assert remaining == 6, remaining   # 4 corpus + 2 synthetic
+        assert message_path.read_bytes() == message_before
 
         conn.close()
     print("test_emails: all ok")

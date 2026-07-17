@@ -62,6 +62,7 @@ def test_config(tmp: Path) -> None:
     assert folder.root.name == "2024-01-05 1230.eml__aaaaaaaa"
     assert folder.body_full.name == "email_body_full.txt"
     assert folder.body_authored.name == "email_body_authored.txt"
+    assert folder.message.name == "email_message.txt"
     assert folder.pdf_text_dir == folder.root / "attachments" / "pdf-to-text"
     assert cache.pdf_text_dir == cache.root / "pdf-to-text"
 

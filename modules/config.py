@@ -11,6 +11,7 @@ Cache layout (`docs/workspace-parsing-design.md`):
         <email_basename>__<sha8>/           EmailCacheFolder
             email_body_full.txt
             email_body_authored.txt
+            email_message.txt
             attachments/{pdf-original,pdf-ocr,pdf-to-text,
                          images,zip-archives,other}/
         pdf-original/  pdf-ocr/  pdf-to-text/   (corpora-native PDFs)
@@ -83,6 +84,10 @@ class EmailCacheFolder:
     @property
     def body_authored(self) -> Path:
         return self.root / "email_body_authored.txt"
+
+    @property
+    def message(self) -> Path:
+        return self.root / "email_message.txt"
 
     @property
     def attachments_dir(self) -> Path:

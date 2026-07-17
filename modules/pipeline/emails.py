@@ -6,6 +6,7 @@ For each EMAIL candidate from Stage 1
     cache/<collection_id>/<basename>__<sha8>/
         email_body_full.txt        lossless (written in sub-step 2a)
         email_body_authored.txt    authored only (derived in sub-step 2b)
+        email_message.txt          readable headers + authored body
         attachments/{pdf-original,images,zip-archives,other}/
 
 Attachment routing: PDFs are pending work for Stage 3; images / zips /
@@ -106,6 +107,39 @@ def _addr_list(msg: EmailMessage, header: str) -> str:
         ensure_ascii=False)
 
 
+def _single_line(value: object | None) -> str:
+    """Render one decoded header value without allowing line injection."""
+    return " ".join(str(value or "").split())
+
+
+def _display_address(name: object | None, addr: object | None) -> str:
+    clean_name = _single_line(name)
+    clean_addr = _single_line(addr)
+    if clean_name and clean_addr:
+        return f"{clean_name} <{clean_addr}>"
+    return clean_addr or clean_name
+
+
+def _display_address_list(raw: str | None) -> str:
+    addresses = json.loads(raw or "[]")
+    return ", ".join(
+        rendered for entry in addresses
+        if (rendered := _display_address(entry.get("name"),
+                                         entry.get("addr"))))
+
+
+def _render_message(row, authored: bytes) -> bytes:
+    """Human-readable envelope followed by the exact authored body."""
+    headers = (
+        f"Date: {_single_line(row['date_raw'] or row['date_utc'])}",
+        f"From: {_display_address(row['from_name'], row['from_addr'])}",
+        f"To: {_display_address_list(row['to_addrs'])}",
+        f"Cc: {_display_address_list(row['cc_addrs'])}",
+        f"Subject: {_single_line(row['subject'])}",
+    )
+    return ("\n".join(headers) + "\n\n").encode("utf-8") + authored
+
+
 def _attachment_payload(part: EmailMessage) -> bytes | None:
     if part.get_content_type() == "message/rfc822":
         inner = part.get_payload()
@@ -152,8 +186,34 @@ class EmailStage(Stage):
                                              self.config.project_root)
         for key, value in compaction.items():
             stats.inc(key, value)
+        self._write_readable_messages()
         self.conn.commit()
         return stats
+
+    def _write_readable_messages(self) -> None:
+        """Render headers plus the final Stage 2b authored body.
+
+        This runs after compaction, keeping the lossless body and searchable
+        authored body unchanged while giving cache readers a complete,
+        human-readable message artifact.
+        """
+        rows = self.conn.execute(
+            """SELECT date_utc, date_raw, from_name, from_addr, to_addrs,
+                      cc_addrs, subject, body_text_path
+                 FROM items
+                WHERE item_kind = 'email' AND body_text_path IS NOT NULL
+                ORDER BY id""").fetchall()
+        root = self.config.project_root
+        for row in rows:
+            authored_path = root / row["body_text_path"]
+            if not authored_path.is_file():
+                raise SystemExit(
+                    f"authored body missing while rendering email message:"
+                    f" {authored_path}")
+            authored = authored_path.read_bytes()
+            message_path = EmailCacheFolder(authored_path.parent).message
+            rendered = _render_message(row, authored)
+            write_verified(message_path, rendered)
 
     # -- sub-step 2a: one candidate ----------------------------------------
 

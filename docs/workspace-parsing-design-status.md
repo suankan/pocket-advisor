@@ -71,7 +71,11 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 ## Next steps (in order)
 
 1. **Review and commit the embedding/thread implementation when requested.**
-   The full new and frozen self-test suites pass.
+   The full new and frozen self-test suites pass. Reviewed 2026-07-18:
+   findings and proposed fixes in `docs/embedding-review-findings.md`
+   (no cutover blocker; F1/F2 correctness items fix before or with the
+   re-ingest, F5 design decision before the answering pass, rest during
+   the adapter-retirement port).
 2. **Restart cutover only when explicitly confirmed** — wipe the incompatible
    partial state, run `ingest all`, then run the golden set and spot-check
    cache folders, generated summaries, relationships, and readable evidence.

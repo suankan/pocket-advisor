@@ -65,9 +65,10 @@ Do not answer case questions from platform instructions alone.
 - `scripts/` is frozen reference code. New `modules/` code must never import
   it. Keep its tests passing until retrieval is ported; delete it only after
   the replacement is complete.
-- `pocket-advisor.py` remains the sole executable entrypoint. The target
-  argparse implementation lives in `modules/cli.py`; stage modules never
-  parse arguments or sequence one another.
+- `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
+  only in `modules/cli.py`; the root entrypoint temporarily supplies the
+  frozen retrieval/maintenance adapter. Stage modules never parse arguments
+  or sequence one another.
 - The new database is fresh-schema only and deliberately refuses legacy
   state. Do not add compatibility migrations or shims.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
@@ -110,16 +111,16 @@ Always confirm this against `docs/workspace-parsing-design-status.md` and
 `git status` before editing. At the 2026-07-17 handoff:
 
 - foundations and Stages 1–5 are implemented and tested under `modules/`;
-- the old `pocket-advisor.py` still drives real queries and ingestion;
-- the new pipeline has no CLI yet and refuses the existing legacy DB.
+- the new CLI is implemented and tested under `modules/cli.py`;
+- real retrieval commands still use the frozen adapter;
+- new ingestion/report commands refuse the existing legacy DB until cutover.
 
 The ordered continuation is:
 
-1. add `modules/cli.py` and slim `pocket-advisor.py`;
-2. remove the retired image-OCR config key;
-3. request confirmation, wipe derived state, fully re-ingest, and run the
+1. remove the retired image-OCR config key;
+2. request confirmation, wipe derived state, fully re-ingest, and run the
    golden-set accuracy/spot checks;
-4. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
+3. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
    remove `scripts/` and unused dependencies.
 
 ## Transaction-stage constraints
@@ -152,6 +153,9 @@ for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
 ./pocket-advisor.py test
+for test_file in scripts/test_*.py; do
+  venv/bin/python "$test_file"
+done
 git diff --check
 git status --short
 ```

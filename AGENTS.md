@@ -87,8 +87,8 @@ and deleted at adapter retirement, not maintained.
 1. `discover` — one read-only collection walk populates
    `ingestion_candidates` and refreshes `source_blob_index`;
 2. `emails` — MIME parsing, per-email cache folders, attachment routing,
-   attached-email/ZIP recursion, then authored-body and readable-message
-   derivation;
+   attached-email/ZIP recursion, then authored-body derivation and the
+   two readable message artifacts;
 3. `pdfs` — verified PDF collection, persistent OCR derivative using
    `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
 4. `thread` — full thread reconstruction;
@@ -107,15 +107,17 @@ exist; only CLI orchestration owns ordering.
 
 - Each email, including attached emails, has one flat
   `<basename>__<sha8>/` folder.
-- `email_body_full.txt` is lossless and never compacted.
-- `email_body_authored.txt` is the Stage 2b derived/searchable body.
-- `email_message.txt` is generated after compaction: decoded Date, From, To,
-  Cc, and Subject headers, a blank line, then the exact authored-body bytes.
-  It is write-verified and never embedded.
+- Two readable message artifacts per email (2026-07-18 decision;
+  implemented with roadmap item 1): `email_message_full.txt` — envelope +
+  lossless body, never compacted or embedded — and `email_message.txt` —
+  envelope + Stage 2b authored body, write-verified. The authored body
+  region of `email_message.txt` is the leaf-chunk source
+  (envelope-relative offsets); the header block is never chunked — the
+  embedded envelope prefix derives from DB fields.
 - Attached-email lineage is stored in `items.parent_item_id`.
 - PDFs retain `pdf-original/`, persistent `pdf-ocr/`, and
   `pdf-to-text/` artifacts.
-- Only authored email bodies and PDF text artifacts are leaf-chunked.
+- Only authored email body regions and PDF text artifacts are leaf-chunked.
   Generated thread summaries have a separate vector namespace and are always
   labeled as navigation, never evidence.
 
@@ -139,8 +141,9 @@ Always confirm this against `docs/status.md` and
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.
 
-The ordered continuation lives in `docs/roadmap.md` (cutover resume,
-adapter retirement, answering pass, experiments).
+The ordered continuation lives in `docs/roadmap.md` (envelope-enriched
+payload + message-artifact consolidation, cutover resume, adapter
+retirement, answering pass, experiments).
 
 ## Transaction-stage constraints
 

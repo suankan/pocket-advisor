@@ -85,10 +85,14 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   intentionally refused; it requires a newly confirmed wipe and full ingest.
 - The retired `ingestion.ocr.small_image_bytes` key has been removed from
   `config.yaml` and is rejected as unknown by the new loader.
-- `email_message.txt` is implemented for human cache inspection and future
-  retrieval evidence display. It preserves the two body artifacts: headers
-  never enter compaction or embeddings, and the content after the envelope
-  separator is exactly `email_body_authored.txt`.
+- `email_message.txt` is implemented for human cache inspection and
+  retrieval evidence display; the content after the envelope separator is
+  exactly the authored body. The current implementation still writes the
+  separate `email_body_full.txt`/`email_body_authored.txt` files — the
+  2026-07-18 two-artifact decision (drop authored, rename full to
+  `email_message_full.txt`, chunk the authored body region of
+  `email_message.txt`) is implemented with roadmap item 1, before the
+  cutover re-ingest.
 - Cutover started on 2026-07-17: the legacy `.state` was wiped, discovery
   and email parsing completed, then ingestion was stopped by the user during
   the PDF stage. Partial new-layout derived state remains; no ingestion/OCR
@@ -97,7 +101,8 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-Future work is tracked in `docs/roadmap.md` (in order: confirmed
+Future work is tracked in `docs/roadmap.md` (in order:
+envelope-enriched payload + message-artifact consolidation, confirmed
 cutover resume, adapter retirement, local answering pass, experiments).
 
 ## Watch-outs

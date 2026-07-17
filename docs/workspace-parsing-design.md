@@ -24,11 +24,12 @@ Refactor of the ingestion pipeline around two ideas:
   `<original filename>__<first 8 hex of sha256>` — human-readable and
   collision-proof (two `message.eml` attachments can coexist; identity
   stays content-based, consistent with custody rules).
-- **Readable email rendering.** Each email folder also contains
+- **Readable email rendering.** Each email folder contains
   `email_message.txt`: the final authored body prefixed by decoded Date,
-  From, To, Cc, and Subject headers. It is a derived human/LLM-facing view
-  for cache inspection and future retrieval evidence display; it is not an
-  embedded input and does not alter either body artifact.
+  From, To, Cc, and Subject headers — the human/LLM-facing evidence view.
+  (Extended by the 2026-07-18 two-artifact decision below: it is now also
+  the leaf-chunking source for its authored body region, and the separate
+  body files are retired.)
 - **Migration: wipe + full re-ingest.** No in-place migration of the old
   cache layout. Once the new pipeline passes tests: `wipe state`
   (explicit confirmation at that moment) and re-ingest from corpora.
@@ -75,15 +76,40 @@ Consequences (locked):
   reference until it is deleted at adapter retirement; it is not
   maintained to match this decision.
 
+## Decision (2026-07-18): two message artifacts, no separate body files
+
+Each email's cache folder converges on exactly two readable message
+artifacts; the separate body files are retired (implemented as roadmap
+item 1, before the cutover re-ingest):
+
+- **`email_body_authored.txt` is dropped.** Its bytes are, by existing
+  invariant, exactly the post-envelope content of `email_message.txt` —
+  retaining both is pure duplication. The authored body remains a
+  sub-step 2b *derivation*; it just no longer persists as its own file.
+- **`email_body_full.txt` becomes `email_message_full.txt`**: the same
+  five-header envelope followed by the lossless full body, never
+  compacted. A file named "message" carries an envelope; a bare body
+  under that name would lie.
+- **Leaf chunking reads the authored body region of
+  `email_message.txt`.** Chunk `char_start`/`char_end` are
+  envelope-relative — counted from the first byte after the envelope's
+  blank-line separator — so a header-rendering change can never shift
+  chunk identity or force a re-chunk.
+- **The embedded envelope prefix comes from DB header fields**
+  (embedding-design decision 10), never from parsing the rendered
+  header block: values stay decoded and format-stable, and the payload
+  cannot double-carry the envelope.
+- The rendered header block itself is never leaf-chunked; `chunks.text`
+  remains a pure quote of authored content.
+
 ## Cache layout (target state)
 
 ```
 workspaces/.state/cache/<collection_id>/
 ├── <email_basename.eml>__<sha8>/          # one per email, incl. attached emails (flat)
-│   ├── email_body_full.txt                # lossless: exactly as extracted from MIME
-│   ├── email_body_authored.txt            # only what THIS sender wrote (quoted
-│   │                                      #   replies / forwarded blocks stripped)
-│   ├── email_message.txt                  # five readable headers + exact authored body
+│   ├── email_message_full.txt             # envelope + lossless body, never compacted
+│   ├── email_message.txt                  # envelope + authored body (quoted replies /
+│   │                                      #   forwarded blocks stripped in 2b)
 │   └── attachments/
 │       ├── pdf-original/                  # attachment PDFs, verified copies
 │       ├── pdf-ocr/                       # persistent <name>-ocrmypdf.pdf derivatives
@@ -134,25 +160,24 @@ stays a pure custody cache; pipeline state lives only in
 For each `document_type='email'` candidate:
 
 1. Create `cache/<collection_id>/<email_basename>__<sha8>/`.
-2. Extract the body and produce THREE artifacts, kept side by side:
-   - `email_body_full.txt` — the lossless body, exactly as extracted
-     from MIME. Never rewritten; audit/context reference.
-   - `email_body_authored.txt` — only the text this sender authored,
-     produced by the existing quoted-reply compaction engine (see
-     below). When no compaction is proven, the two files are identical.
-   - `email_message.txt` — a readable rendering produced after compaction:
-     five decoded single-line headers followed by a blank line and the exact
-     bytes of `email_body_authored.txt`. This file is for direct cache
-     inspection and future retrieval/augmentation evidence display; it is
-     not embedded.
+2. Extract the body and produce TWO artifacts, kept side by side
+   (2026-07-18 decision above):
+   - `email_message_full.txt` — the envelope plus the lossless body,
+     exactly as extracted from MIME. Never compacted; audit/context
+     reference.
+   - `email_message.txt` — the envelope plus the authored body: only
+     the text this sender wrote, derived by the existing quoted-reply
+     compaction engine (see below). When no compaction is proven, the
+     two bodies are identical. The authored body region of this file is
+     the leaf-chunking input; the header block is not.
 
    Compaction is part of THIS step, not a separate pipeline stage.
    Because proving a cut requires the parent's full body, step 2
    internally runs in three sub-steps over the whole working set:
-   - **2a** — for every email: parse MIME, write `email_body_full.txt`,
-     register headers in DB;
-   - **2b** — for every email: resolve the parent and derive
-     `email_body_authored.txt`.
+   - **2a** — for every email: parse MIME, write
+     `email_message_full.txt`, register headers in DB;
+   - **2b** — for every email: resolve the parent and derive the
+     authored body;
    - **2c** — for every email: write-verify `email_message.txt` from the
      stored headers and final authored body.
    Running 2b only after 2a has covered the run keeps results
@@ -169,7 +194,7 @@ For each `document_type='email'` candidate:
    Cc: ...
    Subject: ...
 
-   <exact email_body_authored.txt bytes>
+   <exact authored-body bytes (sub-step 2b output)>
    ```
 
    Missing headers retain an empty labeled line. Header values are decoded
@@ -191,13 +216,13 @@ For each `document_type='email'` candidate:
 
 ### Authored-body derivation — existing mechanism, carried over as-is
 
-`email_body_authored.txt` is the output of the already-shipped
-quoted-reply compaction engine —
-**docs_old/specs/quoted-reply-compaction.md**
-(R-19, detector version 5). This refactor changes only where the file
-lives (`text/emails/<item_id>.txt` → `email_body_authored.txt`;
-`text/emails_full/<item_id>.txt` → `email_body_full.txt`), not how it
-is computed. How it works today:
+The authored body is the output of the already-shipped quoted-reply
+compaction engine — **docs_old/specs/quoted-reply-compaction.md**
+(R-19, detector version 5). This refactor changes only where the result
+lives (formerly `text/emails/<item_id>.txt`, now the body region of
+`email_message.txt`; formerly `text/emails_full/<item_id>.txt`, now the
+body region of `email_message_full.txt`), not how it is computed. How
+it works today:
 
 - It runs inside Stage 2 step 2 (sub-step 2b), after sub-step 2a has
   registered every email of the run — so parents are always resolvable
@@ -307,16 +332,16 @@ Inputs are exactly the plain-text artifacts:
 
 | type                   | location                                                              |
 |------------------------|-----------------------------------------------------------------------|
-| from-email-body        | `cache/<collection_id>/<email>__<sha8>/email_body_authored.txt`        |
+| from-email-body        | `cache/<collection_id>/<email>__<sha8>/email_message.txt` (authored body region, envelope-relative offsets) |
 | from-email-attachments | `cache/<collection_id>/<email>__<sha8>/attachments/pdf-to-text/*.txt`  |
 | from-corpora-native    | `cache/<collection_id>/pdf-to-text/*.txt`                              |
 
-Only the **authored** body is chunked and embedded — quoted history is
+Only the **authored** body region is chunked — quoted history is
 already indexed once as the original email it came from, so embedding
-it again would only duplicate hits. `email_body_full.txt` is not
-embedded; it serves lossless audit/context. `email_message.txt` is also not
-embedded; it is the readable evidence representation for humans and future
-retrieval augmentation.
+it again would only duplicate hits, and the rendered header block is
+never chunked (the embedded envelope prefix derives from DB fields per
+embedding-design decision 10). `email_message_full.txt` is never
+embedded; it serves lossless audit/context.
 
 Chunking (~1500 chars / ~200 overlap), transliteration shadow, FTS triggers,
 and the per-model vector cache remain. Immutable leaf chunks retain their

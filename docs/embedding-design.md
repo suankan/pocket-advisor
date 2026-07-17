@@ -37,8 +37,11 @@ is governed solely by workspace collection mounts.
 1. **SQLite remains the relational source of truth.** There is no external
    vector database. Dense indexes remain local NumPy matrices backed by
    durable per-entity `.npy` files.
-2. **Leaf chunks remain immutable and evidentiary.** Authored email bodies
-   and PDF text are chunked exactly once. FTS stores the original chunk text.
+2. **Leaf chunks remain immutable and evidentiary.** Authored email
+   bodies (the authored body region of `email_message.txt`, offsets
+   envelope-relative — see the 2026-07-18 two-artifact decision in
+   workspace-parsing-design.md) and PDF text are chunked exactly once.
+   FTS stores the original chunk text.
 3. **Do not inject a mutable thread summary into leaf vectors.** A new email
    changes its thread summary; embedding that summary into every historical
    leaf would invalidate every leaf vector and produce mixed summary
@@ -65,6 +68,22 @@ is governed solely by workspace collection mounts.
    SQLite summary rows carry source digests; vector files carry content
    identity. Missing/stale files are retried and matrices are rebuilt from
    the current verified cache.
+10. **The embedded leaf payload is envelope + chunk, not the bare chunk**
+    (locked 2026-07-18). The corpus is correspondence and the natural
+    queries are envelope-shaped ("what did the solicitor propose about X
+    in March"); short messages whose meaning lives in their subject line
+    are otherwise retrievally dead, and envelope-enriched leaves
+    complement thread summaries at message granularity — including
+    singletons and PDF/attachment chunks that summaries never touch.
+    Constraints: `chunks.text` remains a pure evidentiary quote — the
+    envelope is prepended only to the payload fed to the embedder and
+    mirrored into an FTS shadow column (the `translit_shadow` pattern);
+    the envelope is minimal (From, Date, Subject, To — never Cc lists or
+    boilerplate; `Document:`/`Attachment:` filename plus carrying-email
+    envelope for file chunks); the payload recipe is a fingerprint
+    field, so the enriched index lives in its own cache directory and a
+    recipe change re-embeds without re-chunking. The golden-set
+    comparison measures the size of the win, not whether to adopt.
 
 ## Relational schema
 
@@ -196,15 +215,17 @@ workspaces/.state/vectors/text/<fingerprint>/
 
 ### Leaf index
 
-- Inputs remain the immutable `chunks.text` values.
+- Chunks are cut from the authored body region of `email_message.txt`
+  (envelope-relative offsets; the header block is never chunked) and
+  from PDF text artifacts; `chunks.text` stores the pure quote.
+- The embedded payload is the minimal envelope plus the chunk text
+  (decision 10); the same enriched payload is mirrored into an FTS
+  shadow column so BM25 sees it too.
 - Passage embeddings use `retrieval.passage`; questions use
   `retrieval.query`.
 - The existing per-model cache, transliteration shadow, and matrix rebuild
-  semantics remain.
-
-Stable header-enriched leaf embeddings are an experiment, not part of the
-initial implementation. They require their own payload-recipe fingerprint
-and a golden-set comparison before adoption.
+  semantics remain; the payload recipe joins the fingerprint so plain
+  and enriched indexes can never mix.
 
 ### Thread index
 
@@ -322,3 +343,6 @@ loader or make it silently ignore unknown configuration.
 13. A result packet carries at most one match per item, and readable
     context across all packets respects the single per-answer
     `thread_context_chars` budget with matched messages exempt.
+14. Envelope enrichment never alters `chunks.text`, snippets, or
+    citations; a payload-recipe change selects a new vector cache
+    directory and re-embeds without re-chunking.

@@ -10,6 +10,7 @@ Package layout:
     custody.py     sha256 + write-and-verify primitives
     review.py      review queue / ingestion_log flagging
     progress.py    terminal progress reporting
+    statement_parsers.py  typed bank-statement layout parsers
     pipeline/      one Stage class per pipeline stage
     cli.py         the ONLY argument parsing in the repo
     tests/         standalone self-test scripts

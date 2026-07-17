@@ -17,6 +17,7 @@ from modules.custody import (CustodyError, sha256_bytes,  # noqa: E402
 from modules.database import Database, LegacyDatabaseError  # noqa: E402
 from modules.domain import (Candidate, CandidateStatus,  # noqa: E402
                             DocumentType, StageStats)
+from modules.embedding import (PAYLOAD_RECIPE, fingerprint_slug)  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
@@ -57,8 +58,7 @@ def test_config(tmp: Path) -> None:
 
     folder = cache.email_folder("2024-01-05 1230.eml", "a" * 64)
     assert folder.root.name == "2024-01-05 1230.eml__aaaaaaaa"
-    assert folder.body_full.name == "email_body_full.txt"
-    assert folder.body_authored.name == "email_body_authored.txt"
+    assert folder.message_full.name == "email_message_full.txt"
     assert folder.message.name == "email_message.txt"
     assert folder.pdf_text_dir == folder.root / "attachments" / "pdf-to-text"
     assert cache.pdf_text_dir == cache.root / "pdf-to-text"
@@ -86,6 +86,9 @@ def test_config(tmp: Path) -> None:
 
     assert safe_component("a/b\\c:d") == "a_b_c_d"
     assert artifact_folder_name("x.pdf", "ff" * 32) == "x.pdf__ffffffff"
+    plain = {"model": "fake/model", "dim": 4, "payload_recipe": "plain-v1"}
+    enriched = {**plain, "payload_recipe": PAYLOAD_RECIPE}
+    assert fingerprint_slug(plain) != fingerprint_slug(enriched)
 
 
 def test_workspace(tmp: Path) -> None:
@@ -161,10 +164,16 @@ def test_database(tmp: Path) -> None:
     conn.execute("INSERT INTO items (message_id, parent_item_id,"
                  " ingested_at) VALUES ('<m2>', 1, 't')")
     conn.execute("INSERT INTO chunks (source_type, item_id, chunk_index,"
-                 " text) VALUES ('email_body', 1, 0, 'hello custody')")
+                 " text, payload_shadow) VALUES"
+                 " ('email_body', 1, 0, 'hello custody',"
+                 "  'Subject: envelopeonlyterm\\n\\nhello custody')")
     hit = conn.execute("SELECT rowid FROM chunks_fts WHERE chunks_fts"
                        " MATCH 'custody'").fetchone()
     assert hit is not None
+    envelope_hit = conn.execute(
+        "SELECT rowid FROM chunks_fts WHERE chunks_fts"
+        " MATCH 'envelopeonlyterm'").fetchone()
+    assert envelope_hit is not None
     conn.close()
 
     # legacy DB refused, never patched

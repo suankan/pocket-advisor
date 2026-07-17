@@ -133,6 +133,9 @@ Always confirm this against `docs/status.md` and
   always-on summary staleness maintenance, rerank cap, match dedup,
   warnings, ghost-root coverage);
 - the privileged-content concept is removed engine-wide;
+- leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
+  vector caches, while `chunks.text` stays a pure quote; email caches contain
+  only `email_message_full.txt` and `email_message.txt`;
 - `query` uses the native hybrid leaf/thread retriever; daemon, accuracy,
   verify, wipe, and blob lookup still use the frozen adapter — the frozen
   `daemon`/`accuracy` commands expect retired columns and must not run
@@ -141,9 +144,9 @@ Always confirm this against `docs/status.md` and
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.
 
-The ordered continuation lives in `docs/roadmap.md` (envelope-enriched
-payload + message-artifact consolidation, cutover resume, adapter
-retirement, answering pass, experiments).
+The ordered continuation lives in `docs/roadmap.md` (confirmed cutover resume,
+adapter retirement, answering pass, experiments; the payload A/B measurement
+waits for the native accuracy port).
 
 ## Transaction-stage constraints
 

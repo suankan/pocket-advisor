@@ -155,8 +155,7 @@ class ThreadSummaryStage(Stage):
             messages = []
             missing: Path | None = None
             for row in rows:
-                authored_path = root / row["body_text_path"]
-                message_path = authored_path.with_name("email_message.txt")
+                message_path = root / row["body_text_path"]
                 if not message_path.is_file():
                     missing = message_path
                     break

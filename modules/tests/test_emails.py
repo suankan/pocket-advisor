@@ -12,6 +12,7 @@ from modules.config import Config, artifact_folder_name  # noqa: E402
 from modules.custody import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.domain import CandidateStatus, DocumentType  # noqa: E402
+from modules.emailbody import body_bytes  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
@@ -120,25 +121,32 @@ def main() -> int:
         n_items = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         assert n_items == 5, n_items
 
-        # Folder layout: full, authored, and readable message side by side.
+        # Folder layout: exactly two readable message artifacts.
         parent_raw = (ws_dir / "corpora/mail/parent.eml").read_bytes()
         folder = (cfg.cache_dir / "mail" /
                   artifact_folder_name("parent.eml",
                                        sha256_bytes(parent_raw)))
         assert folder.is_dir(), folder
-        assert (folder / "email_body_full.txt").is_file()
-        assert (folder / "email_body_authored.txt").is_file()
+        assert (folder / "email_message_full.txt").is_file()
         assert (folder / "email_message.txt").is_file()
+        assert {path.name for path in folder.iterdir() if path.is_file()} == {
+            "email_message_full.txt", "email_message.txt"}
+        assert not (folder / "email_body_full.txt").exists()
+        assert not (folder / "email_body_authored.txt").exists()
 
         # Compaction: reply authored body loses the quoted parent tail.
         reply = conn.execute(
             "SELECT * FROM items WHERE message_id = '<reply@x>'").fetchone()
-        authored = (tmp / reply["body_text_path"]).read_text()
-        full = (tmp / reply["body_full_text_path"]).read_text()
+        authored_path = tmp / reply["body_text_path"]
+        full_path = tmp / reply["body_full_text_path"]
+        assert authored_path.name == "email_message.txt"
+        assert full_path.name == "email_message_full.txt"
+        authored = body_bytes(
+            authored_path.read_bytes(), source=authored_path).decode()
+        full = body_bytes(full_path.read_bytes(), source=full_path).decode()
         assert authored.strip() == REPLY_AUTHORED, authored
         assert "settlement conference" in full.lower()
-        message_path = (tmp / reply["body_text_path"]).with_name(
-            "email_message.txt")
+        message_path = tmp / reply["body_text_path"]
         message = message_path.read_text()
         envelope, message_body = message.split("\n\n", 1)
         assert envelope == "\n".join((
@@ -173,8 +181,9 @@ def main() -> int:
                 "SELECT * FROM items WHERE message_id = ?", (mid,)).fetchone()
             assert child["parent_item_id"] == rich_row["id"], mid
             assert (tmp / child["body_text_path"]).is_file()
-            assert (tmp / child["body_text_path"]).with_name(
-                "email_message.txt").is_file()
+            assert (tmp / child["body_text_path"]).name == "email_message.txt"
+            assert (tmp / child["body_full_text_path"]).name == \
+                "email_message_full.txt"
         synthetic = conn.execute(
             "SELECT relpath, status FROM ingestion_candidates"
             " WHERE relpath LIKE '%::%' ORDER BY relpath").fetchall()

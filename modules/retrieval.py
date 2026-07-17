@@ -256,7 +256,7 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
         if not include_context and item_id not in matched_item_ids:
             continue
         row = by_id[item_id]
-        path = (root / row["body_text_path"]).with_name("email_message.txt")
+        path = root / row["body_text_path"]
         if not path.is_file():
             continue
         paths[item_id] = str(path.relative_to(root))

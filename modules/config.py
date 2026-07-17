@@ -9,8 +9,7 @@ Cache layout (`docs/workspace-parsing-design.md`):
 
     workspaces/.state/cache/<collection_id>/
         <email_basename>__<sha8>/           EmailCacheFolder
-            email_body_full.txt
-            email_body_authored.txt
+            email_message_full.txt
             email_message.txt
             attachments/{pdf-original,pdf-ocr,pdf-to-text,
                          images,zip-archives,other}/
@@ -75,12 +74,8 @@ class EmailCacheFolder:
     root: Path
 
     @property
-    def body_full(self) -> Path:
-        return self.root / "email_body_full.txt"
-
-    @property
-    def body_authored(self) -> Path:
-        return self.root / "email_body_authored.txt"
+    def message_full(self) -> Path:
+        return self.root / "email_message_full.txt"
 
     @property
     def message(self) -> Path:

@@ -1,12 +1,14 @@
 # Pocket Advisor Roadmap
 
-Ordered future work. Current state lives in `docs/status.md`; locked
+Completed foundation plus ordered future work. Current state lives in
+`docs/status.md`; locked
 architecture in `docs/workspace-parsing-design.md` and
 `docs/embedding-design.md`.
 
-## 1. Envelope-enriched payload + message-artifact consolidation
+## 1. Envelope-enriched payload + message-artifact consolidation — implemented
 
-Locked as design intent in `docs/embedding-design.md` (decision 10,
+Implemented in the 2026-07-18 working tree, with temp-fixture coverage. Locked
+as design intent in `docs/embedding-design.md` (decision 10,
 acceptance criterion 14) and `docs/workspace-parsing-design.md`
 (2026-07-18 two-artifact decision). Implement **before** the cutover
 re-ingest so the first index and cache are built in the final shape at
@@ -32,7 +34,8 @@ zero extra cost:
 5. fixture coverage: payload derivation per source type, fingerprint
    separation, unchanged `chunks.text`/snippets, envelope-relative
    offsets, and the two-artifact cache layout;
-6. after the accuracy port (item 3), A/B against a plain-payload index
+6. **Deferred measurement:** after the accuracy port (item 3), A/B against a
+   plain-payload index
    on the golden set to measure the gain (adoption is already decided).
 
 ## 2. Resume cutover (requires explicit user confirmation)
@@ -44,7 +47,8 @@ is intentionally refused by the engine. When directed:
    rule 6);
 2. `ingest all` — full re-ingest from corpora, including thread
    summaries and the dual vector index;
-3. run the golden-set accuracy checks and spot-check cache folders,
+3. after the native accuracy command is available in item 3, run the golden-set
+   checks; meanwhile spot-check cache folders,
    generated summaries, reply relationships, and readable evidence
    packets.
 

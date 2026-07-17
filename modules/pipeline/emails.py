@@ -4,9 +4,8 @@ For each EMAIL candidate from Stage 1
 (`docs/workspace-parsing-design.md`):
 
     cache/<collection_id>/<basename>__<sha8>/
-        email_body_full.txt        lossless (written in sub-step 2a)
-        email_body_authored.txt    authored only (derived in sub-step 2b)
-        email_message.txt          readable headers + authored body
+        email_message_full.txt     readable headers + lossless body (2a)
+        email_message.txt          readable headers + authored body (2c)
         attachments/{pdf-original,images,zip-archives,other}/
 
 Attachment routing: PDFs are pending work for Stage 3; images / zips /
@@ -45,7 +44,8 @@ from modules.custody import CustodyError, sha256_bytes, write_verified
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.emailbody import (compact_authored_bodies, decode_maybe_encoded,
                                extract_body, normalize_message_id,
-                               normalize_subject, sanitize_filename)
+                               normalize_subject, render_message,
+                               sanitize_filename)
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
 from modules.progress import Progress
@@ -107,39 +107,6 @@ def _addr_list(msg: EmailMessage, header: str) -> str:
         ensure_ascii=False)
 
 
-def _single_line(value: object | None) -> str:
-    """Render one decoded header value without allowing line injection."""
-    return " ".join(str(value or "").split())
-
-
-def _display_address(name: object | None, addr: object | None) -> str:
-    clean_name = _single_line(name)
-    clean_addr = _single_line(addr)
-    if clean_name and clean_addr:
-        return f"{clean_name} <{clean_addr}>"
-    return clean_addr or clean_name
-
-
-def _display_address_list(raw: str | None) -> str:
-    addresses = json.loads(raw or "[]")
-    return ", ".join(
-        rendered for entry in addresses
-        if (rendered := _display_address(entry.get("name"),
-                                         entry.get("addr"))))
-
-
-def _render_message(row, authored: bytes) -> bytes:
-    """Human-readable envelope followed by the exact authored body."""
-    headers = (
-        f"Date: {_single_line(row['date_raw'] or row['date_utc'])}",
-        f"From: {_display_address(row['from_name'], row['from_addr'])}",
-        f"To: {_display_address_list(row['to_addrs'])}",
-        f"Cc: {_display_address_list(row['cc_addrs'])}",
-        f"Subject: {_single_line(row['subject'])}",
-    )
-    return ("\n".join(headers) + "\n\n").encode("utf-8") + authored
-
-
 def _attachment_payload(part: EmailMessage) -> bytes | None:
     if part.get_content_type() == "message/rfc822":
         inner = part.get_payload()
@@ -183,35 +150,33 @@ class EmailStage(Stage):
         progress.done()
         compaction = compact_authored_bodies(self.conn,
                                              self.config.project_root)
-        for key, value in compaction.items():
+        for key, value in compaction.stats.items():
             stats.inc(key, value)
-        self._write_readable_messages()
+        self._write_readable_messages(compaction.authored_bodies)
         self.conn.commit()
         return stats
 
-    def _write_readable_messages(self) -> None:
+    def _write_readable_messages(self,
+                                 authored_bodies: dict[int, str]) -> None:
         """Render headers plus the final Stage 2b authored body.
 
-        This runs after compaction, keeping the lossless body and searchable
-        authored body unchanged while giving cache readers a complete,
-        human-readable message artifact.
+        This runs after compaction. The authored derivation persists only as
+        the body region of this write-verified message artifact.
         """
         rows = self.conn.execute(
-            """SELECT date_utc, date_raw, from_name, from_addr, to_addrs,
+            """SELECT id, date_utc, date_raw, from_name, from_addr, to_addrs,
                       cc_addrs, subject, body_text_path
                  FROM items
                 WHERE item_kind = 'email' AND body_text_path IS NOT NULL
                 ORDER BY id""").fetchall()
         root = self.config.project_root
         for row in rows:
-            authored_path = root / row["body_text_path"]
-            if not authored_path.is_file():
+            authored = authored_bodies.get(int(row["id"]))
+            if authored is None:
                 raise SystemExit(
-                    f"authored body missing while rendering email message:"
-                    f" {authored_path}")
-            authored = authored_path.read_bytes()
-            message_path = EmailCacheFolder(authored_path.parent).message
-            rendered = _render_message(row, authored)
+                    f"authored body derivation missing for item {row['id']}")
+            message_path = root / row["body_text_path"]
+            rendered = render_message(row, authored.encode("utf-8"))
             write_verified(message_path, rendered)
 
     # -- sub-step 2a: one candidate ----------------------------------------
@@ -301,13 +266,12 @@ class EmailStage(Stage):
         from_pairs = email.utils.getaddresses([str(msg.get("From", ""))])
         from_name, from_addr = from_pairs[0] if from_pairs else (None, None)
         body = extract_body(msg)
+        to_addrs = _addr_list(msg, "To")
+        cc_addrs = _addr_list(msg, "Cc")
 
         folder = self.config.collection_cache(coll.id).email_folder(
             filename, sha)
         folder.root.mkdir(parents=True, exist_ok=True)
-        folder.body_full.write_text(body.text, encoding="utf-8")
-        # 2a writes authored = full; 2b rewrites it when a cut is proven.
-        folder.body_authored.write_text(body.text, encoding="utf-8")
         root = self.config.project_root
 
         cur = self.conn.execute(
@@ -321,14 +285,21 @@ class EmailStage(Stage):
             (mid, parent_item_id, date_utc, date_raw,
              decode_maybe_encoded(from_name) or None,
              (from_addr or "").lower() or None,
-             _addr_list(msg, "To"), _addr_list(msg, "Cc"),
+             to_addrs, cc_addrs,
              subject, normalize_subject(subject),
              normalize_message_id(msg.get("In-Reply-To")),
              msg.get("References"),
-             str(folder.body_authored.relative_to(root)),
-             str(folder.body_full.relative_to(root)),
+             str(folder.message.relative_to(root)),
+             str(folder.message_full.relative_to(root)),
              body.source, str(body.charset), has_issue, now_iso()))
         item_id = int(cur.lastrowid)
+        artifact_row = self.conn.execute(
+            """SELECT date_utc, date_raw, from_name, from_addr, to_addrs,
+                      cc_addrs, subject FROM items WHERE id = ?""",
+            (item_id,)).fetchone()
+        write_verified(
+            folder.message_full,
+            render_message(artifact_row, body.text.encode("utf-8")))
         stats.inc("attached_emails" if parent_item_id else "new_emails")
 
         for name, raw_header, ctype, payload in _iter_attachments(msg):

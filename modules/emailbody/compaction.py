@@ -1,7 +1,7 @@
 """Quoted-reply compaction (R-19, detector version 5).
 
-Derives each email's AUTHORED body (email_body_authored.txt) from its
-lossless FULL body (email_body_full.txt). The detector is ported
+Derives each email's authored body region for ``email_message.txt`` from the
+lossless body region of ``email_message_full.txt``. The detector is ported
 unchanged from the shipped implementation — its behavior is specified
 and acceptance-tested in `docs_old/specs/quoted-reply-compaction.md`:
 
@@ -21,7 +21,10 @@ independent of file/import order.
 """
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
+
+from modules.emailbody.artifacts import body_text
 
 COMPACTION_VERSION = 5
 PREFIX_TOKENS = 16
@@ -42,6 +45,12 @@ _FORWARD_HEADER = re.compile(
     r"^[ \t]*>*[ \t]*(From|Date|Subject|To|Cc)[ \t]*:",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionResult:
+    stats: dict[str, int]
+    authored_bodies: dict[int, str]
 
 
 def _tokens_with_offsets(text: str) -> list[tuple[str, int, int]]:
@@ -212,14 +221,15 @@ def find_quote_start(child_full: str,
 
 
 def compact_authored_bodies(conn: sqlite3.Connection,
-                            project_root: Path) -> dict[str, int]:
-    """Sub-step 2b: regenerate every authored body from its full body.
+                            project_root: Path) -> CompactionResult:
+    """Sub-step 2b: derive every authored body from its full body.
 
     The full body is written by sub-step 2a and is REQUIRED — in this
     pipeline there is no lossless-migration fallback: a missing full
     body is a custody fault, not a legacy condition.
 
-    If applying a changed authored body would strand existing chunks
+    The returned body map is persisted by sub-step 2c. If applying a changed
+    authored body would strand existing chunks
     (possible only on incremental re-runs where a new parent arrives
     for an already-embedded child), abort before touching any file and
     direct the operator to the guarded rebuild.
@@ -242,10 +252,11 @@ def compact_authored_bodies(conn: sqlite3.Connection,
                 f" ({full_path}). Regenerate derived state:"
                 " './pocket-advisor.py wipe state' then"
                 " './pocket-advisor.py ingest'.")
-        full_texts[row["id"]] = full_path.read_text(encoding="utf-8")
+        full_texts[row["id"]] = body_text(
+            full_path.read_bytes(), source=full_path)
 
-    planned: list[tuple[Path, str]] = []
     planned_item_ids: list[int] = []
+    authored_bodies: dict[int, str] = {}
     for row in rows:
         full = full_texts[row["id"]]
         parent = by_mid.get(row["in_reply_to"])
@@ -257,11 +268,16 @@ def compact_authored_bodies(conn: sqlite3.Connection,
 
         should_compact = parent is not None and start is not None
         target = full[:start].rstrip() if should_compact else full
+        authored_bodies[int(row["id"])] = target
         authored_path = project_root / row["body_text_path"]
-        current = authored_path.read_text(encoding="utf-8") \
-            if authored_path.is_file() else None
+        current = None
+        if authored_path.is_file():
+            try:
+                current = body_text(
+                    authored_path.read_bytes(), source=authored_path)
+            except (UnicodeDecodeError, ValueError):
+                pass
         if target != current:
-            planned.append((authored_path, target))
             planned_item_ids.append(row["id"])
 
         conn.execute(
@@ -289,11 +305,10 @@ def compact_authored_bodies(conn: sqlite3.Connection,
             conn.rollback()
             raise SystemExit(
                 "quoted-reply compaction would change authored bodies for"
-                f" {len(planned)} email(s), but {n_chunks} existing chunks"
+                f" {len(planned_item_ids)} email(s), but {n_chunks}"
+                " existing chunks"
                 " would become stale. Run './pocket-advisor.py wipe state'"
                 " then './pocket-advisor.py ingest'. Originals are"
                 " untouched.")
 
-    for path, target in planned:
-        path.write_text(target, encoding="utf-8")
-    return stats
+    return CompactionResult(stats, authored_bodies)

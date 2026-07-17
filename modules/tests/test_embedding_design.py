@@ -16,7 +16,8 @@ import modules.pipeline.summaries as summaries_mod  # noqa: E402
 import modules.retrieval as retrieval_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
-from modules.embedding import (index_paths, thread_index_paths)  # noqa: E402
+from modules.embedding import (PAYLOAD_RECIPE, index_paths,  # noqa: E402
+                               thread_index_paths)
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
 from modules.pipeline.summaries import ThreadSummaryStage  # noqa: E402
@@ -40,7 +41,8 @@ workspaces:
 
 DIM = 4
 FINGERPRINT = {"backend": "mlx", "model": "fake/model", "dim": DIM,
-               "chunk_chars": 1500, "chunk_overlap": 200}
+               "chunk_chars": 1500, "chunk_overlap": 200,
+               "payload_recipe": PAYLOAD_RECIPE}
 
 
 class FakeEmbedder:
@@ -70,9 +72,8 @@ def insert_email(conn, root: Path, mid: str, subject: str, body: str,
                  references: str | None = None) -> int:
     folder = root / "cache" / mid.strip("<>").replace("@", "_")
     folder.mkdir(parents=True, exist_ok=True)
-    authored = folder / "email_body_authored.txt"
-    authored.write_text(body)
-    (folder / "email_message.txt").write_text(
+    message = folder / "email_message.txt"
+    message.write_text(
         f"Date: {date}\nFrom: {from_addr}\nTo: {to_addr}\nCc: "
         f"\nSubject: {subject}\n\n{body}")
     to_json = json.dumps([{"name": None, "addr": to_addr}])
@@ -84,7 +85,7 @@ def insert_email(conn, root: Path, mid: str, subject: str, body: str,
            VALUES ('email', ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 't')""",
         (mid, subject, subject.removeprefix("Re: ").lower(), date,
          from_addr, to_json, in_reply_to, references,
-         str(authored.relative_to(root))))
+         str(message.relative_to(root))))
     item_id = int(cur.lastrowid)
     conn.execute(
         """INSERT INTO item_memberships
@@ -184,6 +185,10 @@ def main() -> int:
         packet = found["results"][0]
         assert packet["thread_id"] == thread_id
         assert packet["generated_summary"]
+        assert any(match["snippet"] == "Direct reply."
+                   for match in packet["matches"]), packet["matches"]
+        assert all("Subject:" not in match["snippet"]
+                   for match in packet["matches"])
         assert len(packet["messages"]) == 3
         reply = next(message for message in packet["messages"]
                      if message["item_id"] == b)

@@ -1,6 +1,6 @@
 """Text-embedding identity and per-model vector cache resolution.
 
-Fingerprint = model repo + dim + chunking knobs. Each distinct
+Fingerprint = model repo + dim + chunking knobs + payload recipe. Each distinct
 fingerprint gets its own cache directory (see index_paths) — switching
 models never deletes another model's cache; switching back reuses it
 (`docs_old/specs/multi-model-vector-cache.md`).
@@ -12,6 +12,7 @@ from pathlib import Path
 
 from modules.config import Config
 from modules.embedding.loader import MlxTextEmbedder, ModelStore
+from modules.embedding.payloads import PAYLOAD_RECIPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ def current_fingerprint(config: Config, store: ModelStore) -> dict:
         "dim": dim,
         "chunk_chars": config.chunk_chars,
         "chunk_overlap": config.chunk_overlap,
+        "payload_recipe": PAYLOAD_RECIPE,
     }
 
 
@@ -52,6 +54,7 @@ def meta_fingerprint(meta: dict) -> dict:
         "dim": meta["dim"],
         "chunk_chars": meta.get("chunk_chars"),
         "chunk_overlap": meta.get("chunk_overlap"),
+        "payload_recipe": meta.get("payload_recipe"),
     }
 
 

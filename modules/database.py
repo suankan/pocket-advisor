@@ -49,9 +49,9 @@ CREATE TABLE IF NOT EXISTS items (
     references_raw      TEXT,
     thread_id           INTEGER REFERENCES threads(id),
     thread_link_method  TEXT,
-    -- body_text_path = email_body_authored.txt (searchable);
-    -- body_full_text_path = email_body_full.txt (lossless). Old column
-    -- names kept: the frozen retrieval stack reads them.
+    -- For emails these point to email_message.txt (authored/searchable)
+    -- and email_message_full.txt (lossless). Native PDFs continue to use
+    -- body_text_path for their extracted text artifact.
     body_text_path      TEXT,
     body_full_text_path TEXT,
     body_quote_start    INTEGER,
@@ -149,7 +149,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     char_start       INTEGER,
     char_end         INTEGER,
     embedded_at      TEXT,
-    translit_shadow  TEXT
+    translit_shadow  TEXT,
+    payload_shadow   TEXT
 );
 
 -- R-04b structured transactions
@@ -294,29 +295,35 @@ CREATE INDEX IF NOT EXISTS idx_source_blob_source
     ON source_blob_index(source_id);
 """
 
-# chunks_fts is contentless-synced to chunks via triggers; 2-column
-# (text + translit_shadow, `docs_old/specs/transliteration.md`).
+# chunks_fts is contentless-synced to chunks via triggers. `text` remains the
+# pure evidentiary quote; payload_shadow carries the envelope-enriched search
+# payload, while translit_shadow preserves the proper-noun fallback.
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     text,
     translit_shadow,
+    payload_shadow,
     content='chunks',
     content_rowid='id'
 );
 
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text, translit_shadow)
-    VALUES (new.id, new.text, new.translit_shadow);
+    INSERT INTO chunks_fts(rowid, text, translit_shadow, payload_shadow)
+    VALUES (new.id, new.text, new.translit_shadow, new.payload_shadow);
 END;
 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, text, translit_shadow)
-    VALUES ('delete', old.id, old.text, old.translit_shadow);
+    INSERT INTO chunks_fts(
+        chunks_fts, rowid, text, translit_shadow, payload_shadow)
+    VALUES ('delete', old.id, old.text, old.translit_shadow,
+            old.payload_shadow);
 END;
 CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, text, translit_shadow)
-    VALUES ('delete', old.id, old.text, old.translit_shadow);
-    INSERT INTO chunks_fts(rowid, text, translit_shadow)
-    VALUES (new.id, new.text, new.translit_shadow);
+    INSERT INTO chunks_fts(
+        chunks_fts, rowid, text, translit_shadow, payload_shadow)
+    VALUES ('delete', old.id, old.text, old.translit_shadow,
+            old.payload_shadow);
+    INSERT INTO chunks_fts(rowid, text, translit_shadow, payload_shadow)
+    VALUES (new.id, new.text, new.translit_shadow, new.payload_shadow);
 END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS thread_summaries_fts USING fts5(
@@ -403,6 +410,21 @@ class Database:
         if "threads" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(threads)")}
-            if "stable_key" not in columns:
+            required = {"stable_key", "item_count"}
+            missing = required - columns
+            if missing:
                 raise LegacyDatabaseError(
-                    self.path, "threads without stable_key")
+                    self.path, "threads missing "
+                    + ", ".join(sorted(missing)))
+        if "chunks" in tables:
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(chunks)")}
+            if "payload_shadow" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, "chunks missing payload_shadow")
+        if "chunks_fts" in tables:
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(chunks_fts)")}
+            if "payload_shadow" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, "chunks_fts missing payload_shadow")

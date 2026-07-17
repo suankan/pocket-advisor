@@ -1,7 +1,7 @@
 """Stage 4 — chunk the plain-text artifacts and embed via Jina MLX.
 
 Inputs are exactly the Stage 2/3 text artifacts, read through the DB:
-- items.body_text_path — authored email bodies AND native-PDF texts
+- items.body_text_path — authored email messages AND native-PDF texts
   (chunk source_type 'email_body', name kept for retrieval compat)
 - attachments.extracted_text_path — attachment pdf-to-text artifacts
   (chunk source_type 'attachment')
@@ -23,10 +23,12 @@ from datetime import datetime, timezone
 import numpy as np
 
 from modules.domain import StageStats
+from modules.emailbody import body_text as message_body_text
 from modules.embedding import (IndexPaths, ModelStore,
                                chunking_fields_changed, current_fingerprint,
-                               get_backend, index_paths, meta_fingerprint,
-                               thread_index_paths, thread_vector_filename)
+                               enriched_payload, get_backend, index_paths,
+                               meta_fingerprint, thread_index_paths,
+                               thread_vector_filename)
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.transliteration import proper_noun_shadow
@@ -35,16 +37,17 @@ from modules.transliteration import proper_noun_shadow
 def chunk_text(text: str, chunk_chars: int,
                chunk_overlap: int) -> Iterator[tuple[int, int, int, str]]:
     """Yield (chunk_index, char_start, char_end, chunk)."""
-    text = text.strip()
-    if not text:
+    content_start = len(text) - len(text.lstrip())
+    content_end = len(text.rstrip())
+    if content_start >= content_end:
         return
-    if len(text) <= chunk_chars:
-        yield 0, 0, len(text), text
+    if content_end - content_start <= chunk_chars:
+        yield 0, content_start, content_end, text[content_start:content_end]
         return
-    idx, start = 0, 0
-    while start < len(text):
-        end = min(start + chunk_chars, len(text))
-        if end < len(text):
+    idx, start = 0, content_start
+    while start < content_end:
+        end = min(start + chunk_chars, content_end)
+        if end < content_end:
             # prefer a paragraph break, then any newline, in the last 40%
             window = text[start + int(chunk_chars * 0.6):end]
             cut = max(window.rfind("\n\n"), window.rfind("\n"))
@@ -52,7 +55,7 @@ def chunk_text(text: str, chunk_chars: int,
                 end = start + int(chunk_chars * 0.6) + cut
         yield idx, start, end, text[start:end]
         idx += 1
-        if end >= len(text):
+        if end >= content_end:
             break
         start = max(end - chunk_overlap, start + 1)
 
@@ -63,6 +66,7 @@ class EmbedStage(Stage):
     def run(self) -> StageStats:
         stats = StageStats()
         stats.inc("new_chunks", self._sync_chunks())
+        stats.inc("payloads_updated", self._sync_payloads())
 
         store = ModelStore(self.config.models_dir)
         fingerprint = current_fingerprint(self.config, store)
@@ -129,13 +133,15 @@ class EmbedStage(Stage):
         chunk_args = (self.config.chunk_chars, self.config.chunk_overlap)
 
         items = self.conn.execute(
-            """SELECT id, body_text_path FROM items
+            """SELECT id, item_kind, body_text_path FROM items
                WHERE body_text_path IS NOT NULL AND NOT EXISTS
                  (SELECT 1 FROM chunks c WHERE c.item_id = items.id
                   AND c.source_type = 'email_body')""").fetchall()
         for row in items:
-            text = (root / row["body_text_path"]).read_text(
-                encoding="utf-8")
+            path = root / row["body_text_path"]
+            text = message_body_text(path.read_bytes(), source=path) \
+                if row["item_kind"] == "email" else path.read_text(
+                    encoding="utf-8")
             for idx, start, end, chunk in chunk_text(text, *chunk_args):
                 self.conn.execute(
                     "INSERT INTO chunks (source_type, item_id, chunk_index,"
@@ -167,6 +173,42 @@ class EmbedStage(Stage):
         self.conn.commit()
         return created
 
+    def _sync_payloads(self) -> int:
+        """Converge the mutable FTS/embed shadow without re-chunking.
+
+        A payload-recipe change selects a new vector directory through the
+        fingerprint and this pass refreshes the FTS shadow over the same
+        immutable chunk quotes.
+        """
+        rows = self.conn.execute(
+            """SELECT chunks.id, chunks.text, chunks.source_type,
+                      chunks.payload_shadow, items.item_kind,
+                      items.date_utc, items.date_raw, items.from_name,
+                      items.from_addr, items.to_addrs, items.subject,
+                      attachments.filename AS attachment_name,
+                      COALESCE(
+                        (SELECT item_memberships.filename
+                           FROM item_memberships
+                          WHERE item_memberships.item_id = items.id
+                          ORDER BY item_memberships.id LIMIT 1),
+                        items.subject) AS document_name
+                 FROM chunks
+                 JOIN items ON items.id = chunks.item_id
+                 LEFT JOIN attachments
+                   ON attachments.id = chunks.attachment_id
+                ORDER BY chunks.id""").fetchall()
+        updated = 0
+        for row in rows:
+            payload = enriched_payload(row)
+            if row["payload_shadow"] == payload:
+                continue
+            self.conn.execute(
+                "UPDATE chunks SET payload_shadow = ? WHERE id = ?",
+                (payload, row["id"]))
+            updated += 1
+        self.conn.commit()
+        return updated
+
     # -- vector cache ----------------------------------------------------------
 
     def _resolve_index(self, fingerprint: dict) -> IndexPaths:
@@ -194,14 +236,15 @@ class EmbedStage(Stage):
 
     def _embed_pending(self, backend, vecs_dir,
                        have: set[int]) -> tuple[int, int]:
-        rows = self.conn.execute("SELECT id, text FROM chunks").fetchall()
+        rows = self.conn.execute(
+            "SELECT id, payload_shadow FROM chunks").fetchall()
         pending = [r for r in rows if r["id"] not in have]
         done, failed = 0, 0
         progress = Progress("embed text chunks", total=len(pending))
         for row in pending:
             progress.step(note=f"chunk {row['id']}")
             try:
-                vec = backend.embed_one(row["text"])
+                vec = backend.embed_one(row["payload_shadow"])
                 np.save(vecs_dir / f"{row['id']}.npy", vec)
                 done += 1
             except Exception as exc:

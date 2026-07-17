@@ -19,6 +19,10 @@ Locked architecture: `docs/workspace-parsing-design.md` and
 | `97ee193` | **Staged pipeline CLI**: sole argparse surface in `modules/cli.py`; ordered and gated `ingest all`; named-stage execution; native database, transaction-report, and module-test commands; frozen retrieval/maintenance commands isolated behind the root transitional adapter; removed spellings rejected rather than aliased |
 | `7a9fe80` | **Config cleanup**: removed retired `ingestion.ocr.small_image_bytes`; new loader rejects it as unknown; corrected the embed-stage guidance; added regression coverage |
 | `92e4f03` | **Readable email artifacts**: Stage 2 writes `email_message.txt` after compaction with decoded Date/From/To/Cc/Subject headers and byte-identical authored-body content; write-verified, idempotent, covers attached emails, and remains outside embedding inputs |
+| `0fb9f6f` | **Relational thread-summary retrieval**: stable thread keys and real reply edges; local navigation summaries; dual leaf/summary vector namespaces; native cold four-leg hybrid retrieval and readable relational evidence packets |
+| `4a593ef` | **Privilege concept removed**: registry/schema/query privilege flags and restricted passes removed from the new engine; frozen adapter left untouched pending retirement |
+| `9b9e052` | **Review findings fixed**: always-on summary staleness, bounded/warm-ready reranking, global context budget, match dedup, operational warnings, aggregate visibility, missing-artifact handling, `item_count`, and ghost-root/disabled-generation coverage |
+| `625504a` | **Final payload/cache decisions locked**: envelope-enriched leaf payload + FTS shadow + recipe fingerprint, and exactly two readable message artifacts with authored-body-region chunking |
 
 Current self-tests: all 8 `modules/tests/test_*.py` pass, including the new
 embedding/thread/retrieval fixture (`./pocket-advisor.py test`). The frozen
@@ -36,7 +40,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Current operating state
 
-- **Privilege concept removed (2026-07-18, uncommitted):** per the locked
+- **Privilege concept removed (`4a593ef`):** per the locked
   decision in `docs/workspace-parsing-design.md`, all privilege handling
   was dropped from `modules/`, `config.yaml`, the user registry, tests,
   and current docs: no registry `privileged:` key (now rejected as
@@ -47,7 +51,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   commands expect the old columns and must not be run against the
   privilege-free fresh schema — use cold `query` until their native
   port.
-- **Uncommitted embedding/thread implementation:**
+- **Embedding/thread implementation (`0fb9f6f`, refined at `9b9e052`):**
   `docs/embedding-design.md` is the locked design. Thread IDs now use stable
   root Message-ID keys and store real `reply_parent_item_id` edges. A local
   `summaries` stage generates digest/versioned navigation summaries for
@@ -55,7 +59,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   maintains separate leaf and summary vector matrices; and cold `query` runs
   four retrieval legs, fuses/deduplicates threads, then returns DB-addressed
   readable email evidence. Focused synthetic tests pass.
-- **Review findings implemented (2026-07-18, uncommitted):** the
+- **Review findings implemented (`9b9e052`):** the
   post-implementation review's actionable findings are all fixed —
   always-on summary staleness maintenance (generation-only knob),
   candidate filters as concrete sets, rerank capped at the fused
@@ -68,6 +72,16 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   `docs/embedding-design.md`; the separate review-findings document is
   deleted; open items (native daemon/accuracy, verify FTS
   integrity-check) moved to `docs/roadmap.md`.
+- **Envelope payload + two-artifact cache implemented (2026-07-18,
+  uncommitted):** leaf chunks keep pure `chunks.text` quotes while the dense
+  embedder and `chunks_fts.payload_shadow` consume the same From/Date/Subject/
+  To-enriched payload (plus Document/Attachment filename context). The
+  `envelope-v1` payload recipe participates in the vector fingerprint. Email
+  caches now contain only write-verified `email_message_full.txt` and
+  `email_message.txt`; only the latter's authored body region is chunked, with
+  envelope-relative offsets. Temp fixtures cover email, attachment, and native
+  document payloads, FTS envelope hits, fingerprint separation, pure snippets,
+  offsets, and the final cache layout.
 
 - **New CLI implemented** in `modules/cli.py` at `97ee193`;
   `pocket-advisor.py` is now the venv bootstrap plus a
@@ -85,14 +99,8 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   intentionally refused; it requires a newly confirmed wipe and full ingest.
 - The retired `ingestion.ocr.small_image_bytes` key has been removed from
   `config.yaml` and is rejected as unknown by the new loader.
-- `email_message.txt` is implemented for human cache inspection and
-  retrieval evidence display; the content after the envelope separator is
-  exactly the authored body. The current implementation still writes the
-  separate `email_body_full.txt`/`email_body_authored.txt` files — the
-  2026-07-18 two-artifact decision (drop authored, rename full to
-  `email_message_full.txt`, chunk the authored body region of
-  `email_message.txt`) is implemented with roadmap item 1, before the
-  cutover re-ingest.
+- `email_message.txt` is both the human/retrieval evidence view and, for its
+  authored body region only, the email leaf-chunk source.
 - Cutover started on 2026-07-17: the legacy `.state` was wiped, discovery
   and email parsing completed, then ingestion was stopped by the user during
   the PDF stage. Partial new-layout derived state remains; no ingestion/OCR
@@ -101,9 +109,9 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-Future work is tracked in `docs/roadmap.md` (in order:
-envelope-enriched payload + message-artifact consolidation, confirmed
-cutover resume, adapter retirement, local answering pass, experiments).
+Future work is tracked in `docs/roadmap.md` (in order: confirmed cutover
+resume, adapter retirement, local answering pass, experiments; payload A/B
+measurement follows the native accuracy port).
 
 ## Watch-outs
 
@@ -111,7 +119,7 @@ cutover resume, adapter retirement, local answering pass, experiments).
   folder (active workspace root), not engine state — keep that.
 - EmbedStage chunks native-PDF texts through `items.body_text_path`
   (source_type 'email_body') — same as old pipeline, keeps retrieval
-  compatible; do not "fix" this to a new source_type before the
-  retrieval port.
+  compatible; do not "fix" this to a new source_type before adapter
+  retirement.
 - Frozen scripts/ tree must keep passing its suite until the retrieval
   port lands — don't edit it, don't import it from modules/.

@@ -32,6 +32,12 @@ Refactor of the ingestion pipeline around two ideas:
   spellings are removed (not deprecated), superseded modules are
   deleted, and the DB legacy-migration chain is dropped — wipe +
   re-ingest makes all of it dead code. Single-operator tool; no shims.
+- **Full rewrite under `modules/`.** New code is written from scratch
+  under repo-root `modules/` — OOP: typed dataclasses for domain
+  objects, one class per pipeline stage behind a common Stage
+  interface, full type hints, reuse and readability over cleverness.
+  `scripts/` is frozen: reference-only during the build, deleted at
+  cutover. Nothing under `modules/` imports from `scripts/`.
 
 ## Cache layout (target state)
 
@@ -78,11 +84,13 @@ Properties:
 - Output: the working set that Stages 2–5 consume. Volume (count,
   bytes) is reportable before any heavy work starts.
 
-Implementation note: this overlaps heavily with the existing
-`source_blob_index` (source_id, sha256, relpath, size, mtime). Proposal:
-extend that table with `document_type` and `status` and make Discovery
-the same walk as `blob-index rebuild` — one walker, one custody cache,
-no second table. (Open question below.)
+Implementation: discovery writes a new lean **`ingestion_candidates`**
+table (`collection_id`, `workspace_id`, `relpath`, `sha256`,
+`size_bytes`, `document_type`, `status`, `discovered_at`; unique on
+`(collection_id, sha256)`). The same walk also refreshes
+`source_blob_index` — absorbing `blob-index rebuild` — but that table
+stays a pure custody cache; pipeline state lives only in
+`ingestion_candidates`.
 
 ## Stage 2 — Parse emails
 
@@ -163,9 +171,10 @@ no attached emails remain.
 - Every email — top-level or attached at any depth — gets its own
   **flat** folder `cache/<collection_id>/<basename>__<sha8>/`.
   No nested email folders.
-- The child's `items` row records the parent item id (provenance edge:
-  "extracted from attachment N of item M"), so the flat layout loses no
-  lineage.
+- The child's `items` row records its origin in
+  **`items.parent_item_id`** (nullable self-FK; NULL for top-level
+  emails), so the flat folder layout loses no lineage — including
+  emails that arrived via a zip inside an email.
 
 ### Special case 2 — attached zip archives
 
@@ -294,26 +303,61 @@ Other top-level commands:
 - Unchanged: `db init`, `fetch-model`, `query`, `daemon`, `wipe`,
   `verify`, `accuracy`, `test`.
 
-## Discarded — module map
+## New code layout — `modules/`
 
-| current                  | fate |
-|--------------------------|------|
-| `ingest.py`              | rewritten: thin stage dispatcher for the table above |
-| `parse_eml.py`           | reshaped into `ingest_emails.py` (Stage 2) |
-| `ingest_documents.py`    | **deleted** — native PDFs are Stage 1 candidates processed by Stage 3; docx/xlsx/image extraction retired |
-| `extract_attachments.py` | **deleted** — attachment routing moves into Stage 2; PDF OCR into Stage 3 |
-| `extraction.py`          | shrinks to PDF-only (`ocrmypdf_redo_derivative`, `extract_pdf_layout`); `extract_image` / `extract_docx` / `extract_xlsx` / nested-msg deleted; zip unpack moves to Stage 2 routing |
-| *(new)* `discover.py`    | Stage 1 walker (also serves the old `blob-index rebuild`) |
-| *(new)* `pdf_to_text.py` | Stage 3 |
-| `embed.py`               | Stage 4; drop `_migrate_legacy_flat_index` (dead after wipe) |
-| `thread_linker.py`       | unchanged |
-| `transactions.py`, `statement_parsers.py` | Stage 5 engine; CLI surface shrinks to `report` |
-| `db.py`                  | drop the entire legacy-migration chain (`emails`→`items` Schema B, pathless evidence, Phase A collection identity, dot-state path rewrite, transactions v1→v2, 1-column FTS rebuild); `migrate()` = `BASE_SCHEMA` + guarded `ensure_column`s going forward |
-| `config.py`              | new layout path helpers (email folder, pdf-original/pdf-ocr/pdf-to-text); drop `DOCUMENT_FOLDERS`, `DOCUMENT_SKIP_UNSUPPORTED_EXTS`, `SMALL_IMAGE_BYTES`, `TEXT_DOCUMENTS_DIR`, `DOCUMENTS_EXTRACTED_DIR`, and the `text_*` / `extracted_*` dir helpers |
-| `test_ingest_documents.py` | replaced by tests for discover / emails / pdfs stages |
+All new code lives under repo-root `modules/`. `scripts/` is frozen
+(reference-only, never imported) and deleted at cutover.
 
-Python packages that become unused in the venv: `extract-msg`,
-`python-docx`, `openpyxl` (no other importers in the codebase).
+```
+modules/
+├── config.py           # Config: paths, knobs, config.yaml overlay — typed
+├── workspace.py        # Workspace / Collection registry (workspace-config.yaml)
+├── database.py         # Database: connection, fresh schema, guarded column adds
+├── domain.py           # dataclasses: Candidate, EmailItem, Attachment, Chunk, …
+├── custody.py          # sha256, write-and-verify, source blob index
+├── review.py           # review queue / ingestion_log flagging
+├── progress.py         # progress reporting
+├── ocr.py              # ocrmypdf + pdftotext wrappers (PDF-only)
+├── emailbody/          # MIME body extraction + quoted-reply compaction engine
+├── embedding/          # MLX backends, model loader, transliteration shadow
+├── pipeline/
+│   ├── base.py         # Stage ABC: name, run(ctx) -> StageStats; shared ctx
+│   ├── discover.py     # DiscoverStage     (Stage 1; also refreshes blob index)
+│   ├── emails.py       # EmailStage        (Stage 2; sub-steps 2a/2b)
+│   ├── pdfs.py         # PdfTextStage      (Stage 3)
+│   ├── thread.py       # ThreadStage       (carried-over algorithm)
+│   ├── embed.py        # EmbedStage        (Stage 4)
+│   └── transactions.py # TransactionsStage (Stage 5 + statement parsers)
+├── cli.py              # the ONLY argparse in the repo; dispatch to stages
+└── tests/              # test_*.py self-tests for the new modules
+```
+
+`pocket-advisor.py` remains the single entrypoint (venv re-exec
+preserved) and shrinks to: put `modules/` on `sys.path`, call
+`cli.main()`. The built-in `test` command globs `modules/tests/`.
+
+Reference pointers into frozen `scripts/` (what to consult, not port
+verbatim): `parse_eml.py` + `email_bodies.py` → EmailStage/emailbody;
+`extraction.py` → ocr.py; `embed.py` + `embedding_backends.py` +
+`mlx_model_loader.py` + `transliteration.py` → embedding/ + EmbedStage;
+`thread_linker.py` → ThreadStage; `transactions.py` +
+`statement_parsers.py` → TransactionsStage; `blob_index.py` +
+`utils_hash.py` → custody.py; `workspace_config.py` → workspace.py.
+
+Dropped outright (no successor): `ingest_documents.py`,
+`extract_attachments.py`, image/docx/xlsx/msg extraction, the db.py
+legacy-migration chain (Schema B conversion, pathless evidence, Phase A,
+dot-state path rewrite, transactions v1→v2, 1-column FTS rebuild), the
+legacy flat vector-index migration, `DOCUMENT_FOLDERS` and the
+`text_*`/`extracted_*` path helpers. Venv packages that become unused:
+`extract-msg`, `python-docx`, `openpyxl`.
+
+The retrieval stack (`query.py`, `query_daemon.py`, `reranker.py`,
+`rerank_backends.py`, `search_accuracy_test.py`, `verify_integrity.py`,
+`wipe.py`) is ported to `modules/` in a follow-up pass — the retrieval
+schema (items/chunks/FTS/vector cache) is unchanged, so the port is
+mechanical; until it lands, those commands keep running from the frozen
+tree. `scripts/` is deleted only after that port.
 
 ## Migration plan
 
@@ -325,16 +369,16 @@ Python packages that become unused in the venv: `extract-msg`,
    scratch → full re-embed → `accuracy run` against the golden set to
    confirm no retrieval regression.
 
-## Open questions
+## Resolved questions (2026-07-17)
 
-1. Discovery table: extend `source_blob_index` (proposed) vs. a new
-   `ingestion_candidates` table?
-2. Parent linkage for attached emails: new `items.parent_item_id`
-   column vs. keeping an `attachments` custody row that points at the
-   child item?
-3. `ingestion-type: bank-transactions` is a new workspace-config
-   collection field — confirm the key name and whether one collection
-   can be both a normal corpus and a bank-transactions source.
-4. Do `wipe` / `verify` need changes beyond path awareness of the new
-   layout? (`blob-index rebuild` is already absorbed by `ingest
-   discover` per the CLI section.)
+1. **Discovery table**: new lean `ingestion_candidates` table;
+   `source_blob_index` stays a pure custody cache, refreshed by the
+   same discover walk.
+2. **Parent linkage**: `items.parent_item_id` (nullable self-FK), set
+   for emails extracted from another email's attachment or zip.
+3. **Bank-transactions marking**: the existing workspace-config-v2 key
+   `ingestion-type: bank-transactions` (default `general`). Marked
+   collections still run Stages 1–4 — statements remain searchable
+   corpus — with Stage 5 running in addition.
+4. **`wipe` / `verify`**: new-layout path awareness only; handled when
+   those modules are ported.

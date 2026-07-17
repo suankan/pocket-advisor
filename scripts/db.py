@@ -5,7 +5,7 @@ import sys
 import config
 
 BASE_SCHEMA = """
--- Schema B (docs/specs/schema-items-membership.md): items + memberships.
+-- Schema B (docs_old/specs/schema-items-membership.md): items + memberships.
 -- Schema A pathless identity preserved: UNIQUE (collection_id, sha256).
 
 CREATE TABLE IF NOT EXISTS items (
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     translit_shadow  TEXT
 );
 
--- R-04b structured transactions (docs/specs/structured-transactions-v2.md).
+-- R-04b structured transactions (docs_old/specs/structured-transactions-v2.md).
 -- Money is signed integer minor units everywhere; negative = egress.
 
 CREATE TABLE IF NOT EXISTS holders (
@@ -252,7 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_source_blob_source
 """
 
 # chunks_fts is 2-column (text + translit_shadow, see
-# docs/specs/transliteration.md) so it lives outside BASE_SCHEMA:
+# docs_old/specs/transliteration.md) so it lives outside BASE_SCHEMA:
 # CREATE VIRTUAL TABLE IF NOT EXISTS is a no-op on an already-existing
 # table even with a different column count, so a real column-set change
 # needs the DROP+recreate migration in _ensure_chunks_fts_shadow_column.
@@ -801,7 +801,7 @@ def _migrate_schema_b_items_memberships(conn):
 
 def _migrate_transactions_v2(conn):
     """R-04b: replace the R-04 heuristic transactions table (drop-and-
-    recreate per docs/specs/structured-transactions-v2.md; the R-04 table
+    recreate per docs_old/specs/structured-transactions-v2.md; the R-04 table
     was verified empty in every known DB). Refuses to drop a non-empty
     old table — that would need a real migration decision, not a silent
     wipe."""

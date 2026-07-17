@@ -23,7 +23,7 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
   thread/date-window settings): change anytime, takes effect on the
   next run (`embed_text` gates `--embed all` / stage `all`).
 - **index-invalidating, cached per model** (`models.mlx_model_embed_text`,
-  docs/specs/multi-model-vector-cache.md): changing the text embedding
+  docs_old/specs/multi-model-vector-cache.md): changing the text embedding
   repo resolves to a **different cache directory** on the next
   `pocket-advisor.py ingest --embed text` — vectors from different
   models/dims are numerically incomparable, so they're never mixed,
@@ -50,7 +50,7 @@ onto `scripts/config.py`'s defaults. Schema and comments live in
 
 Platform `config.yaml` only sets `workspaces.dir` (default `workspaces`).
 **Collections, mounts, and active matter** are declared in the
-gitignored registry (docs/specs/workspace-config-v2.md):
+gitignored registry (docs_old/specs/workspace-config-v2.md):
 
 ```
 workspaces/
@@ -67,7 +67,7 @@ workspaces/
 ```
 
 Schema reference (committed):
-`docs/specs/workspace-config-v2.example.yaml` (v1 example still at
+`docs_old/specs/workspace-config-v2.example.yaml` (v1 example still at
 `workspace-config.example.yaml`; loader dual-reads both). Each
 **collection** has `id`, `title`, `description`, `path` (relative to
 `workspaces.dir`, e.g. `corpora/…`), `privileged` (bool). No `kind` /
@@ -92,7 +92,7 @@ text prefix occurs once in the reply, the repeated parent body/tail is omitted
 from `cache/<collection>/text/emails/<id>.txt`. The complete extraction remains
 at `text/emails_full/<id>.txt` and the original `.eml` is untouched. Missing,
 short, absent, or ambiguous parent-prefix matches retain the complete searchable
-body. See `docs/specs/quoted-reply-compaction.md`.
+body. See `docs_old/specs/quoted-reply-compaction.md`.
 
 ## Adding standalone documents (PDFs, images, docx, xlsx)
 
@@ -152,7 +152,7 @@ agent or interactive session with many searches, keep them warm:
 
 Socket: `workspaces/.state/query_daemon.sock` (mode 0600, local only).
 Restart after `pocket-advisor.py ingest --embed text` or model config changes. See
-`docs/specs/query-daemon.md`. Config: `query.daemon_auto`,
+`docs_old/specs/query-daemon.md`. Config: `query.daemon_auto`,
 `query.daemon_idle_sec`.
 ## Models (MLX-only)
 
@@ -168,7 +168,7 @@ models:
 
 Changing the text embedding repo is INDEX-INVALIDATING but not destructive —
 each model gets its own cache directory
-(docs/specs/multi-model-vector-cache.md); switching back to a
+(docs_old/specs/multi-model-vector-cache.md); switching back to a
 previously-used model reuses it instead of re-embedding
 (`pocket-advisor.py ingest --embed text`, or `--embed all`).
 Reranker is not index-invalidating. Universal loader:
@@ -187,7 +187,7 @@ Every (model, dim) fingerprint your `config.yaml` has ever pointed at
 keeps its own cache under `.state/vectors/{text,image}/<slug>/` — text
 and image use the identical layout (`vecs/`, `vectors.npy`,
 `vectors_ids.npy`, `meta.json`) — see
-docs/specs/multi-model-vector-cache.md. Nothing in the ingest pipeline
+docs_old/specs/multi-model-vector-cache.md. Nothing in the ingest pipeline
 ever deletes one; disk space is the only cost of keeping old models
 around after experimenting.
 
@@ -213,7 +213,7 @@ inside a collection:
 ./pocket-advisor.py blob-index lookup -w <workspace_id> -s <collection_id> --sha256 <hex>
 ```
 
-Safe to rebuild anytime (docs/specs/source-blob-index.md). This table
+Safe to rebuild anytime (docs_old/specs/source-blob-index.md). This table
 is the regenerable path cache only. Rebuild after bulk moves inside a
 collection tree.
 
@@ -221,7 +221,7 @@ collection tree.
 
 ```bash
 # default --mode warm: load embed+rerank once, then score all questions
-# (docs/specs/search-accuracy-test-warm-mode.md). Much faster than cold; same ranking math.
+# (docs_old/specs/search-accuracy-test-warm-mode.md). Much faster than cold; same ranking math.
 ./pocket-advisor.py accuracy run \
   --golden workspaces/<ws>/search-accuracy-test/golden/<name>.yaml \
   [--label L] [--top-k 15] [--mode warm]
@@ -243,7 +243,7 @@ not a chat LLM session — only encoder/reranker weights stay resident.
 the *same* golden set (a golden-set change disables the exit-code gate
 and just warns). Re-baseline after any re-ingest and before/after any
 accuracy-affecting change (retrieval, chunking, model, backend).
-Golden-set format and full design: `docs/specs/search-accuracy-test.md`.
+Golden-set format and full design: `docs_old/specs/search-accuracy-test.md`.
 
 ## Bank statements & reconciliation (R-04b)
 

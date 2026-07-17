@@ -1,4 +1,5 @@
-"""Pocket Advisor engine — full rewrite (workspace-parsing-design.md).
+"""Pocket Advisor engine — full rewrite
+(`docs/workspace-parsing-design.md`).
 
 Package layout:
 

@@ -3,7 +3,7 @@
 Fingerprint = model repo + dim + chunking knobs. Each distinct
 (model, dim) fingerprint gets its own cache directory (see
 `index_paths`) — switching models never deletes another model's
-cache; see docs/specs/multi-model-vector-cache.md.
+cache; see docs_old/specs/multi-model-vector-cache.md.
 """
 import hashlib
 import json

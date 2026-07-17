@@ -1,16 +1,16 @@
 # Platform-layer configuration — no user/workspace/case content
-# (docs/DESIGN.md tenet 10). Committed with the repo. Every key is
+# (`docs_old/DESIGN.md` tenet 10). Committed with the repo. Every key is
 # optional; omitted keys fall back to scripts/config.py. Unknown keys
 # abort loudly (typo protection).
 #
-# Three-class knob discipline (docs/DESIGN.md):
+# Three-class knob discipline (`docs_old/DESIGN.md`):
 #   - query / ingestion.ocr / ingestion.thread_* / ingestion.doc_date_* /
 #     ingestion.embed_text: FREE, change anytime.
 #   - ingestion.chunking / models.mlx_model_embed_text: INDEX-INVALIDATING.
 #     Model changes select a separate cache on the next
 #     `pocket-advisor.py ingest --embed text` (or `--embed all`).
 #     Chunking only WARNs — no
-#     automated re-chunk pipeline (docs/specs/config-yaml.md).
+#     automated re-chunk pipeline (`docs_old/specs/config-yaml.md`).
 #   - Privilege is NOT configured here: collections[].privileged in
 #     workspaces/workspace-config.yaml and/or a path segment literally
 #     named privileged/ (AGENTS.md hard rule 2).
@@ -19,7 +19,7 @@ workspaces:
   # Parent directory for all matters (relative to repo root). Active
   # workspace + evidence collections are declared in the gitignored user
   # registry: {dir}/workspace-config.yaml
-  # See docs/specs/workspace-config-v2.md and workspace-config-v2.example.yaml.
+  # See docs_old/specs/workspace-config-v2.md and its example YAML.
   dir: workspaces
 
 # Optional legacy (ignored when workspace-config.yaml is present):
@@ -42,16 +42,16 @@ query:
   # call with --top-k).
   default_top_k: 15
   # Whether the cross-encoder reranker re-scores the fused RRF
-  # candidate list before the top-k cut. See docs/specs/reranker.md
+  # candidate list before the top-k cut. See docs_old/specs/reranker.md
   # for the measured accuracy/latency tradeoff; false falls back to
   # plain RRF ordering.
   rerank_enabled: true
   # How many characters of each candidate's (whitespace-collapsed)
   # text are fed to the reranker. Reranker cost scales ~linearly with
   # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
-  # 300 chars) — latency/thoroughness dial; see docs/specs/reranker.md.
+  # 300 chars) — latency/thoroughness dial; see docs_old/specs/reranker.md.
   rerank_text_chars: 600
-  # Session-warm query daemon (docs/specs/query-daemon.md): when
+  # Session-warm query daemon (docs_old/specs/query-daemon.md): when
   # `query_daemon.py serve` is running, query.py sends searches over a
   # local Unix socket so embed/rerank weights stay loaded. FREE knobs.
   daemon_auto: true          # use daemon when socket is live
@@ -94,7 +94,8 @@ models:
   # Apple-Silicon MLX only — no GGUF / llama.cpp.
   # INDEX-INVALIDATING: changing the text repo resolves to a different
   # per-model cache on next `ingest --embed text`
-  # — never deletes another model's cache (docs/specs/multi-model-vector-cache.md).
+  # — never deletes another model's cache
+  # (`docs_old/specs/multi-model-vector-cache.md`).
   # Reranker is not index-invalidating.
   # Requires: pip install -r scripts/requirements.txt (includes MLX).
   # Fetch once: venv/bin/python scripts/fetch_model.py

@@ -1,7 +1,7 @@
 """Bank-statement format parsers + assertion discovery (R-04b).
 
 ENGINE layer: bank *layout* knowledge only — zero case content
-(docs/specs/structured-transactions-v2.md, two-layer rule). Each parser:
+(docs_old/specs/structured-transactions-v2.md, two-layer rule). Each parser:
 
     parser_id: str
     detect(text) -> bool          # first-page signature match

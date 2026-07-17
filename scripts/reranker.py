@@ -15,7 +15,7 @@ def rerank(conn, question, chunk_ids, backend=None):
     relevance to `question`, descending. No-op on an empty list.
 
     Pass a pre-loaded `backend` to reuse weights across many calls
-    (warm search-accuracy-test — docs/specs/search-accuracy-test-warm-mode.md);
+    (warm search-accuracy-test — docs_old/specs/search-accuracy-test-warm-mode.md);
     default loads once per call (interactive CLI cold start).
     """
     if not chunk_ids:

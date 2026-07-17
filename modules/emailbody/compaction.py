@@ -3,7 +3,7 @@
 Derives each email's AUTHORED body (email_body_authored.txt) from its
 lossless FULL body (email_body_full.txt). The detector is ported
 unchanged from the shipped implementation — its behavior is specified
-and acceptance-tested in docs/specs/quoted-reply-compaction.md:
+and acceptance-tested in `docs_old/specs/quoted-reply-compaction.md`:
 
 - Parent resolved strictly by normalized In-Reply-To → imported
   Message-ID. No fuzzy matching, hashing, or embeddings.

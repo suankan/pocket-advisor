@@ -8,7 +8,7 @@
   retried next run (source of truth is the per-chunk cache file, not
   a DB column).
 - Vector store: one cache directory per (model, dim) fingerprint
-  (docs/specs/multi-model-vector-cache.md) — switching models never
+  (docs_old/specs/multi-model-vector-cache.md) — switching models never
   deletes another model's cache; switching back reuses it. Each run
   rebuilds vectors.npy (float32 [N x EMBED_DIM]) + vectors_ids.npy
   from that directory's per-chunk cache.
@@ -124,9 +124,9 @@ def _migrate_legacy_flat_index():
 def check_fingerprint(conn):
     """Resolve the current model's cache directory. Never deletes
     another model's cache — switching models just means the resolved
-    paths point somewhere else (docs/specs/multi-model-vector-cache.md).
+    paths point somewhere else (docs_old/specs/multi-model-vector-cache.md).
     Chunking config drift is reported but NOT auto-fixed — no automated
-    re-chunk pipeline exists (docs/specs/config-yaml.md); existing
+    re-chunk pipeline exists (docs_old/specs/config-yaml.md); existing
     chunks keep their original size, only new content uses the new
     config. The chunking baseline is adopted in-place in this
     fingerprint's own meta.json (unchanged behavior, just per-slug)."""

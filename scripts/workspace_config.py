@@ -2,7 +2,7 @@
 
 Supports schema_version 1 (sources under each workspace) and
 schema_version 2 (global collections + workspace mounts). See
-docs/specs/workspace-config.md (v1) and workspace-config-v2.md.
+docs_old/specs/workspace-config.md (v1) and workspace-config-v2.md.
 """
 from __future__ import annotations
 
@@ -405,7 +405,7 @@ def load_registry(path: Path | None = None,
     path = Path(path or (ws_dir / "workspace-config.yaml"))
     if not path.is_file():
         _die(f"missing registry file: {path}\n"
-             f"Copy docs/specs/workspace-config.example.yaml to {path}")
+             f"Copy docs_old/specs/workspace-config.example.yaml to {path}")
 
     data = yaml.safe_load(path.read_text()) or {}
     if not isinstance(data, dict):

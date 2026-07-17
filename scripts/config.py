@@ -4,7 +4,7 @@ All scripts import from here. Defaults below are code-level invariants
 (engine-generic). User-tunable, workspace-specific values load from
 committed config.yaml (platform knobs only — no case content) and
 overlay onto these defaults at the bottom of this file; see
-config.yaml and docs/specs/config-yaml.md for the schema and the
+config.yaml and docs_old/specs/config-yaml.md for the schema and the
 three-class knob discipline (free / index-invalidating /
 safety-semantics).
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Directory that holds all workspaces (docs/specs/workspace-config.md).
+# Directory that holds all workspaces (docs_old/specs/workspace-config.md).
 # Active matter comes from workspaces/workspace-config.yaml (gitignored).
 WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
 
@@ -38,7 +38,7 @@ CACHE_DIR = OUTPUT_DIR / "cache"
 LOGS_DIR = OUTPUT_DIR / "logs"
 REVIEW_QUEUE_CSV = LOGS_DIR / "review_queue.csv"
 
-# Root for per-model vector caches (docs/specs/multi-model-vector-cache.md).
+# Root for per-model vector caches (docs_old/specs/multi-model-vector-cache.md).
 # Actual index paths are resolved per fingerprint by
 # embedding_backends.index_paths() — never a single fixed vectors.npy;
 # switching models never deletes
@@ -164,7 +164,7 @@ DEFAULT_TOP_K = 15
 RERANK_ENABLED = True
 RERANK_TEXT_CHARS = 600
 
-# Session-warm query daemon (docs/specs/query-daemon.md): keeps embed +
+# Session-warm query daemon (docs_old/specs/query-daemon.md): keeps embed +
 # rerank + vectors loaded so interactive/agent multi-query sessions
 # skip per-call cold start. Unix socket under workspace output/ (local).
 QUERY_DAEMON_SOCKET = OUTPUT_DIR / "query_daemon.sock"
@@ -177,13 +177,13 @@ QUERY_DAEMON_IDLE_SEC = 1800      # idle exit; 0 = run until stop
 # restricted pass. Product multi-tenant "safe default" is not current.
 INCLUDE_PRIVILEGED_BY_DEFAULT = True
 
-# Search accuracy test harness (docs/specs/search-accuracy-test.md): under workspace.
+# Search accuracy test harness (docs_old/specs/search-accuracy-test.md): under workspace.
 SEARCH_ACCURACY_TEST_DIR = WORKSPACE_DIR / "search-accuracy-test"
 SEARCH_ACCURACY_TEST_GOLDEN_DIR = SEARCH_ACCURACY_TEST_DIR / "golden"
 SEARCH_ACCURACY_TEST_RESULTS_DIR = SEARCH_ACCURACY_TEST_DIR / "results"
 
 
-# ---- config.yaml overlay (docs/specs/config-yaml.md) --------------------
+# ---- config.yaml overlay (docs_old/specs/config-yaml.md) --------------------
 #
 # Dotted yaml path -> (module attribute name, type converter). Anything
 # in config.yaml not in this map aborts loudly at import time — a typo

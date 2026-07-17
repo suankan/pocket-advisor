@@ -2,7 +2,7 @@
 
 Each document becomes an `items` row (`item_kind='file'`) plus
 `item_memberships` (+ `item_file_meta` for extract/OCR/date). Schema B:
-docs/specs/schema-items-membership.md. Chain-of-custody: originals
+docs_old/specs/schema-items-membership.md. Chain-of-custody: originals
 read-only; identity is (collection_id, sha256).
 """
 import sys

@@ -5,7 +5,7 @@ link cross-account transfers, report coverage + integrity.
     venv/bin/python scripts/transactions.py link
     venv/bin/python scripts/transactions.py report
 
-Spec: docs/specs/structured-transactions-v2.md. ENGINE code — account
+Spec: docs_old/specs/structured-transactions-v2.md. ENGINE code — account
 ownership (accounts.yaml), manual reconciliation (reconciliation.yaml)
 and the watch-list (counterparties.yaml) are gitignored workspace files
 re-applied on every rebuild (tenet 5).

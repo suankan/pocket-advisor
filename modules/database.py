@@ -1,6 +1,6 @@
 """SQLite schema and connections — fresh Schema B, NO migration chain.
 
-The clean-break refactor (workspace-parsing-design.md) ships with a
+The clean-break refactor (`docs/workspace-parsing-design.md`) ships with a
 wipe + full re-ingest, so this module carries no legacy migrations.
 A database created by the old scripts/ tree is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.
@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     translit_shadow  TEXT
 );
 
--- R-04b structured transactions (docs/specs/structured-transactions-v2.md).
+-- R-04b structured transactions
+-- (`docs_old/specs/structured-transactions-v2.md`).
 -- Money is signed integer minor units everywhere; negative = egress.
 
 CREATE TABLE IF NOT EXISTS holders (
@@ -282,7 +283,7 @@ CREATE INDEX IF NOT EXISTS idx_source_blob_source
 """
 
 # chunks_fts is contentless-synced to chunks via triggers; 2-column
-# (text + translit_shadow, docs/specs/transliteration.md).
+# (text + translit_shadow, `docs_old/specs/transliteration.md`).
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     text,

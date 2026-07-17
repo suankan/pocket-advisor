@@ -1,4 +1,5 @@
-"""Proper-noun transliteration shadow field (docs/specs/transliteration.md).
+"""Proper-noun transliteration shadow field
+(`docs_old/specs/transliteration.md`).
 
 Scope is deliberately narrow: names/places/organizations only, via a
 capitalized-word heuristic, not whole-text transliteration. Ordinary

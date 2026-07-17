@@ -1,6 +1,6 @@
 """workspace-config.yaml registry — schema_version 2 ONLY.
 
-v2 layout (docs/specs/workspace-config-v2.md): global `collections:`
+v2 layout (`docs_old/specs/workspace-config-v2.md`): global `collections:`
 (evidence stores) + `workspaces:` each mounting collections by id.
 schema_version 1 is no longer supported (clean-break refactor); the
 loader aborts with a migration pointer.
@@ -269,14 +269,14 @@ def _load_workspace(raw: dict, label: str, ws_dir: Path,
 def _load(path: Path, ws_dir: Path) -> Registry:
     if not path.is_file():
         _die(f"missing registry file: {path}\n"
-             f"Copy docs/specs/workspace-config-v2.example.yaml there")
+             "Copy docs_old/specs/workspace-config-v2.example.yaml there")
     data = yaml.safe_load(path.read_text()) or {}
     if not isinstance(data, dict):
         _die("root must be a mapping")
     version = data.get("schema_version")
     if version == 1:
         _die("schema_version 1 is no longer supported — migrate the"
-             " registry to v2 (docs/specs/workspace-config-v2.md)")
+             " registry to v2 (docs_old/specs/workspace-config-v2.md)")
     if version != 2:
         _die(f"schema_version must be 2, got {version!r}")
     _check_keys(data, _TOP_KEYS, "root")

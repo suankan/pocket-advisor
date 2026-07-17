@@ -1,5 +1,5 @@
-"""Search accuracy test (docs/specs/search-accuracy-test.md, Phase 1a;
-warm path: docs/specs/search-accuracy-test-warm-mode.md).
+"""Search accuracy test (docs_old/specs/search-accuracy-test.md, Phase 1a;
+warm path: docs_old/specs/search-accuracy-test-warm-mode.md).
 
 Measures query.py's retrieval quality against a golden question set and
 records every run with a full fingerprint (git commit, index identity,
@@ -142,7 +142,7 @@ def run_query_cold(question, top_k, include_privileged=True):
 
 class WarmQuerySession:
     """Thin wrapper around query.WarmResources for search-accuracy-test warm mode
-    (docs/specs/search-accuracy-test-warm-mode.md). Same residency idea as query_daemon."""
+    (docs_old/specs/search-accuracy-test-warm-mode.md). Same residency idea as query_daemon."""
 
     def __init__(self):
         import query as querymod

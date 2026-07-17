@@ -8,7 +8,7 @@ to the source root* so open/verify stay fast after users shuffle files.
     venv/bin/python scripts/blob_index.py rebuild
     venv/bin/python scripts/blob_index.py lookup -w family-law -s ID --sha256 HEX
 
-See docs/specs/source-blob-index.md.
+See docs_old/specs/source-blob-index.md.
 """
 from __future__ import annotations
 

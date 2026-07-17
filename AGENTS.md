@@ -1,128 +1,164 @@
 # Pocket Advisor — Agent Instructions
 
-Local, privacy-preserving RAG over personal evidence: email exports,
-documents, PDFs, and scans. This is the platform entrypoint for every
-agentic CLI. It contains no case facts.
+Pocket Advisor is a local, privacy-preserving RAG engine over personal
+evidence. The ingestion engine is being rebuilt around the staged workspace
+parsing design under `docs/`.
 
-## Instruction loading
+## Read first
 
-For platform work, read this file, then `docs/DESIGN.md`; read
-`docs/LEARNINGS.md` before pipeline changes.
-
-For case work, load in this order:
+For every platform task, load these files in order:
 
 1. this file;
-2. `workspaces/workspace-config.yaml` — active workspace, mounted
-   collections, privilege flags, and provenance descriptions;
-3. the active workspace's `WORKSPACE.md`;
-4. its applicable domain playbook(s).
+2. `docs/workspace-parsing-design-status.md` — current implementation state
+   and ordered pickup point;
+3. `docs/workspace-parsing-design.md` — locked architecture and acceptance
+   decisions.
+
+`docs_old/` is an archive of the superseded engine design, specs, learnings,
+roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
+context or when the new design explicitly says an old mechanism is carried
+over. Do not treat archived paths or CLI spellings as current design, and do
+not update archived documents.
+
+For case work, additionally load:
+
+1. `workspaces/workspace-config.yaml`;
+2. the active workspace's `WORKSPACE.md`;
+3. its applicable domain playbook(s).
 
 Do not answer case questions from platform instructions alone.
 
 ## Hard rules
 
-1. **Evidence is read-only.** Never write, rename, or delete anything
-   under a collection root (`workspaces/corpora/…` or a registry path).
-   Durable identity is `(source_id, sha256)` ≈
-   `(collection_id, sha256)`, not path. A changed hash is tampering, not
-   an update. Resolve moved originals through `source_blob_index` /
-   `./pocket-advisor.py blob-index`. Only derived state under
-   `workspaces/.state/` is regenerable.
-
-2. **Privilege is an OR rule.** An item is privileged when its registry
-   collection has `privileged: true` or a physical copy has a path
-   segment literally named `privileged`; `privilege_override` wins.
-   Retrieval includes privileged items by default and always labels
-   them; `query --exclude-privileged` is the restricted pass. For an
-   outward-facing draft, do not quote, paraphrase, or reveal privileged
-   advice, strategy, assessment, or communication without the user's
-   choice. A user's own position may be stated without its privileged
-   origin. Follow the workspace's channel-specific drafting rules.
-
-3. **Corpus claims require citations.** Cite each source email by
-   message_id, date, and sender, adding `source_id` / `source_ref` when
-   useful. Cite a standalone document by filename and date; surface
-   `date_source` whenever it is not `extracted_text`. Never infer what
-   correspondence says from an uncited snippet.
-
-4. **Case data stays local.** Never send originals, extracted text,
+1. **Evidence is read-only.** Never write, rename, or delete anything under a
+   collection root (`workspaces/corpora/...` or a registry path). Durable
+   identity is `(collection_id, sha256)`, never a path. Only derived state
+   under `workspaces/.state/` is regenerable.
+2. **Preserve custody.** Hash originals before parsing, write-verify every
+   derived copy, tolerate renames through `source_blob_index`, and treat a
+   changed hash at a known path as a custody alarm—not an update.
+3. **Privilege is an OR rule.** A registry collection with
+   `privileged: true` or a physical path segment literally named
+   `privileged` makes the item privileged; `privilege_override` wins.
+   Retrieval includes privileged items by default and labels them. Do not
+   reveal privileged advice or communications in an outward-facing draft
+   without the user's choice.
+4. **Corpus claims require citations.** Cite emails by message ID, date, and
+   sender, adding collection/source identity when useful. Cite standalone
+   documents by filename and date, and surface weak date provenance.
+5. **Case data stays local.** Never send originals, extracted text,
    embeddings, case facts, or narrative content to a cloud/API/service.
    Inbound model weights and abstract web research are allowed. This
    repository has no remote and must never be pushed.
+6. **No autocommit.** Commit only when the user's current prompt explicitly
+   requests it. Permission does not carry to later prompts.
+7. **No unsupervised cutover wipe.** The clean-break migration requires
+   `wipe state` followed by a complete re-ingest. Obtain explicit user
+   confirmation immediately before that wipe.
 
-5. **This is technical and organizational assistance, not legal
-   advice.** Say so when the distinction matters.
+## New engine architecture
 
-6. **No autocommit.** Run `git commit` only when the user's current
-   prompt explicitly requests it. Permission is one-time and never
-   carries into a later prompt. Otherwise leave changes uncommitted for
-   review.
+- Runtime: Python 3.14.
+- New implementation: repository-root `modules/`.
+- Style: typed domain dataclasses, clear classes, reuse, readability, and one
+  pipeline stage class behind the common `Stage` interface.
+- `scripts/` is frozen reference code. New `modules/` code must never import
+  it. Keep its tests passing until retrieval is ported; delete it only after
+  the replacement is complete.
+- `pocket-advisor.py` remains the sole executable entrypoint. The target
+  argparse implementation lives in `modules/cli.py`; stage modules never
+  parse arguments or sequence one another.
+- The new database is fresh-schema only and deliberately refuses legacy
+  state. Do not add compatibility migrations or shims.
+- Originals are email and PDF only. Images, ZIPs, and other attachments are
+  retained for custody/manual inspection but are not text-extracted or
+  embedded.
 
-7. **Repository knowledge must outlive the current tool.** Keep
-   load-bearing decisions in the canonical repository file, never only
-   in tool memory: as-built architecture → `docs/DESIGN.md`; future work
-   → `docs/ROADMAP.md` plus a PLANNED spec; shipped work →
-   `docs/CHANGELOG.md` and remove it from ROADMAP; engine gotchas →
-   `docs/LEARNINGS.md`; case facts → the workspace layer. Do not create
-   parallel PLAN/STATUS files or commit tool-specific instructions.
+### Pipeline order
 
-## Repository map and lifecycle
+`ingest all` maps directly to:
 
-```text
-ROADMAP (future) ──ship──> CHANGELOG (history) ──condense──> DESIGN (as-built)
+1. `discover` — one read-only collection walk populates
+   `ingestion_candidates` and refreshes `source_blob_index`;
+2. `emails` — MIME parsing, per-email cache folders, attachment routing,
+   attached-email/ZIP recursion, then authored-body derivation;
+3. `pdfs` — verified PDF collection, persistent OCR derivative using
+   `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
+4. `thread` — full thread reconstruction;
+5. `embed` — authored email bodies and PDF text only, using the per-model
+   vector cache;
+6. `transactions` — parse and link marked bank-statement collections.
 
-workspaces/
-  workspace-config.yaml       # gitignored collections + mounts
-  corpora/<collection_id>/     # read-only originals
-  .state/                      # regenerable DB, text, vectors, logs, socket
-  <workspace_id>/              # WORKSPACE, playbooks, journal, chronology, tests
-```
+Stages receive a shared `PipelineContext`, do not call one another, and
+return `StageStats`. A named stage assumes prerequisite artifacts already
+exist; only CLI orchestration owns ordering.
 
-- `docs/DESIGN.md` — as-built architecture, tenets, capability map,
-  interim ledger, spec index. Read before architecture/schema/dependency
-  decisions.
-- `docs/ROADMAP.md` — future work only, with stable IDs and an open spec
-  before implementation.
-- `docs/CHANGELOG.md` — shipped capabilities, newest first.
-- `docs/specs/` — scoped decisions, acceptance criteria, verification.
-- `docs/LEARNINGS.md` — empirically verified engine gotchas.
-- `RUNBOOK.md` — setup and operations.
-- `config.yaml` — committed engine knobs only; never case paths or
-  privilege lists.
-- `workspaces/workspace-config.yaml` — user registry. A collection may
-  declare `ingestion-type: bank-transactions`; one account per
-  collection, with quoted BSB/account strings, owners, and type.
-- `./pocket-advisor.py` — the only CLI and the only argparse surface.
-  Modules under `scripts/` remain importable functions without their own
-  command-line entrypoints.
+### Cache layout invariants
 
-## Operations
+- Each email, including attached emails, has one flat
+  `<basename>__<sha8>/` folder.
+- `email_body_full.txt` is lossless and never compacted.
+- `email_body_authored.txt` is the Stage 2b derived/searchable body.
+- Attached-email lineage is stored in `items.parent_item_id`.
+- PDFs retain `pdf-original/`, persistent `pdf-ocr/`, and
+  `pdf-to-text/` artifacts.
+- Only authored email bodies and PDF text artifacts are chunked/embedded.
 
-Use `./pocket-advisor.py --help` and `RUNBOOK.md` for the full command
-surface. Common paths:
+## Current implementation state
+
+Always confirm this against `docs/workspace-parsing-design-status.md` and
+`git status` before editing. At the 2026-07-17 handoff:
+
+- foundations and Stages 1–4 are implemented and tested under `modules/`;
+- Stage 5 transactions is the next implementation task;
+- the old `pocket-advisor.py` still drives real queries and ingestion;
+- the new pipeline has no CLI yet and refuses the existing legacy DB.
+
+The ordered continuation is:
+
+1. port statement parsers and implement `TransactionsStage` plus report
+   support;
+2. add `modules/cli.py` and slim `pocket-advisor.py`;
+3. remove the retired image-OCR config key;
+4. request confirmation, wipe derived state, fully re-ingest, and run the
+   golden-set accuracy/spot checks;
+5. port retrieval/daemon/reranking/accuracy/verify/wipe into `modules/`, then
+   remove `scripts/` and unused dependencies.
+
+## Transaction-stage constraints
+
+- Scope only collections mounted on the active workspace and marked
+  `ingestion-type: bank-transactions`.
+- One marked collection represents one account; seed holders/accounts from
+  its registry metadata.
+- Stage 1 owns blob-index refresh. Do not recreate the legacy transaction
+  module's internal refresh.
+- Resolve statement files through blob index + memberships + file metadata.
+- Every PDF in a marked collection is expected to parse; report unparsed,
+  not-ingested, and account-mismatch cases loudly.
+- Money is signed integer minor units, never float.
+- Keep assertion validation, deterministic rebuilds, transfer matching,
+  reconciliation overrides, coverage reporting, tamper signals, and row-level
+  citations.
+- `reconciliation.yaml` and `counterparties.yaml` remain in the active
+  workspace folder, not engine state.
+- Preserve `source_type='email_body'` for native-PDF chunks until retrieval
+  is ported; the frozen query stack depends on it.
+
+## Verification
+
+Use temp fixtures for any custody/tamper test; never modify real corpus files.
+Before handing off a change:
 
 ```bash
-./pocket-advisor.py ingest all
-./pocket-advisor.py ingest --embed text
-./pocket-advisor.py transactions parse|link|report
-./pocket-advisor.py fetch-model
-./pocket-advisor.py daemon serve|status|stop
-./pocket-advisor.py query "question" [--json] [--exclude-privileged]
-./pocket-advisor.py wipe list|index|state
-./pocket-advisor.py verify
+for test_file in modules/tests/test_*.py; do
+  venv/bin/python "$test_file"
+done
+./pocket-advisor.py test
+git diff --check
+git status --short
 ```
 
-Ingest is idempotent. PDF and image search text comes only from the
-OCRmyPDF `--redo-ocr` → `pdftotext -layout` path. Text embeddings are
-the only vector index. Model changes select a per-model cache; derived
-state is deleted only through `wipe`.
-
-## Case-answer workflow
-
-Prefer a warm query daemon for a multi-query session. Query in English,
-usually with two materially different phrasings; the text embedder is
-verified cross-lingual, so translating the question adds loss without
-retrieval benefit. Read full bodies at the DB/query-returned paths under
-`.state/cache/<collection_id>/text/`; never rely on snippets or browse
-the cache as a library. Pull the whole thread when history matters, then
-answer with the citations required above.
+The query-daemon socket test may require permission to bind a temporary local
+Unix socket in restricted environments; that is an environment constraint,
+not grounds to weaken or skip the test.

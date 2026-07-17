@@ -14,7 +14,7 @@ Every result carries message_id, date, sender, subject and source path:
 answers built on these results must cite them.
 
 Library: `run_search(...)` / `WarmResources` (search-accuracy-test-warm-mode + query-daemon).
-If the session daemon is up (docs/specs/query-daemon.md), this CLI
+If the session daemon is up (docs_old/specs/query-daemon.md), this CLI
 sends the search over the local Unix socket (warm); otherwise cold.
 """
 import json
@@ -50,7 +50,7 @@ def _mounted_collection_ids(purpose=None):
 
 def allowed_chunk_ids(conn, args):
     """Chunk ids satisfying privilege/date/thread/mount filters, computed
-    BEFORE ranking (docs/specs/pre-filtered-retrieval.md) — a selective
+    BEFORE ranking (docs_old/specs/pre-filtered-retrieval.md) — a selective
     filter must not be starved by candidates that never made an
     unfiltered top-K cut. None = no filter active (fast path, byte-
     identical to unfiltered behavior).
@@ -132,7 +132,7 @@ def _check_vector_index(fp):
     """Resolve the current model's cache dir and warn on chunking drift.
     Model/dim mismatch can no longer happen here by construction — the
     path itself is derived from the current fingerprint (see
-    docs/specs/multi-model-vector-cache.md); a stale index just means
+    docs_old/specs/multi-model-vector-cache.md); a stale index just means
     resolving to a directory that hasn't been embedded into yet."""
     vectors_npy, vectors_ids_npy, meta_json, vecs_dir = embedding_backends.index_paths(fp)
     if not vectors_npy.exists():
@@ -329,7 +329,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
     Pass open `conn`, loaded embed/rerank backends, and/or preloaded
     vector arrays to avoid per-call cold starts (warm search-accuracy-test). Each call
     is independent: only `question` (and filters) change ranking input
-    — no chat/history state (docs/specs/search-accuracy-test-warm-mode.md).
+    — no chat/history state (docs_old/specs/search-accuracy-test-warm-mode.md).
 
     """
     owns_conn = conn is None
@@ -396,7 +396,7 @@ def run_search(question, *, top_k=None, include_privileged=None,
 class WarmResources:
     """Load embed + rerank + vectors once; each search is independent
     (no chat history). Used by query_daemon and search-accuracy-test warm mode.
-    docs/specs/query-daemon.md, docs/specs/search-accuracy-test-warm-mode.md."""
+    docs_old/specs/query-daemon.md, docs_old/specs/search-accuracy-test-warm-mode.md."""
 
     def __init__(self, log=print):
         import rerank_backends

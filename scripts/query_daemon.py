@@ -1,4 +1,4 @@
-"""Session-warm query daemon (docs/specs/query-daemon.md).
+"""Session-warm query daemon (docs_old/specs/query-daemon.md).
 
 Keeps embed + rerank models and the vector matrix loaded so interactive
 or agent multi-query sessions skip per-call cold starts. Local Unix

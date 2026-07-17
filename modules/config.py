@@ -1,11 +1,11 @@
 """Typed configuration and cache layout.
 
 Config is an immutable dataclass built from code defaults overlaid with
-the committed platform config.yaml (docs/specs/config-yaml.md). It is
+the committed platform config.yaml (`docs_old/specs/config-yaml.md`). It is
 constructed once (Config.load) and passed explicitly to everything that
 needs it — no module-global mutation, no import-time side effects.
 
-Cache layout (workspace-parsing-design.md):
+Cache layout (`docs/workspace-parsing-design.md`):
 
     workspaces/.state/cache/<collection_id>/
         <email_basename>__<sha8>/           EmailCacheFolder
@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Engine invariants — deliberately NOT config.yaml knobs
-# (docs/DESIGN.md knob discipline: a knob exists only when a real case
+# (`docs_old/DESIGN.md` knob discipline: a knob exists only when a real case
 # forces it).
 
 CHARSET_FALLBACKS: tuple[str, ...] = ("utf-8", "windows-1252", "cp1251",

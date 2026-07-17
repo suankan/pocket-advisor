@@ -2,7 +2,7 @@
 ingest/embed pipeline deletes anything automatically — switching
 `models.mlx_model_embed_text` in config.yaml just resolves to a
 different cache directory
-(docs/specs/multi-model-vector-cache.md). This script is the only
+(docs_old/specs/multi-model-vector-cache.md). This script is the only
 thing that deletes derived state, and only when you run it.
 
     ./pocket-advisor.py wipe list                     # cached vector indexes

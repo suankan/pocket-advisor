@@ -132,7 +132,8 @@ For each `document_type='email'` candidate:
 ### Authored-body derivation — existing mechanism, carried over as-is
 
 `email_body_authored.txt` is the output of the already-shipped
-quoted-reply compaction engine — **docs/specs/quoted-reply-compaction.md**
+quoted-reply compaction engine —
+**docs_old/specs/quoted-reply-compaction.md**
 (R-19, detector version 5). This refactor changes only where the file
 lives (`text/emails/<item_id>.txt` → `email_body_authored.txt`;
 `text/emails_full/<item_id>.txt` → `email_body_full.txt`), not how it
@@ -240,7 +241,7 @@ embedded; it serves audit and full-context display.
 
 Chunking (~1500 chars / ~200 overlap), transliteration shadow, FTS
 triggers, and the per-model vector cache
-(docs/specs/multi-model-vector-cache.md) are unchanged — only the
+(docs_old/specs/multi-model-vector-cache.md) are unchanged — only the
 sources of text move.
 
 ## Stage 5 — Parsing bank transactions

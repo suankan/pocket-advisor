@@ -1,7 +1,8 @@
 # Retrieval-Expectation Accuracy Testing
 
 Status: **locked and implemented 2026-07-18** (native `accuracy` suite in
-`modules/accuracy.py`; the "golden set" naming is retired).
+`modules/accuracy.py`; flat state-owned suite location refined at `b6b0391`;
+the "golden set" naming is retired).
 
 Measures retrieval quality of the native leaf/thread retriever against a
 human-authored expectation set, produces a machine-readable result record

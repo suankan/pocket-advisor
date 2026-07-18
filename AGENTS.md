@@ -184,6 +184,9 @@ Always confirm this against `docs/status.md` and
 - command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
   `test`, and help are workspace-free; every `accuracy` action is
   workspace-bound (native compare is `--last N`, not file-addressed);
+- flat workspace state shipped at `b6b0391`: each workspace owns
+  `.state/workspace-<id>/<id>.db`; preserved expectations and results live in
+  its `search-accuracy-tests/` directory and survive `wipe state`;
 - generic end-to-end validation is available through an isolated workspace
   rebuild, saved ingest reporting, and the native retrieval-expectation suite;
   no particular live-workspace ingestion is a platform roadmap dependency;

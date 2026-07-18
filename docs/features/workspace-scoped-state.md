@@ -5,7 +5,7 @@ Status: workspace isolation **shipped 2026-07-18** in implementation commit
 implementation commit `c6df0a3`; the native accuracy action matrix superseded
 the earlier workspace-free result-comparison rule in `3d8d9d7`. The flat
 state-root, workspace-named database, and state-owned accuracy-suite refinement
-was locked on 2026-07-18.
+shipped in implementation commit `b6b0391` on 2026-07-18.
 
 This feature replaces the original shared-state design. Each workspace owns
 one SQLite database and one complete state container. A workspace is an

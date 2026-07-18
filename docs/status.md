@@ -32,6 +32,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `3d8d9d7` | **Native retrieval-expectation accuracy suite**: workspace-bound `accuracy generate/run/compare/list`; anchor-verified scaffolds with human-authored questions; schema-versioned JSON result records with per-question verdict/rank/latency and environment fingerprints; `compare --last N` with drift warnings; "golden set" naming retired; verified 12/12 on the test workspace |
 | `4037db7` | **Adapter retirement**: native workspace-local warm query daemon, deep custody/index verification, blob lookup, and vector-index maintenance; shared warm retrieval resources; root requirements/config defaults; retired `scripts/` tree and obsolete packages deleted; native suite 13/13 |
 | `99cc7b9` | **Quoted-reply duplicate-prefix fix**: detector v6 safely resolves a repeated 16-token parent prefix only through an exact 64-token confirmation of the earliest candidate; later nested and genuinely ambiguous matches remain uncut; reproduced finding documented and native suite 13/13 |
+| `b6b0391` | **Flat workspace-state layout**: `.state/workspace-<id>/` roots, `<id>.db`, and preserved state-owned `search-accuracy-tests/`; no nested state parent or workspace-root accuracy output; exact/symlink/wipe-preservation coverage; native suite 13/13 |
 
 Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -112,15 +113,25 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   run record.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
-  is explicit in runtime context and owns a bound database plus independent
-  cache/vector/log/runtime tree. Model weights alone are shared, duplication
-  across multiply mounted collections is intentional, and the retired
-  `active:` registry key is rejected. Workspace-state wipe is native,
-  confirmed, exact-path, and protected against overlap/symlink redirection.
+  is explicit in runtime context and owns the flat
+  `.state/workspace-<id>/` container introduced at `b6b0391`, with `<id>.db`
+  plus independent cache/vector/log/runtime trees and preserved
+  `search-accuracy-tests/`. Model weights alone are shared, duplication across
+  multiply mounted collections is intentional, and the retired `active:`
+  registry key is rejected. Workspace-state wipe is native, confirmed,
+  exact-path, protected against overlap/symlink redirection, and preserves the
+  complete accuracy suite while deleting regenerable children.
   Shared `fetch-model`, fixture `test`, and help are workspace-free,
   reject a meaningless selector, and do not resolve the registry. (The
   formerly workspace-free file-addressed `accuracy compare` was replaced
   by the workspace-bound native `accuracy compare --last N`.)
+
+- **Accuracy-suite location refined (`b6b0391`):** default expectations and
+  result records resolve only under the selected flat state root's plural
+  `search-accuracy-tests/` directory. The old registry-workspace
+  `search-accuracy-test/` path is no longer created or read implicitly.
+  Existing authored suites require an explicit operator relocation; no
+  compatibility copy or migration exists.
 
 - **Adapter retired (`4037db7`):** the complete runtime is native under
   `modules/`; `scripts/` is deleted. Query can use the workspace-local

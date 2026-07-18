@@ -4,6 +4,40 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-18 — Flat workspace-state layout
+
+Implementation commit: `b6b0391` (locked design:
+`docs/features/workspace-scoped-state.md`; accuracy refinement:
+`docs/features/accuracy-testing.md`).
+
+- Flattened each workspace container from
+  `.state/workspaces/<workspace_id>/` to
+  `.state/workspace-<workspace_id>/`, removing the redundant intermediate
+  directory.
+- Replaced the generic `pocket_advisor.db` filename with
+  `<workspace_id>.db`, making the database's filesystem identity agree with
+  its schema-bound workspace owner.
+- Moved retrieval expectations and result history from the registry workspace
+  root into the plural
+  `<workspace-state>/search-accuracy-tests/` directory and made all accuracy
+  actions resolve it from the bound `Config` with symlink refusal.
+- Refined `wipe state` to delete only regenerable children while preserving
+  the complete human-authored accuracy suite and result history
+  byte-identically. Confirmation, daemon shutdown, exact containment,
+  protected-root, and cross-workspace isolation safeguards remain intact.
+- Updated the holistic/feature designs, embedding path, runbook, and safety
+  instructions; added exact path, DB name, suite location, symlink, and wipe
+  preservation fixtures.
+
+Verification: native suite 13/13; Python compilation and `git diff --check`
+clean. No live workspace state, accuracy files, or evidence was moved, copied,
+deleted, initialized, or migrated.
+
+Operational note: earlier nested state roots and workspace-root
+`search-accuracy-test/` directories are intentionally not auto-migrated.
+Engine state is rebuilt in the flat layout; an operator explicitly relocates
+any human-authored expectation sets that should be retained.
+
 ## 2026-07-18 — Retired shared-layout state removed
 
 Operational milestone (no implementation commit).

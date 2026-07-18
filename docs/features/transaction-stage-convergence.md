@@ -1,16 +1,17 @@
 # Transaction-Stage Convergence
 
-Status: **locked 2026-07-18; implementation pending roadmap item 1**.
+Status: **implemented at `aedd667` from locked design `892a3bb`**.
 
-Stage 5 currently reparses every marked bank-statement PDF and atomically
-rebuilds all statements, assertions, transactions, and transfer links on every
-`ingest all`. The rebuild is deterministic and cheap for a small corpus, but it
-changes `parsed_at`, repeats statement output and review flags, and scales
-linearly even when neither evidence nor transaction rules changed.
+Before this feature, Stage 5 reparsed every marked bank-statement PDF and
+atomically rebuilt all statements, assertions, transactions, and transfer
+links on every `ingest all`. The rebuild was deterministic and cheap for a
+small corpus, but it changed `parsed_at`, repeated statement output and review
+flags, and scaled linearly even when neither evidence nor transaction rules
+changed.
 
-This feature adds a safe stage-level convergence guard. It does not introduce
-per-statement incremental mutation: an unchanged transaction build is skipped;
-any relevant change retains the existing complete atomic rebuild.
+The implementation adds a safe stage-level convergence guard. It does not
+introduce per-statement incremental mutation: an unchanged transaction build
+is skipped; any relevant change retains the existing complete atomic rebuild.
 
 ## Objective
 

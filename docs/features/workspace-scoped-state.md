@@ -71,7 +71,7 @@ workspaces/.state/
     │   ├── review_queue.csv
     │   ├── ingest-runs/
     │   └── transactions/
-    │       └── build-state.json  # locked; pending Stage 5 convergence
+    │       └── build-state.json  # shipped Stage 5 convergence manifest
     ├── runtime/
     │   └── <daemon files>
     └── search-accuracy-tests/       preserved by wipe state

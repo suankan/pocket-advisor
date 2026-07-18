@@ -4,6 +4,43 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-18 — Transaction-stage convergence
+
+Implementation commit: `aedd667` (locked design: `892a3bb`,
+`docs/features/transaction-stage-convergence.md`).
+
+- Added a versioned Stage 3 PDF-text recipe fingerprint covering the local
+  OCRmyPDF/`pdftotext` wrapper contract, OCR languages, and tool versions.
+  Successful artifacts from an older recipe are now regenerated before
+  transaction parsing; named Stage 5 execution fails safely when that
+  prerequisite is stale.
+- Added an atomic, write-verified workspace-local transaction build manifest
+  with semantic input and canonical live-output digests, row cardinalities,
+  and current aggregate findings. Extracted statement-text bytes are a direct
+  input, so changed OCR/text output invalidates parsing even when the original
+  PDF hash is unchanged.
+- Made verified unchanged transaction runs skip statement detection/parsing,
+  table rewrites, transfer matching, per-statement output, and duplicate
+  review-log writes. Missing/corrupt manifests, parser/config/reconciliation
+  changes, live-row divergence, and explicit force retain the existing full
+  atomic rebuild.
+- Added guarded `ingest transactions --force`, manifest-aware ingest/report
+  findings and verification, exact current account/owner/holder convergence,
+  and one-time graph cleanup when the final bank collection is unmounted.
+- Added temporary-fixture coverage for Stage 3 recipe reprocessing, every core
+  Stage 5 invalidation path, output tampering, parser-set changes, manifest
+  publication failure, persisted findings, CLI restrictions, final unmount,
+  and cross-workspace manifest isolation.
+
+Verification: all 13 native module tests and `./pocket-advisor.py test` pass;
+Python compilation and `git diff --check` clean. No corpus or live workspace
+state was modified. The first post-upgrade full ingest may reprocess existing
+PDF text once to establish the new recipe fingerprint, then performs one
+transaction rebuild to publish its initial manifest.
+
+Deferred: broader institution parser coverage remains roadmap item 1 and does
+not block roadmap item 2, the local answering pass.
+
 ## 2026-07-18 — PDF OCR validation-warning recovery
 
 Implementation commit: `838e037`.

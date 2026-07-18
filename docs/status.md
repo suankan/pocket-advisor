@@ -34,6 +34,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `99cc7b9` | **Quoted-reply duplicate-prefix fix**: detector v6 safely resolves a repeated 16-token parent prefix only through an exact 64-token confirmation of the earliest candidate; later nested and genuinely ambiguous matches remain uncut; reproduced finding documented and native suite 13/13 |
 | `b6b0391` | **Flat workspace-state layout**: `.state/workspace-<id>/` roots, `<id>.db`, and preserved state-owned `search-accuracy-tests/`; no nested state parent or workspace-root accuracy output; exact/symlink/wipe-preservation coverage; native suite 13/13 |
 | `838e037` | **PDF OCR validation-warning recovery**: a fresh derivative from non-zero OCRmyPDF proceeds to the authoritative `pdftotext` gate; warnings remain reviewable, stale outputs cannot be reused, prior failures retry, and successful recovery is idempotent; native suite 13/13 |
+| `aedd667` | **Transaction-stage convergence**: versioned Stage 3 PDF-text recipe freshness; workspace-local semantic input/output manifest; verified unchanged Stage 5 skip; atomic invalidation rebuild; persisted current input findings; exact retired-account cleanup; guarded `ingest transactions --force`; native suite 13/13 |
 
 Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -43,12 +44,15 @@ exists.
 Stage 5 is implemented in `modules/statement_parsers.py` and
 `modules/pipeline/transactions.py`, with fixture coverage in
 `modules/tests/test_transactions.py`. It handles marked mounted
-collections, native and email-attached statement PDFs, assertion
-validation, account mismatch/unknown-format review flags, deterministic
-rebuilds, transfer overrides/auto-linking, and report support. Multiple
-statement attachments under one email item receive deterministic global
-row indexes so `(item_id, row_index)` override keys remain unambiguous.
-Any parser/override failure rolls the whole Stage 5 rebuild back.
+collections, native and email-attached statement PDFs, assertion validation,
+account mismatch/unknown-format review flags, deterministic rebuilds, transfer
+overrides/auto-linking, and report support. At `aedd667`, Stage 5 gained a
+workspace-local convergence manifest: matching semantic inputs and verified
+live output rows now report unchanged without parser execution or row churn;
+any relevant change retains the complete atomic rebuild. Multiple statement
+attachments under one email item receive deterministic global row indexes so
+`(item_id, row_index)` override keys remain unambiguous. Any parser/override
+failure rolls the whole Stage 5 rebuild back.
 
 ## Current operating state
 
@@ -113,6 +117,21 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   obsolete failure state. The isolated malformed duplicate recovered as two
   readable occurrences and ten chunks; the next full ingest performed no PDF
   or embedding work.
+- **PDF-text freshness + transaction convergence (`aedd667`, design
+  `892a3bb`):** Stage 3 records a fingerprint of its OCRmyPDF/`pdftotext`
+  wrapper recipe, OCR languages, and local tool versions, and requeues any
+  successful occurrence produced by an older recipe. Stage 5 hashes the
+  resulting statement text plus account configuration, reconciliation,
+  parser IDs, `pdfinfo`, and build recipe into a workspace-local manifest. A
+  matching input plus matching canonical live relational output returns
+  `unchanged` without parsing or writes; missing/corrupt state, changed input,
+  output tampering, or `ingest transactions --force` performs the existing
+  complete atomic rebuild. Current non-relational findings persist across
+  hits, final account unmounts converge to an empty graph, and `verify` checks
+  manifest/output agreement. No live workspace state was mutated during the
+  implementation; the first post-upgrade full ingest will normally refresh
+  pre-fingerprint PDF text once and then publish the first transaction
+  manifest.
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a
@@ -206,3 +225,7 @@ pass** (`docs/roadmap.md`).
 - Quoted-reply detector changes can alter already-chunked authored bodies.
   The stale-chunk guard must continue to refuse in-place rewrites and direct
   the operator to an explicitly confirmed full workspace rebuild.
+- Stage 3 extraction behavior changes require a PDF-text recipe bump; parser
+  behavior changes require a new parser ID, while shared Stage 5 detection,
+  assertion, canonicalization, or linking changes require a transaction
+  recipe bump. These fingerprints are what make unchanged skips safe.

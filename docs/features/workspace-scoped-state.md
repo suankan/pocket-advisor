@@ -68,7 +68,10 @@ workspaces/.state/
     ├── vectors/
     │   └── text/<fingerprint>/
     ├── logs/
-    │   └── review_queue.csv
+    │   ├── review_queue.csv
+    │   ├── ingest-runs/
+    │   └── transactions/
+    │       └── build-state.json  # locked; pending Stage 5 convergence
     ├── runtime/
     │   └── <daemon files>
     └── search-accuracy-tests/       preserved by wipe state

@@ -110,14 +110,20 @@ order:
    bodies after the run's message graph is available;
 3. **pdfs** — collect verified PDF copies, persist OCR derivatives using
    `ocrmypdf --redo-ocr --clean`, then extract layout-preserving text with
-   `pdftotext -layout`;
+   `pdftotext -layout`. Successful artifacts carry a versioned extraction
+   recipe covering wrappers, options, languages, configuration, and local tool
+   versions; a recipe mismatch requeues the PDF so downstream stages never
+   mistake old text for current text;
 4. **thread** — reconstruct complete threads and direct reply relationships;
 5. **summaries** — maintain staleness and generate local-LLM navigation
    summaries for complete multi-message threads;
 6. **embed** — chunk evidentiary text and maintain separate leaf and
    thread-summary indexes;
 7. **transactions** — parse, validate, reconcile, and link statements from
-   mounted collections marked `ingestion-type: bank-transactions`.
+   mounted collections marked `ingestion-type: bank-transactions`. The locked
+   convergence design in `docs/features/transaction-stage-convergence.md`
+   skips an unchanged, independently verified transaction graph while retaining
+   a complete atomic rebuild for every relevant input or rule change.
 
 Stages implement the common `Stage` interface, receive one explicit
 `PipelineContext`, never parse CLI arguments, never call one another, and

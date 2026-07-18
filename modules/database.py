@@ -1,6 +1,6 @@
 """SQLite schema and connections — fresh Schema B, NO migration chain.
 
-The clean-break refactor (`docs/workspace-parsing-design.md`) ships with a
+The clean-break refactor (`docs/design.md`) ships with a
 wipe + full re-ingest, so this module carries no legacy migrations.
 A database created by the old scripts/ tree is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.

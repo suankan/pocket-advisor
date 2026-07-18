@@ -8,8 +8,10 @@ still-open items live in `docs/roadmap.md`).
 
 This document defines the project-native embedding, thread-summary, and
 relational retrieval design. It supersedes the generic relational/vector
-reference from which it was derived. The workspace parsing design remains
-authoritative for evidence ingestion and cache artifacts.
+reference from which it was derived. `docs/design.md` remains authoritative
+for system-wide evidence ingestion and custody; the locked workspace state
+boundary and path prefix are defined in
+`docs/features/workspace-scoped-state.md`.
 
 ## Objective
 
@@ -29,7 +31,7 @@ leaf chunks + thread summaries
 
 The corpus is owned and operated by one individual. There are no
 user-specific indexes, ACLs, or multi-tenant retrieval paths, and — per
-the 2026-07-18 decision in workspace-parsing-design.md — no
+the 2026-07-18 decision in `docs/design.md` — no
 privileged-content concept anywhere in the engine: retrieval visibility
 is governed solely by workspace collection mounts.
 
@@ -41,7 +43,7 @@ is governed solely by workspace collection mounts.
 2. **Leaf chunks remain immutable and evidentiary.** Authored email
    bodies (the authored body region of `email_message.txt`, offsets
    envelope-relative — see the 2026-07-18 two-artifact decision in
-   workspace-parsing-design.md) and PDF text are chunked exactly once.
+   `docs/design.md`) and PDF text are chunked exactly once.
    FTS stores the original chunk text.
 3. **Do not inject a mutable thread summary into leaf vectors.** A new email
    changes its thread summary; embedding that summary into every historical
@@ -202,7 +204,7 @@ the stage continues with the remaining threads.
 Each embedding-model fingerprint keeps two namespaces:
 
 ```text
-workspaces/.state/vectors/text/<fingerprint>/
+workspaces/.state/workspaces/<workspace_id>/vectors/text/<fingerprint>/
   vecs/<chunk_id>.npy
   vectors.npy
   vectors_ids.npy

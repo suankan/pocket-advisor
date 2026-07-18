@@ -5,7 +5,7 @@ the committed platform config.yaml (`docs_old/specs/config-yaml.md`). It is
 constructed once (Config.load) and passed explicitly to everything that
 needs it — no module-global mutation, no import-time side effects.
 
-Cache layout (`docs/workspace-parsing-design.md`):
+Cache layout (`docs/design.md`):
 
     workspaces/.state/cache/<collection_id>/
         <email_basename>__<sha8>/           EmailCacheFolder

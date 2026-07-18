@@ -1,0 +1,224 @@
+# Pocket Advisor Design
+
+Status: **locked architecture**. Implementation state lives in
+`docs/status.md`; ordered unfinished work lives in `docs/roadmap.md`; shipped
+history lives in `docs/changelog.md`.
+
+Pocket Advisor is a local, privacy-preserving retrieval-augmented generation
+engine over personal evidence. It turns read-only email and PDF collections
+into searchable, relational evidence while preserving custody and keeping all
+corpus-bearing computation on the local machine.
+
+Feature-level designs refine this document:
+
+- `docs/features/workspace-scoped-state.md` — one database and derived-state
+  tree per workspace, mandatory CLI workspace selection, and wipe isolation.
+- `docs/features/embedding-design.md` — thread reconstruction, navigation
+  summaries, dual indexes, hybrid retrieval, evidence expansion, and the
+  future answering boundary.
+
+If a feature document is more specific, it governs that feature. Neither
+feature document may weaken the custody, privacy, or evidence rules here.
+
+## System boundaries
+
+- **Single local operator.** There is no multi-user, ACL, or privileged-content
+  subsystem. Collection mounts determine retrieval scope; sensitivity labels
+  are descriptive text only.
+- **Local case data.** Originals, extracted text, embeddings, questions,
+  answers, and case facts never leave the machine. Downloading model weights
+  and abstract web research are allowed.
+- **Read-only evidence.** Collection roots are never written, renamed, or
+  deleted. All generated artifacts live under `workspaces/.state/`.
+- **Email and PDF originals only.** Images, ZIPs, and other attachments are
+  retained for custody and inspection but are not text-extracted or embedded.
+- **Fresh schema.** The engine deliberately refuses legacy state. Architecture
+  changes use an explicit wipe and complete re-ingest, not compatibility
+  migrations or shims.
+
+## Workspaces and collections
+
+`workspaces/workspace-config.yaml` declares evidence collections and the
+workspaces that mount them. A collection is a read-only source; a workspace is
+the operational and retrieval boundary over one or more mounted collections.
+Optional mount purposes can further restrict a query.
+
+Every operational CLI invocation names its workspace explicitly:
+
+```bash
+./pocket-advisor.py --workspace <workspace_id> <command> ...
+```
+
+Each workspace owns an independent SQLite database, cache, vector indexes,
+logs, and runtime files under
+`workspaces/.state/workspaces/<workspace_id>/`. Model weights under `models/`
+are the only shared runtime asset. Reprocessing a collection separately for
+each workspace that mounts it is an accepted cost. The complete contract is
+locked in `docs/features/workspace-scoped-state.md`.
+
+## Data and custody model
+
+Durable source identity is `(collection_id, sha256)`, never a filesystem path.
+Discovery hashes originals before parsing, records first-seen provenance, and
+refreshes the source blob index. A rename preserves identity; a changed hash
+at a known path is a custody alarm, not an update.
+
+Every derived binary or text copy is written and read back for hash
+verification. Failures are recorded in the database and review queue; they do
+not authorize changes to originals.
+
+The fresh relational schema centres on:
+
+- `ingestion_candidates` and `source_blob_index` for discovery and custody;
+- `items`, `item_memberships`, `item_file_meta`, and `attachments` for parsed
+  evidence and provenance;
+- `threads`, `thread_summaries`, and `chunks` plus their FTS indexes for
+  retrieval;
+- accounts, statements, assertions, transactions, and transfer links for
+  marked bank-statement collections.
+
+Email `items.parent_item_id` records physical attached-email lineage, while
+`items.reply_parent_item_id` records a proven RFC conversation edge. These are
+different relationships and must never be conflated.
+
+## Staged ingestion
+
+`ingest all` is the sole full-pipeline orchestration and runs these stages in
+order:
+
+1. **discover** — walk the selected workspace's mounted collections once,
+   hash originals, populate candidates, and refresh the blob index;
+2. **emails** — parse MIME, render readable artifacts, route attachments,
+   recursively process attached emails and ZIP members, then derive authored
+   bodies after the run's message graph is available;
+3. **pdfs** — collect verified PDF copies, persist OCR derivatives using
+   `ocrmypdf --redo-ocr --clean`, then extract layout-preserving text with
+   `pdftotext -layout`;
+4. **thread** — reconstruct complete threads and direct reply relationships;
+5. **summaries** — maintain staleness and generate local-LLM navigation
+   summaries for complete multi-message threads;
+6. **embed** — chunk evidentiary text and maintain separate leaf and
+   thread-summary indexes;
+7. **transactions** — parse, validate, reconcile, and link statements from
+   mounted collections marked `ingestion-type: bank-transactions`.
+
+Stages implement the common `Stage` interface, receive one explicit
+`PipelineContext`, never parse CLI arguments, never call one another, and
+return `StageStats`. A named stage assumes its prerequisites already exist;
+only CLI orchestration owns ordering and gates.
+
+Stages are idempotent and resumable. A failure is loud and reviewable while
+independent work continues where custody permits. Summary-staleness maintenance
+always runs; configuration gates only the generative pass.
+
+## Derived artifacts
+
+Each collection has a cache below its owning workspace state. Every email,
+including attached emails, receives one flat
+`<basename>__<sha8>/` directory containing exactly two readable artifacts:
+
+- `email_message_full.txt` — decoded envelope plus lossless full body; never
+  compacted or embedded;
+- `email_message.txt` — decoded envelope plus the sender's derived authored
+  body; write-verified and used as the human evidence view.
+
+The authored body region of `email_message.txt` is the email leaf-chunk source.
+Chunk offsets are relative to that region, so rendered-envelope changes do not
+change chunk identity. The header block is never chunked; the embedding payload
+derives its stable envelope prefix from database fields.
+
+PDFs retain verified `pdf-original/`, persistent `pdf-ocr/`, and
+`pdf-to-text/` artifacts. Attached PDF artifacts remain under their carrying
+email folder; corpus-native PDF artifacts live at collection-cache level.
+
+Quoted-reply compaction is conservative: only an exact, unique match to the
+resolved direct parent's normalized body can authorize a cut. Missing,
+ambiguous, or interleaved parents preserve the full body. The frozen historical
+mechanics are documented in `docs_old/specs/quoted-reply-compaction.md`.
+
+## Retrieval and answering
+
+Only authored email body regions and PDF text are evidentiary leaf chunks.
+Generated thread summaries are a separate navigation namespace and are never
+evidence or citation targets.
+
+Retrieval combines leaf FTS, leaf dense, summary FTS, and summary dense legs;
+fuses and reranks candidates; deduplicates relational matches; and expands
+readable source context through SQLite. Dense and FTS leaf search consume the
+same source-aware envelope-enriched payload while `chunks.text` remains a pure
+evidentiary quotation.
+
+Every corpus claim must cite its underlying email or document. The future local
+answering pass consumes delimited evidence packets and may use summaries only
+to navigate toward evidence. Detailed invariants and acceptance criteria live
+in `docs/features/embedding-design.md`.
+
+## Bank transactions
+
+A mounted collection marked `ingestion-type: bank-transactions` represents one
+configured account. Stage 1 owns discovery and blob-index refresh; the
+transaction stage resolves statement PDFs through custody records and parsed
+artifacts rather than walking evidence again.
+
+Money is signed integer minor units, never floating point. Every expected PDF
+must either parse successfully or produce a loud unparsed, not-ingested, or
+account-mismatch finding. Rebuilds are deterministic and atomic, retaining
+statement assertions, transfer matching, reconciliation overrides, coverage
+reporting, tamper signals, and row-level citations.
+
+Workspace-owned `reconciliation.yaml` and `counterparties.yaml` remain user
+data outside engine state and survive state wipes.
+
+## Runtime and code boundaries
+
+- Runtime is Python 3.14.
+- `pocket-advisor.py` is the sole executable entrypoint.
+- `modules/cli.py` is the sole argparse surface and owns orchestration.
+- New implementation lives under `modules/` as typed domain classes and one
+  class per pipeline stage.
+- Stage modules do not import or sequence other stages.
+- The frozen `scripts/` tree is reference-only until adapter retirement;
+  nothing under `modules/` imports it. Transitional commands that cannot obey
+  the selected workspace must fail closed.
+- SQLite is the relational source of truth. Local NumPy vector matrices and
+  per-entity files are convergent derived indexes, not a second authority.
+
+## Lifecycle
+
+Workspace state is regenerable; evidence and workspace user data are not.
+`wipe state` validates and deletes only the explicitly selected workspace state
+after immediate user confirmation. It never deletes the common `.state`
+parent, a collection root, golden sets, benchmark results, playbooks, or
+reconciliation files.
+
+The clean-break migration is:
+
+```text
+confirm selected-workspace wipe
+→ initialize fresh workspace-bound schema
+→ ingest all
+→ verify custody and indexes
+→ run the native golden-set accuracy suite
+```
+
+No automatic cutover wipe is permitted.
+
+## System acceptance invariants
+
+1. Originals are never modified, and every derived copy is write-verified.
+2. Import order cannot change durable identity, thread keys, reply edges,
+   summary source digests, or chunk identity.
+3. A workspace operation cannot read, mutate, search, or delete another
+   workspace's derived state.
+4. Re-running an unchanged stage creates no duplicate relational entities and
+   performs no unnecessary model work.
+5. Missing or failed derived artifacts stay retryable and cannot masquerade as
+   current searchable state.
+6. Generated summaries are visibly non-evidentiary and never cited as source
+   material.
+7. Retrieval returns readable, relationally expanded evidence within one
+   per-answer context budget.
+8. Transaction parsing is deterministic, atomic, integer-valued, reconciled,
+   and fully traceable to statement rows.
+9. Custody and tamper tests use temporary fixtures only; tests never modify
+   real collection roots or live workspace state.

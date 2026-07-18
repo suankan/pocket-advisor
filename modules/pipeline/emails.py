@@ -1,7 +1,7 @@
 """Stage 2 — Parse emails into per-email cache folders.
 
 For each EMAIL candidate from Stage 1
-(`docs/workspace-parsing-design.md`):
+(`docs/design.md`):
 
     cache/<collection_id>/<basename>__<sha8>/
         email_message_full.txt     readable headers + lossless body (2a)

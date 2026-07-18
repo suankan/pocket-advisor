@@ -42,7 +42,7 @@ defaults in `modules/config.py`. Schema and comments live in
   run.
 
 There is no privileged-content concept (removed 2026-07-18, see
-docs/workspace-parsing-design.md) — no privilege keys, flags, or
+docs/design.md) — no privilege keys, flags, or
 restricted retrieval passes exist.
 
 ## User-data layout + workspace-config (v2)

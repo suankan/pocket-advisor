@@ -1,6 +1,6 @@
 """PDF → text pipeline wrappers: ocrmypdf then pdftotext (PDF-only).
 
-Stage 3.2 command sequence (`docs/workspace-parsing-design.md`):
+Stage 3.2 command sequence (`docs/design.md`):
 
     ocrmypdf --redo-ocr --clean ... pdf-original/X  pdf-ocr/X-ocrmypdf.pdf
     pdftotext -layout pdf-ocr/X-ocrmypdf.pdf  pdf-to-text/X.txt

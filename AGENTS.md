@@ -1,8 +1,7 @@
 # Pocket Advisor — Agent Instructions
 
 Pocket Advisor is a local, privacy-preserving RAG engine over personal
-evidence. The ingestion engine is being rebuilt around the staged workspace
-parsing design under `docs/`.
+evidence. The solution architecture is locked under `docs/`.
 
 ## Read first
 
@@ -12,11 +11,13 @@ For every platform task, load these files in order:
 2. `docs/status.md` — the single status-tracking document and pickup
    point;
 3. `docs/changelog.md` — shipped roadmap history, newest first;
-4. `docs/workspace-parsing-design.md` — locked ingestion architecture
-   and acceptance decisions;
-5. `docs/embedding-design.md` — locked embedding/thread-retrieval
+4. `docs/design.md` — concise holistic solution architecture and system
+   invariants;
+5. `docs/features/workspace-scoped-state.md` — locked per-workspace
+   database/cache and mandatory CLI workspace-selection design;
+6. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
    design (review-refined);
-6. `docs/roadmap.md` — ordered future work only.
+7. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -85,7 +86,7 @@ archived `docs_old/` changelog.
    confirmation immediately before that wipe.
 
 There is no privileged-content concept. It was removed by decision on
-2026-07-18 (docs/workspace-parsing-design.md): the sole user already owns
+2026-07-18 (`docs/design.md`): the sole user already owns
 every document fed into the system, so no privilege flags, restricted
 retrieval passes, or ACLs exist anywhere in the new engine. The frozen
 `scripts/` tree still contains the old privilege code; it is reference-only
@@ -107,6 +108,10 @@ and deleted at adapter retirement, not maintained.
   or sequence one another.
 - The new database is fresh-schema only and deliberately refuses legacy
   state. Do not add compatibility migrations or shims.
+- Locked target (not yet implemented): every workspace owns a separate
+  database/cache/vector/log/runtime tree and every operational CLI command
+  requires global `--workspace`. Until roadmap item 1 lands, follow
+  `docs/status.md` for the still-shared runtime and do not resume cutover.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
   retained for custody/manual inspection but are not text-extracted or
   embedded.
@@ -160,7 +165,7 @@ Always confirm this against `docs/status.md` and
 - foundations, Stages 1–5, stable thread relationships, thread summaries,
   dual indexes, and cold relational query are implemented under `modules/`;
 - the post-implementation review's actionable findings are all fixed and
-  folded into `docs/embedding-design.md` (per-answer context budget,
+  folded into `docs/features/embedding-design.md` (per-answer context budget,
   always-on summary staleness maintenance, rerank cap, match dedup,
   warnings, ghost-root coverage);
 - the privileged-content concept is removed engine-wide;
@@ -175,9 +180,10 @@ Always confirm this against `docs/status.md` and
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.
 
-The ordered continuation lives in `docs/roadmap.md` (confirmed cutover resume,
-adapter retirement, answering pass, experiments; the payload A/B measurement
-waits for the native accuracy port).
+The ordered continuation lives in `docs/roadmap.md` (workspace-scoped state
+and mandatory selection, confirmed cutover resume, adapter retirement,
+answering pass, experiments; the payload A/B measurement waits for the native
+accuracy port).
 
 ## Transaction-stage constraints
 

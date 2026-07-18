@@ -2,9 +2,9 @@
 
 The single status-tracking document for the platform (formerly
 `workspace-parsing-design-status.md`). Last updated: 2026-07-18.
-Locked architecture: `docs/workspace-parsing-design.md` and
-`docs/embedding-design.md`. Shipped history: `docs/changelog.md`. Future work:
-`docs/roadmap.md`.
+Locked architecture: `docs/design.md` and feature decisions under
+`docs/features/`.
+Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 
 ## Done
 
@@ -43,7 +43,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 ## Current operating state
 
 - **Privilege concept removed (`4a593ef`):** per the locked
-  decision in `docs/workspace-parsing-design.md`, all privilege handling
+  decision in `docs/design.md`, all privilege handling
   was dropped from `modules/`, `config.yaml`, the user registry, tests,
   and current docs: no registry `privileged:` key (now rejected as
   unknown), no `is_privileged`/`privilege_override` schema columns, no
@@ -54,10 +54,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   privilege-free fresh schema — use cold `query` until their native
   port.
 - **Embedding/thread implementation (`0fb9f6f`, refined at `9b9e052`):**
-  `docs/embedding-design.md` is the locked design. Thread IDs now use stable
-  root Message-ID keys and store real `reply_parent_item_id` edges. A local
-  `summaries` stage generates digest/versioned navigation summaries for
-  multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
+  `docs/features/embedding-design.md` is the locked design. Thread IDs now
+  use stable root Message-ID keys and store real `reply_parent_item_id` edges.
+  A local `summaries` stage generates digest/versioned navigation summaries
+  for multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
   maintains separate leaf and summary vector matrices; and cold `query` runs
   four retrieval legs, fuses/deduplicates threads, then returns DB-addressed
   readable email evidence. Focused synthetic tests pass.
@@ -71,7 +71,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   missing-artifact threads held stale and review-flagged,
   `threads.item_count` rename, and ghost-root + disabled-generation
   fixture coverage. The refined behaviors are folded into
-  `docs/embedding-design.md`; the separate review-findings document is
+  `docs/features/embedding-design.md`; the separate review-findings document is
   deleted; open items (native daemon/accuracy, verify FTS
   integrity-check) moved to `docs/roadmap.md`.
 - **Envelope payload + two-artifact cache implemented (`a48bf7b`):** leaf
@@ -84,6 +84,15 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   envelope-relative offsets. Temp fixtures cover email, attachment, and native
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
+
+- **Workspace-scoped state design locked (implementation pending):**
+  `docs/features/workspace-scoped-state.md` replaces the shared-state target
+  with one bound SQLite database plus cache/vector/log/runtime tree per
+  workspace. Every operational CLI invocation will require an explicit global
+  `--workspace`; duplicated derived state for multiply mounted collections is
+  an accepted cost, and only model weights remain shared. Current code still
+  uses the active registry workspace and shared `workspaces/.state` paths;
+  roadmap item 1 implements the decision before cutover resumes.
 
 - **New CLI implemented** in `modules/cli.py` at `97ee193`;
   `pocket-advisor.py` is now the venv bootstrap plus a
@@ -105,16 +114,17 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   authored body region only, the email leaf-chunk source.
 - Cutover started on 2026-07-17: the legacy `.state` was wiped, discovery
   and email parsing completed, then ingestion was stopped by the user during
-  the PDF stage. Partial new-layout derived state remains; no ingestion/OCR
-  process is running.
+  the PDF stage. Partial shared-layout derived state remains and will not be
+  migrated into workspace-scoped state; no ingestion/OCR process is running.
 - venv is Python 3.14.6; old and new code share it.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover**, which requires explicit user
-confirmation immediately before `wipe state`. After the full re-ingest:
-adapter retirement, local answering, and experiments follow in order; payload
-A/B measurement follows the native accuracy port.
+The roadmap head is **1. Workspace-scoped state and mandatory workspace
+selection**. Implement and verify it without touching live derived state.
+Then resume cutover with explicit confirmation immediately before the
+workspace-scoped wipe; adapter retirement, local answering, and experiments
+follow in order.
 
 ## Watch-outs
 

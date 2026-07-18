@@ -4,25 +4,7 @@ Ordered future work only. Current state lives in `docs/status.md`; shipped
 roadmap history in `docs/changelog.md`; locked architecture in
 `docs/design.md`, with detailed feature decisions under `docs/features/`.
 
-## 1. Default full-ingest completion report
-
-Implement `docs/features/ingest-all-reporting.md` so every `ingest all` run
-finishes with:
-
-- monotonic per-stage and pipeline timings plus run-local `StageStats`;
-- a read-only snapshot of source/evidence, PDF, thread/summary, search-index,
-  and transaction totals;
-- concise current finding rollups, including honest single-account transfer
-  coverage rather than the vacuous “all accounts covered” classification;
-- an aggregate-only, schema-versioned JSON record under the selected
-  workspace's logs for later end-to-end timing automation.
-
-Keep named-stage output unchanged, share transaction classification with the
-standalone report, avoid model/corpus work during reporting, and cover success,
-tolerated findings, idempotent reruns, skips, stage failures, and report
-failures with temporary fixtures.
-
-## 2. Resume cutover (requires explicit user confirmation)
+## 1. Resume cutover (requires explicit user confirmation)
 
 The partial derived state predates the stable-thread/summary schema and
 is intentionally refused by the engine. When directed:
@@ -32,12 +14,12 @@ is intentionally refused by the engine. When directed:
 2. `./pocket-advisor.py --workspace case-documents-demo ingest all` — full
    re-ingest from corpora, including thread
    summaries and the dual vector index;
-3. after the native accuracy command is available in item 3, run the golden-set
+3. after the native accuracy command is available in item 2, run the golden-set
    checks; meanwhile spot-check cache folders,
-   generated summaries, reply relationships, and readable evidence
-   packets.
+   generated summaries, reply relationships, readable evidence
+   packets, and the saved `ingest report` run record.
 
-## 3. Adapter retirement
+## 2. Adapter retirement
 
 Port the remaining frozen commands into `modules/`, then delete
 `scripts/`:
@@ -63,14 +45,14 @@ Port the remaining frozen commands into `modules/`, then delete
 - Move the thread-summary/query config defaults from `modules/config.py`
   into committed `config.yaml` once no frozen command strict-reads it.
 
-## 4. Local answering pass
+## 3. Local answering pass
 
 The retrieval layer returns delimited evidence packets; the answering
 pass (design sketch in `docs/features/embedding-design.md`) feeds them to a
 local MLX model that produces a cited answer, shows readable source
 material, and never cites a generated thread summary as evidence.
 
-## 5. Experiments and watchlist
+## 4. Experiments and watchlist
 
 - **Rolling-summary quality on long threads** — a changed N-message
   thread replays N generations and the 600-token ceiling compresses

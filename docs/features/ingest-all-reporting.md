@@ -1,7 +1,7 @@
 # Full-Ingest Completion Reporting
 
-Status: **locked 2026-07-18; not yet implemented**. Implementation is roadmap
-item 1.
+Status: **locked 2026-07-18; implemented at `78e705a`**, including the
+saved-record display command (decision 13).
 
 This feature makes every successful or failed `ingest all` invocation end with
 one concise, trustworthy account of what the run did and what searchable state

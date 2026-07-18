@@ -27,9 +27,10 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `a48bf7b` | **Envelope payload + message-artifact consolidation**: source-aware email/document/attachment payloads shared by dense and FTS retrieval; `envelope-v1` fingerprint separation; pure evidentiary chunk text; envelope-relative email offsets; final write-verified two-artifact email cache; comprehensive temp-fixture coverage |
 | `23b0a42` | **Workspace-scoped state + mandatory selection**: required global `--workspace`; explicit workspace runtime context; independent bound DB/cache/vector/log/runtime trees; exact native workspace wipe; unsafe frozen commands fail closed; redundant `active:` key removed; two-workspace custody/isolation coverage |
 | `c6df0a3` | **Command-scoped workspace selection**: workspace required only for actions that access workspace scope; registry-free shared model fetch and fixture tests; file-addressed accuracy comparison classified workspace-free; meaningless selectors rejected; exhaustive CLI action-matrix coverage |
+| `78e705a` | **Full-ingest completion reporting + saved-record display**: typed end-of-run report (stage timings/outcomes, read-only workspace snapshot, finding rollups); atomic schema-versioned JSON record per run; shared honest transaction-coverage classifier; `ingest report [--last \| PATH]` re-renders any saved record through the same formatter without opening the database |
 
-Current self-tests: all 9 `modules/tests/test_*.py` pass, including the
-workspace-isolation fixture
+Current self-tests: all 10 `modules/tests/test_*.py` pass, including the
+workspace-isolation and ingest-reporting fixtures
 (`./pocket-advisor.py test`). The frozen
 `scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
 
@@ -88,6 +89,16 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
 
+- **Full-ingest completion reporting implemented (`78e705a`):** every
+  `ingest all` ends with the locked report contract from
+  `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a
+  read-only workspace snapshot, honest transaction-coverage rollups shared
+  with `transactions report`, and one atomic schema-versioned JSON record
+  under the workspace's `logs/ingest-runs/`. `ingest report
+  [--last | PATH]` re-renders any saved record identically via the shared
+  formatter, resolves the latest by filename ordering, and never opens the
+  database. Verified end-to-end against the isolated test workspace's real
+  run record.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns a bound database plus independent
@@ -105,9 +116,9 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   entrypoint. Argparse lives only in `modules/cli.py`; nothing in `modules/`
   imports from `scripts/`.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
-  `transactions report`, `db init`, and the 9-test module runner are wired
-  to the new engine. Removed stage spellings and `blob-index rebuild` are
-  rejected, not aliased.
+  `ingest report [--last | PATH]`, `transactions report`, `db init`, and the
+  10-test module runner are wired to the new engine. Removed stage spellings
+  and `blob-index rebuild` are rejected, not aliased.
 - Real `query` dispatches to the native cold relational retriever and
   `wipe state` is workspace-native. Daemon, accuracy, verify, blob lookup, and
   vector-index wipe fail closed until their native ports land.
@@ -126,13 +137,11 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Default full-ingest completion report**, locked in
-`docs/features/ingest-all-reporting.md`. Implement the CLI-owned timing and
-post-run snapshot before the production cutover so subsequent `ingest all`
-runs produce a concise human assessment and local machine-readable run record
-by default. Resume cutover (still requiring explicit confirmation immediately
-before the workspace-scoped production wipe), adapter retirement, local
-answering, and experiments follow.
+The roadmap head is **1. Resume cutover** — requiring explicit user
+confirmation immediately before the workspace-scoped production wipe, then
+a full `ingest all` (which now ends with the default completion report and
+saved run record) and golden-set/spot checks. Adapter retirement, the local
+answering pass, and experiments follow (`docs/roadmap.md`).
 
 ## Watch-outs
 

@@ -4,6 +4,39 @@ Reverse-chronological history of shipped platform roadmap items. Current
 operating state lives in `docs/status.md`; future work lives only in
 `docs/roadmap.md`.
 
+## 2026-07-18 — Full-ingest completion reporting and saved-record display
+
+Implementation commit: `78e705a`.
+
+- Every `ingest all` run now ends with the typed completion report:
+  monotonic per-stage/pipeline timings with run-local `StageStats`, a
+  read-only workspace snapshot (sources, evidence, PDFs, threads/summaries,
+  search indexes, transactions), and severity-graded finding rollups.
+- Wrote an aggregate-only, schema-versioned, atomically write-verified JSON
+  record per run under the selected workspace's `logs/ingest-runs/`;
+  `INCOMPLETE`/`REPORT FAILED` semantics preserve the original pipeline
+  error and exit non-zero when the reporting contract is unmet.
+- Shared the transaction coverage classifier with `transactions report`,
+  classifying single-account unmatched transfer-like debits honestly as
+  `single_account_unverifiable` instead of “all accounts covered”.
+- Added `ingest report [--last | PATH]` (feature decision 13): loads a
+  persisted record back through the shared formatter for an identical later
+  rendering; latest resolves by filename ordering with no symlink; the
+  command opens no database and rejects conflicting, missing, or
+  wrong-schema inputs with clear messages.
+- Documented the records location and display command in the RUNBOOK and
+  the feature doc (decision 13, acceptance criterion 14).
+
+Verification: native module tests 10/10 (including the new reporting and
+CLI-display fixtures); frozen tests 11/11; `git diff --check` clean;
+`ingest report --last` verified end-to-end against a real saved record in
+the isolated test workspace. No live corpus or production workspace state
+was touched.
+
+Deferred: the explicitly confirmed production cutover is now the roadmap
+head; full custody/FTS integrity verification remains with the native
+`verify` port in adapter retirement.
+
 ## 2026-07-18 — Command-scoped workspace selection
 
 Implementation commit: `c6df0a3`.

@@ -8,10 +8,12 @@
     the existing item instead of re-copying (shared content graph).
 
 3.2 pdf-to-text: one queue over BOTH locations —
-    - email-attachment PDFs (attachments rows left pending by Stage 2:
-      extraction_method IS NULL), inside each email folder's
+    - email-attachment PDFs (attachments rows left pending by Stage 2 or
+      previously failed: extraction_method IS NULL or 'error'), inside each
+      email folder's
       attachments/pdf-original/;
-    - native PDFs (item_file_meta rows with extraction_method IS NULL)
+    - native PDFs (item_file_meta rows with extraction_method IS NULL or
+      'error')
       at collection level.
     Each gets a persistent OCR derivative in pdf-ocr/ and a text
     artifact in pdf-to-text/. Failures are review-flagged and recorded
@@ -123,12 +125,13 @@ class PdfTextStage(Stage):
     def _ocr_pending(self, stats: StageStats) -> None:
         attachment_jobs = self.conn.execute(
             "SELECT id, filename, extracted_copy_path FROM attachments"
-            " WHERE extraction_method IS NULL"
+            " WHERE (extraction_method IS NULL OR extraction_method = 'error')"
             " AND extracted_copy_path IS NOT NULL ORDER BY id").fetchall()
         native_jobs = self.conn.execute(
             "SELECT m.item_id, m.extracted_copy_path, i.subject"
             " FROM item_file_meta m JOIN items i ON i.id = m.item_id"
-            " WHERE m.extraction_method IS NULL"
+            " WHERE (m.extraction_method IS NULL"
+            " OR m.extraction_method = 'error')"
             " AND m.extracted_copy_path IS NOT NULL"
             " ORDER BY m.item_id").fetchall()
 
@@ -142,21 +145,36 @@ class PdfTextStage(Stage):
             self._ocr_native(row, stats)
         progress.done()
 
-    def _extract(self, copy_path: Path) -> tuple[str, Path]:
+    def _extract(self, copy_path: Path) -> tuple[str, Path, str | None]:
         """OCR derivative + text artifact next to a pdf-original/ copy."""
         ocr_dir = copy_path.parent.with_name("pdf-ocr")
         txt_dir = copy_path.parent.with_name("pdf-to-text")
         derivative = ocr_dir / f"{copy_path.stem}-ocrmypdf.pdf"
         txt_path = txt_dir / f"{copy_path.stem}.txt"
-        ocr_to_derivative(copy_path, derivative,
-                          langs=self.config.ocr_langs)
-        text = pdf_to_text(derivative, txt_path)
-        return text, txt_path
+        ocr_warning = ocr_to_derivative(
+            copy_path, derivative, langs=self.config.ocr_langs)
+        try:
+            text = pdf_to_text(derivative, txt_path)
+        except OcrError as exc:
+            if ocr_warning:
+                raise OcrError(f"{ocr_warning}; {exc}") from exc
+            raise
+        return text, txt_path, ocr_warning
+
+    def _record_ocr_warning(self, path: str, label: str,
+                            warning: str | None,
+                            stats: StageStats) -> None:
+        if warning is None:
+            return
+        self.review.flag(
+            path, self.name, "warning",
+            f"{label}: {warning}; pdftotext -layout succeeded")
+        stats.inc("ocr_warnings")
 
     def _ocr_attachment(self, row, stats: StageStats) -> None:
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
-            _, txt_path = self._extract(copy_path)
+            _, txt_path, ocr_warning = self._extract(copy_path)
         except (OcrError, OSError) as exc:
             self.review.flag(row["extracted_copy_path"], self.name, "error",
                              f"attachment {row['id']}: {exc}")
@@ -167,9 +185,13 @@ class PdfTextStage(Stage):
             self.conn.commit()
             stats.inc("ocr_errors")
             return
+        self._record_ocr_warning(
+            row["extracted_copy_path"], f"attachment {row['id']}",
+            ocr_warning, stats)
         self.conn.execute(
             "UPDATE attachments SET extraction_method = ?,"
-            " extracted_text_path = ?, processed_at = ? WHERE id = ?",
+            " extracted_text_path = ?, skip_reason = NULL, processed_at = ?"
+            " WHERE id = ?",
             (EXTRACTION_METHOD,
              str(txt_path.relative_to(self.config.project_root)),
              now_iso(), row["id"]))
@@ -180,7 +202,7 @@ class PdfTextStage(Stage):
         item_id = int(row["item_id"])
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
-            text, txt_path = self._extract(copy_path)
+            text, txt_path, ocr_warning = self._extract(copy_path)
         except (OcrError, OSError) as exc:
             self.review.flag(row["extracted_copy_path"], self.name, "error",
                              f"item {item_id}: {exc}")
@@ -192,6 +214,10 @@ class PdfTextStage(Stage):
             stats.inc("ocr_errors")
             return
 
+        self._record_ocr_warning(
+            row["extracted_copy_path"], f"item {item_id}", ocr_warning,
+            stats)
+
         mtime_iso = datetime.fromtimestamp(
             copy_path.stat().st_mtime, tz=timezone.utc).date().isoformat()
         filename = copy_path.name
@@ -202,7 +228,8 @@ class PdfTextStage(Stage):
         self.conn.execute(
             "UPDATE item_file_meta SET extraction_method = ?,"
             " extracted_text_path = ?, doc_date = ?, doc_date_source = ?,"
-            " doc_date_detail = ?, doc_date_raw = ?, processed_at = ?"
+            " doc_date_detail = ?, doc_date_raw = ?, skip_reason = NULL,"
+            " processed_at = ?"
             " WHERE item_id = ?",
             (EXTRACTION_METHOD, txt_rel, doc_date.date_iso, doc_date.source,
              doc_date.detail, doc_date.raw, now_iso(), item_id))

@@ -37,9 +37,18 @@ def _detail(result: subprocess.CompletedProcess[bytes]) -> str:
 
 
 def ocr_to_derivative(source: Path, derivative: Path,
-                      *, langs: str) -> None:
-    """OCRmyPDF the source into a persistent derivative PDF."""
+                      *, langs: str) -> str | None:
+    """OCRmyPDF the source into a persistent derivative PDF.
+
+    OCRmyPDF may produce a derivative and then return non-zero because its
+    final structural validation found warnings.  Such an output is still
+    eligible for the authoritative ``pdftotext`` extraction attempt.  Return
+    the OCR diagnostic in that case so the caller can record it after text
+    extraction succeeds.  A stale derivative is removed first so a failed
+    attempt can never make an older output look current.
+    """
     derivative.parent.mkdir(parents=True, exist_ok=True)
+    derivative.unlink(missing_ok=True)
     result = run_command(
         ["ocrmypdf", "--redo-ocr", "--clean",
          "--output-type", "pdf", "--optimize", "0",
@@ -47,15 +56,17 @@ def ocr_to_derivative(source: Path, derivative: Path,
          "--jobs", str(os.process_cpu_count() or 1),
          str(source), str(derivative)],
         timeout=OCRMYPDF_TIMEOUT_SEC)
-    if result.returncode != 0:
-        detail = _detail(result)
-        raise OcrError(f"ocrmypdf failed ({result.returncode})"
-                       + (f": {detail}" if detail else ""))
+    if result.returncode == 0:
+        return None
+    detail = _detail(result)
+    return (f"ocrmypdf exited {result.returncode}"
+            + (f": {detail}" if detail else ""))
 
 
 def pdf_to_text(pdf: Path, txt: Path) -> str:
     """pdftotext -layout into txt; returns the extracted text."""
     txt.parent.mkdir(parents=True, exist_ok=True)
+    txt.unlink(missing_ok=True)
     result = run_command(
         ["pdftotext", "-layout", str(pdf), str(txt)],
         timeout=PDFTOTEXT_TIMEOUT_SEC)
@@ -63,4 +74,11 @@ def pdf_to_text(pdf: Path, txt: Path) -> str:
         detail = _detail(result)
         raise OcrError(f"pdftotext -layout failed ({result.returncode})"
                        + (f": {detail}" if detail else ""))
-    return txt.read_text(encoding="utf-8", errors="replace")
+    if not txt.is_file():
+        raise OcrError("pdftotext -layout exited 0 but did not create "
+                       f"the output file: {txt}")
+    try:
+        return txt.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise OcrError(f"pdftotext output is not readable: {txt}: {exc}") \
+            from exc

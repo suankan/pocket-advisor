@@ -154,6 +154,12 @@ derives its stable envelope prefix from database fields.
 PDFs retain verified `pdf-original/`, persistent `pdf-ocr/`, and
 `pdf-to-text/` artifacts. Attached PDF artifacts remain under their carrying
 email folder; corpus-native PDF artifacts live at collection-cache level.
+OCRmyPDF may write a usable derivative and then return non-zero during its
+final structural validation. When a fresh derivative exists, Stage 3 still
+runs `pdftotext -layout`: a zero exit, present output file, and readable text
+artifact make the occurrence searchable, while the OCR anomaly remains a
+review warning. A failed or missing `pdftotext` output keeps the occurrence in
+the error queue for retry; stale derivatives and text outputs are never reused.
 
 Quoted-reply compaction is conservative: only exact normalized content from
 the resolved direct parent can authorize a cut. The first 16 parent tokens are

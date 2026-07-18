@@ -43,7 +43,10 @@ STATEMENT_TEXT = ("ACME BANK\nStatement period 01/02/2026 - 28/02/2026\n"
                   "Date  Description  Debit  Credit\n")
 
 
-def fake_run_factory(calls: list[list[str]], fail_for: set[str]):
+def fake_run_factory(calls: list[list[str]], fail_for: set[str],
+                     warn_for: set[str] | None = None):
+    warn_for = warn_for or set()
+
     def fake_run(args: list[str], timeout: int):
         calls.append(args)
         program = args[0]
@@ -54,6 +57,9 @@ def fake_run_factory(calls: list[list[str]], fail_for: set[str]):
         target.parent.mkdir(parents=True, exist_ok=True)
         if program == "ocrmypdf":
             target.write_bytes(b"%PDF-derived " + source.read_bytes())
+            if any(marker in source.name for marker in warn_for):
+                return subprocess.CompletedProcess(
+                    args, 4, b"", b"generated PDF has structural warnings")
         else:
             assert program == "pdftotext" and args[1] == "-layout"
             target.write_text(STATEMENT_TEXT, encoding="utf-8")
@@ -78,6 +84,8 @@ def build_fixtures(ws_dir: Path) -> None:
                        subtype="pdf", filename="attached.pdf")
     msg.add_attachment(b"%PDF-attached-BROKEN", maintype="application",
                        subtype="pdf", filename="broken.pdf")
+    msg.add_attachment(b"%PDF-attached-WARNED", maintype="application",
+                       subtype="pdf", filename="warned.pdf")
     (mail / "with-pdfs.eml").write_bytes(msg.as_bytes())
 
     (statements / "acme-feb.pdf").write_bytes(b"%PDF-native-acme")
@@ -107,7 +115,8 @@ def main() -> int:
         EmailStage(ctx).run()
 
         calls: list[list[str]] = []
-        fake_run = fake_run_factory(calls, fail_for={"broken"})
+        fake_run = fake_run_factory(
+            calls, fail_for={"broken"}, warn_for={"warned"})
         with patch.object(ocr, "run_command", side_effect=fake_run):
             stats = PdfTextStage(ctx).run()
 
@@ -127,8 +136,10 @@ def main() -> int:
         assert copy_rel.endswith(".pdf") and "pdf-original" in copy_rel
         assert (tmp / copy_rel).read_bytes() == b"%PDF-native-acme"
 
-        # 3.2: ok for attached.pdf + native; error recorded for broken.pdf.
-        assert stats.get("ocr_ok") == 2, stats
+        # 3.2: OCR warning is tolerated only because pdftotext succeeds;
+        # attached.pdf + warned.pdf + native are readable, broken.pdf errors.
+        assert stats.get("ocr_ok") == 3, stats
+        assert stats.get("ocr_warnings") == 1, stats
         assert stats.get("ocr_errors") == 1, stats
         ok_att = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'attached.pdf'"
@@ -139,6 +150,18 @@ def main() -> int:
         derivative = (txt_path.parent.with_name("pdf-ocr") /
                       f"{txt_path.stem}-ocrmypdf.pdf")
         assert derivative.is_file()   # persistent OCR artifact
+        warned = conn.execute(
+            "SELECT * FROM attachments WHERE filename = 'warned.pdf'"
+        ).fetchone()
+        assert warned["extraction_method"] == ocr.EXTRACTION_METHOD
+        assert (tmp / warned["extracted_text_path"]).is_file()
+        warning = conn.execute(
+            "SELECT severity, message FROM ingestion_log"
+            " WHERE stage = 'pdfs' AND severity = 'warning'"
+            " AND message LIKE 'attachment %ocrmypdf exited 4%'"
+        ).fetchone()
+        assert warning is not None, "non-zero OCR exit was not review-flagged"
+        assert "pdftotext -layout succeeded" in warning["message"]
         broken = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
         ).fetchone()
@@ -171,15 +194,40 @@ def main() -> int:
             (DocumentType.PDF, CandidateStatus.CANDIDATE)).fetchone()[0]
         assert pending == 0
 
-        # Idempotent re-run: broken.pdf is NOT retried (error is
-        # terminal until wiped), nothing else pending.
+        # A failed artifact remains retryable.  The successful retry clears
+        # the old error while already-readable PDFs remain idempotent.
         calls2: list[list[str]] = []
         with patch.object(ocr, "run_command",
                           side_effect=fake_run_factory(calls2, set())):
             stats2 = PdfTextStage(ctx).run()
-        assert stats2.get("ocr_ok", ) == 0, stats2
+        assert stats2.get("ocr_ok", ) == 1, stats2
         assert stats2.get("native_new", ) == 0, stats2
-        assert calls2 == [], calls2
+        assert [call[0] for call in calls2] == ["ocrmypdf", "pdftotext"]
+        broken = conn.execute(
+            "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
+        ).fetchone()
+        assert broken["extraction_method"] == ocr.EXTRACTION_METHOD
+        assert broken["skip_reason"] is None
+        assert (tmp / broken["extracted_text_path"]).is_file()
+
+        # A zero pdftotext exit without an output file is not success.
+        missing_txt = tmp / "missing-output.txt"
+        with patch.object(
+                ocr, "run_command",
+                return_value=subprocess.CompletedProcess([], 0, b"", b"")):
+            try:
+                ocr.pdf_to_text(tmp / "input.pdf", missing_txt)
+            except ocr.OcrError as exc:
+                assert "did not create the output file" in str(exc)
+            else:
+                raise AssertionError("missing pdftotext output was accepted")
+
+        calls3: list[list[str]] = []
+        with patch.object(ocr, "run_command",
+                          side_effect=fake_run_factory(calls3, set())):
+            stats3 = PdfTextStage(ctx).run()
+        assert stats3.get("ocr_ok", ) == 0, stats3
+        assert calls3 == [], calls3
 
         conn.close()
     print("test_pdfs: all ok")

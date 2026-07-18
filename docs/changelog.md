@@ -4,6 +4,34 @@ Reverse-chronological history of shipped platform roadmap items. Current
 operating state lives in `docs/status.md`; future work lives only in
 `docs/roadmap.md`.
 
+## 2026-07-18 — Cutover rehearsal completed on the test workspace
+
+Operational milestone (no implementation commit); scope reduction
+recorded at `8d9a1ae`; run record
+`workspaces/.state/workspaces/test/logs/ingest-runs/20260718T050815083153Z.json`.
+
+- Ran a from-scratch `ingest all` over the extended test corpus — 60
+  originals (56 emails including a newly added Russian thread, 4 native
+  PDFs) — through the final schema, envelope-enriched payloads, thread
+  summaries, dual vector index, transactions, and the completion report.
+- Completed in 11m06s: 554 leaf + 7 navigation vectors (indexes
+  consistent), 7/7 eligible summaries generated, 4 Westpac statements /
+  1488 rows balance-ok, 2 tolerated OCR failures correctly reported as
+  findings with review-queue entries.
+- Established production cost rates: OCR ~3.3 s/PDF, summaries
+  ~8.1 s/message, embedding ~0.27 s/chunk → ~2–3 hours estimated for the
+  production corpus (~812 emails, ~196 PDFs), interruption-safe.
+- Reduced roadmap item 1 (Resume cutover) accordingly: the cutover motion
+  is fully rehearsed, no pre-wipe is needed (the production workspace tree
+  does not exist; ingestion is additive), and the only remaining go/no-go
+  input is human QA of Russian summary/retrieval quality on the test
+  workspace.
+
+Deferred: Russian QA, then the explicitly confirmed production
+`ingest all`; statement parsers for the ~120 unparsed production
+statements; confirmed deletion of the ~410 MB legacy shared-layout state
+after the new state validates.
+
 ## 2026-07-18 — Full-ingest completion reporting and saved-record display
 
 Implementation commit: `78e705a`.

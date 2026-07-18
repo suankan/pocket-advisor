@@ -1,7 +1,7 @@
 # Pocket Advisor — Status
 
 The single status-tracking document for the platform (formerly
-`workspace-parsing-design-status.md`). Last updated: 2026-07-18.
+`workspace-parsing-design-status.md`). Last updated: 2026-07-19.
 Locked architecture: `docs/design.md` and feature decisions under
 `docs/features/`.
 Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
@@ -35,6 +35,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `b6b0391` | **Flat workspace-state layout**: `.state/workspace-<id>/` roots, `<id>.db`, and preserved state-owned `search-accuracy-tests/`; no nested state parent or workspace-root accuracy output; exact/symlink/wipe-preservation coverage; native suite 13/13 |
 | `838e037` | **PDF OCR validation-warning recovery**: a fresh derivative from non-zero OCRmyPDF proceeds to the authoritative `pdftotext` gate; warnings remain reviewable, stale outputs cannot be reused, prior failures retry, and successful recovery is idempotent; native suite 13/13 |
 | `aedd667` | **Transaction-stage convergence**: versioned Stage 3 PDF-text recipe freshness; workspace-local semantic input/output manifest; verified unchanged Stage 5 skip; atomic invalidation rebuild; persisted current input findings; exact retired-account cleanup; guarded `ingest transactions --force`; native suite 13/13 |
+| `a9c9d96` | **Multiple-ingestion regression fixes**: verified-original fallback when OCRmyPDF produces no derivative; correct multi-value assertion binding and zero diagnostics; valid zero-activity statements; accurate top-level source/PDF finding reporting; bounded structural failure reasons; PDF/transaction recipe convergence; native suite 13/13 |
 
 Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -117,6 +118,18 @@ failure rolls the whole Stage 5 rebuild back.
   obsolete failure state. The isolated malformed duplicate recovered as two
   readable occurrences and ten chunks; the next full ingest performed no PDF
   or embedding work.
+- **Multiple-ingestion regressions fixed (`a9c9d96`):** Stage 3 now attempts
+  `pdftotext -layout` against the write-verified original when OCRmyPDF
+  refuses to produce any derivative, while keeping the refusal reviewable.
+  Generic assertion discovery binds the first decimal monetary value after a
+  recognized label, integer zero remains distinct from absence, and
+  assertion-bearing zero-activity statements publish normally with zero rows.
+  Full-ingest snapshots now count only top-level custody sources, separate OCR
+  and weak-date categories without equivalent run-flag duplication, and save
+  only bounded structural failure context. The PDF and transaction recipes
+  were bumped; the next operator-run full ingest converges both once without a
+  wipe. The independent unsupported-institution parser backlog remains the
+  roadmap head.
 - **PDF-text freshness + transaction convergence (`aedd667`, design
   `892a3bb`):** Stage 3 records a fingerprint of its OCRmyPDF/`pdftotext`
   wrapper recipe, OCR languages, and local tool versions, and requeues any
@@ -129,9 +142,9 @@ failure rolls the whole Stage 5 rebuild back.
   complete atomic rebuild. Current non-relational findings persist across
   hits, final account unmounts converge to an empty graph, and `verify` checks
   manifest/output agreement. No live workspace state was mutated during the
-  implementation; the first post-upgrade full ingest will normally refresh
-  pre-fingerprint PDF text once and then publish the first transaction
-  manifest.
+  implementation. The `a9c9d96` extraction/build recipe refinements make the
+  next full ingest refresh PDF text once and then publish the corresponding
+  transaction manifest; no wipe is required.
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a

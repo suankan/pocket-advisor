@@ -4,6 +4,45 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Multiple-ingestion regression fixes
+
+Implementation commit: `a9c9d96` (investigation and resolution record:
+`docs/bugs/multiple-ingestion-errors.md`).
+
+- Made Stage 3 fall back to the write-verified original PDF when OCRmyPDF
+  refuses to produce a derivative. The authoritative acceptance gate remains a
+  successful `pdftotext -layout` extraction, while the OCR refusal remains a
+  review warning. Bumped the PDF-text recipe so prior artifacts converge once
+  through the new contract.
+- Corrected generic statement assertion discovery to bind the first decimal
+  monetary value after its recognized label, preventing a later loan-limit
+  value from masquerading as the opening balance. Zero is now preserved in
+  conflict diagnostics.
+- Made assertion-bearing zero-activity statements valid Stage 5 output with
+  zero transaction rows, and bumped the shared transaction recipe so prior
+  builds are safely invalidated.
+- Corrected top-level source totals to derive from the custody blob index and
+  exclude recursively discovered attached emails. Split PDF extraction
+  failures, OCR-recovery warnings, and weak-date warnings into distinct
+  categories without equivalent run-flag duplication.
+- Limited saved failed-stage reasons to aggregate-safe exception type and
+  allowlisted structural conflict context, avoiding both opaque
+  `ParserConflict` records and serialized corpus narrative.
+
+Verification: every `modules/tests/test_*.py` fixture and
+`./pocket-advisor.py test` passed (13/13); `git diff --check` clean. Tests used
+synthetic temporary fixtures, and no corpus or live workspace state was
+modified.
+
+Operational note: the next `ingest all` reprocesses successful PDF occurrences
+once under `pdf-text-v2`, then rebuilds transactions once under
+`transactions-v2`; no state wipe is required.
+
+Deferred: live-corpus acceptance is performed by that next operator-run
+ingest. Parser support for the 121 statements from currently unsupported
+institutions remains roadmap item 1 and was deliberately not folded into this
+regression fix.
+
 ## 2026-07-18 — Transaction-stage convergence
 
 Implementation commit: `aedd667` (locked design: `892a3bb`,

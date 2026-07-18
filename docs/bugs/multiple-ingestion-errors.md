@@ -1,7 +1,7 @@
 # Multiple Ingestion Errors
 
-Status: **fixes implemented and verified 2026-07-19; awaiting commit and live
-validation**.
+Status: **resolved in implementation commit `a9c9d96` on 2026-07-19; live
+corpus validation remains for the next operator-run ingest**.
 
 Run record:
 `workspaces/.state/workspace-case-documents-demo/logs/ingest-runs/20260718T144258177050Z.json`.
@@ -180,6 +180,8 @@ top-level-source reporting, and regression coverage using synthetic temporary
 fixtures only.
 
 ## Resolution
+
+Implementation commit: `a9c9d96`.
 
 The implementation now addresses every regression identified above:
 

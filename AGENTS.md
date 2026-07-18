@@ -106,9 +106,8 @@ exist anywhere in the engine.
 - The retired `scripts/` implementation is deleted. Historical mechanics live
   only under `docs_old/`; runtime code and tests live under `modules/`.
 - `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
-  only in `modules/cli.py`. Frozen commands that have not been ported to
-  workspace-scoped state fail closed; stage modules never parse arguments or
-  sequence one another.
+  only in `modules/cli.py`; every supported command is native. Stage modules
+  never parse arguments or sequence one another.
 - The new database is fresh-schema only and deliberately refuses legacy
   state. Do not add compatibility migrations or shims.
 - Every workspace owns a separate database/cache/vector/log/runtime tree.

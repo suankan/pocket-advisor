@@ -30,11 +30,13 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `78e705a` | **Full-ingest completion reporting + saved-record display**: typed end-of-run report (stage timings/outcomes, read-only workspace snapshot, finding rollups); atomic schema-versioned JSON record per run; shared honest transaction-coverage classifier; `ingest report [--last \| PATH]` re-renders any saved record through the same formatter without opening the database |
 | `e07ac2c` | **Summaries-stage progress reporting**: explicit stale-count/model-loading line, per-message progress bar with heartbeat across all stale threads, and bar-safe failure lines — the generative pass can no longer look hung |
 | `3d8d9d7` | **Native retrieval-expectation accuracy suite**: workspace-bound `accuracy generate/run/compare/list`; anchor-verified scaffolds with human-authored questions; schema-versioned JSON result records with per-question verdict/rank/latency and environment fingerprints; `compare --last N` with drift warnings; "golden set" naming retired; verified 12/12 on the test workspace |
+| `4037db7` | **Adapter retirement**: native workspace-local warm query daemon, deep custody/index verification, blob lookup, and vector-index maintenance; shared warm retrieval resources; root requirements/config defaults; retired `scripts/` tree and obsolete packages deleted; native suite 13/13 |
+| `99cc7b9` | **Quoted-reply duplicate-prefix fix**: detector v6 safely resolves a repeated 16-token parent prefix only through an exact 64-token confirmation of the earliest candidate; later nested and genuinely ambiguous matches remain uncut; reproduced finding documented and native suite 13/13 |
 
-Current self-tests: all 11 `modules/tests/test_*.py` pass, including the
-workspace-isolation, ingest-reporting, and accuracy fixtures
-(`./pocket-advisor.py test`). The frozen
-`scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
+Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
+maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
+fixtures (`./pocket-advisor.py test`). The retired `scripts/` tree no longer
+exists.
 
 Stage 5 is implemented in `modules/statement_parsers.py` and
 `modules/pipeline/transactions.py`, with fixture coverage in
@@ -54,19 +56,17 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   and current docs: no registry `privileged:` key (now rejected as
   unknown), no `is_privileged`/`privilege_override` schema columns, no
   query flags or restricted pass, summaries always searchable within
-  mounts. Frozen `scripts/` retains its old privilege code untouched
-  (reference-only until deletion); the frozen `daemon`/`accuracy`
-  commands expect the old columns and must not be run against the
-  privilege-free fresh schema — use cold `query` until their native
-  port.
+  mounts. The retired implementation containing the old privilege paths was
+  deleted at Adapter retirement (`4037db7`).
 - **Embedding/thread implementation (`0fb9f6f`, refined at `9b9e052`):**
   `docs/features/embedding-design.md` is the locked design. Thread IDs now
   use stable root Message-ID keys and store real `reply_parent_item_id` edges.
   A local `summaries` stage generates digest/versioned navigation summaries
   for multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
-  maintains separate leaf and summary vector matrices; and cold `query` runs
-  four retrieval legs, fuses/deduplicates threads, then returns DB-addressed
-  readable email evidence. Focused synthetic tests pass.
+  maintains separate leaf and summary vector matrices; and native `query`
+  runs four retrieval legs, fuses/deduplicates threads, then returns
+  DB-addressed readable email evidence either cold or through the
+  workspace-local warm daemon. Focused synthetic tests pass.
 - **Review findings implemented (`9b9e052`):** the
   post-implementation review's actionable findings are all fixed —
   always-on summary staleness maintenance (generation-only knob),
@@ -78,8 +78,8 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   `threads.item_count` rename, and ghost-root + disabled-generation
   fixture coverage. The refined behaviors are folded into
   `docs/features/embedding-design.md`; the separate review-findings document is
-  deleted; open items (native daemon/accuracy, verify FTS
-  integrity-check) moved to `docs/roadmap.md`.
+  deleted. Native accuracy, daemon, and FTS integrity verification have since
+  shipped at `3d8d9d7` and `4037db7`.
 - **Envelope payload + two-artifact cache implemented (`a48bf7b`):** leaf
   chunks keep pure `chunks.text` quotes while the dense
   embedder and `chunks_fts.payload_shadow` consume the same From/Date/Subject/
@@ -122,19 +122,35 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   formerly workspace-free file-addressed `accuracy compare` was replaced
   by the workspace-bound native `accuracy compare --last N`.)
 
+- **Adapter retired (`4037db7`):** the complete runtime is native under
+  `modules/`; `scripts/` is deleted. Query can use the workspace-local
+  session-warm daemon while sharing the same retriever as cold query and the
+  accuracy runner. `verify` performs custody, SQLite/foreign-key, FTS5,
+  artifact, vector, and transaction checks. Blob lookup resolves only indexed
+  originals, and vector list/wipe actions enforce exact workspace paths,
+  symlink refusal, active-index force confirmation, and safe daemon shutdown.
+  Runtime requirements and strict defaults now live at repository root.
+
+- **Quoted-reply detector v6 (`99cc7b9`):** when the exact 16-token parent
+  prefix repeats inside nested history, an exact 64-token confirmation may
+  select only the earliest candidate. If the earliest candidate diverges or
+  multiple longer matches remain, the complete body is retained. Existing
+  already-chunked state is not rewritten in place; a normal confirmed full
+  workspace rebuild applies the changed authored-body derivation.
+
 - **New CLI implemented** in `modules/cli.py` at `97ee193`, with workspace
-  isolation/fail-closed enforcement at `23b0a42` and action-scoped selection at
+  isolation enforcement at `23b0a42` and action-scoped selection at
   `c6df0a3`. `pocket-advisor.py` is only the venv bootstrap and native CLI
-  entrypoint. Argparse lives only in `modules/cli.py`; nothing in `modules/`
-  imports from `scripts/`.
+  entrypoint. Argparse lives only in `modules/cli.py`; all supported commands
+  and tests are native.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
   `ingest report [--last | PATH]`, `transactions report`, `db init`, and the
-  11-test module runner are wired to the new engine. Removed stage spellings
+  13-test module runner are wired to the native engine. Removed stage spellings
   and `blob-index rebuild` are rejected, not aliased.
-- Real `query` dispatches to the native cold relational retriever;
-  `wipe state` and the retrieval-expectation `accuracy` suite
-  (generate/run/compare/list) are workspace-native. Daemon, verify, blob
-  lookup, and vector-index wipe fail closed until their native ports land.
+- Real `query` dispatches to the native relational retriever cold or through
+  the warm daemon; `wipe state/index/list`, `verify`, blob lookup, and the
+  retrieval-expectation `accuracy` suite (generate/run/compare/list) are all
+  workspace-native.
 - The new ingest/report/query commands deliberately refuse older databases.
   State predating the stable-thread/summary schema is intentionally refused;
   any operator-chosen workspace rebuild requires a confirmed wipe and full
@@ -146,24 +162,22 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 - Retired shared-layout derived state, if present, is never migrated or opened
   by workspace-scoped commands. Its optional, explicitly confirmed cleanup is
   tracked as an independent roadmap item.
-- venv is Python 3.14.6; old and new code share it.
+- venv is Python 3.14.6 and serves the native runtime only.
 
 ## Next steps
 
-The roadmap head is **1. Adapter retirement**. It is not gated by ingestion,
-re-ingestion, or validation of any particular live workspace: the isolated
-rebuild/report/accuracy workflow already provides generic end-to-end platform
-validation. Transaction parser coverage and explicitly confirmed legacy
-shared-state cleanup are independent roadmap item 2; neither blocks adapter
-retirement or the local answering pass (`docs/roadmap.md`).
+The roadmap head is **1. Transaction parser coverage and legacy-state
+cleanup**. It is independent of generic end-to-end platform validation and
+does not block **2. Local answering pass** (`docs/roadmap.md`).
 
 ## Watch-outs
 
 - `reconciliation.yaml` / `counterparties.yaml` live in the MATTER
   folder (selected workspace root), not engine state — keep that.
 - EmbedStage chunks native-PDF texts through `items.body_text_path`
-  (source_type 'email_body') — same as old pipeline, keeps retrieval
-  compatible; do not "fix" this to a new source_type before adapter
-  retirement.
-- Frozen scripts/ tree must keep passing its suite until adapter retirement —
-  don't edit it, don't import it from modules/.
+  (source_type 'email_body') — reporters and retrieval derive semantic source
+  type by joining through `items.item_kind`; change it only through a
+  deliberate fresh-schema decision.
+- Quoted-reply detector changes can alter already-chunked authored bodies.
+  The stale-chunk guard must continue to refuse in-place rewrites and direct
+  the operator to an explicitly confirmed full workspace rebuild.

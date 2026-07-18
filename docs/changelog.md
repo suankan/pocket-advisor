@@ -1,8 +1,63 @@
 # Pocket Advisor Changelog
 
-Reverse-chronological history of shipped platform roadmap items. Current
-operating state lives in `docs/status.md`; future work lives only in
-`docs/roadmap.md`.
+Reverse-chronological history of shipped platform changes, including completed
+roadmap items. Current operating state lives in `docs/status.md`; future work
+lives only in `docs/roadmap.md`.
+
+## 2026-07-18 — Quoted-reply duplicate-prefix compaction fix
+
+Implementation commit: `99cc7b9`.
+
+- Fixed a conservative false negative where the resolved direct parent's
+  initial 16-token prefix occurred both in its direct quote and again in
+  nested quoted history, causing the complete child body to remain indexed.
+- Bumped the detector to version 6. A repeated minimum prefix may now resolve
+  only when an exact 64-token confirmation uniquely selects the earliest
+  candidate; a later nested match is never selected after the earliest
+  candidate diverges.
+- Preserved the existing hard boundaries: exact RFC parent identity, no fuzzy
+  text matching, and client wrapper recognition that can expand but never
+  authorize a cut.
+- Added a durable reproduced-finding record under `docs/bugs/`, updated the
+  holistic design, and added regressions for resolvable nested repetition,
+  misleading later matches, and genuinely ambiguous duplicates.
+
+Verification: the existing affected artifacts resolve read-only at the
+correct Gmail wrapper (13,972 redundant characters identified); native suite
+13/13; Python compilation and `git diff --check` clean. No workspace state or
+original evidence was changed.
+
+Operational note: an already-chunked workspace requires its normal explicitly
+confirmed state wipe and complete re-ingestion to apply a changed authored
+body; the stale-chunk guard deliberately refuses an in-place rewrite.
+
+## 2026-07-18 — Adapter retirement
+
+Implementation commit: `4037db7` (locked daemon design:
+`docs/features/query-daemon.md`).
+
+- Replaced every remaining frozen-adapter command with native workspace-safe
+  implementations: session-warm relational query daemon, full custody/index
+  verification (including both FTS5 integrity checks), indexed-blob lookup,
+  and vector-index list/wipe maintenance.
+- Made query and accuracy reuse one warm retrieval-resource bundle while
+  preserving explicit cold fallback and one native retrieval implementation.
+- Added exact workspace, containment, symlink, active-index confirmation, and
+  daemon-shutdown safety boundaries for maintenance and runtime paths.
+- Moved all runtime dependencies and strict defaults to repository-root
+  configuration, removed obsolete venv packages, and deleted the complete
+  retired `scripts/` implementation and test tree.
+- Updated CLI/operator/architecture documentation and added native daemon,
+  maintenance, CLI, accuracy, and workspace-isolation coverage.
+
+Verification: native suite 13/13; Python compilation, `git diff --check`, and
+`pip check` clean; read-only daemon status, index listing, and blob-source
+listing exercised against workspace-scoped state. No evidence or workspace
+derived state was changed.
+
+Deferred: none from Adapter retirement. Transaction-parser coverage and
+explicitly confirmed retired shared-state cleanup remain independent roadmap
+work.
 
 ## 2026-07-18 — Native retrieval-expectation accuracy suite
 
@@ -35,8 +90,9 @@ thread-or-better) through the real models, with all four cross-lingual
 questions at rank 1. Module suite 11/11 with the new fixture; frozen suite
 untouched; `git diff --check` clean.
 
-Deferred: frozen accuracy-code deletion remains in adapter retirement
-(roadmap item 1); the `envelope-v1` versus plain-payload A/B is an experiment.
+Subsequently completed: frozen accuracy-code deletion shipped with Adapter
+retirement (`4037db7`). The `envelope-v1` versus plain-payload A/B remains an
+experiment.
 
 ## 2026-07-18 — Generic end-to-end platform rehearsal completed
 
@@ -88,8 +144,8 @@ CLI-display fixtures); frozen tests 11/11; `git diff --check` clean;
 an isolated validation workspace. No live corpus or workspace state was
 touched.
 
-Deferred: full custody/FTS integrity verification remains with the native
-`verify` port in adapter retirement.
+Subsequently completed: native custody/FTS integrity verification shipped with
+Adapter retirement (`4037db7`).
 
 ## 2026-07-18 — Command-scoped workspace selection
 
@@ -111,8 +167,8 @@ Verification: workspace-free native test command 9/9; frozen tests 11/11;
 Python compilation and `git diff --check` clean. No live workspace state was
 touched.
 
-Deferred: native accuracy and the remaining frozen-command retirement work
-were tracked separately; native accuracy has since shipped.
+Subsequently completed: native accuracy shipped at `3d8d9d7`; the remaining
+frozen-command retirement shipped at `4037db7`.
 
 ## 2026-07-18 — Workspace-scoped state and mandatory workspace selection
 
@@ -139,9 +195,9 @@ Verification: native module tests 9/9 through the mandatory-workspace CLI;
 frozen tests 11/11; Python compilation and `git diff --check` clean. No live
 workspace state was initialized, wiped, or ingested.
 
-Deferred: daemon, accuracy, verify, blob-index lookup, and vector-index wipe
-remain fail-closed pending adapter retirement. Native accuracy has since
-shipped; operator-chosen workspace rebuilds remain outside the platform
+Subsequently completed: accuracy shipped at `3d8d9d7`; daemon, verify,
+blob-index lookup, vector-index wipe, and frozen-tree deletion shipped at
+`4037db7`. Operator-chosen workspace rebuilds remain outside the platform
 roadmap and require immediate confirmation before a scoped wipe.
 
 ## 2026-07-18 — Envelope-enriched payload + message-artifact consolidation

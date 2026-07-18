@@ -73,6 +73,23 @@ workspaces:
       - id: westpac
 """
 
+SINGLE_ACCOUNT_REGISTRY_YAML = """\
+schema_version: 2
+collections:
+  - id: business
+    path: corpora/business
+    ingestion-type: bank-transactions
+    bsb: "111-222"
+    account_number: "333444"
+    owners: [person-a]
+    type: business
+workspaces:
+  - id: test-matter
+    path: test-matter
+    collections:
+      - id: business
+"""
+
 
 def statement_text(
         account: str,
@@ -257,13 +274,18 @@ def test_westpac_parser() -> None:
     assert statement.rows[2].balance_after_minor == -3500
 
 
-def build_context(tmp: Path) -> PipelineContext:
+def build_context(
+        tmp: Path,
+        registry_yaml: str = REGISTRY_YAML,
+) -> PipelineContext:
     workspaces = tmp / "workspaces"
     workspaces.mkdir(parents=True)
     (workspaces / "workspace-config.yaml").write_text(
-        REGISTRY_YAML, encoding="utf-8")
-    for collection in ("business", "personal-a", "personal-b", "westpac"):
-        (workspaces / "corpora" / collection).mkdir(parents=True)
+        registry_yaml, encoding="utf-8")
+    registry_data = Registry.load(
+        Config(project_root=tmp, workspaces_dir=workspaces))
+    for collection in registry_data.collections:
+        (workspaces / "corpora" / collection.id).mkdir(parents=True)
     (workspaces / "test-matter").mkdir()
     base = Config(project_root=tmp, workspaces_dir=workspaces)
     registry = Registry.load(base)
@@ -345,7 +367,7 @@ def test_stage(ctx: PipelineContext) -> None:
     logs: list[str] = []
     report = report_transactions(ctx, log=logs.append)
     assert report["tamper"] == []
-    assert isinstance(report["buckets"]["external"], int)
+    assert isinstance(report["buckets"]["external"], list)
 
 
 def test_loud_failures(ctx: PipelineContext) -> None:
@@ -488,6 +510,23 @@ def test_override_and_watchlist(ctx: PipelineContext) -> None:
     assert after == before
 
 
+def test_single_account_coverage(ctx: PipelineContext) -> None:
+    transfer = statement_text(
+        "111-222 333444", "2026-06-01", "2026-06-30", "10.00",
+        [("2026-06-10", "", "Osko transfer", "-10.00", "0.00")],
+        "0.00", "0.00", "10.00", count=1)
+    add_fixture(ctx, 30, "business", transfer)
+    TransactionsStage(ctx).run()
+    logs: list[str] = []
+    report = report_transactions(ctx, log=logs.append)
+    buckets = report["buckets"]
+    assert len(buckets["single_account_unverifiable"]) == 1, buckets
+    assert buckets["suspicious"] == [], buckets
+    assert buckets["coverage_unknown"] == [], buckets
+    assert any("UNVERIFIABLE txn" in line for line in logs), logs
+    assert not any("all accounts covered" in line for line in logs), logs
+
+
 def main() -> int:
     test_normalization()
     test_westpac_parser()
@@ -496,6 +535,10 @@ def main() -> int:
         test_stage(ctx)
         test_loud_failures(ctx)
         test_override_and_watchlist(ctx)
+        ctx.conn.close()
+    with tempfile.TemporaryDirectory(prefix="pa_transactions_single_") as td:
+        ctx = build_context(Path(td), SINGLE_ACCOUNT_REGISTRY_YAML)
+        test_single_account_coverage(ctx)
         ctx.conn.close()
     print("test_transactions: all ok")
     return 0

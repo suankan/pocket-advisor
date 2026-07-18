@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,35 @@ _TRANSFERISH_RE = re.compile(
 
 type Log = Callable[[str], None]
 type RowDict = dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionCoverage:
+    """Mutually exclusive transfer-coverage classifications.
+
+    Unmatched credits are intentionally absent: coverage reporting evaluates
+    whether debits that look like transfers should have a corresponding
+    ingress in another configured account.
+    """
+
+    matched: tuple[int, ...]
+    external: tuple[int, ...]
+    coverage_unknown: tuple[int, ...]
+    single_account_unverifiable: tuple[int, ...]
+    suspicious: tuple[int, ...]
+
+    def as_dict(self) -> dict[str, list[int]]:
+        return {
+            "matched": list(self.matched),
+            "external": list(self.external),
+            "coverage_unknown": list(self.coverage_unknown),
+            "single_account_unverifiable": list(
+                self.single_account_unverifiable),
+            "suspicious": list(self.suspicious),
+        }
+
+    def counts(self) -> dict[str, int]:
+        return {key: len(value) for key, value in self.as_dict().items()}
 
 
 def _load_yaml(path: Path) -> Any:
@@ -683,6 +713,65 @@ def _covered(conn: sqlite3.Connection, account_id: int, date: str) -> bool:
     ).fetchone() is not None
 
 
+def classify_transaction_coverage(
+        conn: sqlite3.Connection,
+) -> TransactionCoverage:
+    """Classify linkable transactions without making coverage claims from
+    an empty set of other accounts.
+
+    This is shared by the detailed transaction report and the compact
+    ``ingest all`` completion report so their semantics cannot drift.
+    """
+    transactions = _linkable_transactions(conn)
+    linked = {int(row[0]) for row in conn.execute(
+        "SELECT from_txn_id FROM transfer_links")} | {
+        int(row[0]) for row in conn.execute(
+            "SELECT to_txn_id FROM transfer_links")}
+    descriptions = {
+        int(row["id"]): row["description_raw"] or ""
+        for row in conn.execute(
+            "SELECT id, description_raw FROM transactions")}
+    account_ids = [int(row[0]) for row in conn.execute(
+        "SELECT id FROM accounts ORDER BY id")]
+
+    matched: list[int] = []
+    external: list[int] = []
+    coverage_unknown: list[int] = []
+    single_account_unverifiable: list[int] = []
+    suspicious: list[int] = []
+    for transaction in transactions:
+        transaction_id = int(transaction["id"])
+        if transaction_id in linked:
+            matched.append(transaction_id)
+            continue
+        if transaction["amount_minor"] >= 0:
+            continue
+        if not _TRANSFERISH_RE.search(descriptions[transaction_id]):
+            external.append(transaction_id)
+            continue
+        other_accounts = [
+            account_id for account_id in account_ids
+            if account_id != transaction["account_id"]]
+        if not other_accounts:
+            single_account_unverifiable.append(transaction_id)
+            continue
+        uncovered = [
+            account_id for account_id in other_accounts
+            if not _covered(conn, account_id, transaction["txn_date"])]
+        if uncovered:
+            coverage_unknown.append(transaction_id)
+        else:
+            suspicious.append(transaction_id)
+    return TransactionCoverage(
+        matched=tuple(sorted(matched)),
+        external=tuple(sorted(external)),
+        coverage_unknown=tuple(sorted(coverage_unknown)),
+        single_account_unverifiable=tuple(
+            sorted(single_account_unverifiable)),
+        suspicious=tuple(sorted(suspicious)),
+    )
+
+
 def _build_report(
         conn: sqlite3.Connection,
         workspace_root: Path,
@@ -692,7 +781,7 @@ def _build_report(
         "continuity_breaks": [],
         "coverage_gaps": [],
         "overlaps": [],
-        "buckets": {"external": 0, "suspicious": [], "unknown": []},
+        "buckets": {},
         "tamper": [],
         "watchlist": {},
         "ambiguous": 0,
@@ -757,33 +846,29 @@ def _build_report(
                     f"{previous['id']} and {following['id']}")
 
     transactions = _linkable_transactions(conn)
-    linked = {row[0] for row in conn.execute(
-        "SELECT from_txn_id FROM transfer_links")} | {
-        row[0] for row in conn.execute("SELECT to_txn_id FROM transfer_links")}
-    descriptions = {
-        row["id"]: row["description_raw"] or ""
+    linked = frozenset(
+        int(row[0])
         for row in conn.execute(
-            "SELECT id, description_raw FROM transactions")}
-    account_ids = [row[0] for row in conn.execute("SELECT id FROM accounts")]
-    for transaction in transactions:
-        if transaction["amount_minor"] >= 0 or transaction["id"] in linked:
-            continue
-        if not _TRANSFERISH_RE.search(descriptions[transaction["id"]]):
-            report["buckets"]["external"] += 1
-            continue
-        other_accounts = [account_id for account_id in account_ids
-                          if account_id != transaction["account_id"]]
-        uncovered = [account_id for account_id in other_accounts
-                     if not _covered(conn, account_id,
-                                     transaction["txn_date"])]
-        if uncovered:
-            report["buckets"]["unknown"].append(transaction["id"])
-            log(f"UNKNOWN txn {transaction['id']}: uncovered accounts "
-                f"{uncovered}")
-        else:
-            report["buckets"]["suspicious"].append(transaction["id"])
-            log(f"SUSPICIOUS txn {transaction['id']}: all accounts covered, "
-                "no matching ingress")
+            "SELECT from_txn_id FROM transfer_links UNION "
+            "SELECT to_txn_id FROM transfer_links"))
+    coverage = classify_transaction_coverage(conn)
+    report["buckets"] = coverage.as_dict()
+    account_ids = [int(row[0]) for row in conn.execute(
+        "SELECT id FROM accounts ORDER BY id")]
+    by_id = {int(row["id"]): row for row in transactions}
+    for transaction_id in coverage.coverage_unknown:
+        transaction = by_id[transaction_id]
+        uncovered = [
+            account_id for account_id in account_ids
+            if account_id != transaction["account_id"]
+            and not _covered(conn, account_id, transaction["txn_date"])]
+        log(f"UNKNOWN txn {transaction_id}: uncovered accounts {uncovered}")
+    for transaction_id in coverage.single_account_unverifiable:
+        log(f"UNVERIFIABLE txn {transaction_id}: only one account "
+            "configured, no matching ingress")
+    for transaction_id in coverage.suspicious:
+        log(f"SUSPICIOUS txn {transaction_id}: all other accounts covered, "
+            "no matching ingress")
     _, ambiguities = auto_match(transactions, frozenset(linked))
     report["ambiguous"] = len(ambiguities)
 

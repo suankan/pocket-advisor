@@ -64,6 +64,14 @@ blob-index rebuild. Originals supported for extraction are email and PDF.
 Images, ZIPs, and other attachments are retained for custody/manual inspection
 but are not text-extracted or embedded.
 
+Every full `ingest all` run persists its completion report as JSON under
+the workspace's `logs/ingest-runs/`. Re-display a saved report later with:
+
+```bash
+./pocket-advisor.py --workspace <workspace_id> ingest report          # latest
+./pocket-advisor.py --workspace <workspace_id> ingest report <path>   # specific record
+```
+
 After ingestion, inspect the selected workspace's
 `logs/review_queue.csv`. Email cache folders contain
 `email_message_full.txt` (envelope plus lossless body) and

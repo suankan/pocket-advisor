@@ -4,6 +4,7 @@ import io
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import modules.cli as cli  # noqa: E402
 from modules.config import Config  # noqa: E402
+from modules.domain import StageStats  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +26,12 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+    def execute(self, _sql: str):
+        return SimpleNamespace(fetchone=lambda: (0,))
+
+    def rollback(self) -> None:
+        pass
 
 
 def fake_selection(*, embed: bool = True, bank: bool = False):
@@ -129,15 +137,26 @@ def test_grammar() -> None:
 
 
 def test_orchestration() -> None:
+    def record_stage(executed: list[str], name: str) -> StageStats:
+        executed.append(name)
+        stats = StageStats()
+        stats.inc("ran")
+        return stats
+
     executed: list[str] = []
     selection = fake_selection(embed=True, bank=True)
     context = fake_context(embed=True, bank=True)
     with patch.object(cli, "_open_context", return_value=context), \
             patch.object(cli, "_execute_stage",
-                         side_effect=lambda _, name: executed.append(name)):
+                         side_effect=lambda _, name:
+                         record_stage(executed, name)), \
+            patch.object(cli, "_finalize_ingest_report") as finalize:
         assert cli.run_ingest("all", selection) == 0
     assert executed == ["discover", "emails", "pdfs", "thread",
                         "summaries", "embed", "transactions"]
+    stages = finalize.call_args.kwargs["stages"]
+    assert [item.name for item in stages] == executed
+    assert all(item.outcome == "completed" for item in stages)
     assert context.conn.closed
 
     # Config gates apply only to `all`; summaries always maintains staleness.
@@ -146,10 +165,15 @@ def test_orchestration() -> None:
     context = fake_context(embed=False, bank=False)
     with patch.object(cli, "_open_context", return_value=context), \
             patch.object(cli, "_execute_stage",
-                         side_effect=lambda _, name: executed.append(name)), \
+                         side_effect=lambda _, name:
+                         record_stage(executed, name)), \
+            patch.object(cli, "_finalize_ingest_report") as finalize, \
             contextlib.redirect_stdout(io.StringIO()):
         cli.run_ingest("all", selection)
     assert executed == ["discover", "emails", "pdfs", "thread", "summaries"]
+    stages = finalize.call_args.kwargs["stages"]
+    assert [(item.name, item.outcome) for item in stages[-2:]] == [
+        ("embed", "skipped"), ("transactions", "skipped")]
     assert context.conn.closed
 
     for stage in ("embed", "summaries", "transactions"):
@@ -158,9 +182,71 @@ def test_orchestration() -> None:
         context = fake_context(embed=False, bank=False)
         with patch.object(cli, "_open_context", return_value=context), \
                 patch.object(cli, "_execute_stage",
-                             side_effect=lambda _, name: executed.append(name)):
+                             side_effect=lambda _, name:
+                             record_stage(executed, name)):
             cli.run_ingest(stage, selection)
         assert executed == [stage]
+
+
+def test_ingest_reporting_failures_and_timings() -> None:
+    fixed_now = lambda: datetime(2026, 7, 18, tzinfo=timezone.utc)
+
+    # A failed stage keeps its original exception, records completed timing,
+    # and marks every downstream stage not_run.
+    selection = fake_selection(embed=True, bank=True)
+    context = fake_context(embed=True, bank=True)
+    ticks = iter(float(value) for value in range(20))
+
+    def fail_at_pdfs(_ctx, name: str) -> StageStats:
+        if name == "pdfs":
+            raise RuntimeError("synthetic pipeline failure")
+        stats = StageStats()
+        stats.inc("ok")
+        return stats
+
+    with patch.object(cli, "_open_context", return_value=context), \
+            patch.object(cli, "_execute_stage", side_effect=fail_at_pdfs), \
+            patch.object(cli, "_finalize_ingest_report") as finalize, \
+            contextlib.redirect_stdout(io.StringIO()):
+        try:
+            cli.run_ingest(
+                "all", selection, clock=lambda: next(ticks),
+                utc_now=fixed_now)
+            raise AssertionError("pipeline failure must propagate")
+        except RuntimeError as exc:
+            assert str(exc) == "synthetic pipeline failure"
+    call = finalize.call_args.kwargs
+    assert call["failed_stage"] == "pdfs"
+    assert call["pipeline_seconds"] == 7.0
+    assert [(item.name, item.outcome) for item in call["stages"]] == [
+        ("discover", "completed"),
+        ("emails", "completed"),
+        ("pdfs", "failed"),
+        ("thread", "not_run"),
+        ("summaries", "not_run"),
+        ("embed", "not_run"),
+        ("transactions", "not_run"),
+    ]
+    assert [item.duration_seconds for item in call["stages"][:3]] == \
+        [1.0, 1.0, 1.0]
+    assert context.conn.closed
+
+    # A required report failure does not roll back completed stages, but the
+    # full command returns non-zero as locked by the reporting contract.
+    selection = fake_selection(embed=False, bank=False)
+    context = fake_context(embed=False, bank=False)
+
+    def successful_stage(_ctx, _name: str) -> StageStats:
+        return StageStats()
+
+    with patch.object(cli, "_open_context", return_value=context), \
+            patch.object(cli, "_execute_stage", side_effect=successful_stage), \
+            patch.object(
+                cli, "_finalize_ingest_report",
+                side_effect=OSError("synthetic report failure")), \
+            contextlib.redirect_stdout(io.StringIO()):
+        assert cli.run_ingest("all", selection, utc_now=fixed_now) == 1
+    assert context.conn.closed
 
 
 def test_native_query_seam() -> None:
@@ -235,6 +321,63 @@ def test_workspace_free_dispatch() -> None:
         assert cli.main(["fetch-model"]) == 0
 
 
+def test_ingest_report_display(tmp: Path) -> None:
+    from modules.ingest_report import (Finding, IngestRunReport, StageRun,
+                                       format_report, latest_report_path,
+                                       load_report, persist_report)
+
+    config = SimpleNamespace(project_root=tmp, logs_dir=tmp / "logs")
+    report = IngestRunReport(
+        schema_version=1,
+        workspace_id="matter-x",
+        started_at="2026-07-18T00:00:00+00:00",
+        ended_at="2026-07-18T00:00:05+00:00",
+        status="COMPLETE",
+        pipeline_seconds=5.0,
+        report_seconds=0.01,
+        stages=[StageRun("discover", "completed", 1.0, {"new": 2})],
+        snapshot=None,
+        findings=[Finding("error", "pdf_failures", 2)],
+    )
+    path = persist_report(report, config)
+    assert latest_report_path(config) == path
+    loaded = load_report(path)
+    assert loaded.workspace_id == "matter-x"
+    assert loaded.stages[0].stats == {"new": 2}
+    rendered = format_report(loaded, path)
+    assert "INGEST COMPLETE" in rendered
+    assert "pdf_failures=2" in rendered
+
+    # CLI dispatch: `ingest report` (and --last) render the saved record;
+    # an explicit path works too; stray report flags on real stages fail.
+    selection = fake_selection()
+    selection.config.project_root = tmp
+    selection.config.logs_dir = tmp / "logs"
+    with patch.object(cli, "_resolve_selection", return_value=selection):
+        for arguments in ([*WS, "ingest", "report"],
+                          [*WS, "ingest", "report", "--last"],
+                          [*WS, "ingest", "report", str(path)]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                assert cli.main(arguments) == 0
+            assert "pdf_failures=2" in out.getvalue()
+        try:
+            cli.main([*WS, "ingest", "report", "--last", str(path)])
+            raise AssertionError("--last plus a path must conflict")
+        except SystemExit as exc:
+            assert "not both" in str(exc)
+        try:
+            cli.main([*WS, "ingest", "emails", "--last"])
+            raise AssertionError("stray --last must be rejected")
+        except SystemExit as exc:
+            assert "ingest report" in str(exc)
+        try:
+            cli.main([*WS, "ingest", "report", "missing.json"])
+            raise AssertionError("missing record must abort")
+        except SystemExit as exc:
+            assert "no such record" in str(exc)
+
+
 def test_unknown_workspace_has_no_side_effect(tmp: Path) -> None:
     workspaces = tmp / "workspaces"
     workspaces.mkdir()
@@ -294,9 +437,12 @@ def test_entrypoint_bootstrap() -> None:
 def main() -> int:
     test_grammar()
     test_orchestration()
+    test_ingest_reporting_failures_and_timings()
     test_native_query_seam()
     test_frozen_commands_fail_closed()
     test_workspace_free_dispatch()
+    with tempfile.TemporaryDirectory(prefix="pa_cli_report_") as td:
+        test_ingest_report_display(Path(td))
     with tempfile.TemporaryDirectory(prefix="pa_cli_") as td:
         test_unknown_workspace_has_no_side_effect(Path(td))
     test_entrypoint_bootstrap()

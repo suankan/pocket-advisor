@@ -87,6 +87,16 @@ still showing a complete, useful workspace snapshot.
     SQLite/FTS integrity commands, artifact hash verification, and exhaustive
     reconciliation remain the responsibility of the future native `verify`
     command.
+13. **Saved records are re-renderable** (added 2026-07-18). `ingest report
+    [--last | <path>]` loads one persisted JSON record and prints it through
+    the same formatter, so the later rendering is identical to what the run
+    printed. With no argument (or `--last`) it shows the workspace's newest
+    record, found by the chronologically sortable filenames — no `latest`
+    symlink. The command is workspace-bound but read-only: it never opens
+    the database, runs no stage, and a wrong-schema or malformed record
+    aborts with a clear message. A relative path is resolved as given, then
+    against the project root, matching the `record_path` stored inside each
+    record.
 
 ## Report data contract
 
@@ -162,7 +172,8 @@ run/timing block but does not create a report elsewhere.
 JSON records are written atomically and write-verified. Their filenames use a
 collision-resistant UTC run timestamp, and the terminal prints the exact path
 of the created record. No `latest` symlink or cross-workspace catalogue is
-created.
+created; `ingest report` resolves the newest record by filename ordering
+(decision 13).
 
 ## Human output shape
 
@@ -191,6 +202,22 @@ Findings
 
 Run report: <workspace-state>/logs/ingest-runs/<timestamp>.json
 ```
+
+## Displaying saved records
+
+Implemented 2026-07-18. Any persisted record can be re-rendered later in
+exactly the shape above:
+
+```bash
+./pocket-advisor.py --workspace <id> ingest report          # latest record
+./pocket-advisor.py --workspace <id> ingest report --last   # same, explicit
+./pocket-advisor.py --workspace <id> ingest report <path>   # specific record
+```
+
+`--last` combined with a path is rejected, as are report flags on a real
+pipeline stage. Loading round-trips the versioned JSON back into the typed
+report (`load_report`) and reuses `format_report`; only `schema_version` 1
+records are accepted.
 
 ## Acceptance criteria
 
@@ -221,6 +248,11 @@ Run report: <workspace-state>/logs/ingest-runs/<timestamp>.json
     that ingestion state may have committed successfully.
 13. Existing module and frozen test suites remain passing, and no test touches
     real corpus or live workspace state.
+14. `ingest report` renders a persisted record byte-identically to the
+    original run's final block via the shared formatter; the latest record
+    resolves without a symlink; `--last` plus a path, report flags on a
+    pipeline stage, a missing record, and a wrong-schema record all abort
+    with clear messages and touch no database or pipeline state.
 
 ## Non-goals
 

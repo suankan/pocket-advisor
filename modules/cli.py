@@ -8,13 +8,16 @@ frozen tree.
 import argparse
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from modules.config import Config
 from modules.database import Database
+from modules.domain import StageStats
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import ReviewLog
 from modules.workspace import Registry, Workspace
@@ -43,7 +46,8 @@ class RuntimeSelection:
 _HELP = {
     "db": "init — create the fresh SQLite schema",
     "fetch-model": "download configured MLX model repos (workspace-free)",
-    "ingest": "all | discover | emails | pdfs | thread | summaries | embed | transactions",
+    "ingest": ("all | discover | emails | pdfs | thread | summaries | embed"
+               " | transactions | report [--last | PATH]"),
     "transactions": "report — statement integrity and reconciliation report",
     "query": "one-off hybrid leaf/thread retrieval query",
     "daemon": "serve | status | stop — unavailable pending native port",
@@ -129,34 +133,189 @@ def _stage_class(name: str) -> type[Stage]:
             raise ValueError(f"unknown pipeline stage: {name}")
 
 
-def _execute_stage(ctx: PipelineContext, name: str) -> None:
-    _stage_class(name)(ctx).execute()
+def _execute_stage(ctx: PipelineContext, name: str) -> StageStats:
+    return _stage_class(name)(ctx).execute()
 
 
-def run_ingest(stage: str, selection: RuntimeSelection) -> int:
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _finalize_ingest_report(
+        ctx: PipelineContext,
+        *,
+        started_at: str,
+        ended_at: str,
+        pipeline_seconds: float,
+        stages: list[Any],
+        start_log_id: int,
+        failed_stage: str | None,
+        clock: Callable[[], float],
+) -> None:
+    """Build, persist, and render the required full-ingest report."""
+    from modules.ingest_report import (build_report, format_report,
+                                       persist_report)
+
+    report_started = clock()
+    report = build_report(
+        ctx,
+        started_at=started_at,
+        ended_at=ended_at,
+        pipeline_seconds=pipeline_seconds,
+        report_seconds=0.0,
+        stages=stages,
+        start_log_id=start_log_id,
+        failed_stage=failed_stage,
+    )
+    # Prepare the renderer once so format-time failures are part of the
+    # required report contract. File persistence and terminal I/O themselves
+    # are excluded to avoid recursively changing the serialized duration.
+    format_report(report, None)
+    report.report_seconds = round(clock() - report_started, 6)
+    path = persist_report(report, ctx.config)
+    print(format_report(report, path))
+
+
+def run_ingest(
+        stage: str,
+        selection: RuntimeSelection,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        utc_now: Callable[[], datetime] = _utc_now,
+) -> int:
     """Execute one named stage or the complete ordered pipeline."""
-    ctx = _open_context(selection)
+    pipeline_started = clock()
+    started_at = utc_now().isoformat()
+    try:
+        ctx = _open_context(selection)
+    except BaseException as exc:
+        if stage == "all":
+            elapsed = clock() - pipeline_started
+            print(
+                "\nINGEST INCOMPLETE — workspace "
+                f"{selection.workspace.id} — pipeline {elapsed:.1f}s\n\n"
+                "This run\n"
+                f"  database       failed     {elapsed:.1f}s   "
+                f"{type(exc).__name__}\n\n"
+                "Run report: unavailable (database did not open safely)")
+        raise
     try:
         if stage != "all":
             _execute_stage(ctx, stage)
             return 0
 
+        from modules.ingest_report import STAGE_ORDER, StageRun
+
+        stages: list[StageRun] = []
+        start_log_id = int(ctx.conn.execute(
+            "SELECT coalesce(max(id), 0) FROM ingestion_log").fetchone()[0])
+
+        def execute(name: str) -> None:
+            stage_started = clock()
+            try:
+                stats = _execute_stage(ctx, name)
+            except BaseException as exc:
+                stages.append(StageRun(
+                    name=name,
+                    outcome="failed",
+                    duration_seconds=round(clock() - stage_started, 6),
+                    stats={},
+                    reason=type(exc).__name__,
+                ))
+                raise
+            stages.append(StageRun(
+                name=name,
+                outcome="completed",
+                duration_seconds=round(clock() - stage_started, 6),
+                stats=dict(stats.counts),
+            ))
+
+        def skip(name: str, reason: str) -> None:
+            stages.append(StageRun(
+                name=name,
+                outcome="skipped",
+                duration_seconds=None,
+                stats={},
+                reason=reason,
+            ))
+
         # summaries always runs: its staleness maintenance must see every
         # ingest even when generation is disabled (the stage gates the
         # generative pass on ingestion.summarize_threads itself).
-        for name in ("discover", "emails", "pdfs", "thread", "summaries"):
-            _execute_stage(ctx, name)
-        if ctx.config.embed_text:
-            _execute_stage(ctx, "embed")
-        else:
-            print("embed: skipped (ingestion.embed_text=false)")
-        has_bank_collections = any(
-            collection.is_bank_transactions
-            for collection in ctx.workspace.collections)
-        if has_bank_collections:
-            _execute_stage(ctx, "transactions")
-        else:
-            print("transactions: skipped (no mounted bank-transactions collections)")
+        try:
+            for name in (
+                    "discover", "emails", "pdfs", "thread", "summaries"):
+                execute(name)
+            if ctx.config.embed_text:
+                execute("embed")
+            else:
+                reason = "ingestion.embed_text=false"
+                print(f"embed: skipped ({reason})")
+                skip("embed", reason)
+            has_bank_collections = any(
+                collection.is_bank_transactions
+                for collection in ctx.workspace.collections)
+            if has_bank_collections:
+                execute("transactions")
+            else:
+                reason = "no mounted bank-transactions collections"
+                print(f"transactions: skipped ({reason})")
+                skip("transactions", reason)
+        except BaseException:
+            failed_stage = stages[-1].name
+            completed_names = {item.name for item in stages}
+            for name in STAGE_ORDER:
+                if name not in completed_names:
+                    stages.append(StageRun(
+                        name=name,
+                        outcome="not_run",
+                        duration_seconds=None,
+                        stats={},
+                        reason=f"pipeline stopped at {failed_stage}",
+                    ))
+            try:
+                ctx.conn.rollback()
+            except Exception:
+                pass
+            ended_at = utc_now().isoformat()
+            pipeline_seconds = clock() - pipeline_started
+            try:
+                _finalize_ingest_report(
+                    ctx,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    pipeline_seconds=pipeline_seconds,
+                    stages=stages,
+                    start_log_id=start_log_id,
+                    failed_stage=failed_stage,
+                    clock=clock,
+                )
+            except BaseException as report_exc:
+                print(
+                    "ingest report failed while preserving the original "
+                    f"pipeline error: {type(report_exc).__name__}: "
+                    f"{report_exc}")
+            raise
+
+        ended_at = utc_now().isoformat()
+        pipeline_seconds = clock() - pipeline_started
+        try:
+            _finalize_ingest_report(
+                ctx,
+                started_at=started_at,
+                ended_at=ended_at,
+                pipeline_seconds=pipeline_seconds,
+                stages=stages,
+                start_log_id=start_log_id,
+                failed_stage=None,
+                clock=clock,
+            )
+        except Exception as exc:
+            print(
+                "\nINGEST REPORT FAILED — stages completed and their state "
+                "may be committed — "
+                f"{type(exc).__name__}: {exc}")
+            return 1
         return 0
     finally:
         ctx.conn.close()
@@ -195,7 +354,39 @@ def _handle_fetch_model(args: argparse.Namespace) -> int:
 
 
 def _handle_ingest(args: argparse.Namespace) -> int:
+    if args.stage == "report":
+        return _show_ingest_report(args)
+    if args.record is not None or args.last:
+        raise SystemExit(
+            "ingest: --last / a record path apply only to 'ingest report'")
     return run_ingest(args.stage, args.selection)
+
+
+def _show_ingest_report(args: argparse.Namespace) -> int:
+    """Render one persisted ingest run record (default: the latest)."""
+    from modules.ingest_report import (format_report, latest_report_path,
+                                       load_report)
+
+    selection: RuntimeSelection = args.selection
+    if args.record is not None and args.last:
+        raise SystemExit(
+            "ingest report: pass either --last or a record path, not both")
+    if args.record is not None:
+        path = Path(args.record)
+        if not path.is_file():
+            candidate = selection.config.project_root / args.record
+            if not candidate.is_file():
+                raise SystemExit(
+                    f"ingest report: no such record: {args.record}")
+            path = candidate
+    else:
+        path = latest_report_path(selection.config)
+        if path is None:
+            raise SystemExit(
+                "ingest report: no saved run reports under "
+                f"{selection.config.logs_dir / 'ingest-runs'}")
+    print(format_report(load_report(path), path))
+    return 0
 
 
 def _handle_transactions(args: argparse.Namespace) -> int:
@@ -312,14 +503,29 @@ def build_parser() -> argparse.ArgumentParser:
         help=_HELP["ingest"],
         description=(
             "Run all pipeline stages or exactly one named stage. A named "
-            "stage assumes earlier artifacts already exist."),
+            "stage assumes earlier artifacts already exist. 'ingest report' "
+            "re-renders a saved full-ingest run record instead of running "
+            "anything (default: the workspace's latest record)."),
     )
     command.add_argument(
         "stage",
         nargs="?",
-        choices=INGEST_STAGES,
+        choices=INGEST_STAGES + ("report",),
         default="all",
-        help="pipeline stage (default: all)",
+        help="pipeline stage (default: all), or 'report' to display a "
+             "saved run record",
+    )
+    command.add_argument(
+        "record",
+        nargs="?",
+        metavar="PATH",
+        help="saved run record to display (ingest report only)",
+    )
+    command.add_argument(
+        "--last",
+        action="store_true",
+        help="display the workspace's latest saved run record "
+             "(ingest report only; this is also the default)",
     )
     command.set_defaults(handler=_handle_ingest, workspace_required=True)
 

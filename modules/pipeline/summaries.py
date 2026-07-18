@@ -6,6 +6,7 @@ from pathlib import Path
 from modules.domain import StageStats
 from modules.embedding.loader import ModelStore
 from modules.pipeline.base import Stage
+from modules.progress import Progress
 from modules.review import now_iso
 from modules.summarization import (SUMMARY_PROMPT_VERSION,
                                    SummaryGenerator,
@@ -99,11 +100,17 @@ class ThreadSummaryStage(Stage):
         if not stale:
             return stats
 
+        print(f"summaries: {len(stale)} stale"
+              f" {'thread' if len(stale) == 1 else 'threads'} — loading"
+              f" {self.config.mlx_model_thread_summary}")
         generator = get_summary_generator(
             self.config, ModelStore(self.config.models_dir))
+        progress = Progress(
+            "generate thread summaries",
+            total=sum(len(job.messages) for job in stale))
         for job in stale:
             try:
-                summary = self._generate(job, generator)
+                summary = self._generate(job, generator, progress)
                 self.conn.execute(
                     """INSERT INTO thread_summaries
                        (thread_id, summary_text, source_digest,
@@ -124,11 +131,15 @@ class ThreadSummaryStage(Stage):
                 stats.inc("generated")
             except Exception as exc:
                 self.conn.rollback()
+                progress.println(
+                    f"  summary FAIL thread {job.stable_key}:"
+                    f" {type(exc).__name__}: {exc}")
                 self.review.flag(
                     f"thread:{job.stable_key}", self.name, "error",
                     f"{type(exc).__name__}: {exc}")
                 self.conn.commit()
                 stats.inc("failed")
+        progress.done()
         return stats
 
     def _load_work(self) -> tuple[list[_ThreadWork], list[_BrokenThread]]:
@@ -183,10 +194,13 @@ class ThreadSummaryStage(Stage):
             self.config.mlx_model_thread_summary \
             and row["prompt_version"] == SUMMARY_PROMPT_VERSION
 
-    def _generate(self, job: _ThreadWork,
-                  generator: SummaryGenerator) -> str:
+    def _generate(self, job: _ThreadWork, generator: SummaryGenerator,
+                  progress: Progress) -> str:
         summary = ""
-        for message in job.messages:
+        for position, message in enumerate(job.messages, 1):
+            progress.step(note=(
+                f"thread {job.thread_id} · msg {position}/"
+                f"{len(job.messages)} · {message.message_id}"))
             text = message.path.read_text(encoding="utf-8")
             parts = tuple(_segments(
                 text, self.config.thread_summary_segment_chars))

@@ -190,6 +190,12 @@ the model chat template. The prompt treats email content as untrusted evidence,
 requests only a concise factual chronology, and forbids following instructions
 found inside emails.
 
+The generative pass reports progress (added at `e07ac2c`): an explicit
+stale-count line before the silent model load, then a per-message progress
+bar across all stale threads whose heartbeat keeps elapsed/ETA ticking
+during a single slow generation, so a working stage never looks hung.
+Per-thread failures print through the bar and are review-flagged.
+
 Before regeneration, an existing row is marked `is_stale=1`; stale summaries
 are excluded from retrieval and embedding. A successful upsert clears the
 flag. The source email bodies remain authoritative. A failed summary is

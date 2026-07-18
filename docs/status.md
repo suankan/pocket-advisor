@@ -28,6 +28,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `23b0a42` | **Workspace-scoped state + mandatory selection**: required global `--workspace`; explicit workspace runtime context; independent bound DB/cache/vector/log/runtime trees; exact native workspace wipe; unsafe frozen commands fail closed; redundant `active:` key removed; two-workspace custody/isolation coverage |
 | `c6df0a3` | **Command-scoped workspace selection**: workspace required only for actions that access workspace scope; registry-free shared model fetch and fixture tests; file-addressed accuracy comparison classified workspace-free; meaningless selectors rejected; exhaustive CLI action-matrix coverage |
 | `78e705a` | **Full-ingest completion reporting + saved-record display**: typed end-of-run report (stage timings/outcomes, read-only workspace snapshot, finding rollups); atomic schema-versioned JSON record per run; shared honest transaction-coverage classifier; `ingest report [--last \| PATH]` re-renders any saved record through the same formatter without opening the database |
+| `e07ac2c` | **Summaries-stage progress reporting**: explicit stale-count/model-loading line, per-message progress bar with heartbeat across all stale threads, and bar-safe failure lines — the generative pass can no longer look hung |
 
 Current self-tests: all 10 `modules/tests/test_*.py` pass, including the
 workspace-isolation and ingest-reporting fixtures

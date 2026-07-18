@@ -4,6 +4,41 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Post-ingest integrity and reporting fixes
+
+Implementation commit: `5fd5bdd` (investigation record: `b678f14`,
+`docs/bugs/post-ingest-integrity-reporting.md`).
+
+- Bumped the Westpac parser to `westpac-v2` and recognized explicitly labelled
+  compact account lines such as `Account No. 037-186 40-5530`, while retaining
+  the existing two-column format, digit normalization, and loud configured-
+  account mismatch behavior.
+- Made completion reporting suppress transaction run flags only when their
+  severity counts exactly equal the corresponding structured manifest finding
+  totals. Non-equivalent flags remain visible as fallback signals.
+- Made native verification distinguish recursively attached-email candidates
+  from collection-root originals only after proving custody membership, email
+  type, an acyclic existing parent chain, and a terminal mounted blob-indexed
+  carrying original. Added the verified attached-lineage count to the report.
+- Added temporary-fixture regressions for both Westpac account layouts,
+  equivalent and non-equivalent finding totals, valid attached-email custody,
+  missing lineage, an unindexed carrying root, and cyclic parents.
+
+Verification: `./pocket-advisor.py test` passed 13/13; Python compilation and
+`git diff --check` were clean. Read-only native verification of the existing
+family workspace passed with 1,008 indexed originals, 1,027 memberships, 19
+attached-email lineages, 3,691 derived artifacts, 10,541 leaf vectors, 126
+navigation vectors, and a valid transaction manifest. No live derived state or
+collection evidence was mutated.
+
+Operational note: the next normal family-workspace `ingest all` performs one
+fast Stage 5 rebuild because `westpac-v2` changes the parser fingerprint. No
+PDF, summary, embedding, schema, or wipe work is required.
+
+Deferred: the 121 unsupported AMP, MEBank, NAB, CBA, Revolut, and Qantas
+statements remain roadmap item 1. Genuine ambiguous transfer candidates remain
+operator reconciliation findings.
+
 ## 2026-07-19 — Multiple-ingestion regression fixes
 
 Implementation commit: `a9c9d96` (investigation and resolution record:

@@ -36,6 +36,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `838e037` | **PDF OCR validation-warning recovery**: a fresh derivative from non-zero OCRmyPDF proceeds to the authoritative `pdftotext` gate; warnings remain reviewable, stale outputs cannot be reused, prior failures retry, and successful recovery is idempotent; native suite 13/13 |
 | `aedd667` | **Transaction-stage convergence**: versioned Stage 3 PDF-text recipe freshness; workspace-local semantic input/output manifest; verified unchanged Stage 5 skip; atomic invalidation rebuild; persisted current input findings; exact retired-account cleanup; guarded `ingest transactions --force`; native suite 13/13 |
 | `a9c9d96` | **Multiple-ingestion regression fixes**: verified-original fallback when OCRmyPDF produces no derivative; correct multi-value assertion binding and zero diagnostics; valid zero-activity statements; accurate top-level source/PDF finding reporting; bounded structural failure reasons; PDF/transaction recipe convergence; native suite 13/13 |
+| `5fd5bdd` | **Post-ingest integrity and reporting fixes**: `westpac-v2` compact account-line identity recognition; exact transaction finding/run-flag deduplication; proven attached-email custody-chain verification; live read-only verify pass and native suite 13/13 |
 
 Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -126,10 +127,23 @@ failure rolls the whole Stage 5 rebuild back.
   assertion-bearing zero-activity statements publish normally with zero rows.
   Full-ingest snapshots now count only top-level custody sources, separate OCR
   and weak-date categories without equivalent run-flag duplication, and save
-  only bounded structural failure context. The PDF and transaction recipes
-  were bumped; the next operator-run full ingest converges both once without a
-  wipe. The independent unsupported-institution parser backlog remains the
-  roadmap head.
+  only bounded structural failure context. The live acceptance ingest
+  subsequently converged 545/545 readable PDF occurrences, 10,541 leaf plus
+  126 navigation vectors, and 56 balance-valid supported statements / 2,873
+  rows without a wipe. The independent unsupported-institution parser backlog
+  remains the roadmap head.
+- **Post-ingest integrity/reporting findings fixed (`5fd5bdd`, investigation
+  record `b678f14`):** Westpac parser `westpac-v2` recognizes both the existing
+  two-column account layout and labelled compact Flexi forms, preserving the
+  configured-account mismatch gate. Structured transaction findings now own
+  exactly equivalent severity totals without hiding non-equivalent run flags.
+  Native verification exempts an attached-email candidate from a direct blob
+  row only after proving custody membership and an acyclic parent chain to a
+  mounted blob-indexed carrying original. Read-only verification of the live
+  family workspace passes with 1,008 originals, 1,027 memberships, 19 attached
+  lineages, 3,691 derived artifacts, and both vector namespaces consistent.
+  Its next normal ingest performs one fast Stage 5 rebuild for the parser-ID
+  change; no PDF, summary, embedding, wipe, or schema work is required.
 - **PDF-text freshness + transaction convergence (`aedd667`, design
   `892a3bb`):** Stage 3 records a fingerprint of its OCRmyPDF/`pdftotext`
   wrapper recipe, OCR languages, and local tool versions, and requeues any
@@ -142,9 +156,9 @@ failure rolls the whole Stage 5 rebuild back.
   complete atomic rebuild. Current non-relational findings persist across
   hits, final account unmounts converge to an empty graph, and `verify` checks
   manifest/output agreement. No live workspace state was mutated during the
-  implementation. The `a9c9d96` extraction/build recipe refinements make the
-  next full ingest refresh PDF text once and then publish the corresponding
-  transaction manifest; no wipe is required.
+  implementation. The `a9c9d96` extraction/build recipe refinements have now
+  converged in live state and published the corresponding transaction
+  manifest; no wipe was required.
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a

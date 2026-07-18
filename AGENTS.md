@@ -73,8 +73,9 @@ archived `docs_old/` changelog.
 
 1. **Evidence is read-only.** Never write, rename, or delete anything under a
    collection root (`workspaces/corpora/...` or a registry path). Durable
-   identity is `(collection_id, sha256)`, never a path. Only derived state
-   under `workspaces/.state/` is regenerable.
+   identity is `(collection_id, sha256)`, never a path. Only engine-derived
+   state under `workspaces/.state/` is regenerable; preserved
+   `search-accuracy-tests/` directories are human-authored workspace test data.
 2. **Preserve custody.** Hash originals before parsing, write-verify every
    derived copy, tolerate renames through `source_blob_index`, and treat a
    changed hash at a known path as a custody alarm—not an update.

@@ -9,6 +9,8 @@ from modules.config import Config, STATE_DIRNAME
 from modules.embedding import ModelStore, current_fingerprint, fingerprint_slug
 from modules.workspace import Registry, Workspace
 
+PRESERVED_STATE_NAMES = frozenset({"search-accuracy-tests"})
+
 
 def _dir_size(path: Path) -> int:
     if not path.is_dir():
@@ -49,8 +51,8 @@ def active_index_slug(config: Config) -> str:
 def _index_root(config: Config) -> Path:
     raw = config.vectors_dir / "text"
     expected = (
-        config.workspaces_dir.resolve() / STATE_DIRNAME / "workspaces"
-        / config._selected_workspace_id() / "vectors" / "text"
+        config.workspaces_dir.resolve() / STATE_DIRNAME
+        / f"workspace-{config._selected_workspace_id()}" / "vectors" / "text"
     )
     resolved = raw.resolve(strict=False)
     if resolved != expected:
@@ -186,7 +188,7 @@ def validated_state_dir(
             f"{config.workspace_id!r} != {workspace.id!r}")
 
     workspaces_root = config.workspaces_dir.resolve()
-    expected = (workspaces_root / STATE_DIRNAME / "workspaces" / workspace.id)
+    expected = (workspaces_root / STATE_DIRNAME / f"workspace-{workspace.id}")
     state = config.state_dir
     if state.is_symlink():
         raise SystemExit(f"wipe: refusing symlinked workspace state: {state}")
@@ -221,7 +223,7 @@ def wipe_state(
     input_fn: Callable[[str], str] = input,
     before_delete: Callable[[], None] | None = None,
 ) -> int:
-    """Delete only the selected workspace's complete derived-state tree."""
+    """Delete selected derived state while preserving authored QA suites."""
     state = validated_state_dir(config, registry, workspace)
     if not state.exists():
         print(f"wipe: {state} does not exist — nothing to wipe")
@@ -229,17 +231,34 @@ def wipe_state(
     if not state.is_dir():
         raise SystemExit(f"wipe: refusing — workspace state is not a directory: {state}")
 
-    entries = sorted(state.iterdir(), key=lambda path: path.name)
+    entries = sorted(state.iterdir(), key=lambda item: item.name)
+    deletable = [entry for entry in entries
+                 if entry.name not in PRESERVED_STATE_NAMES]
+    preserved = [entry for entry in entries
+                 if entry.name in PRESERVED_STATE_NAMES]
+    if not deletable:
+        if preserved:
+            print(
+                f"wipe: no regenerable state under {state}; preserved "
+                + ", ".join(entry.name for entry in preserved))
+        else:
+            print(f"wipe: {state} is empty — nothing to wipe")
+        return 0
     total = 0
-    print(f"Will DELETE workspace {workspace.id!r} derived state under {state}:")
-    for entry in entries:
+    print(f"Will DELETE workspace {workspace.id!r} regenerable state under "
+          f"{state}:")
+    for entry in deletable:
         size = _dir_size(entry)
         total += size
         suffix = "/" if entry.is_dir() and not entry.is_symlink() else ""
         print(f"  {_human(size):>8}  {entry.name}{suffix}")
     print(f"  {_human(total):>8}  total")
-    print("Untouched: every collection root, other workspace states, and "
-          "workspace user data.")
+    if preserved:
+        print("Preserved workspace test data:")
+        for entry in preserved:
+            print(f"  {entry.name}/")
+    print("Untouched: every collection root, other workspace states, "
+          "workspace test data, and workspace user data.")
 
     if not yes:
         answer = input_fn(
@@ -250,6 +269,15 @@ def wipe_state(
 
     if before_delete is not None:
         before_delete()
-    shutil.rmtree(state)
-    print(f"wipe: deleted {state} ({_human(total)})")
+    for entry in deletable:
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    if not any(state.iterdir()):
+        state.rmdir()
+        print(f"wipe: deleted {state} ({_human(total)})")
+    else:
+        print(f"wipe: deleted regenerable contents under {state} "
+              f"({_human(total)}); preserved workspace test data")
     return 0

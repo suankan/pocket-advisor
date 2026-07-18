@@ -493,7 +493,7 @@ def _handle_accuracy(args: argparse.Namespace) -> int:
     from modules import accuracy
 
     selection: RuntimeSelection = args.selection
-    paths = accuracy.suite_paths(selection.workspace.root)
+    paths = accuracy.suite_paths(selection.config)
 
     if args.action == "list":
         print(accuracy.format_list(paths))

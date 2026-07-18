@@ -3,10 +3,12 @@
 Status: workspace isolation **shipped 2026-07-18** in implementation commit
 `23b0a42`; command-scoped selector refinement **shipped 2026-07-18** in
 implementation commit `c6df0a3`; the native accuracy action matrix superseded
-the earlier workspace-free result-comparison rule in `3d8d9d7`.
+the earlier workspace-free result-comparison rule in `3d8d9d7`. The flat
+state-root, workspace-named database, and state-owned accuracy-suite refinement
+was locked on 2026-07-18.
 
 This feature replaces the original shared-state design. Each workspace owns
-one SQLite database and one complete derived-state tree. A workspace is an
+one SQLite database and one complete state container. A workspace is an
 isolation boundary, not merely a collection filter applied to a global
 database.
 
@@ -15,7 +17,9 @@ database.
 1. **One database per workspace.** No item, attachment, thread, summary,
    chunk, FTS row, account, statement, transaction, or review record is
    shared between workspace databases.
-2. **One cache and vector tree per workspace.** Parsed artifacts, OCR
+2. **One flat state container per workspace.** Its exact root is
+   `workspaces/.state/workspace-<workspace_id>/`; there is no intermediate
+   `workspaces/` directory. Parsed artifacts, OCR
    derivatives, leaf vectors, thread-summary vectors, logs, and daemon
    runtime files live below that workspace's state root.
 3. **`--workspace` is mandatory only for workspace-bound actions.** An action
@@ -38,28 +42,38 @@ database.
    operate only on its mounts. They never rediscover a workspace through an
    implicit registry lookup.
 7. **Workspace state deletion is exact and local.** `wipe state` deletes only
-   the selected workspace state root after validating its resolved path and
-   obtaining confirmation. It never deletes the common `.state` parent or
-   another workspace's state.
-8. **A database is bound to its workspace.** Fresh schema metadata records the
-   owning workspace ID. Opening a database for a different selected workspace
+   regenerable children of the selected workspace state root after validating
+   its resolved path and obtaining confirmation. It never deletes the common
+   `.state` parent or another workspace's state.
+8. **A database is named and bound to its workspace.** Workspace `<id>` owns
+   `<id>.db` directly below its state root. Fresh schema metadata records the
+   same owning ID. Opening a database for a different selected workspace
    aborts before any read or write.
+9. **Accuracy suites are state-located but preserved.** Human-authored
+   expectations and their result history live at
+   `<workspace-state>/search-accuracy-tests/`. They are workspace test data,
+   not regenerable engine output, so `wipe state` must preserve the complete
+   directory while removing the database/cache/vector/log/runtime children.
+   This allows the canonical wipe → re-ingest → accuracy workflow to reuse the
+   same questions and compare with earlier runs.
 
 ## State layout
 
 ```text
 workspaces/.state/
-└── workspaces/
-    └── <workspace_id>/
-        ├── pocket_advisor.db
-        ├── cache/
-        │   └── <collection_id>/
-        ├── vectors/
-        │   └── text/<fingerprint>/
-        ├── logs/
-        │   └── review_queue.csv
-        └── runtime/
-            └── <daemon files when implemented>
+└── workspace-<workspace_id>/
+    ├── <workspace_id>.db
+    ├── cache/
+    │   └── <collection_id>/
+    ├── vectors/
+    │   └── text/<fingerprint>/
+    ├── logs/
+    │   └── review_queue.csv
+    ├── runtime/
+    │   └── <daemon files>
+    └── search-accuracy-tests/       preserved by wipe state
+        ├── expectations/*.yaml
+        └── results/*.json
 ```
 
 Workspace IDs used as state-directory names must be safe single path
@@ -68,9 +82,11 @@ components. Registry loading rejects IDs outside
 same directory name.
 
 Evidence remains under registry collection roots and is read-only.
-Retrieval-expectation sets, accuracy results, reconciliation overrides,
-counterparties, and workspace playbooks remain workspace user data under
-`workspaces/<workspace-path>/`; they are not deleted with derived state.
+Reconciliation overrides, counterparties, and workspace playbooks remain
+workspace user data under `workspaces/<workspace-path>/`. Retrieval-expectation
+sets and accuracy results live in the state container only to consolidate the
+workspace layout; they remain preserved workspace test data and are not
+deleted by `wipe state`.
 
 ## CLI contract
 
@@ -93,7 +109,7 @@ The following actions are workspace-bound and require `--workspace`:
 | `transactions report` | selected transaction database and workspace files |
 | `query` | selected database, vectors, and mounts |
 | `daemon serve/status/stop` | selected database and runtime directory |
-| `wipe list/index/state` | selected vector or complete state tree |
+| `wipe list/index/state` | selected vectors or regenerable workspace state |
 | `blob-index list-sources/lookup` | selected custody database and mounts |
 | `verify` | selected evidence and derived state |
 | `accuracy generate/run/compare/list` | selected retrieval state, expectation sets, or results |
@@ -151,12 +167,15 @@ searchable if a collection is unmounted before the next clean rebuild.
   selected registry workspace.
 - Adding or changing a mounted collection requires ingestion for every
   affected workspace; no other workspace is updated implicitly.
-- A workspace rebuild wipes and recreates only its own state tree.
-- The existing shared `workspaces/.state/pocket_advisor.db`, cache, and vector
-  layout is not migrated in place. After implementation, each required
-  workspace is explicitly wiped/initialized and fully re-ingested.
-- Workspace-scoped commands never write into the retired shared layout; its
-  optional cleanup is a separate, explicitly confirmed operation.
+- A workspace rebuild removes and recreates only its own regenerable state;
+  `search-accuracy-tests/` survives in place.
+- Earlier per-workspace roots at
+  `workspaces/.state/workspaces/<workspace_id>/`, generic
+  `pocket_advisor.db` names, and workspace-root `search-accuracy-test/`
+  directories are not migrated or copied automatically. Engine state is
+  rebuilt in the flat layout; the operator deliberately relocates any
+  human-authored expectation sets that should be retained.
+- Workspace-scoped commands never write into any retired layout.
 
 ## Acceptance criteria
 
@@ -173,8 +192,9 @@ searchable if a collection is unmounted before the next clean rebuild.
 5. The same RFC Message-ID may be ingested independently into both workspace
    databases without collision or cross-workspace reuse.
 6. `wipe state` resolves and displays the exact selected state root, requires
-   confirmation, deletes only that root, and leaves all evidence and other
-   workspace state byte-identical.
+   confirmation, deletes only its regenerable children, preserves
+   `search-accuracy-tests/` byte-identically, and leaves all evidence and
+   other workspace state byte-identical.
 7. A copied or misaddressed database whose bound workspace ID differs from
    `--workspace` is refused before mutation.
 8. Pipeline stages and retrieval use the selected workspace carried by
@@ -185,6 +205,9 @@ searchable if a collection is unmounted before the next clean rebuild.
    collection as well as separate test collections.
 11. Current module self-tests pass, including native daemon, maintenance, and
     workspace-isolation fixtures.
+12. Tests lock the exact flat state path, workspace-derived database filename,
+    plural accuracy-suite path, symlink refusal, and preservation across a
+    confirmed state wipe.
 
 ## Non-goals
 
@@ -194,4 +217,4 @@ searchable if a collection is unmounted before the next clean rebuild.
 - Cross-workspace parsed-artifact or vector deduplication.
 - Automatic selection from registry metadata, current directory, environment
   variables, or last-used state.
-- In-place migration of the retired shared database.
+- In-place migration of any retired shared or nested per-workspace state.

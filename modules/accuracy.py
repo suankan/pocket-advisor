@@ -1,11 +1,11 @@
 """Native retrieval-expectation accuracy testing.
 
-Workspace-generic: everything is derived from the selected workspace's
-registry entry and bound database — no per-workspace knowledge lives here.
+Workspace-generic: everything is derived from the selected workspace's bound
+configuration and database — no per-workspace knowledge lives here.
 
-Layout (workspace data, gitignored):
+Layout (workspace-owned, preserved across ``wipe state``):
 
-    <workspace-root>/search-accuracy-test/
+    <workspace-state>/search-accuracy-tests/
         expectations/*.yaml     question sets (durable anchors only)
         results/<utc>__<label>.json   one measurement record per run
 
@@ -30,6 +30,7 @@ from pathlib import Path
 
 import yaml
 
+from modules.config import Config
 from modules.custody import write_verified
 from modules.pipeline.base import PipelineContext
 from modules.retrieval import SearchOptions, SearchResources, run_search
@@ -50,8 +51,19 @@ class SuitePaths:
     results_dir: Path
 
 
-def suite_paths(workspace_root: Path) -> SuitePaths:
-    base = workspace_root / "search-accuracy-test"
+def suite_paths(config: Config) -> SuitePaths:
+    """Resolve the selected workspace's exact, non-symlinked suite paths."""
+    base = config.accuracy_tests_dir
+    expected = config.state_dir.resolve(strict=False) / "search-accuracy-tests"
+    resolved = base.resolve(strict=False)
+    if resolved != expected:
+        raise ExpectationError(
+            f"accuracy: refusing suite path {resolved}; expected {expected}")
+    for component in (config.state_dir, base,
+                      base / "expectations", base / "results"):
+        if component.is_symlink():
+            raise ExpectationError(
+                f"accuracy: refusing symlinked suite path: {component}")
     return SuitePaths(base / "expectations", base / "results")
 
 

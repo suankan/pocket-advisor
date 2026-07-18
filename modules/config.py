@@ -7,7 +7,7 @@ needs it — no module-global mutation, no import-time side effects.
 
 Cache layout (`docs/design.md`):
 
-    workspaces/.state/workspaces/<workspace_id>/cache/<collection_id>/
+    workspaces/.state/workspace-<workspace_id>/cache/<collection_id>/
         <email_basename>__<sha8>/           EmailCacheFolder
             email_message_full.txt
             email_message.txt
@@ -184,10 +184,6 @@ class Config:
     def state_root(self) -> Path:
         return self.workspaces_dir / STATE_DIRNAME
 
-    @property
-    def workspaces_state_dir(self) -> Path:
-        return self.state_root / "workspaces"
-
     def for_workspace(self, workspace_id: str) -> Config:
         """Return this immutable config bound to one selected workspace."""
         if not workspace_id:
@@ -202,11 +198,11 @@ class Config:
 
     @property
     def state_dir(self) -> Path:
-        return self.workspaces_state_dir / self._selected_workspace_id()
+        return self.state_root / f"workspace-{self._selected_workspace_id()}"
 
     @property
     def db_path(self) -> Path:
-        return self.state_dir / "pocket_advisor.db"
+        return self.state_dir / f"{self._selected_workspace_id()}.db"
 
     @property
     def cache_dir(self) -> Path:
@@ -227,6 +223,11 @@ class Config:
     @property
     def runtime_dir(self) -> Path:
         return self.state_dir / "runtime"
+
+    @property
+    def accuracy_tests_dir(self) -> Path:
+        """Preserved workspace-owned retrieval expectations and results."""
+        return self.state_dir / "search-accuracy-tests"
 
     @property
     def models_dir(self) -> Path:

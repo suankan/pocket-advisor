@@ -88,7 +88,12 @@ def main() -> int:
                           return_value=FakeEmbedder()):
             EmbedStage(ctx).run()
 
-        paths = suite_paths(ctx.workspace.root)
+        paths = suite_paths(ctx.config)
+        assert paths.expectations_dir == \
+            cfg.state_dir / "search-accuracy-tests" / "expectations"
+        assert paths.results_dir == \
+            cfg.state_dir / "search-accuracy-tests" / "results"
+        assert not (ctx.workspace.root / "search-accuracy-test").exists()
 
         # generate: anchor-verified scaffold, TODO questions, no overwrite.
         target = paths.expectations_dir / "scaffold.yaml"
@@ -170,6 +175,20 @@ def main() -> int:
         assert first.name in listing and second.name in listing
 
         conn.close()
+
+        # A suite path cannot redirect outside the selected flat state root.
+        unsafe = base.for_workspace("unsafe")
+        unsafe.state_dir.mkdir(parents=True)
+        outside = root / "outside-accuracy"
+        outside.mkdir()
+        unsafe.accuracy_tests_dir.symlink_to(
+            outside, target_is_directory=True)
+        try:
+            suite_paths(unsafe)
+            raise AssertionError("symlinked accuracy suite must be refused")
+        except ExpectationError as exc:
+            assert "refusing suite path" in str(exc) or \
+                "symlinked suite path" in str(exc)
     print("test_accuracy: all ok")
     return 0
 

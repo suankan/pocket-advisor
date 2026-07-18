@@ -1,4 +1,5 @@
 """Self-test: independent workspace DB/cache/index/transaction/wipe state."""
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -218,6 +219,11 @@ def main() -> int:
         b_state_before = snapshot_tree(b.config.state_dir)
         evidence_before = shared_path.read_bytes()
         a_state = a.config.state_dir
+        expectations = a.config.accuracy_tests_dir / "expectations"
+        expectations.mkdir(parents=True)
+        authored_suite = expectations / "authored.yaml"
+        authored_suite.write_text("- id: durable-test\n")
+        suite_before = snapshot_tree(a.config.accuracy_tests_dir)
         a.conn.close()
 
         # Without explicit approval, nothing is deleted.
@@ -236,14 +242,30 @@ def main() -> int:
             before_delete=lambda: before_delete_calls.append("called"),
         ) == 0
         assert before_delete_calls == ["called"]
-        assert not a_state.exists()
+        assert a_state.exists()
+        assert snapshot_tree(a.config.accuracy_tests_dir) == suite_before
+        assert authored_suite.read_text() == "- id: durable-test\n"
+        assert not a.config.db_path.exists()
+        for derived in (a.config.cache_dir, a.config.vectors_dir,
+                        a.config.logs_dir, a.config.runtime_dir):
+            assert not derived.exists(), derived
         assert b_sentinel.read_bytes() == b"workspace-b-state"
         assert snapshot_tree(b.config.state_dir) == b_state_before
         assert shared_path.read_bytes() == evidence_before == shared_bytes
         assert b.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] \
             == 1
 
+        # With only preserved test data left, a second wipe is a no-op and
+        # does not stop a daemon or remove the suite.
+        assert wipe_state(
+            a.config, registry, a.workspace, yes=True,
+            before_delete=lambda: before_delete_calls.append("called-again"),
+        ) == 0
+        assert before_delete_calls == ["called"]
+        assert snapshot_tree(a.config.accuracy_tests_dir) == suite_before
+
         # A malicious state symlink cannot redirect deletion into B.
+        shutil.rmtree(a_state)
         a_state.symlink_to(b.config.state_dir, target_is_directory=True)
         try:
             wipe_state(a.config, registry, a.workspace, yes=True)

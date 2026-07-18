@@ -10,13 +10,15 @@ per run, and compares runs over time. It is the sole accuracy implementation.
 ## Locked decisions
 
 1. **Workspace-generic, workspace-bound.** The implementation knows only the
-   selected workspace id; every path derives from the registry workspace
-   root. All four actions require `--workspace`. The formerly planned
+   selected workspace id; every path derives from its bound state root. All
+   four actions require `--workspace`. The formerly planned
    file-addressed workspace-free compare is replaced by `compare --last N`.
-2. **Expectation sets and results are workspace data.** Both live under
-   `<workspace-root>/search-accuracy-test/` (`expectations/*.yaml`,
-   `results/<utc>__<label>.json`) — gitignored case data, wiped only with
-   the workspace, never committed, never sent anywhere.
+2. **Expectation sets and results are preserved workspace test data.** Both
+   live under `<workspace-state>/search-accuracy-tests/`
+   (`expectations/*.yaml`, `results/<utc>__<label>.json`) — gitignored local
+   data, never committed or sent anywhere. Despite their consolidated state
+   location they are not regenerable: `wipe state` preserves the directory so
+   a clean re-ingest can run the same questions and compare prior results.
 3. **Durable anchors only.** Expectations anchor on Message-IDs
    (`expect_any`, any-of) and thread stable keys (`expect_thread_key`) —
    never integer row ids, which do not survive a re-ingest. Anchors absent
@@ -83,6 +85,8 @@ directory, merged in sorted order with globally unique ids.
 7. An isolated validation workspace can be rebuilt and its expectation set run
    end-to-end through the real models (verified 2026-07-18: 12/12, 100%
    thread-or-better).
+8. The exact plural suite path is workspace-state-local, rejects symlink
+   redirection, and survives a confirmed `wipe state` byte-identically.
 
 ## Non-goals
 

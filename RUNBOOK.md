@@ -25,12 +25,13 @@ Workspace and collection mounts are declared in
 weights are shared under `models/`; all corpus-derived state is isolated at:
 
 ```text
-workspaces/.state/workspaces/<workspace_id>/
-├── pocket_advisor.db
+workspaces/.state/workspace-<workspace_id>/
+├── <workspace_id>.db
 ├── cache/
 ├── vectors/
 ├── logs/review_queue.csv
-└── runtime/
+├── runtime/
+└── search-accuracy-tests/     # preserved by wipe state
 ```
 
 Do not move, rename, or edit evidence as an operational shortcut. Collection
@@ -125,9 +126,10 @@ not derived state.
 
 ## Workspace rebuild
 
-`wipe state` displays and deletes exactly one selected workspace state root.
-It leaves evidence, workspace user data, model weights, and every other
-workspace untouched:
+`wipe state` displays and deletes the regenerable children of exactly one
+selected workspace state root. It preserves that workspace's
+`search-accuracy-tests/` directory and leaves evidence, workspace user data,
+model weights, and every other workspace untouched:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> wipe state
@@ -140,9 +142,10 @@ For any destructive workspace rebuild, obtain explicit user confirmation
 immediately before the wipe even when using `--yes`. A running daemon is
 stopped only after confirmation and immediately before deletion.
 
-Existing shared state at `workspaces/.state/pocket_advisor.db` and its former
-cache/vector paths is retired and is never migrated or touched by workspace
-commands.
+Earlier shared and nested per-workspace layouts are retired and are never
+migrated or touched by workspace commands. Human-authored expectation sets
+from an earlier workspace-root `search-accuracy-test/` are relocated only by
+an explicit operator action, never silently copied.
 
 ## Custody and index maintenance
 
@@ -188,7 +191,8 @@ evidence, and every other workspace untouched.
 ## Retrieval accuracy testing
 
 Native and workspace-bound. Expectation sets and JSON result records are
-workspace data under `<workspace-root>/search-accuracy-test/`
+preserved workspace test data under
+`<workspace-state>/search-accuracy-tests/`
 (`expectations/*.yaml`, `results/<utc>__<label>.json`):
 
 ```bash

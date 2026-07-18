@@ -36,7 +36,9 @@ document may weaken the custody, privacy, or evidence rules here.
   answers, and case facts never leave the machine. Downloading model weights
   and abstract web research are allowed.
 - **Read-only evidence.** Collection roots are never written, renamed, or
-  deleted. All generated artifacts live under `workspaces/.state/`.
+  deleted. All generated artifacts live under `workspaces/.state/`; preserved
+  human-authored retrieval tests are consolidated there as an explicit
+  non-regenerable exception.
 - **Email and PDF originals only.** Images, ZIPs, and other attachments are
   retained for custody and inspection but are not text-extracted or embedded.
 - **Fresh schema.** The engine deliberately refuses legacy state. Architecture
@@ -63,12 +65,13 @@ remain workspace-owned. Selection is required by action scope, never as a
 ceremonial argument; the complete matrix is locked in
 `docs/features/workspace-scoped-state.md`.
 
-Each workspace owns an independent SQLite database, cache, vector indexes,
-logs, and runtime files under
-`workspaces/.state/workspaces/<workspace_id>/`. Model weights under `models/`
-are the only shared runtime asset. Reprocessing a collection separately for
-each workspace that mounts it is an accepted cost. The complete contract is
-locked in `docs/features/workspace-scoped-state.md`.
+Each workspace owns an independent flat state container at
+`workspaces/.state/workspace-<workspace_id>/`, including a workspace-named
+`<workspace_id>.db`, cache, vector indexes, logs, runtime files, and preserved
+`search-accuracy-tests/`. Model weights under `models/` are the only shared
+runtime asset. Reprocessing a collection separately for each workspace that
+mounts it is an accepted cost. The complete contract is locked in
+`docs/features/workspace-scoped-state.md`.
 
 ## Data and custody model
 
@@ -214,11 +217,12 @@ data outside engine state and survive state wipes.
 
 ## Lifecycle
 
-Workspace state is regenerable; evidence and workspace user data are not.
-`wipe state` validates and deletes only the explicitly selected workspace state
-after immediate user confirmation. It never deletes the common `.state`
-parent, a collection root, retrieval expectation sets, benchmark results, playbooks, or
-reconciliation files.
+Engine-derived workspace state is regenerable; evidence, workspace user data,
+and human-authored retrieval tests are not. `wipe state` validates the
+explicitly selected flat workspace root and, after immediate user
+confirmation, deletes only its regenerable children. It never deletes the
+common `.state` parent, a collection root, `search-accuracy-tests/`, playbooks,
+or reconciliation files.
 
 The clean-break migration is:
 

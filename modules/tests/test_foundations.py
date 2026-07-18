@@ -52,16 +52,17 @@ def test_config(tmp: Path) -> None:
     ws_dir = tmp / "workspaces"
     base = Config(project_root=tmp, workspaces_dir=ws_dir)
     assert base.state_root == ws_dir / ".state"
-    assert base.workspaces_state_dir == ws_dir / ".state" / "workspaces"
     try:
         _ = base.state_dir
         raise AssertionError("unselected config must not resolve state")
     except RuntimeError as exc:
         assert "before workspace selection" in str(exc)
     cfg = base.for_workspace("matter-x")
-    assert cfg.state_dir == ws_dir / ".state" / "workspaces" / "matter-x"
-    assert cfg.db_path.name == "pocket_advisor.db"
+    assert cfg.state_dir == ws_dir / ".state" / "workspace-matter-x"
+    assert cfg.db_path == cfg.state_dir / "matter-x.db"
     assert cfg.runtime_dir == cfg.state_dir / "runtime"
+    assert cfg.accuracy_tests_dir == \
+        cfg.state_dir / "search-accuracy-tests"
     cache = cfg.collection_cache("own/solicitor")
     assert cache.root == cfg.cache_dir / "own_solicitor"
 

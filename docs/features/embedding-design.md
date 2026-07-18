@@ -210,7 +210,7 @@ the stage continues with the remaining threads.
 Each embedding-model fingerprint keeps two namespaces:
 
 ```text
-workspaces/.state/workspaces/<workspace_id>/vectors/text/<fingerprint>/
+workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
   vecs/<chunk_id>.npy
   vectors.npy
   vectors_ids.npy

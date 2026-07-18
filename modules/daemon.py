@@ -33,8 +33,8 @@ class DaemonPaths:
 def daemon_paths(config: Config) -> DaemonPaths:
     workspace_id = config._selected_workspace_id()
     expected = (
-        config.workspaces_dir.resolve() / STATE_DIRNAME / "workspaces"
-        / workspace_id / "runtime"
+        config.workspaces_dir.resolve() / STATE_DIRNAME
+        / f"workspace-{workspace_id}" / "runtime"
     )
     runtime = config.runtime_dir.resolve(strict=False)
     if runtime != expected:

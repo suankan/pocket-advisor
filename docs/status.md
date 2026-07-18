@@ -25,9 +25,11 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `9b9e052` | **Review findings fixed**: always-on summary staleness, bounded/warm-ready reranking, global context budget, match dedup, operational warnings, aggregate visibility, missing-artifact handling, `item_count`, and ghost-root/disabled-generation coverage |
 | `625504a` | **Final payload/cache decisions locked**: envelope-enriched leaf payload + FTS shadow + recipe fingerprint, and exactly two readable message artifacts with authored-body-region chunking |
 | `a48bf7b` | **Envelope payload + message-artifact consolidation**: source-aware email/document/attachment payloads shared by dense and FTS retrieval; `envelope-v1` fingerprint separation; pure evidentiary chunk text; envelope-relative email offsets; final write-verified two-artifact email cache; comprehensive temp-fixture coverage |
+| `23b0a42` | **Workspace-scoped state + mandatory selection**: required global `--workspace`; explicit workspace runtime context; independent bound DB/cache/vector/log/runtime trees; exact native workspace wipe; unsafe frozen commands fail closed; redundant `active:` key removed; two-workspace custody/isolation coverage |
 
-Current self-tests: all 8 `modules/tests/test_*.py` pass, including the new
-embedding/thread/retrieval fixture (`./pocket-advisor.py test`). The frozen
+Current self-tests: all 9 `modules/tests/test_*.py` pass, including the
+workspace-isolation fixture
+(`./pocket-advisor.py --workspace test-workspace test`). The frozen
 `scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
 
 Stage 5 is implemented in `modules/statement_parsers.py` and
@@ -85,26 +87,26 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
 
-- **Workspace-scoped state design locked (implementation pending):**
-  `docs/features/workspace-scoped-state.md` replaces the shared-state target
-  with one bound SQLite database plus cache/vector/log/runtime tree per
-  workspace. Every operational CLI invocation will require an explicit global
-  `--workspace`; duplicated derived state for multiply mounted collections is
-  an accepted cost, and only model weights remain shared. Current code still
-  uses implicit registry workspace selection and shared `workspaces/.state` paths;
-  roadmap item 1 implements the decision before cutover resumes.
+- **Workspace-scoped state implemented (`23b0a42`):** every operational CLI
+  command requires global `--workspace`; the selected workspace is explicit
+  in runtime context and owns a bound database plus independent
+  cache/vector/log/runtime tree. Model weights alone are shared, duplication
+  across multiply mounted collections is intentional, and the retired
+  `active:` registry key is rejected. Workspace-state wipe is native,
+  confirmed, exact-path, and protected against overlap/symlink redirection.
 
-- **New CLI implemented** in `modules/cli.py` at `97ee193`;
-  `pocket-advisor.py` is now the venv bootstrap plus a
-  narrow transitional adapter for frozen retrieval/maintenance commands.
-  Argparse lives only in `modules/cli.py`; nothing in `modules/` imports
-  from `scripts/`.
+- **New CLI implemented** in `modules/cli.py` at `97ee193`, with mandatory
+  workspace selection and frozen-command fail-closed enforcement completed at
+  `23b0a42`. `pocket-advisor.py` is now only the venv bootstrap and native CLI
+  entrypoint. Argparse lives only in `modules/cli.py`; nothing in `modules/`
+  imports from `scripts/`.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
-  `transactions report`, `db init`, and the 8-test module runner are wired
+  `transactions report`, `db init`, and the 9-test module runner are wired
   to the new engine. Removed stage spellings and `blob-index rebuild` are
   rejected, not aliased.
-- Real `query` now dispatches to the native cold relational retriever.
-  Daemon/accuracy/wipe/verify/blob lookup still dispatch to frozen modules.
+- Real `query` dispatches to the native cold relational retriever and
+  `wipe state` is workspace-native. Daemon, accuracy, verify, blob lookup, and
+  vector-index wipe fail closed until their native ports land.
 - The new ingest/report/query commands deliberately refuse older databases.
   The current partial state predates the stable-thread/summary schema and is
   intentionally refused; it requires a newly confirmed wipe and full ingest.
@@ -120,10 +122,9 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Workspace-scoped state and mandatory workspace
-selection**. Implement and verify it without touching live derived state.
-Then resume cutover with explicit confirmation immediately before the
-workspace-scoped wipe; adapter retirement, local answering, and experiments
+The roadmap head is **1. Resume cutover**. It requires explicit user
+confirmation immediately before the workspace-scoped production wipe, then a
+complete re-ingest. Adapter retirement, local answering, and experiments
 follow in order.
 
 ## Watch-outs
@@ -134,5 +135,5 @@ follow in order.
   (source_type 'email_body') — same as old pipeline, keeps retrieval
   compatible; do not "fix" this to a new source_type before adapter
   retirement.
-- Frozen scripts/ tree must keep passing its suite until the retrieval
-  port lands — don't edit it, don't import it from modules/.
+- Frozen scripts/ tree must keep passing its suite until adapter retirement —
+  don't edit it, don't import it from modules/.

@@ -1,6 +1,6 @@
 # Workspace-Scoped Derived State
 
-Status: **locked 2026-07-18; implementation pending** in roadmap item 1.
+Status: **shipped 2026-07-18** in implementation commit `23b0a42`.
 
 This feature replaces the original shared-state design. Each workspace owns
 one SQLite database and one complete derived-state tree. A workspace is an

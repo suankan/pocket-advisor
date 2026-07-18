@@ -90,6 +90,15 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
 
+- **Cutover rehearsal completed (2026-07-18):** a from-scratch
+  `ingest all` on the test workspace — 60 originals, 56 emails including
+  a Russian thread, 4 native PDFs — finished in 11m06s with consistent
+  indexes (554 leaf + 7 navigation vectors), 7/7 summaries generated,
+  1488 balance-ok transaction rows, and 2 tolerated OCR failures
+  surfaced as findings (run record `20260718T050815083153Z`). Measured
+  rates put the production run at ~2–3 hours. Remaining before
+  production cutover: human QA of the Russian summary/retrieval
+  quality, then the explicit go (roadmap item 1).
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a
@@ -138,11 +147,14 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover** — requiring explicit user
-confirmation immediately before the workspace-scoped production wipe, then
-a full `ingest all` (which now ends with the default completion report and
-saved run record) and golden-set/spot checks. Adapter retirement, the local
-answering pass, and experiments follow (`docs/roadmap.md`).
+The roadmap head is **1. Resume cutover**, scope reduced after the full
+test-workspace rehearsal (11m06s from-scratch run incl. a Russian
+thread): no pre-wipe is needed — the production tree does not exist and
+ingestion is additive. Remaining: Russian summary/retrieval QA on the
+test workspace, then on explicit go the ~2–3 h production `ingest all`
+with report/review-queue triage; statement parsers and the confirmed
+legacy shared-state deletion follow. Adapter retirement, the local
+answering pass, and experiments come after (`docs/roadmap.md`).
 
 ## Watch-outs
 

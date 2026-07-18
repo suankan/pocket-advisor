@@ -6,18 +6,38 @@ roadmap history in `docs/changelog.md`; locked architecture in
 
 ## 1. Resume cutover (requires explicit user confirmation)
 
-The partial derived state predates the stable-thread/summary schema and
-is intentionally refused by the engine. When directed:
+Scope reduced 2026-07-18 after the full test-workspace rehearsal (run
+record `20260718T050815083153Z`): a from-scratch `ingest all` over 60
+originals — including a Russian thread — completed in 11m06s with the
+final schema, envelope payloads, tolerated OCR failures, and the
+completion report. The cutover motion itself is fully rehearsed; no
+pre-wipe is needed because the production workspace tree does not exist
+yet and ingestion is purely additive.
 
-1. `./pocket-advisor.py --workspace case-documents-demo wipe state` —
-   confirmed immediately beforehand (AGENTS.md hard rule 6);
-2. `./pocket-advisor.py --workspace case-documents-demo ingest all` — full
-   re-ingest from corpora, including thread
-   summaries and the dual vector index;
-3. after the native accuracy command is available in item 2, run the golden-set
-   checks; meanwhile spot-check cache folders,
-   generated summaries, reply relationships, readable evidence
-   packets, and the saved `ingest report` run record.
+1. **Russian QA on the test workspace** (the one remaining go/no-go
+   input, ~15 minutes): read the generated Russian thread summary and
+   run a few Russian-language queries; confirm summary fidelity and
+   cross-lingual retrieval quality.
+2. **On explicit go:**
+   `./pocket-advisor.py --workspace case-documents-demo ingest all` —
+   full build from corpora including summaries and the dual vector
+   index. Expected runtime from measured test rates (OCR ~3.3 s/PDF,
+   summaries ~8.1 s/message, embedding ~0.27 s/chunk): roughly 2–3
+   hours for ~812 emails / ~196 PDFs, interruption-safe and resumable.
+   Then review the completion report, triage the review queue, and
+   spot-check summaries, reply relationships, and evidence packets.
+   Golden-set accuracy checks wait for the native runner in item 2.
+3. **Follow-ups:**
+   - statement parsers for the unparsed institutions (NAB, CBA, MEBank,
+     AMP, Qantas cards, Revolut — ~120 of 177 production statements
+     currently have no parser); the transactions stage will flag them
+     loudly but honestly until each lands, re-running
+     `ingest transactions` per parser;
+   - after the new state validates: confirmed deletion (AGENTS.md hard
+     rule 6) of the ~410 MB legacy shared-layout state
+     (`workspaces/.state/cache/`, `workspaces/.state/pocket_advisor.db`)
+     — currently outside native `wipe state` scope, so a one-off
+     confirmed removal or a small `wipe legacy` addition.
 
 ## 2. Adapter retirement
 

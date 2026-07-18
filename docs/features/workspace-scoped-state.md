@@ -2,7 +2,8 @@
 
 Status: workspace isolation **shipped 2026-07-18** in implementation commit
 `23b0a42`; command-scoped selector refinement **shipped 2026-07-18** in
-implementation commit `c6df0a3`.
+implementation commit `c6df0a3`; the native accuracy action matrix superseded
+the earlier workspace-free result-comparison rule in `3d8d9d7`.
 
 This feature replaces the original shared-state design. Each workspace owns
 one SQLite database and one complete derived-state tree. A workspace is an
@@ -20,9 +21,11 @@ database.
 3. **`--workspace` is mandatory only for workspace-bound actions.** An action
    requires selection when it reads workspace mounts or user data, opens a
    workspace database, or reads/writes workspace cache, vectors, logs,
-   benchmark results, or runtime files. Repository-global, fixture-only, help,
-   and explicitly file-addressed actions must not require a workspace. There
-   is no active/default workspace registry field.
+   benchmark results, or runtime files. Repository-global, fixture-only, and
+   help actions must not require a workspace. Explicit file addressing is not
+   sufficient reason to waive selection: saved ingest reports and every
+   accuracy action remain workspace-bound. There is no active/default
+   workspace registry field.
 4. **Duplication is accepted.** If two workspaces mount the same collection,
    each parses, stores, summarizes, and embeds it independently. Correct
    isolation and simple lifecycle operations take precedence over storage or
@@ -64,9 +67,9 @@ components. Registry loading rejects IDs outside
 `[A-Za-z0-9][A-Za-z0-9._-]*`; it must not sanitize two distinct IDs into the
 same directory name.
 
-Evidence remains under registry collection roots and is read-only. Golden
-sets, benchmark results, reconciliation overrides, counterparties, and
-workspace playbooks remain workspace user data under
+Evidence remains under registry collection roots and is read-only.
+Retrieval-expectation sets, accuracy results, reconciliation overrides,
+counterparties, and workspace playbooks remain workspace user data under
 `workspaces/<workspace-path>/`; they are not deleted with derived state.
 
 ## CLI contract
@@ -78,7 +81,7 @@ command:
 ./pocket-advisor.py --workspace case-documents-demo ingest all
 ./pocket-advisor.py --workspace case-documents-demo query "question"
 ./pocket-advisor.py --workspace test-workspace wipe state
-./pocket-advisor.py --workspace test-workspace accuracy run --golden <path>
+./pocket-advisor.py --workspace test-workspace accuracy run --expectations <path>
 ```
 
 The following actions are workspace-bound and require `--workspace`:
@@ -93,26 +96,27 @@ The following actions are workspace-bound and require `--workspace`:
 | `wipe list/index/state` | selected vector or complete state tree |
 | `blob-index list-sources/lookup` | selected custody database and mounts |
 | `verify` | selected evidence and derived state |
-| `accuracy run/list` | selected retrieval state and workspace-owned results |
+| `accuracy generate/run/compare/list` | selected retrieval state, expectation sets, or results |
 
 These actions are workspace-free and must use no selector:
 
 ```bash
 ./pocket-advisor.py fetch-model
 ./pocket-advisor.py test
-./pocket-advisor.py accuracy compare <result-a.json> <result-b.json>
 ```
 
 - `fetch-model` reads global model configuration and writes only shared
   repository-root `models/` weights.
 - `test` runs isolated fixtures and must remain usable when the workspace
   registry is missing or invalid.
-- `accuracy compare` is a pure comparison of two explicit files. It becomes
-  available only when accuracy is natively ported; until then it still fails
-  closed.
 - Help at every parser level is workspace-free. A future `--version`,
   workspace listing, global config validation, or shared-model inspection
   action is workspace-free by the same scope rule.
+
+All native `accuracy` actions are workspace-bound. `generate` and `run` use
+the selected retrieval state; `compare` and `list` resolve result records from
+the selected workspace's results directory. Scope follows the state an action
+owns or consumes, not its label or whether it accepts a path.
 
 The parser first identifies the command/action, then enforces its scope.
 Workspace-bound actions reject an omitted or unknown ID before opening a
@@ -160,8 +164,8 @@ searchable if a collection is unmounted before the next clean rebuild.
    actions reject omitted or unknown selection before side effects;
    workspace-free actions reject an unnecessary selector.
 2. `fetch-model` and `test` run without loading the workspace registry;
-   parser help at every level remains state-free. Native `accuracy compare`
-   follows the same rule when ported.
+   parser help at every level remains state-free. Every native accuracy action
+   requires a selected workspace, and tests lock both sides of that boundary.
 3. Selecting workspace A cannot create, read, update, search, or delete any
    file or database row below workspace B's state root.
 4. Two workspaces mounting the same collection produce independent databases,

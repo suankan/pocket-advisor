@@ -76,7 +76,7 @@ def _epilog() -> str:
     lines.extend((
         "",
         "Workspace-bound: pocket-advisor.py --workspace <id> <command> ...",
-        "Workspace-free:  pocket-advisor.py fetch-model | test | accuracy compare A B",
+        "Workspace-free:  pocket-advisor.py fetch-model | test",
         "Help:            pocket-advisor.py <command> --help",
     ))
     return "\n".join(lines)

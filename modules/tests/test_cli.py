@@ -403,6 +403,8 @@ def test_entrypoint_bootstrap() -> None:
     assert result.returncode == 0, result.stderr
     assert "--workspace" in result.stdout
     assert "all | discover | emails | pdfs" in result.stdout
+    assert "Workspace-free:  pocket-advisor.py fetch-model | test" in result.stdout
+    assert "accuracy compare A B" not in result.stdout
 
     for action in (("test",), ("ingest",), ("wipe", "state"),
                    ("accuracy", "compare")):

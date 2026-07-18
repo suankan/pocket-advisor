@@ -19,7 +19,9 @@ For every platform task, load these files in order:
    design (review-refined);
 7. `docs/features/ingest-all-reporting.md` — locked default full-ingest
    timing, statistics, and finding-summary design;
-8. `docs/roadmap.md` — ordered future work only.
+8. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
+   and accuracy-measurement design;
+9. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -112,9 +114,10 @@ and deleted at adapter retirement, not maintained.
   state. Do not add compatibility migrations or shims.
 - Every workspace owns a separate database/cache/vector/log/runtime tree.
   Workspace-bound CLI actions require global `--workspace`; repository-global,
-  fixture-only, help, and explicitly file-addressed actions do not. There is
-  no active/default workspace registry setting. Existing shared state is
-  retired and is neither migrated nor touched.
+  fixture-only, and help actions do not. Explicit file addressing does not by
+  itself determine scope: saved ingest reports and every accuracy action remain
+  workspace-bound. There is no active/default workspace registry setting.
+  Existing shared state is retired and is neither migrated nor touched.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
   retained for custody/manual inspection but are not text-extracted or
   embedded.

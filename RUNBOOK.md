@@ -7,8 +7,9 @@ There is no active/default workspace registry setting:
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
-Shared model download, fixture tests, parser help, and native result-file
-comparison are workspace-free and reject an unnecessary selector.
+Shared model download, fixture tests, and parser help are workspace-free and
+reject an unnecessary selector. Every ingest-report and accuracy action is
+workspace-bound.
 
 ## Setup
 

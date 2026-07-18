@@ -129,7 +129,7 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   imports from `scripts/`.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
   `ingest report [--last | PATH]`, `transactions report`, `db init`, and the
-  10-test module runner are wired to the new engine. Removed stage spellings
+  11-test module runner are wired to the new engine. Removed stage spellings
   and `blob-index rebuild` are rejected, not aliased.
 - Real `query` dispatches to the native cold relational retriever;
   `wipe state` and the retrieval-expectation `accuracy` suite

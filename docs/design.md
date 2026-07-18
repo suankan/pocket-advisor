@@ -19,9 +19,11 @@ Feature-level designs refine this document:
   future answering boundary.
 - `docs/features/ingest-all-reporting.md` — default full-ingest timing,
   converged-state statistics, finding rollups, and local run records.
+- `docs/features/accuracy-testing.md` — native retrieval-expectation suites,
+  workspace-owned results, and comparison workflow.
 
-If a feature document is more specific, it governs that feature. Neither
-feature document may weaken the custody, privacy, or evidence rules here.
+If a feature document is more specific, it governs that feature. No feature
+document may weaken the custody, privacy, or evidence rules here.
 
 ## System boundaries
 
@@ -52,9 +54,10 @@ Every workspace-bound CLI invocation names its workspace explicitly:
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
-Repository-global or explicitly file-addressed actions such as model download,
-fixture tests, help, and result-file comparison run without a workspace and
-must not load the registry. Selection is required by action scope, never as a
+Repository-global actions such as model download, fixture tests, and help run
+without a workspace and must not load the registry. File addressing alone does
+not make an action workspace-free: saved ingest reports and accuracy results
+remain workspace-owned. Selection is required by action scope, never as a
 ceremonial argument; the complete matrix is locked in
 `docs/features/workspace-scoped-state.md`.
 

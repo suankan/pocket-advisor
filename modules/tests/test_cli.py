@@ -41,6 +41,7 @@ def fake_selection(*, embed: bool = True, bank: bool = False):
         embed_text=embed,
         summarize_threads=True,
         default_top_k=15,
+        daemon_auto=False,
     )
     return SimpleNamespace(config=config, registry=SimpleNamespace(),
                            workspace=workspace)
@@ -137,6 +138,8 @@ def test_grammar() -> None:
     parse_must_fail([*WS, "transactions", "parse"])
     parse_must_fail([*WS, "transactions", "link"])
     parse_must_fail([*WS, "blob-index", "rebuild"])
+    parse_must_fail([
+        *WS, "query", "question", "--no-daemon", "--require-daemon"])
 
 
 def test_orchestration() -> None:
@@ -273,15 +276,35 @@ def test_native_query_seam() -> None:
     assert received[0][1].top_k == 3
     assert context.conn.closed
 
+    # Auto mode uses the workspace-local daemon without opening a second DB;
+    # --no-daemon preserves the exact cold path above.
+    warm_selection = fake_selection(embed=False, bank=False)
+    warm_selection.config.daemon_auto = True
+    response = {
+        "ok": True,
+        "result": {"question": "warm", "results": [], "warnings": [],
+                   "retrieval": {}},
+    }
+    with patch.object(cli, "_resolve_selection", return_value=warm_selection), \
+            patch.object(
+                cli, "_open_context",
+                side_effect=AssertionError("warm query must not open DB")), \
+            patch("modules.daemon.daemon_request", return_value=response), \
+            patch("modules.retrieval.format_results") as formatter, \
+            contextlib.redirect_stderr(io.StringIO()):
+        assert cli.main([*WS, "query", "warm"]) == 0
+    formatter.assert_called_once_with(response["result"], as_json=False)
 
-def test_frozen_commands_fail_closed() -> None:
-    selection = fake_selection()
-    with patch.object(cli, "_resolve_selection", return_value=selection):
-        try:
-            cli.main([*WS, "verify"])
-            raise AssertionError("workspace-unsafe frozen command must abort")
-        except SystemExit as exc:
-            assert "refusing the frozen shared-state implementation" in str(exc)
+
+def test_native_maintenance_handlers() -> None:
+    parser = cli.build_parser()
+    assert parser.parse_args([*WS, "daemon", "status"]).handler is \
+        cli._handle_daemon
+    assert parser.parse_args([*WS, "wipe", "list"]).handler is \
+        cli._handle_wipe
+    assert parser.parse_args([
+        *WS, "blob-index", "list-sources"]).handler is cli._handle_blob_index
+    assert parser.parse_args([*WS, "verify"]).handler is cli._handle_verify
 
 
 def test_workspace_free_dispatch() -> None:
@@ -433,7 +456,7 @@ def main() -> int:
     test_orchestration()
     test_ingest_reporting_failures_and_timings()
     test_native_query_seam()
-    test_frozen_commands_fail_closed()
+    test_native_maintenance_handlers()
     test_workspace_free_dispatch()
     with tempfile.TemporaryDirectory(prefix="pa_cli_report_") as td:
         test_ingest_report_display(Path(td))

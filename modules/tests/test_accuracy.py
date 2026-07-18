@@ -114,9 +114,7 @@ def main() -> int:
         with patch.object(retrieval_mod, "current_fingerprint",
                           return_value=dict(FINGERPRINT)), \
              patch.object(retrieval_mod, "get_backend",
-                          return_value=FakeEmbedder()), \
-             patch.object(accuracy_mod, "current_fingerprint",
-                          return_value=dict(FINGERPRINT)):
+                          return_value=FakeEmbedder()):
             result = run_expectations(
                 ctx, entries, files, top_k=5, label="fixture run")
 
@@ -147,9 +145,7 @@ def main() -> int:
         with patch.object(retrieval_mod, "current_fingerprint",
                           return_value=dict(FINGERPRINT)), \
              patch.object(retrieval_mod, "get_backend",
-                          return_value=FakeEmbedder()), \
-             patch.object(accuracy_mod, "current_fingerprint",
-                          return_value=dict(FINGERPRINT)):
+                          return_value=FakeEmbedder()):
             second_result = run_expectations(
                 ctx, entries, files, top_k=5, label="second")
         second = persist_result(second_result, paths)

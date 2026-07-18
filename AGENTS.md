@@ -21,7 +21,9 @@ For every platform task, load these files in order:
    timing, statistics, and finding-summary design;
 8. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
    and accuracy-measurement design;
-9. `docs/roadmap.md` — ordered future work only.
+9. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
+   service design;
+10. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -91,11 +93,9 @@ archived `docs_old/` changelog.
    re-ingest, but it is an operator-owned action, not a platform roadmap gate.
 
 There is no privileged-content concept. It was removed by decision on
-2026-07-18 (`docs/design.md`): the sole user already owns
-every document fed into the system, so no privilege flags, restricted
-retrieval passes, or ACLs exist anywhere in the new engine. The frozen
-`scripts/` tree still contains the old privilege code; it is reference-only
-and deleted at adapter retirement, not maintained.
+2026-07-18 (`docs/design.md`): the sole user already owns every document fed
+into the system, so no privilege flags, restricted retrieval passes, or ACLs
+exist anywhere in the engine.
 
 ## New engine architecture
 
@@ -103,10 +103,8 @@ and deleted at adapter retirement, not maintained.
 - New implementation: repository-root `modules/`.
 - Style: typed domain dataclasses, clear classes, reuse, readability, and one
   pipeline stage class behind the common `Stage` interface.
-- `scripts/` is frozen reference code. New `modules/` code must never import
-  it. Keep its tests passing until the remaining maintenance commands are
-  ported (adapter retirement); delete it only after the replacement is
-  complete.
+- The retired `scripts/` implementation is deleted. Historical mechanics live
+  only under `docs_old/`; runtime code and tests live under `modules/`.
 - `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
   only in `modules/cli.py`. Frozen commands that have not been ported to
   workspace-scoped state fail closed; stage modules never parse arguments or
@@ -179,10 +177,10 @@ Always confirm this against `docs/status.md` and
 - leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
   vector caches, while `chunks.text` stays a pure quote; email caches contain
   only `email_message_full.txt` and `email_message.txt`;
-- `query` uses the native hybrid leaf/thread retriever; workspace-scoped
-  `wipe state` and the retrieval-expectation `accuracy` suite
-  (generate/run/compare/list) are native; daemon, verify, blob lookup, and remaining
-  wipe actions fail closed until their native ports land;
+- `query` uses the native hybrid leaf/thread retriever cold or through the
+  workspace-local warm daemon; workspace-scoped wipe state/index maintenance,
+  full verification, blob lookup, and the retrieval-expectation `accuracy`
+  suite are native;
 - command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
   `test`, and help are workspace-free; every `accuracy` action is
   workspace-bound (native compare is `--last N`, not file-addressed);
@@ -213,9 +211,9 @@ is verified and committed, then perform the documentation lifecycle above.
   citations.
 - `reconciliation.yaml` and `counterparties.yaml` remain in the selected
   workspace folder, not engine state.
-- Preserve `source_type='email_body'` for native-PDF chunks; both the
-  native retriever and the remaining frozen commands read it. Revisit
-  only after adapter retirement.
+- Preserve `source_type='email_body'` for native-PDF chunks until a deliberate
+  fresh-schema change; reporters and retrieval derive semantic source type by
+  joining through `items.item_kind`.
 
 ## Verification
 
@@ -227,9 +225,6 @@ for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
 ./pocket-advisor.py test
-for test_file in scripts/test_*.py; do
-  venv/bin/python "$test_file"
-done
 git diff --check
 git status --short
 ```

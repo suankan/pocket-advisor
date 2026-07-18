@@ -5,8 +5,7 @@ Status: **locked and implemented 2026-07-18** (native `accuracy` suite in
 
 Measures retrieval quality of the native leaf/thread retriever against a
 human-authored expectation set, produces a machine-readable result record
-per run, and compares runs over time. Supersedes the frozen
-`scripts/search_accuracy_test.py` ahead of adapter retirement.
+per run, and compares runs over time. It is the sole accuracy implementation.
 
 ## Locked decisions
 

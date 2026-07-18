@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modules.config import Config
-from modules.embedding.loader import MlxTextEmbedder, ModelStore
+from modules.embedding.loader import (MlxTextEmbedder, ModelStore,
+                                      infer_embed_dim, read_config_json)
 from modules.embedding.payloads import PAYLOAD_RECIPE
 
 
@@ -27,11 +28,14 @@ class IndexPaths:
 
 def current_fingerprint(config: Config, store: ModelStore) -> dict:
     """Identity of the index the current config would build. Dim is
-    read from the text model snapshot when available so nano (768) vs
-    small (1024) switches are honest without a separate dim knob."""
+    read from an already-local text model snapshot when available so nano
+    (768) vs small (1024) switches are honest without a separate dim knob.
+    Resolving identity never downloads weights; ``fetch-model`` owns that
+    repository-global action."""
     repo = config.mlx_model_embed_text
     try:
-        dim = store.embed_dim_for_repo(repo)
+        local = store.snapshot_dir(repo, local_files_only=True)
+        dim = infer_embed_dim(read_config_json(local))
     except Exception:
         dim = config.embed_dim
     return {

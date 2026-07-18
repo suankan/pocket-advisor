@@ -246,8 +246,8 @@ records are accepted.
     downstream stages or masking the original failure.
 12. Reporting failure after completed stages exits non-zero and clearly states
     that ingestion state may have committed successfully.
-13. Existing module and frozen test suites remain passing, and no test touches
-    real corpus or live workspace state.
+13. The module test suite remains passing, and no test touches real corpus or
+    live workspace state.
 14. `ingest report` renders a persisted record byte-identically to the
     original run's final block via the shared formatter; the latest record
     resolves without a symlink; `--last` plus a path, report flags on a

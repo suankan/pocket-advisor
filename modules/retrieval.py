@@ -3,6 +3,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -21,6 +22,76 @@ class SearchOptions:
     thread_id: int | None = None
     purpose: str | None = None
     expand_thread_context: bool = True
+
+
+@dataclass(slots=True)
+class SearchResources:
+    """Models and matrices reusable across independent searches."""
+
+    store: ModelStore
+    fingerprint: dict
+    leaf_matrix: Any
+    leaf_ids: Any
+    thread_matrix: Any
+    thread_ids: Any
+    embedder: Any
+    reranker: MlxReranker | None
+
+    @classmethod
+    def load(cls, ctx: PipelineContext) -> "SearchResources":
+        store = ModelStore(ctx.config.models_dir)
+        fingerprint = current_fingerprint(ctx.config, store)
+        leaf_matrix, leaf_ids = _load_matrix(
+            index_paths(ctx.config, fingerprint))
+        thread_matrix, thread_ids = _load_matrix(
+            thread_index_paths(ctx.config, fingerprint))
+        needs_vector = (
+            leaf_matrix is not None and leaf_ids is not None and len(leaf_ids)
+        ) or (
+            thread_matrix is not None and thread_ids is not None
+            and len(thread_ids)
+        )
+        embedder = get_backend(ctx.config, store) if needs_vector else None
+        reranker = MlxReranker(
+            store, ctx.config.mlx_model_rerank
+        ) if ctx.config.rerank_enabled else None
+        return cls(
+            store=store,
+            fingerprint=fingerprint,
+            leaf_matrix=leaf_matrix,
+            leaf_ids=leaf_ids,
+            thread_matrix=thread_matrix,
+            thread_ids=thread_ids,
+            embedder=embedder,
+            reranker=reranker,
+        )
+
+    def describe(self, ctx: PipelineContext) -> dict:
+        def namespace(paths, matrix) -> dict:
+            built_at = None
+            if paths.meta_json.is_file():
+                try:
+                    built_at = json.loads(
+                        paths.meta_json.read_text(encoding="utf-8")
+                    ).get("built_at")
+                except (OSError, ValueError, json.JSONDecodeError):
+                    built_at = "invalid"
+            return {
+                "count": int(matrix.shape[0]) if matrix is not None else 0,
+                "built_at": built_at,
+            }
+
+        leaf = index_paths(ctx.config, self.fingerprint)
+        thread = thread_index_paths(ctx.config, self.fingerprint)
+        return {
+            "workspace_id": ctx.workspace.id,
+            "embed": self.fingerprint,
+            "rerank_enabled": self.reranker is not None,
+            "rerank_model": ctx.config.mlx_model_rerank
+            if self.reranker is not None else None,
+            "leaf_index": namespace(leaf, self.leaf_matrix),
+            "thread_index": namespace(thread, self.thread_matrix),
+        }
 
 
 def _fts_expression(question: str) -> str | None:
@@ -345,7 +416,8 @@ def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
 
 def run_search(ctx: PipelineContext, question: str,
                options: SearchOptions, *,
-               reranker: MlxReranker | None = None) -> dict:
+               reranker: MlxReranker | None = None,
+               resources: SearchResources | None = None) -> dict:
     conn = ctx.conn
     allowed_chunks = allowed_chunk_ids(ctx, options)
     visible_items = visible_item_ids(ctx, options)
@@ -373,8 +445,10 @@ def run_search(ctx: PipelineContext, question: str,
             HAVING SUM(CASE WHEN items.id IN (SELECT id FROM _visible_items)
                             THEN 0 ELSE 1 END) = 0""").fetchall()}
 
-    store = ModelStore(ctx.config.models_dir)
-    fingerprint = current_fingerprint(ctx.config, store)
+    store = resources.store if resources is not None \
+        else ModelStore(ctx.config.models_dir)
+    fingerprint = resources.fingerprint if resources is not None \
+        else current_fingerprint(ctx.config, store)
     warnings = _index_warnings(ctx, fingerprint)
 
     leaf_fts = leaf_fts_search(
@@ -383,14 +457,21 @@ def run_search(ctx: PipelineContext, question: str,
         conn, question, ctx.config.fts_candidates,
         safe_summary_threads)
 
-    leaf_matrix, leaf_ids = _load_matrix(index_paths(ctx.config, fingerprint))
-    thread_matrix, thread_ids = _load_matrix(
-        thread_index_paths(ctx.config, fingerprint))
+    if resources is None:
+        leaf_matrix, leaf_ids = _load_matrix(
+            index_paths(ctx.config, fingerprint))
+        thread_matrix, thread_ids = _load_matrix(
+            thread_index_paths(ctx.config, fingerprint))
+    else:
+        leaf_matrix, leaf_ids = resources.leaf_matrix, resources.leaf_ids
+        thread_matrix, thread_ids = (
+            resources.thread_matrix, resources.thread_ids)
     needs_vector = (leaf_matrix is not None and len(leaf_ids)) or \
         (thread_matrix is not None and len(thread_ids))
     if needs_vector:
-        query_vec = get_backend(ctx.config, store).embed_one(
-            question, is_query=True)
+        embedder = resources.embedder if resources is not None \
+            else get_backend(ctx.config, store)
+        query_vec = embedder.embed_one(question, is_query=True)
         leaf_dense = _dense_search(
             leaf_matrix, leaf_ids, query_vec,
             ctx.config.vec_candidates, allowed_chunks)
@@ -406,9 +487,11 @@ def run_search(ctx: PipelineContext, question: str,
         [f"t:{value}" for value in thread_fts],
         [f"t:{value}" for value in thread_dense],
     ], ctx.config.rrf_k)
-    # Rerank only up to the frozen stack's candidate ceiling; the fused
-    # tail keeps its RRF order.
+    # Rerank only up to the configured fused-candidate ceiling; the tail keeps
+    # its RRF order.
     cap = ctx.config.fts_candidates + ctx.config.vec_candidates
+    if reranker is None and resources is not None:
+        reranker = resources.reranker
     if keys and ctx.config.rerank_enabled and reranker is None:
         reranker = MlxReranker(store, ctx.config.mlx_model_rerank)
     keys = _rerank(ctx, question, keys[:cap], reranker) + keys[cap:]

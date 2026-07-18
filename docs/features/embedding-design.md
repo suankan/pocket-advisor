@@ -317,11 +317,9 @@ Changing the summarizer model or prompt version invalidates summaries and
 their vectors, not leaf chunks. Changing the text embedding model selects a
 new cache for both leaf and thread indexes.
 
-During the frozen-adapter transition these new values remain code defaults in
-`modules/config.py` rather than being duplicated in committed `config.yaml`:
-the frozen maintenance commands strictly reject keys they do not own. Move the
-same values into YAML after those commands are ported; do not weaken the old
-loader or make it silently ignore unknown configuration.
+These values are committed in `config.yaml` and retain typed fallbacks in
+`modules/config.py` for isolated fixtures. Unknown configuration remains a
+hard error.
 
 ## Acceptance criteria
 

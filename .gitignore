@@ -1,8 +1,8 @@
 # ALL user/case data (evidence corpora, derived output, chronology,
 # journal, eval). Platform code stays case-free. See
-# docs/specs/workspace-user-data.md.
+# docs/design.md.
 workspaces/
-# Tool-specific dirs — local convenience only (ROADMAP tenet 11)
+# Tool-specific dirs — local convenience only.
 # Platform config.yaml is committed (no case data).
 .claude/
 .cursor/

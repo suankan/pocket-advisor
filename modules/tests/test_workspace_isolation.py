@@ -221,15 +221,21 @@ def main() -> int:
         a.conn.close()
 
         # Without explicit approval, nothing is deleted.
+        before_delete_calls = []
         assert wipe_state(
             a.config, registry, a.workspace,
             input_fn=lambda _prompt: "n",
+            before_delete=lambda: before_delete_calls.append("called"),
         ) == 1
+        assert before_delete_calls == []
         assert a_state.exists()
         assert snapshot_tree(b.config.state_dir) == b_state_before
 
         assert wipe_state(
-            a.config, registry, a.workspace, yes=True) == 0
+            a.config, registry, a.workspace, yes=True,
+            before_delete=lambda: before_delete_calls.append("called"),
+        ) == 0
+        assert before_delete_calls == ["called"]
         assert not a_state.exists()
         assert b_sentinel.read_bytes() == b"workspace-b-state"
         assert snapshot_tree(b.config.state_dir) == b_state_before

@@ -21,6 +21,8 @@ Feature-level designs refine this document:
   converged-state statistics, finding rollups, and local run records.
 - `docs/features/accuracy-testing.md` — native retrieval-expectation suites,
   workspace-owned results, and comparison workflow.
+- `docs/features/query-daemon.md` — workspace-local warm retrieval resource
+  lifetime, Unix-socket protocol, and query fallback behavior.
 
 If a feature document is more specific, it governs that feature. No feature
 document may weaken the custody, privacy, or evidence rules here.
@@ -196,11 +198,13 @@ data outside engine state and survive state wipes.
 - New implementation lives under `modules/` as typed domain classes and one
   class per pipeline stage.
 - Stage modules do not import or sequence other stages.
-- The frozen `scripts/` tree is reference-only until adapter retirement;
-  nothing under `modules/` imports it. Transitional commands that cannot obey
-  the selected workspace must fail closed.
+- The retired `scripts/` tree is deleted. Historical mechanics remain under
+  `docs_old/`; all runtime code and self-tests live under `modules/`.
 - SQLite is the relational source of truth. Local NumPy vector matrices and
   per-entity files are convergent derived indexes, not a second authority.
+- The optional query daemon is Unix-socket-only and workspace-local. It reuses
+  the same native retriever while keeping models and matrices warm; it is not a
+  second search implementation or a chat service.
 
 ## Lifecycle
 

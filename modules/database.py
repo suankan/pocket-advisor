@@ -2,7 +2,7 @@
 
 The clean-break refactor (`docs/design.md`) ships with a
 wipe + full re-ingest, so this module carries no legacy migrations.
-A database created by the old scripts/ tree is detected and refused
+A database created by the retired engine is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.
 
 Schema continuity: items / chunks / chunks_fts / threads and the transactions
@@ -357,7 +357,7 @@ AFTER UPDATE ON thread_summaries BEGIN
 END;
 """
 
-# Tables/columns that only the OLD scripts/ pipeline creates. Their
+# Tables/columns that only the retired pipeline created. Their
 # presence means the DB predates this schema and must be wiped, not
 # patched — this module deliberately has no migration chain.
 _LEGACY_TABLES = ("emails", "email_files", "documents", "page_images")

@@ -47,10 +47,12 @@ query:
   # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
   # 300 chars) — latency/thoroughness dial; see docs_old/specs/reranker.md.
   rerank_text_chars: 600
-  # Reserved for the native daemon port. Cold native query does not currently
-  # consume these values; the frozen daemon command remains transitional.
+  # Query uses the selected workspace's local warm daemon when available;
+  # --no-daemon forces cold retrieval and --require-daemon fails closed.
   daemon_auto: true
   daemon_idle_sec: 1800
+  # One shared readable-context budget across all result packets.
+  thread_context_chars: 120000
 
 ingestion:
   chunking:
@@ -77,6 +79,11 @@ ingestion:
   # Whether stage `all` builds the text vector index. An explicit
   # `ingest embed` runs the stage regardless of this flag.
   embed_text: true
+  # Generation can be disabled independently; summary staleness maintenance
+  # still runs on every full ingest.
+  summarize_threads: true
+  thread_summary_max_tokens: 600
+  thread_summary_segment_chars: 12000
 
 models:
   # Apple-Silicon MLX only — no GGUF / llama.cpp.
@@ -85,7 +92,7 @@ models:
   # — never deletes another model's cache
   # (`docs_old/specs/multi-model-vector-cache.md`).
   # Reranker is not index-invalidating.
-  # Requires: pip install -r scripts/requirements.txt (includes MLX).
+  # Requires: pip install -r requirements.txt (includes MLX).
   # Fetch configured snapshots: ./pocket-advisor.py fetch-model
   #
   # Nano (smaller/faster) — code defaults in modules/config.py:
@@ -93,6 +100,5 @@ models:
   # Small (higher quality, larger):
   mlx_model_embed_text: jinaai/jina-embeddings-v5-text-small-mlx
   mlx_model_rerank: jinaai/jina-reranker-v3-mlx
-  # Thread-summary defaults currently live in modules/config.py so frozen
-  # maintenance commands can keep strict-reading this shared YAML unchanged.
-  # Locked default: mlx-community/Qwen3.5-4B-MLX-4bit (text-only via mlx-lm).
+  # Text-only through mlx-lm; no vision path is loaded.
+  mlx_model_thread_summary: mlx-community/Qwen3.5-4B-MLX-4bit

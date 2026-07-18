@@ -125,9 +125,9 @@ database or creating any path. Workspace-free actions reject a supplied
 the workspace registry. The retired `active:` key remains rejected as
 unknown.
 
-During adapter retirement, a frozen command that cannot honor the selected
-workspace must fail closed. It must never fall back to the former shared
-database or shared cache paths.
+Every operational command is native and resolves state only through the
+selected workspace. No command can fall back to the former shared database or
+shared cache paths.
 
 ## Database and identity consequences
 
@@ -183,8 +183,8 @@ searchable if a collection is unmounted before the next clean rebuild.
    workspace's accounts, statements, transactions, or transfer links.
 10. Temporary-fixture tests cover two workspaces with a shared mounted
    collection as well as separate test collections.
-11. Current module and frozen self-tests remain passing; frozen operational
-    commands that are not workspace-safe are rejected until ported.
+11. Current module self-tests pass, including native daemon, maintenance, and
+    workspace-isolation fixtures.
 
 ## Non-goals
 

@@ -15,5 +15,5 @@ Package layout:
     cli.py         the ONLY argument parsing in the repo
     tests/         standalone self-test scripts
 
-Nothing in this package imports from the frozen scripts/ tree.
+The retired scripts tree is absent; all runtime code lives in this package.
 """

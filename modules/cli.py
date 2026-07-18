@@ -1,10 +1,4 @@
-"""Pocket Advisor's sole argparse surface and pipeline orchestrator.
-
-Ingestion, cold retrieval, and workspace-state wiping run through typed
-``modules/`` code directly. Remaining frozen operational commands fail closed
-until their native workspace-scoped ports land; this module never imports the
-frozen tree.
-"""
+"""Pocket Advisor's sole argparse surface and pipeline orchestrator."""
 import argparse
 import subprocess
 import sys
@@ -49,11 +43,11 @@ _HELP = {
     "ingest": ("all | discover | emails | pdfs | thread | summaries | embed"
                " | transactions | report [--last | PATH]"),
     "transactions": "report — statement integrity and reconciliation report",
-    "query": "one-off hybrid leaf/thread retrieval query",
-    "daemon": "serve | status | stop — unavailable pending native port",
-    "wipe": "state (native) | list/index (unavailable pending native port)",
-    "blob-index": "list-sources | lookup — unavailable pending native port",
-    "verify": "unavailable pending native port",
+    "query": "hybrid leaf/thread retrieval (warm daemon or cold fallback)",
+    "daemon": "serve | status | stop — workspace-local warm retrieval",
+    "wipe": "list | index | state — confirmed derived-state deletion",
+    "blob-index": "list-sources | lookup — indexed original resolution",
+    "verify": "full custody, SQLite, FTS, artifact, and vector verification",
     "accuracy": ("generate | run | compare [--last N] | list — "
                  "retrieval expectation testing"),
     "test": "run every modules/tests/test_*.py self-test (workspace-free)",
@@ -106,7 +100,7 @@ def _open_context(selection: RuntimeSelection) -> PipelineContext:
 
 
 def _stage_class(name: str) -> type[Stage]:
-    """Lazy stage imports keep help and frozen retrieval startup light."""
+    """Lazy stage imports keep help and maintenance startup light."""
     match name:
         case "discover":
             from modules.pipeline.discover import DiscoverStage
@@ -403,10 +397,36 @@ def _handle_transactions(args: argparse.Namespace) -> int:
 def _handle_query(args: argparse.Namespace) -> int:
     from modules.retrieval import SearchOptions, format_results, run_search
 
-    if args.require_daemon:
-        raise SystemExit(
-            "query: the new relational retriever currently runs cold; "
-            "--require-daemon is unavailable until the daemon port lands")
+    selection: RuntimeSelection = args.selection
+    use_daemon = not args.no_daemon and (
+        args.require_daemon or selection.config.daemon_auto)
+    if use_daemon:
+        from modules.daemon import daemon_request
+        payload = {
+            "op": "search",
+            "question": args.question,
+            "top_k": args.top_k,
+            "after": args.after,
+            "before": args.before,
+            "thread": args.thread,
+            "purpose": args.purpose,
+            "no_thread_context": args.no_thread_context,
+        }
+        try:
+            response = daemon_request(
+                selection.config, payload, timeout=600.0)
+        except (OSError, ValueError, ConnectionError) as exc:
+            if args.require_daemon:
+                raise SystemExit(
+                    f"query: required daemon is unavailable: {exc}") from exc
+        else:
+            if not response.get("ok"):
+                raise SystemExit(
+                    f"query daemon: {response.get('error', 'search failed')}")
+            print("query: via workspace daemon (warm)", file=sys.stderr)
+            format_results(response["result"], as_json=args.json)
+            return 0
+
     ctx = _open_context(args.selection)
     try:
         top_k = args.top_k or ctx.config.default_top_k
@@ -422,6 +442,21 @@ def _handle_query(args: argparse.Namespace) -> int:
         ))
         format_results(result, as_json=args.json)
         return 0
+    finally:
+        ctx.conn.close()
+
+
+def _handle_daemon(args: argparse.Namespace) -> int:
+    from modules import daemon
+
+    selection: RuntimeSelection = args.selection
+    if args.action == "status":
+        return daemon.status(selection.config)
+    if args.action == "stop":
+        return daemon.stop(selection.config)
+    ctx = _open_context(selection)
+    try:
+        return daemon.serve(ctx, args.idle_sec)
     finally:
         ctx.conn.close()
 
@@ -506,24 +541,74 @@ def _handle_accuracy(args: argparse.Namespace) -> int:
 
 
 def _handle_wipe_state(args: argparse.Namespace) -> int:
+    from modules.daemon import stop as stop_daemon
     from modules.wipe import wipe_state
 
     selection: RuntimeSelection = args.selection
+
+    def before_delete() -> None:
+        if stop_daemon(selection.config) != 0:
+            raise SystemExit("wipe state: could not stop the workspace daemon")
+
     return wipe_state(
         selection.config,
         selection.registry,
         selection.workspace,
         yes=args.yes,
+        before_delete=before_delete,
     )
 
 
-def _handle_workspace_unsafe(args: argparse.Namespace) -> int:
-    action = f" {args.action}" if getattr(args, "action", None) else ""
-    scope = "workspace-scoped " if args.workspace_required else ""
-    raise SystemExit(
-        f"{args.command}{action}: unavailable until its native {scope}"
-        "port lands; refusing the frozen shared-state "
-        "implementation")
+def _handle_wipe(args: argparse.Namespace) -> int:
+    from modules.daemon import stop as stop_daemon
+    from modules.wipe import format_index_list, wipe_indexes
+
+    selection: RuntimeSelection = args.selection
+    if args.action == "list":
+        print(format_index_list(selection.config))
+        return 0
+
+    def before_active_delete() -> None:
+        if stop_daemon(selection.config) != 0:
+            raise SystemExit("wipe index: could not stop the workspace daemon")
+
+    return wipe_indexes(
+        selection.config,
+        slug=args.text,
+        all_inactive=args.all_inactive,
+        yes=args.yes,
+        force=args.force,
+        before_active_delete=before_active_delete,
+    )
+
+
+def _handle_blob_index(args: argparse.Namespace) -> int:
+    from modules.maintenance import format_sources, lookup_blob
+
+    ctx = _open_context(args.selection)
+    try:
+        if args.action == "list-sources":
+            print(format_sources(ctx))
+            return 0
+        path = lookup_blob(
+            ctx, args.source, args.sha256,
+            verify_hash=not args.no_verify)
+        print(path)
+        return 0
+    finally:
+        ctx.conn.close()
+
+
+def _handle_verify(args: argparse.Namespace) -> int:
+    from modules.maintenance import format_verification, verify_workspace
+
+    ctx = _open_context(args.selection)
+    try:
+        report = verify_workspace(ctx)
+        print(format_verification(report))
+        return 0 if report.ok else 1
+    finally:
+        ctx.conn.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -594,8 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--top-k", type=int, default=None)
     command.add_argument("--no-thread-context", action="store_true")
     command.add_argument("--json", action="store_true")
-    command.add_argument("--no-daemon", action="store_true")
-    command.add_argument("--require-daemon", action="store_true")
+    daemon_mode = command.add_mutually_exclusive_group()
+    daemon_mode.add_argument("--no-daemon", action="store_true")
+    daemon_mode.add_argument("--require-daemon", action="store_true")
     command.set_defaults(handler=_handle_query, workspace_required=True)
 
     command = commands.add_parser("daemon", help=_HELP["daemon"])
@@ -603,43 +689,41 @@ def build_parser() -> argparse.ArgumentParser:
         dest="action", metavar="action", required=True)
     serve = actions.add_parser("serve", help="run in foreground")
     serve.add_argument("--idle-sec", type=int, default=None)
-    actions.add_parser("status")
-    actions.add_parser("stop")
+    actions.add_parser("status", help="show process and loaded-index status")
+    actions.add_parser("stop", help="request clean socket shutdown")
     command.set_defaults(
-        handler=_handle_workspace_unsafe,
-        idle_sec=None,
-        workspace_required=True,
-    )
+        handler=_handle_daemon, idle_sec=None, workspace_required=True)
 
     command = commands.add_parser("wipe", help=_HELP["wipe"])
     actions = command.add_subparsers(
         dest="action", metavar="action", required=True)
-    actions.add_parser("list")
-    wipe_index = actions.add_parser("index")
+    actions.add_parser("list", help="list selected workspace vector caches")
+    wipe_index = actions.add_parser(
+        "index", help="delete one or all inactive vector caches")
     wipe_index.add_argument("--text", metavar="SLUG")
     wipe_index.add_argument("--all-inactive", action="store_true")
     wipe_index.add_argument("--yes", action="store_true")
     wipe_index.add_argument("--force", action="store_true")
-    wipe_state = actions.add_parser("state")
+    wipe_state = actions.add_parser(
+        "state", help="delete the selected workspace's full derived state")
     wipe_state.add_argument("--yes", action="store_true")
-    command.set_defaults(
-        handler=_handle_workspace_unsafe, workspace_required=True)
+    command.set_defaults(handler=_handle_wipe, workspace_required=True)
     wipe_state.set_defaults(handler=_handle_wipe_state)
 
     command = commands.add_parser("blob-index", help=_HELP["blob-index"])
     actions = command.add_subparsers(
         dest="action", metavar="action", required=True)
-    actions.add_parser("list-sources")
-    lookup = actions.add_parser("lookup")
+    actions.add_parser(
+        "list-sources", help="show mounted collection roots and index counts")
+    lookup = actions.add_parser(
+        "lookup", help="resolve and verify one indexed original")
     lookup.add_argument("--source", "-s", required=True)
     lookup.add_argument("--sha256", required=True)
     lookup.add_argument("--no-verify", action="store_true")
-    command.set_defaults(
-        handler=_handle_workspace_unsafe, workspace_required=True)
+    command.set_defaults(handler=_handle_blob_index, workspace_required=True)
 
     command = commands.add_parser("verify", help=_HELP["verify"])
-    command.set_defaults(
-        handler=_handle_workspace_unsafe, workspace_required=True)
+    command.set_defaults(handler=_handle_verify, workspace_required=True)
 
     command = commands.add_parser("accuracy", help=_HELP["accuracy"])
     actions = command.add_subparsers(

@@ -1,7 +1,7 @@
 """Typed configuration and cache layout.
 
 Config is an immutable dataclass built from code defaults overlaid with
-the committed platform config.yaml (`docs_old/specs/config-yaml.md`). It is
+the committed platform config.yaml. It is
 constructed once (Config.load) and passed explicitly to everything that
 needs it — no module-global mutation, no import-time side effects.
 
@@ -247,8 +247,7 @@ class Config:
         """Build from code defaults + config.yaml overlay (if present).
 
         Unknown yaml keys abort loudly listing every offender — a typo
-        must never silently do nothing. Deprecated keys warn and are
-        ignored (they exist in committed config.yaml until cutover).
+        must never silently do nothing. Deprecated keys warn and are ignored.
         """
         root = Path(project_root or PROJECT_ROOT)
         path = yaml_path if yaml_path is not None else root / "config.yaml"

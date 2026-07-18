@@ -31,10 +31,8 @@ from pathlib import Path
 import yaml
 
 from modules.custody import write_verified
-from modules.embedding import ModelStore, current_fingerprint
-from modules.embedding.loader import MlxReranker
 from modules.pipeline.base import PipelineContext
-from modules.retrieval import SearchOptions, run_search
+from modules.retrieval import SearchOptions, SearchResources, run_search
 
 RESULT_SCHEMA_VERSION = 1
 _ENTRY_KEYS = frozenset({"id", "question", "expect_any",
@@ -223,11 +221,8 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
                      source_files: list[Path], *, top_k: int,
                      label: str) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
-    reranker = MlxReranker(
-        ModelStore(ctx.config.models_dir), ctx.config.mlx_model_rerank) \
-        if ctx.config.rerank_enabled else None
-    fingerprint = current_fingerprint(
-        ctx.config, ModelStore(ctx.config.models_dir))
+    resources = SearchResources.load(ctx)
+    fingerprint = resources.fingerprint
 
     questions = []
     elapsed_all: list[float] = []
@@ -246,7 +241,7 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
             continue
         t0 = time.monotonic()
         result = run_search(ctx, entry["question"],
-                            SearchOptions(top_k=top_k), reranker=reranker)
+                            SearchOptions(top_k=top_k), resources=resources)
         elapsed = round(time.monotonic() - t0, 3)
         elapsed_all.append(elapsed)
         verdict, rank, matched = _score(entry, result["results"])

@@ -91,9 +91,22 @@ folders under that workspace's cache.
 ```
 
 Query uses the selected workspace's native hybrid leaf/thread retriever. It
-never searches unmounted collections or another workspace's database. The
-daemon has not yet been ported; queries currently run cold and
-`--require-daemon` fails closed.
+never searches unmounted collections or another workspace's database. By
+default it uses that workspace's warm daemon when available and falls back to
+cold retrieval otherwise:
+
+```bash
+./pocket-advisor.py --workspace <workspace_id> daemon serve
+./pocket-advisor.py --workspace <workspace_id> daemon status
+./pocket-advisor.py --workspace <workspace_id> daemon stop
+./pocket-advisor.py --workspace <workspace_id> query "question" --no-daemon
+./pocket-advisor.py --workspace <workspace_id> query "question" --require-daemon
+```
+
+`daemon serve` runs in the foreground and keeps models plus the current leaf
+and thread matrices loaded. Restart it after embedding or changing retrieval
+model/index configuration. Its mode-`0600` Unix socket and PID record live
+only below the selected workspace's `runtime/` directory.
 
 ## Transactions
 
@@ -124,25 +137,53 @@ workspace untouched:
 
 The command requires interactive confirmation unless `--yes` is supplied.
 For any destructive workspace rebuild, obtain explicit user confirmation
-immediately before the wipe even when using `--yes`.
+immediately before the wipe even when using `--yes`. A running daemon is
+stopped only after confirmation and immediately before deletion.
 
 Existing shared state at `workspaces/.state/pocket_advisor.db` and its former
 cache/vector paths is retired and is never migrated or touched by workspace
 commands.
 
-## Temporarily unavailable commands
+## Custody and index maintenance
 
-The following frozen operations cannot safely honor workspace isolation and
-therefore fail closed until their native ports land:
+Inspect and resolve the selected workspace's Stage-1 custody index without
+walking or rebuilding collection roots:
 
-- `daemon serve|status|stop`
-- `verify`
-- `blob-index list-sources|lookup`
-- `wipe list|index`
+```bash
+./pocket-advisor.py --workspace <workspace_id> blob-index list-sources
+./pocket-advisor.py --workspace <workspace_id> blob-index lookup \
+  --source <collection_id> --sha256 <64-hex-digest>
+```
 
-Do not invoke their old `scripts/` implementations against the fresh schema.
-The only native wipe operation currently available is workspace-scoped
-`wipe state`.
+Lookup verifies the current file size and SHA-256 by default. A missing or
+stale row points to `ingest discover`; lookup never steals discovery's
+ownership by rebuilding on demand. `--no-verify` is for path inspection only
+and deliberately skips the final content rehash.
+
+Run the full native verifier after ingestion or suspected tampering:
+
+```bash
+./pocket-advisor.py --workspace <workspace_id> verify
+```
+
+It checks SQLite and foreign keys, both FTS5 indexes with their native
+`integrity-check`, indexed originals, durable memberships, derived artifacts
+and stored copy hashes, current leaf/thread vector matrices and per-entity
+files, plus statement/assertion failures. It reads and hashes evidence but
+never modifies collection roots.
+
+List or explicitly delete only the selected workspace's model-specific vector
+caches:
+
+```bash
+./pocket-advisor.py --workspace <workspace_id> wipe list
+./pocket-advisor.py --workspace <workspace_id> wipe index --text <slug>
+./pocket-advisor.py --workspace <workspace_id> wipe index --all-inactive
+```
+
+Deleting the active index requires `--force`, stops that workspace's daemon
+after confirmation, and leaves SQLite, cache artifacts, other indexes,
+evidence, and every other workspace untouched.
 
 ## Retrieval accuracy testing
 
@@ -173,9 +214,6 @@ for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
 ./pocket-advisor.py test
-for test_file in scripts/test_*.py; do
-  venv/bin/python "$test_file"
-done
 git diff --check
 git status --short
 ```

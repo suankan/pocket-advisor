@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Pocket Advisor's single executable entrypoint.
 
-The argparse surface and all workspace-safe operations live in
-:mod:`modules.cli`. Frozen operational commands fail closed until their native
-workspace-scoped ports land. New modules never import legacy modules.
+The argparse surface and every workspace-scoped operation live in
+:mod:`modules.cli`; the retired implementation has no runtime adapter.
 """
 import os
 import sys

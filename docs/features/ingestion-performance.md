@@ -1,6 +1,7 @@
 # Ingestion Performance
 
-Status: **proposed 2026-07-19; implementation decisions remain open**.
+Status: **proposed and review-refined 2026-07-19; ingest-report telemetry
+schema v2 is locked, while benchmark-dependent tuning decisions remain open**.
 
 This feature records the measured full-ingest bottlenecks and the candidate
 redesigns to reduce clean-build and recipe-invalidation time. It is a working
@@ -80,27 +81,42 @@ decode and prompt overhead many times and repeatedly recompresses early facts.
 ### Proposed direction
 
 1. Render one explicitly delimited, chronological input per eligible thread.
-2. Generate one bounded navigation summary from that complete input.
-3. Retain token-aware segmentation only for a future thread that cannot fit
-   safely in one request; overflow uses a deterministic hierarchical reduce,
-   never silent truncation.
-4. Keep one session-warm model per stage run and commit each completed thread
+2. Select the one-shot threshold from measured navigation quality, not the
+   model's advertised context capacity. A thread that technically fits but
+   crosses the quality threshold uses the hierarchical path; context-window
+   headroom alone is not evidence that early, middle, and late facts remain
+   equally retrievable.
+3. Generate one bounded navigation summary for each thread below that
+   threshold. The prompt uses explicit chronological sections and asks for
+   early, middle, and late turning points, decisions, and unresolved matters
+   rather than allowing the final messages to dominate.
+4. For a longer thread, segment only at complete chronological message
+   boundaries and reduce the segment summaries deterministically. A single
+   message that exceeds the segment budget uses a separately specified
+   token-aware fallback; no path silently truncates evidence. The boundaries
+   are structural and deterministic, not inferred by another semantic model.
+5. Keep one session-warm model per stage run and commit each completed thread
    independently so interruption remains resumable.
-5. Bump `SUMMARY_PROMPT_VERSION`; old summaries and their vectors must become
+6. Bump `SUMMARY_PROMPT_VERSION`; old summaries and their vectors must become
    stale through the existing digest/version mechanism.
-6. Compare the new summaries through the retrieval-expectation suite, with
-   particular attention to long-thread navigation and early chronology.
+7. Compare the new summaries through the retrieval-expectation suite. Long-
+   thread expectations must deliberately anchor facts from the beginning,
+   middle, and end so a faster one-shot prompt cannot hide attention dilution.
 
-For the measured large profile this changes the normal generation-call count
-from 693 to 126, an 82% reduction. The planning estimate is 15–25 minutes for
-the summary stage rather than 85 minutes, subject to an implementation
-benchmark and quality validation.
+For the measured large profile, at least the 117 threads at or below 8,192
+tokens are strong one-shot candidates. The remaining nine threads are assigned
+by the measured quality threshold even though all technically fit the model's
+maximum context. The earlier 126-call / 82% reduction is therefore an upper-
+bound planning case, not a locked implementation promise. The planning
+estimate remains 15–25 minutes rather than 85 minutes, subject to positional
+quality checks and an implementation benchmark.
 
 ### Open decisions
 
 - exact chronological envelope and prompt version;
-- token safety margin below the model context limit;
-- hierarchical fallback shape for genuinely oversized future threads;
+- quality-driven one-shot threshold and token safety margin;
+- segment size and reduce shape for long but technically in-context threads;
+- the deterministic last-resort split for one oversized message;
 - whether output-token allowance should scale within a fixed hard ceiling;
 - whether generated token/prefill timing can be obtained reliably from the
   local runtime without coupling the engine to unstable internals.
@@ -132,19 +148,31 @@ bucketing and small, stable microbatches.
 
 1. Add an `embed_many()` backend contract while retaining `embed_one()` for
    queries, fallback, and failure isolation.
-2. Tokenize pending payloads once, assign them to fixed length buckets, and
-   use a small benchmark-selected microbatch within each bucket.
-3. Preserve entity-to-vector ordering explicitly; padding must be masked and
+2. Keep leaf chunks and thread summaries in separate batching/progress queues.
+   They already occupy separate vector namespaces and lifecycles; independent
+   queues let each use its measured length distribution and keep progress
+   legible. Both queues may reuse the same backend and benchmarked bucket
+   definitions where their lengths overlap.
+3. Tokenize each pending payload once, assign it to a fixed length bucket, and
+   use a small benchmark-selected microbatch within its queue and bucket.
+4. Preserve entity-to-vector ordering explicitly; padding must be masked and
    must not alter the semantic input.
-4. On a batch failure, bisect or retry its members individually. Successful
+5. On a batch failure, bisect or retry its members individually. Successful
    entities remain durable even when one peer fails.
-5. Keep the per-entity `.npy` cache and its crash-resume semantics. A fresh
-   build may assemble the final matrix from vectors already in memory instead
-   of reopening every file it just wrote, provided the durable cache remains
-   authoritative.
-6. Prove single-versus-batched vector equivalence within a locked tolerance.
-   If execution changes vector identity materially, include the execution
-   recipe in the fingerprint rather than mixing caches.
+6. Publish every successful vector independently: validate dimension and
+   finite values, write to a temporary per-entity file, read-verify it, and
+   atomically replace the cache entry. A partial or failed batch never exposes
+   an entity cache file and never contributes to the assembled matrix.
+7. Keep the per-entity `.npy` cache and its crash-resume semantics. A fresh
+   build may assemble the final matrix from in-memory vectors only after their
+   corresponding cache entries have passed publication verification; the
+   durable cache remains authoritative.
+8. Compare single and batched execution through maximum absolute/relative
+   error and cosine similarity. Bit identity is not required unless the
+   runtime provides it without losing the intended speedup. Lock tolerances
+   only after same-hardware measurement; if execution changes vector identity
+   materially, include the execution recipe in the fingerprint rather than
+   mixing caches.
 
 The initial target is at least 1.5x end-to-end embedding throughput on the same
 hardware and inputs, with no retrieval-expectation regression. Batch size and
@@ -155,10 +183,9 @@ operator genuinely needs to control them.
 
 - fixed token bucket boundaries and padding implementation;
 - microbatch size under available unified memory;
-- numerical-equivalence tolerance and whether deterministic bit identity is
-  achievable;
-- whether leaf and summary payloads share batches or remain separate progress
-  channels;
+- numerical-equivalence thresholds after measuring absolute error, relative
+  error, and cosine similarity (with `1e-5` a candidate, not an assumed
+  universal bound);
 - how much matrix assembly time remains after model-call optimization.
 
 ## Workstream C — content-addressed PDF transforms
@@ -187,15 +214,28 @@ recipe is unchanged.
 2. OCR each unique input/recipe once, then write-verify the required derivative
    and text artifacts for every occurrence. Per-occurrence cache layout,
    custody lineage, database rows, warnings, and citations remain intact.
-3. Run independent unique transforms through a bounded worker pool. Allocate a
-   fixed total CPU budget across workers instead of giving every concurrent
-   OCR child all CPUs.
-4. Keep SQLite mutation and review logging on the coordinating thread; workers
+3. A workspace-local canonical transform object may be used as an internal
+   reuse source, but it does not replace occurrence-local `pdf-ocr/` and
+   `pdf-to-text/` artifacts with database pointers. Fan-out publishes and
+   read-verifies each occurrence independently. Plain copies are the baseline;
+   an optional copy-on-write clone requires platform detection and verification.
+   Hardlinks are prohibited because one inode would make corruption or an
+   accidental in-place write affect several evidentiary occurrences.
+4. Run independent unique transforms through a bounded worker pool with one
+   explicit global CPU budget. Nested parallelism must satisfy
+   `workers * ocrmypdf_jobs <= cpu_budget`; an OCR child may never default to
+   every core while several workers are active. Benchmark both one-worker/
+   multi-job and multi-worker/one-job topologies, starting concurrent workers
+   with `--jobs 1`. Treat this equation as a minimum scheduling guard, not
+   proof of resource containment: measure process-tree CPU and peak memory
+   because Ghostscript or native image steps may consume resources outside the
+   nominal OCRmyPDF job count.
+5. Keep SQLite mutation and review logging on the coordinating thread; workers
    return typed aggregate-safe results for deterministic publication.
-5. Split provenance into an OCR-derivative recipe and a text-extraction recipe:
+6. Split provenance into an OCR-derivative recipe and a text-extraction recipe:
    an OCR change rebuilds both products, while a text-only change reuses the
    current verified derivative and reruns `pdftotext`.
-6. Preserve the verified-original fallback when OCRmyPDF produces no
+7. Preserve the verified-original fallback when OCRmyPDF produces no
    derivative. A successful, present, readable `pdftotext` artifact remains
    the final acceptance gate.
 
@@ -208,39 +248,195 @@ is a 10–18 minute PDF stage rather than 26 minutes.
 ### Open decisions
 
 - internal canonical-transform representation and how occurrence artifacts
-  are materialized without weakening write verification;
+  are copied or safely cloned without weakening independent write verification;
 - whether OCR derivatives are byte-deterministic enough to compare directly
   or only through their source/recipe provenance;
-- worker count and per-child `--jobs` allocation on the supported hardware;
+- global CPU budget plus benchmarked worker/per-child `--jobs` allocation on
+  the supported hardware;
 - failure fan-out and retry presentation when several occurrences share one
   failed unique transform;
 - schema columns versus verified sidecar metadata for the two recipe layers.
 
 ## Instrumentation before optimization
 
-The saved run contract already records stage duration and `StageStats`. Add
-aggregate counters needed to evaluate each redesign without persisting corpus
-narrative:
+### Locked report-schema decision
 
-- summaries: messages, input segments, generation calls, input tokens, and
-  overflow reductions;
-- embed: pending entities, bucket/microbatch counts, individual fallbacks,
-  model seconds, cache-write seconds, and matrix-build seconds;
-- PDFs: occurrences, unique transforms, duplicate reuses, worker count,
-  OCR seconds, direct-original fallbacks, and text-extraction seconds.
+Observability takes precedence over preserving the implemented flat
+`StageStats` JSON shape. The performance implementation bumps saved ingest
+records from schema version 1 to version 2 and adds one required, typed,
+nested `performance` block. Operational `StageStats` remain concise stage
+deltas; they are not overloaded with timing trees, queue structure, dynamic
+tier names, or floating-point measurements.
 
-Counters must remain aggregate-only and schema-compatible with saved ingest
-reports. Fine-grained profiling belongs in an explicit local benchmark mode,
-not the default record.
+Every hot-stage object has a required `state`:
+
+- `measured` — the stage ran and all required telemetry was captured, including
+  a legitimate unchanged run with zero pending work;
+- `not_applicable` — the stage was deliberately disabled or out of scope;
+- `partial` — the stage failed or was interrupted after publishing only the
+  measurements captured so far; and
+- `not_run` — orchestration never entered the stage after an earlier failure.
+
+This state prevents zero counters from ambiguously meaning disabled,
+unmeasured, unchanged, or failed. All counts are non-negative integers; all
+timings are finite non-negative seconds measured with a monotonic clock. The
+record remains aggregate-only and may not contain filenames, subjects,
+Message-IDs, text, transaction descriptions, questions, or evidence snippets.
+
+The locked `performance` portion of the version-2 report is:
+
+```json
+{
+  "schema_version": 2,
+  "performance": {
+    "summaries": {
+      "state": "measured",
+      "eligible_threads": 126,
+      "pending_threads": 126,
+      "unchanged_threads": 0,
+      "completed_threads": 126,
+      "failed_threads": 0,
+      "input_messages": 693,
+      "input_segments": 126,
+      "generation_calls": 126,
+      "total_input_tokens": 417087,
+      "one_shot_threads": 126,
+      "hierarchical_threads": 0,
+      "overflow_reductions": 0,
+      "length_tiers": [
+        {
+          "upper_bound_tokens": 8192,
+          "threads": 117,
+          "generation_calls": 117
+        },
+        {
+          "upper_bound_tokens": null,
+          "threads": 9,
+          "generation_calls": 9
+        }
+      ],
+      "timings_seconds": {
+        "input_render": 0.0,
+        "model_execution": 0.0,
+        "publication": 0.0
+      }
+    },
+    "embed": {
+      "state": "measured",
+      "queues": {
+        "leaf": {
+          "pending_entities": 9656,
+          "input_tokens": 0,
+          "bucket_count": 0,
+          "microbatch_count": 0,
+          "padding_tokens": 0,
+          "successful_entities": 9656,
+          "failed_entities": 0,
+          "individual_fallbacks": 0,
+          "bisection_fallbacks": 0
+        },
+        "summary": {
+          "pending_entities": 126,
+          "input_tokens": 0,
+          "bucket_count": 0,
+          "microbatch_count": 0,
+          "padding_tokens": 0,
+          "successful_entities": 126,
+          "failed_entities": 0,
+          "individual_fallbacks": 0,
+          "bisection_fallbacks": 0
+        }
+      },
+      "verified_cache_publications": 9782,
+      "timings_seconds": {
+        "model_execution": 0.0,
+        "cache_publication": 0.0,
+        "matrix_assembly": 0.0
+      }
+    },
+    "pdfs": {
+      "state": "measured",
+      "occurrences_considered": 545,
+      "pending_occurrences": 545,
+      "unique_transforms": 458,
+      "successful_transforms": 458,
+      "failed_transforms": 0,
+      "duplicate_reuses": 87,
+      "direct_original_fallbacks": 16,
+      "fan_out": {
+        "copies": 87,
+        "copy_on_write_clones": 0
+      },
+      "resources": {
+        "configured_worker_count": 1,
+        "configured_per_child_jobs": 10,
+        "configured_global_cpu_budget": 10,
+        "observed_peak_workers": 1,
+        "process_tree_peak_rss_bytes": null
+      },
+      "timings_seconds": {
+        "transform_wall": 0.0,
+        "ocr_process_total": 0.0,
+        "text_process_total": 0.0,
+        "fan_out_publication": 0.0
+      }
+    }
+  }
+}
+```
+
+The example values illustrate shape only; they are not benchmark results for
+the redesigned implementation. `length_tiers` is a deterministically ordered
+array whose final unbounded tier uses `null`; this is stable and comparable,
+unlike dynamic JSON property names such as `tier_lte_8k`. Positional quality
+verdicts belong to retrieval-expectation/benchmark results, not ingestion
+telemetry; the run record stores the input-length and execution-strategy facts
+needed to correlate those external verdicts.
+
+Every object is typo-strict: all documented fields are required for its
+measurement state and unknown fields are rejected. `not_run` and
+`not_applicable` retain the same object shape with empty tier arrays and zero
+counters/timings; `partial` retains the values captured before failure. The
+state, rather than a missing key, explains why zero work was observed.
+
+Measured cardinalities reconcile internally: pending summary threads equal
+one-shot plus hierarchical assignments and completed plus failed outcomes;
+each embed queue's pending entities equal successful plus failed entities;
+verified cache publications equal successful entities across both queues; and
+unique PDF transforms equal successful plus failed transforms. A partial
+record may contain lower captured totals but may never claim impossible
+greater-than-input relationships.
+
+Leaf and summary queue fields have identical schemas and remain separate even
+when they happen to use the same bucket boundaries. `padding_tokens` counts
+padding overhead only, while `input_tokens` records real unpadded tokens, so
+padding ratio is reconstructable.
+
+`StageRun.duration_seconds` remains the authoritative stage wall time. PDF
+`transform_wall` is the coordinator-observed transform subphase, whereas
+`ocr_process_total` and `text_process_total` sum child-process elapsed times
+and may exceed wall time under concurrency. This distinction makes parallel
+efficiency visible instead of producing apparently contradictory timings.
+Peak RSS is nullable because portable process-tree measurement may be
+unavailable; `null` means unavailable, never zero bytes.
+
+Schema version 2 is a deliberate clean cut. New records are written and
+re-rendered through the version-2 typed model. Existing version-1 files remain
+untouched as raw historical derived artifacts but are not migrated and are not
+required to load through `ingest report` after the cutover. Fine-grained,
+per-entity profiling still belongs only in an explicit local benchmark mode.
 
 ## Sequencing
 
 1. Add the aggregate instrumentation and a reproducible local comparison
-   method.
-2. Implement and quality-check one-generation-per-thread summaries.
-3. Benchmark and implement shape-stable embedding microbatches.
+   method by implementing ingest-report schema version 2 first.
+2. Benchmark the summary one-shot quality threshold, then implement the
+   one-shot/hierarchical paths and positional quality checks.
+3. Benchmark numerical equivalence and then implement separate leaf/summary
+   shape-stable embedding microbatches.
 4. Implement unique-hash PDF transformation and occurrence fan-out.
-5. Benchmark and add bounded PDF concurrency.
+5. Benchmark one-worker/multi-job against multi-worker/one-job OCR, then add
+   bounded concurrency under one global CPU budget.
 6. Split OCR-derivative and text-extraction recipe provenance.
 7. Reassess cross-stage overlap only after the three stages are individually
    efficient.
@@ -254,21 +450,25 @@ remaining headroom.
 
 1. The same-hardware representative full build is at least twice as fast
    overall, or every missed target is explained by recorded subphase metrics.
-2. Summary generation normally performs at most one call per eligible thread;
-   overflow calls are deterministic, counted, and never truncate evidence.
+2. Summary generation performs one call for every thread below the measured
+   quality threshold; long-thread calls are deterministic, counted, split only
+   at message boundaries except for the explicit oversized-message fallback,
+   and never truncate evidence.
 3. Summary prompt/version invalidation, stale exclusion, resumability, and
    non-evidentiary labeling remain intact.
-4. Retrieval-expectation results show no unexplained regression, especially
-   for long-thread and summary-navigation expectations.
+4. Retrieval-expectation results show no unexplained regression, with explicit
+   beginning/middle/end anchors for long-thread summary navigation.
 5. Batched and single embeddings meet the locked numerical-equivalence rule;
-   batch failures isolate bad entities and preserve successful cache entries.
+   batch failures isolate bad entities, no partial batch entry is published,
+   and successful cache entries are independently atomic and read-verified.
 6. Every current vector entity remains represented exactly once, matrix IDs
    remain aligned, and an unchanged run performs no embedding work.
 7. Each unique PDF input/recipe is transformed at most once per workspace,
    while every occurrence retains its required write-verified artifacts and
    provenance.
 8. PDF concurrency is bounded, deterministic in publication, interruptible,
-   and cannot let a worker write SQLite or collection evidence.
+   cannot oversubscribe nested OCR jobs beyond the global CPU budget, and
+   cannot let a worker write SQLite or collection evidence.
 9. OCR-only, text-only, tool-version, language, fallback, missing-artifact,
    and failed-artifact changes invalidate exactly the required product layer.
 10. An unchanged run remains fast and performs no OCR, summary generation, or
@@ -277,11 +477,20 @@ remaining headroom.
     benchmark or test mutates live evidence or workspace state.
 12. The native module suite, full `verify` invariants, and
     `git diff --check` pass before implementation ships.
+13. Every full-ingest record contains all three typed performance objects with
+    an explicit state; unchanged, disabled, partial, and not-run stages remain
+    distinguishable after persistence and re-rendering.
+14. Schema-version-2 round trips preserve nested counters, tier order, null
+    resource measurements, and timing precision without accepting negative,
+    non-finite, unknown, or corpus-bearing fields.
 
 ## Non-goals
 
 - Skipping Stage 1 source hashing or weakening custody alarms.
 - Cross-workspace OCR, summary, embedding, or vector reuse.
+- Replacing occurrence-local PDF artifacts with pointer-only shared CAS files
+  or hardlinks; canonical transform reuse is internal to one workspace and
+  every occurrence remains independently materialized and verified.
 - Replacing models merely to claim a faster implementation.
 - Treating generated summaries as evidence or citation targets.
 - A born-digital `pdftotext`-first policy change; that is a separate quality

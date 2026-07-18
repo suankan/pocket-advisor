@@ -131,7 +131,7 @@ failure rolls the whole Stage 5 rebuild back.
   subsequently converged 545/545 readable PDF occurrences, 10,541 leaf plus
   126 navigation vectors, and 56 balance-valid supported statements / 2,873
   rows without a wipe. The independent unsupported-institution parser backlog
-  remains the roadmap head.
+  remains scheduled as roadmap item 5.
 - **Post-ingest integrity/reporting findings fixed (`5fd5bdd`, investigation
   record `b678f14`):** Westpac parser `westpac-v2` recognizes both the existing
   two-column account layout and labelled compact Flexi forms, preserving the
@@ -237,9 +237,11 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Transaction parser coverage**. It is independent of
-generic end-to-end platform validation and does not block **2. Local answering
-pass** (`docs/roadmap.md`).
+The roadmap head is **1. Ingest performance telemetry and benchmark
+baseline**, followed by the separately shippable summary, embedding, and PDF
+optimization items locked in `docs/features/ingestion-performance.md`.
+Transaction parser coverage is now item 5 and remains independent; the local
+answering pass is item 6 (`docs/roadmap.md`).
 
 ## Watch-outs
 

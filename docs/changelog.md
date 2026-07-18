@@ -36,7 +36,7 @@ fast Stage 5 rebuild because `westpac-v2` changes the parser fingerprint. No
 PDF, summary, embedding, schema, or wipe work is required.
 
 Deferred: the 121 unsupported AMP, MEBank, NAB, CBA, Revolut, and Qantas
-statements remain roadmap item 1. Genuine ambiguous transfer candidates remain
+statements remain roadmap item 5. Genuine ambiguous transfer candidates remain
 operator reconciliation findings.
 
 ## 2026-07-19 — Multiple-ingestion regression fixes
@@ -75,7 +75,7 @@ once under `pdf-text-v2`, then rebuilds transactions once under
 
 Deferred: live-corpus acceptance is performed by that next operator-run
 ingest. Parser support for the 121 statements from currently unsupported
-institutions remains roadmap item 1 and was deliberately not folded into this
+institutions remains roadmap item 5 and was deliberately not folded into this
 regression fix.
 
 ## 2026-07-18 — Transaction-stage convergence
@@ -112,8 +112,8 @@ state was modified. The first post-upgrade full ingest may reprocess existing
 PDF text once to establish the new recipe fingerprint, then performs one
 transaction rebuild to publish its initial manifest.
 
-Deferred: broader institution parser coverage remains roadmap item 1 and does
-not block roadmap item 2, the local answering pass.
+Deferred: broader institution parser coverage remains roadmap item 5 and does
+not block roadmap item 6, the local answering pass.
 
 ## 2026-07-18 — PDF OCR validation-warning recovery
 

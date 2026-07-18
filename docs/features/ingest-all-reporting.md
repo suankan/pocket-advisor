@@ -1,7 +1,8 @@
 # Full-Ingest Completion Reporting
 
-Status: **locked 2026-07-18; implemented at `78e705a`**, including the
-saved-record display command (decision 13).
+Status: **version 1 implemented at `78e705a`; version-2 performance telemetry
+schema locked 2026-07-19 and pending implementation**, including the
+saved-record display cutover described below.
 
 This feature makes every successful or failed `ingest all` invocation end with
 one concise, trustworthy account of what the run did and what searchable state
@@ -13,20 +14,23 @@ assessment without turning ingestion into the future full `verify` command.
 ```text
 stage progress and one-line counters
                  |
-       CLI records stage timings
+ CLI records stage timings + typed hot-stage telemetry
                  |
       post-run read-only snapshot
                  |
   terminal summary + local JSON record
 ```
 
-The report answers two different questions and must keep them separate:
+The report answers three different questions and must keep them separate:
 
 1. **This run:** which stages ran or were skipped, how long each took, and what
    work their `StageStats` recorded.
 2. **Workspace now:** how many sources, readable artifacts, threads, summaries,
    chunks, vectors, statements, transactions, and current findings exist after
    the run converged.
+3. **Performance:** within the hot summary, embedding, and PDF stages, how much
+   work entered each strategy/queue/transform, where wall time was spent, and
+   which resource topology was actually used.
 
 An unchanged idempotent rerun should therefore show little or no new work while
 still showing a complete, useful workspace snapshot.
@@ -75,7 +79,10 @@ still showing a complete, useful workspace snapshot.
    attempt writes one aggregate-only, schema-versioned JSON report below
    `<workspace-state>/logs/ingest-runs/`. It is workspace-derived operational
    state, is removed by that workspace's `wipe state`, and is never a source of
-   truth for retrieval.
+   truth for retrieval. The performance work deliberately bumps this contract
+   to schema version 2 and requires the nested `performance` block locked in
+   `docs/features/ingestion-performance.md`; preserving the flat version-1
+   shape is not a constraint on observability.
 10. **No corpus narrative in the run record.** JSON may contain workspace ID,
     timestamps, timings, counter names, aggregate counts, model/index
     fingerprints, status, and finding categories. It must not contain email
@@ -101,6 +108,24 @@ still showing a complete, useful workspace snapshot.
     aborts with a clear message. A relative path is resolved as given, then
     against the project root, matching the `record_path` stored inside each
     record.
+14. **Performance telemetry is typed and visible** (locked 2026-07-19).
+    Schema version 2 separates concise operational stage stats from a required
+    nested `performance` object for summaries, embed, and PDFs. Each hot stage
+    explicitly records `measured`, `not_applicable`, `partial`, or `not_run`;
+    zero never stands in for unavailable measurement. The terminal and saved-
+    record renderer add one compact line per hot stage, while the JSON retains
+    the complete aggregate queue/tier/resource/timing structure. Version-1
+    records remain untouched files but are not migrated and are not required
+    to load after the version-2 cutover.
+15. **Telemetry survives stage failure.** The CLI creates one typed run
+    telemetry recorder before orchestration, initially marking every hot stage
+    `not_run`, and injects it through the pipeline context. Entering a stage
+    changes its state to `partial`; a deliberate gate records
+    `not_applicable`; successful completion seals it as `measured`. Stages
+    update only aggregate counters/timers while doing their existing work and
+    still return operational `StageStats`. The recorder therefore survives an
+    exception without making the reporting service run a model, parse a file,
+    or reconstruct missing measurements afterward.
 
 ## Report data contract
 
@@ -110,6 +135,7 @@ The stable human and JSON snapshot contains these sections:
 |---|---|
 | Run | workspace, start/end UTC, completion status, pipeline/report seconds |
 | Stages | stage name, outcome (`completed`, `skipped`, `failed`), duration, raw `StageStats`, skip/failure category |
+| Performance | required typed summary/embed/PDF objects; explicit measurement state; strategy/queue/transform counts; subphase timings; PDF resource topology and nullable peak RSS |
 | Sources | top-level custody sources from `source_blob_index`, joined to their email/PDF/other candidate status; source count and bytes exclude attached-email candidates |
 | Evidence | email/native-PDF item counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
 | Threads | total/singleton/multi-message threads; eligible/current/stale/missing summaries |
@@ -192,6 +218,11 @@ This run
   ...
   transactions   completed    0.2s   accounts=1, parsed=4
 
+Performance
+  summaries     measured — 126 pending, 126 calls, 417087 input tokens
+  embed         measured — 9656 leaf + 126 summary pending, 9782 published
+  pdfs          measured — 545 occurrences / 458 unique, workers=1 jobs=10
+
 Workspace now
   Sources       37 originals — 33 emails, 4 PDFs
   PDFs          25/27 readable — 2 failed occurrences, 1 unique blob
@@ -209,8 +240,8 @@ Run report: <workspace-state>/logs/ingest-runs/<timestamp>.json
 
 ## Displaying saved records
 
-Implemented 2026-07-18. Any persisted record can be re-rendered later in
-exactly the shape above:
+Implemented for version 1 on 2026-07-18. After the performance cutover, any
+version-2 record can be re-rendered later in exactly the shape above:
 
 ```bash
 ./pocket-advisor.py --workspace <id> ingest report          # latest record
@@ -220,8 +251,9 @@ exactly the shape above:
 
 `--last` combined with a path is rejected, as are report flags on a real
 pipeline stage. Loading round-trips the versioned JSON back into the typed
-report (`load_report`) and reuses `format_report`; only `schema_version` 1
-records are accepted.
+report (`load_report`) and reuses `format_report`. The cutover changes the
+accepted contract from `schema_version` 1 to 2; version-1 files are neither
+migrated nor required to render through the new loader.
 
 ## Acceptance criteria
 
@@ -245,9 +277,11 @@ records are accepted.
    block, and fixes the standalone transaction report wording too.
 9. Multi-account fixtures cover matched, external, coverage-unknown, and truly
    suspicious transactions using the same shared classifier.
-10. The JSON record contains no corpus text or transaction descriptions, is
-    written only inside the selected workspace state, and round-trips against a
-    versioned typed schema.
+10. The version-2 JSON record contains no corpus text or transaction
+    descriptions, is written only inside the selected workspace state, and
+    round-trips the complete typed performance structure including explicit
+    measurement states, ordered length tiers, nullable RSS, and finite timing
+    values.
 11. A stage exception produces an `INCOMPLETE` partial report without running
     downstream stages or masking the original failure. Its saved stage reason
     retains aggregate-safe exception type/category context without corpus
@@ -261,11 +295,17 @@ records are accepted.
     resolves without a symlink; `--last` plus a path, report flags on a
     pipeline stage, a missing record, and a wrong-schema record all abort
     with clear messages and touch no database or pipeline state.
+15. The terminal summary adds only one compact line per hot stage, while the
+    saved record retains the full nested telemetry needed to compare summary
+    strategy, embedding queues, PDF reuse, subphase time, and resource
+    topology. A partial/not-run stage cannot masquerade as measured zero work.
 
 ## Non-goals
 
 - Answer-quality or retrieval-expectation accuracy measurement.
 - Full custody, artifact-hash, SQLite, or FTS integrity verification.
 - Historical trend dashboards or cross-workspace run aggregation.
+- Migrating or preserving native re-render compatibility for version-1 run
+  records after the deliberate version-2 observability cutover.
 - Changing stage transaction boundaries or retry semantics.
 - Printing evidence content or every review finding in the default summary.

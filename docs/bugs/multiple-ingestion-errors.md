@@ -121,7 +121,7 @@ A read-only dry parse classified all 177 mounted bank-statement PDFs:
 | Westpac | 2 | false assertion conflict described above |
 | Westpac | 1 | valid zero-activity statement described above |
 
-The 121 unsupported PDFs match roadmap item 1 rather than representing a new
+The 121 unsupported PDFs match roadmap item 5 rather than representing a new
 regression. The console printed only 64 of them because the fatal Flexi-loan
 conflict occurred before iteration reached the CBA, Revolut, and Qantas
 collections.
@@ -171,7 +171,7 @@ otherwise consistent reduction from 831 email candidates to 806 email items.
    run will retry the same 16 PDFs and roll transactions back at the same
    conflict.
 6. Implement the independent 121-PDF institution parser backlog under roadmap
-   item 1.
+   item 5.
 
 Acceptance requires 545/545 readable PDFs, successful atomic transaction
 publication for all supported Westpac statements including the zero-activity

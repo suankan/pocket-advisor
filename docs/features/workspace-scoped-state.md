@@ -1,8 +1,8 @@
 # Workspace-Scoped Derived State and CLI Selection
 
 Status: workspace isolation **shipped 2026-07-18** in implementation commit
-`23b0a42`; command-scoped selector refinement **locked 2026-07-18, pending
-implementation** in roadmap item 1.
+`23b0a42`; command-scoped selector refinement **shipped 2026-07-18** in
+implementation commit `c6df0a3`.
 
 This feature replaces the original shared-state design. Each workspace owns
 one SQLite database and one complete derived-state tree. A workspace is an

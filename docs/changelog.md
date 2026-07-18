@@ -4,6 +4,29 @@ Reverse-chronological history of shipped platform roadmap items. Current
 operating state lives in `docs/status.md`; future work lives only in
 `docs/roadmap.md`.
 
+## 2026-07-18 — Command-scoped workspace selection
+
+Implementation commit: `c6df0a3`.
+
+- Enforced workspace selection after parsing the complete command/action,
+  requiring it for every database, ingestion, retrieval, daemon, wipe,
+  custody, verification, transaction, and workspace-owned accuracy action.
+- Made shared `fetch-model` and fixture `test` registry-free and
+  workspace-free; preserved explicitly file-addressed `accuracy compare` as
+  workspace-free while its native port remains fail-closed.
+- Rejected meaningless `--workspace` selectors on workspace-free actions and
+  kept help at every parser level state-free.
+- Updated model-fetch guidance, runbook/verification commands, and exhaustive
+  CLI matrix coverage for scope, registry bypass, error behavior, and nested
+  help.
+
+Verification: workspace-free native test command 9/9; frozen tests 11/11;
+Python compilation and `git diff --check` clean. No live workspace state was
+touched.
+
+Deferred: the explicitly confirmed production cutover is roadmap item 1;
+native `accuracy compare` remains part of adapter retirement.
+
 ## 2026-07-18 — Workspace-scoped state and mandatory workspace selection
 
 Implementation commit: `23b0a42`.
@@ -29,7 +52,7 @@ Verification: native module tests 9/9 through the mandatory-workspace CLI;
 frozen tests 11/11; Python compilation and `git diff --check` clean. No live
 workspace state was initialized, wiped, or ingested.
 
-Deferred: the production workspace cutover is roadmap item 2 and requires
+Deferred: the production workspace cutover is roadmap item 1 and requires
 explicit confirmation immediately before its scoped wipe; daemon, accuracy,
 verify, blob-index lookup, and vector-index wipe remain fail-closed pending
 adapter retirement.

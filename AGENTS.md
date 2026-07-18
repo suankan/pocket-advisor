@@ -176,9 +176,8 @@ Always confirm this against `docs/status.md` and
 - `query` uses the native hybrid leaf/thread retriever; workspace-scoped
   `wipe state` is native; daemon, accuracy, verify, blob lookup, and remaining
   wipe actions fail closed until their native ports land;
-- implementation commit `23b0a42` still requires `--workspace` globally;
-  roadmap item 1 implements the locked command-scoped selector refinement
-  before cutover resumes;
+- command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
+  `test`, help, and file-addressed `accuracy compare` are workspace-free;
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.

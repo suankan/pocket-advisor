@@ -26,10 +26,11 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `625504a` | **Final payload/cache decisions locked**: envelope-enriched leaf payload + FTS shadow + recipe fingerprint, and exactly two readable message artifacts with authored-body-region chunking |
 | `a48bf7b` | **Envelope payload + message-artifact consolidation**: source-aware email/document/attachment payloads shared by dense and FTS retrieval; `envelope-v1` fingerprint separation; pure evidentiary chunk text; envelope-relative email offsets; final write-verified two-artifact email cache; comprehensive temp-fixture coverage |
 | `23b0a42` | **Workspace-scoped state + mandatory selection**: required global `--workspace`; explicit workspace runtime context; independent bound DB/cache/vector/log/runtime trees; exact native workspace wipe; unsafe frozen commands fail closed; redundant `active:` key removed; two-workspace custody/isolation coverage |
+| `c6df0a3` | **Command-scoped workspace selection**: workspace required only for actions that access workspace scope; registry-free shared model fetch and fixture tests; file-addressed accuracy comparison classified workspace-free; meaningless selectors rejected; exhaustive CLI action-matrix coverage |
 
 Current self-tests: all 9 `modules/tests/test_*.py` pass, including the
 workspace-isolation fixture
-(`./pocket-advisor.py --workspace test-workspace test`). The frozen
+(`./pocket-advisor.py test`). The frozen
 `scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
 
 Stage 5 is implemented in `modules/statement_parsers.py` and
@@ -87,23 +88,20 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
 
-- **Workspace-scoped state implemented (`23b0a42`):** every operational CLI
-  command requires global `--workspace`; the selected workspace is explicit
-  in runtime context and owns a bound database plus independent
+- **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
+  workspace-bound actions require global `--workspace`; the selected workspace
+  is explicit in runtime context and owns a bound database plus independent
   cache/vector/log/runtime tree. Model weights alone are shared, duplication
   across multiply mounted collections is intentional, and the retired
   `active:` registry key is rejected. Workspace-state wipe is native,
   confirmed, exact-path, and protected against overlap/symlink redirection.
-- **Command-scoped selector refinement locked (implementation pending):**
-  `docs/features/workspace-scoped-state.md` now requires selection only for
-  actions that genuinely access workspace scope. `fetch-model`, fixture
-  `test`, help, and future native `accuracy compare` are workspace-free and
-  must not load the registry; the current CLI still requires a selector for
-  all commands until roadmap item 1 lands.
+  Shared `fetch-model`, fixture `test`, help, and file-addressed
+  `accuracy compare` are workspace-free, reject a meaningless selector, and
+  do not resolve the registry.
 
-- **New CLI implemented** in `modules/cli.py` at `97ee193`, with mandatory
-  workspace selection and frozen-command fail-closed enforcement completed at
-  `23b0a42`. `pocket-advisor.py` is now only the venv bootstrap and native CLI
+- **New CLI implemented** in `modules/cli.py` at `97ee193`, with workspace
+  isolation/fail-closed enforcement at `23b0a42` and action-scoped selection at
+  `c6df0a3`. `pocket-advisor.py` is only the venv bootstrap and native CLI
   entrypoint. Argparse lives only in `modules/cli.py`; nothing in `modules/`
   imports from `scripts/`.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
@@ -128,9 +126,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Command-scoped workspace selection**. Implement and
-verify that locked refinement before the explicitly confirmed production
-cutover; adapter retirement, local answering, and experiments follow.
+The roadmap head is **1. Resume cutover**. It requires explicit user
+confirmation immediately before the workspace-scoped production wipe, then a
+complete re-ingest. Adapter retirement, local answering, and experiments
+follow.
 
 ## Watch-outs
 

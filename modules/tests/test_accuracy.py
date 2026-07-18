@@ -1,0 +1,182 @@
+"""Self-test: native retrieval-expectation accuracy suite."""
+import json
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import modules.accuracy as accuracy_mod  # noqa: E402
+import modules.pipeline.embed as embed_mod  # noqa: E402
+import modules.pipeline.summaries as summaries_mod  # noqa: E402
+import modules.retrieval as retrieval_mod  # noqa: E402
+from modules.accuracy import (ExpectationError, expectation_files,  # noqa: E402
+                              format_compare, format_list, format_run,
+                              generate_scaffold, load_expectations,
+                              load_result, persist_result, result_files,
+                              run_expectations, suite_paths)
+from modules.config import Config  # noqa: E402
+from modules.database import Database  # noqa: E402
+from modules.embedding import PAYLOAD_RECIPE  # noqa: E402
+from modules.pipeline.base import PipelineContext  # noqa: E402
+from modules.pipeline.embed import EmbedStage  # noqa: E402
+from modules.pipeline.summaries import ThreadSummaryStage  # noqa: E402
+from modules.pipeline.thread import ThreadStage  # noqa: E402
+from modules.review import ReviewLog  # noqa: E402
+from modules.workspace import Registry  # noqa: E402
+
+from test_embedding_design import (FakeEmbedder, FakeSummarizer,  # noqa: E402
+                                   REGISTRY_YAML, insert_email)
+
+DIM = 4
+FINGERPRINT = {"backend": "mlx", "model": "fake/model", "dim": DIM,
+               "chunk_chars": 1500, "chunk_overlap": 200,
+               "payload_recipe": PAYLOAD_RECIPE}
+
+EXPECTATIONS_YAML = """\
+- id: q-strong
+  question: "What did the direct reply say?"
+  expect_any:
+    - "<b@x>"
+- id: q-thread
+  question: "Which conversation is the project discussion?"
+  expect_thread_key: "<a@x>"
+  flags: [thread-level]
+- id: q-todo
+  question: "TODO — not written yet"
+  expect_any:
+    - "<a@x>"
+- id: q-invalid
+  question: "Anchored on a message this corpus does not contain?"
+  expect_any:
+    - "<missing@nowhere>"
+"""
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="pa_accuracy_") as td:
+        root = Path(td)
+        workspaces = root / "workspaces"
+        workspaces.mkdir()
+        (workspaces / "workspace-config.yaml").write_text(REGISTRY_YAML)
+        base = Config(project_root=root, workspaces_dir=workspaces,
+                      rerank_enabled=False)
+        registry = Registry.load(base)
+        workspace = registry.require_workspace("matter-x")
+        cfg = base.for_workspace(workspace.id)
+        conn = Database(cfg.db_path, workspace.id).open()
+        ctx = PipelineContext(
+            config=cfg, registry=registry, workspace=workspace, conn=conn,
+            review=ReviewLog(conn, cfg.review_queue_csv))
+
+        insert_email(conn, root, "<a@x>", "Project", "Opening note.",
+                     "2024-01-01T10:00:00+00:00", "a@x", "b@y")
+        insert_email(conn, root, "<b@x>", "Re: Project", "Direct reply.",
+                     "2024-01-02T10:00:00+00:00", "b@y", "a@x",
+                     "<a@x>", "<a@x>")
+        conn.commit()
+        ThreadStage(ctx).run()
+        with patch.object(summaries_mod, "get_summary_generator",
+                          return_value=FakeSummarizer()):
+            ThreadSummaryStage(ctx).run()
+        with patch.object(embed_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)), \
+             patch.object(embed_mod, "get_backend",
+                          return_value=FakeEmbedder()):
+            EmbedStage(ctx).run()
+
+        paths = suite_paths(ctx.workspace.root)
+
+        # generate: anchor-verified scaffold, TODO questions, no overwrite.
+        target = paths.expectations_dir / "scaffold.yaml"
+        written, count = generate_scaffold(ctx, target, force=False)
+        assert written == target and count == 1, (written, count)
+        scaffold = load_expectations([target])
+        assert scaffold[0]["expect_thread_key"] == "<a@x>"
+        assert scaffold[0]["question"].startswith("TODO")
+        try:
+            generate_scaffold(ctx, target, force=False)
+            raise AssertionError("scaffold overwrite must require --force")
+        except ExpectationError as exc:
+            assert "--force" in str(exc)
+        generate_scaffold(ctx, target, force=True)
+
+        # authored set: strong / thread-level / TODO-skip / invalid anchor.
+        authored = paths.expectations_dir / "authored.yaml"
+        authored.write_text(EXPECTATIONS_YAML)
+        files = expectation_files(paths, authored)
+        entries = load_expectations(files)
+        assert len(entries) == 4
+
+        with patch.object(retrieval_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)), \
+             patch.object(retrieval_mod, "get_backend",
+                          return_value=FakeEmbedder()), \
+             patch.object(accuracy_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)):
+            result = run_expectations(
+                ctx, entries, files, top_k=5, label="fixture run")
+
+        verdicts = {q["id"]: q for q in result["questions"]}
+        assert verdicts["q-strong"]["verdict"] == "STRONG" \
+            and verdicts["q-strong"]["rank"] == 1, verdicts["q-strong"]
+        assert verdicts["q-strong"]["matched"] == "<b@x>"
+        assert verdicts["q-thread"]["verdict"].startswith("THREAD"), \
+            verdicts["q-thread"]
+        assert verdicts["q-todo"]["verdict"] == "SKIPPED"
+        assert verdicts["q-invalid"]["verdict"] == "INVALID"
+        aggregates = result["aggregates"]
+        assert aggregates["scored"] == 2 and aggregates["miss"] == 0
+        assert aggregates["skipped"] == 1 and aggregates["invalid"] == 1
+        assert aggregates["thread_or_better_rate"] == 1.0
+        assert result["environment"]["embed"]["model"] == "fake/model"
+        assert result["environment"]["corpus"]["items"] == 2
+        assert result["expectations"]["count"] == 4
+
+        # persistence: JSON record round-trips; ordering by filename.
+        first = persist_result(result, paths)
+        assert first.is_file() and load_result(first)["label"] == \
+            "fixture run"
+        rendered = format_run(result, first)
+        assert "STRONG" in rendered and "1 TODO skipped" in rendered \
+            and "1 INVALID" in rendered
+
+        with patch.object(retrieval_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)), \
+             patch.object(retrieval_mod, "get_backend",
+                          return_value=FakeEmbedder()), \
+             patch.object(accuracy_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)):
+            second_result = run_expectations(
+                ctx, entries, files, top_k=5, label="second")
+        second = persist_result(second_result, paths)
+        files_on_disk = result_files(paths)
+        assert files_on_disk == sorted([first, second])
+
+        comparison = format_compare(
+            [load_result(first), load_result(second)],
+            [first.name, second.name])
+        assert "No per-question changes" in comparison
+
+        # a synthetic regression is surfaced per-question.
+        regressed = json.loads(second.read_text())
+        for question in regressed["questions"]:
+            if question["id"] == "q-strong":
+                question["verdict"], question["rank"] = "MISS", None
+        comparison = format_compare(
+            [load_result(first), regressed], [first.name, "regressed"])
+        assert "q-strong" in comparison and "MISS" in comparison
+
+        listing = format_list(paths)
+        assert first.name in listing and second.name in listing
+
+        conn.close()
+    print("test_accuracy: all ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

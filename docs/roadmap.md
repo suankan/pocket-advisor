@@ -26,7 +26,10 @@ yet and ingestion is purely additive.
    hours for ~812 emails / ~196 PDFs, interruption-safe and resumable.
    Then review the completion report, triage the review queue, and
    spot-check summaries, reply relationships, and evidence packets.
-   Golden-set accuracy checks wait for the native runner in item 2.
+   The native `accuracy` suite is available now: after cutover, scaffold
+   a production expectation set (`accuracy generate`, migrating durable
+   Message-ID anchors from the legacy set), author questions, and run it.
+   The test workspace's 12-question set passes 100% (2026-07-18).
 3. **Follow-ups:**
    - statement parsers for the unparsed institutions (NAB, CBA, MEBank,
      AMP, Qantas cards, Revolut — ~120 of 177 production statements
@@ -49,10 +52,13 @@ Port the remaining frozen commands into `modules/`, then delete
   reranker for warm reuse). Until then the frozen `daemon`/`accuracy`
   commands must not run against the fresh schema — they expect
   retired columns.
-- **accuracy** — golden-set runner over the native retriever; add the isolated
-  `test-workspace` full rebuild/timing run, migrate stable expectations from
-  the existing golden set, and A/B the shipped `envelope-v1` payload against
-  a plain-payload index to measure the locked enrichment decision.
+- **accuracy** — the native retrieval-expectation suite
+  (generate/run/compare/list, JSON result records) shipped ahead of this
+  phase. Remaining here: migrate the durable Message-ID anchors from the
+  legacy production set (its integer `expect_thread` ids do not survive
+  re-ingest), add the isolated `test-workspace` full rebuild/timing run,
+  and A/B the shipped `envelope-v1` payload against a plain-payload
+  index to measure the locked enrichment decision.
 - **verify** — custody/integrity checks, plus FTS index
   self-verification: `INSERT INTO thread_summaries_fts
   (thread_summaries_fts) VALUES('integrity-check')` and the same for
@@ -76,7 +82,7 @@ material, and never cites a generated thread summary as evidence.
 
 - **Rolling-summary quality on long threads** — a changed N-message
   thread replays N generations and the 600-token ceiling compresses
-  early detail; revisit only if golden-set spot checks or a
+  early detail; revisit only if expectation-set spot checks or a
   long-thread collection show degradation.
 - **Semantic transaction search** — bank-statement rows are structured
   but not semantically searchable; embedding normalized

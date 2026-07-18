@@ -204,7 +204,7 @@ data outside engine state and survive state wipes.
 Workspace state is regenerable; evidence and workspace user data are not.
 `wipe state` validates and deletes only the explicitly selected workspace state
 after immediate user confirmation. It never deletes the common `.state`
-parent, a collection root, golden sets, benchmark results, playbooks, or
+parent, a collection root, retrieval expectation sets, benchmark results, playbooks, or
 reconciliation files.
 
 The clean-break migration is:
@@ -214,7 +214,7 @@ confirm selected-workspace wipe
 → initialize fresh workspace-bound schema
 → ingest all
 → verify custody and indexes
-→ run the native golden-set accuracy suite
+→ run the native retrieval-expectation accuracy suite
 ```
 
 No automatic cutover wipe is permitted.

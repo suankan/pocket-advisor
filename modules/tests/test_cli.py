@@ -100,7 +100,11 @@ def test_grammar() -> None:
         ("blob-index", "list-sources"),
         ("blob-index", "lookup", "--source", "mail", "--sha256", "00"),
         ("verify",),
-        ("accuracy", "run", "--golden", "golden.yaml"),
+        ("accuracy", "generate"),
+        ("accuracy", "run"),
+        ("accuracy", "run", "--expectations", "set.yaml"),
+        ("accuracy", "compare"),
+        ("accuracy", "compare", "--last", "3"),
         ("accuracy", "list"),
     )
     for action in bound_actions:
@@ -109,7 +113,6 @@ def test_grammar() -> None:
     free_actions = (
         ("fetch-model",),
         ("test",),
-        ("accuracy", "compare", "a.json", "b.json"),
     )
     for action in free_actions:
         assert parser.parse_args(action).workspace_required is False
@@ -121,10 +124,10 @@ def test_grammar() -> None:
     # Workspace-free actions reject a meaningless selector.
     main_must_fail([*WS, "fetch-model"], "not accepted")
     main_must_fail([*WS, "test"], "not accepted")
-    main_must_fail(
-        [*WS, "accuracy", "compare", "a.json", "b.json"],
-        "not accepted",
-    )
+
+    # Native accuracy compare takes --last, never result-file positionals.
+    parse_must_fail([*WS, "accuracy", "compare", "a.json", "b.json"])
+    parse_must_fail([*WS, "accuracy", "run", "--golden", "set.yaml"])
 
     # Clean break: removed spellings and flags are errors, not aliases.
     parse_must_fail([*WS, "ingest", "parse"])
@@ -277,17 +280,6 @@ def test_frozen_commands_fail_closed() -> None:
         try:
             cli.main([*WS, "verify"])
             raise AssertionError("workspace-unsafe frozen command must abort")
-        except SystemExit as exc:
-            assert "refusing the frozen shared-state implementation" in str(exc)
-
-    # File-addressed comparison is workspace-free even while its native port
-    # remains unavailable; it must fail closed without resolving a registry.
-    with patch.object(
-            cli, "_resolve_selection",
-            side_effect=AssertionError("workspace resolution must not run")):
-        try:
-            cli.main(["accuracy", "compare", "a.json", "b.json"])
-            raise AssertionError("unported accuracy compare must abort")
         except SystemExit as exc:
             assert "refusing the frozen shared-state implementation" in str(exc)
 

@@ -85,7 +85,7 @@ is governed solely by workspace collection mounts.
     boilerplate; `Document:`/`Attachment:` filename plus carrying-email
     envelope for file chunks); the payload recipe is a fingerprint
     field, so the enriched index lives in its own cache directory and a
-    recipe change re-embeds without re-chunking. The golden-set
+    recipe change re-embeds without re-chunking. The retrieval-expectation
     comparison measures the size of the win, not whether to adopt.
 
 ## Relational schema

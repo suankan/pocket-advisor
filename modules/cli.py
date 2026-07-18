@@ -54,8 +54,8 @@ _HELP = {
     "wipe": "state (native) | list/index (unavailable pending native port)",
     "blob-index": "list-sources | lookup — unavailable pending native port",
     "verify": "unavailable pending native port",
-    "accuracy": (
-        "run/list (workspace-bound) | compare (workspace-free) — unavailable"),
+    "accuracy": ("generate | run | compare [--last N] | list — "
+                 "retrieval expectation testing"),
     "test": "run every modules/tests/test_*.py self-test (workspace-free)",
 }
 _GROUPS = (
@@ -454,6 +454,57 @@ def _handle_test(_: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _handle_accuracy(args: argparse.Namespace) -> int:
+    from modules import accuracy
+
+    selection: RuntimeSelection = args.selection
+    paths = accuracy.suite_paths(selection.workspace.root)
+
+    if args.action == "list":
+        print(accuracy.format_list(paths))
+        return 0
+
+    if args.action == "compare":
+        if args.last < 1:
+            raise SystemExit("accuracy compare: --last must be >= 1")
+        files = accuracy.result_files(paths)
+        if len(files) < 2:
+            raise SystemExit(
+                f"accuracy compare: need at least 2 results under "
+                f"{paths.results_dir}, found {len(files)}")
+        window = files[-(args.last + 1):]
+        results = [accuracy.load_result(path) for path in window]
+        print(accuracy.format_compare(
+            results, [path.name for path in window]))
+        return 0
+
+    ctx = _open_context(selection)
+    try:
+        if args.action == "generate":
+            target = paths.expectations_dir / "scaffold.yaml"
+            target, count = accuracy.generate_scaffold(
+                ctx, target, args.force)
+            print(f"accuracy: scaffolded {count} anchor-verified entries "
+                  f"-> {target}\nReplace the TODO questions, then run "
+                  "'accuracy run'.")
+            return 0
+        files = accuracy.expectation_files(paths, args.expectations)
+        entries = accuracy.load_expectations(files)
+        top_k = args.top_k or ctx.config.default_top_k
+        if top_k <= 0:
+            raise SystemExit("accuracy run: --top-k must be positive")
+        print(f"accuracy: {len(entries)} expectations from "
+              f"{', '.join(path.name for path in files)} — loading models…")
+        result = accuracy.run_expectations(
+            ctx, entries, files, top_k=top_k, label=args.label)
+        record = accuracy.persist_result(result, paths)
+        print(accuracy.format_run(result, record))
+        return 1 if result["aggregates"]["miss"] \
+            or result["aggregates"]["invalid"] else 0
+    finally:
+        ctx.conn.close()
+
+
 def _handle_wipe_state(args: argparse.Namespace) -> int:
     from modules.wipe import wipe_state
 
@@ -593,19 +644,25 @@ def build_parser() -> argparse.ArgumentParser:
     command = commands.add_parser("accuracy", help=_HELP["accuracy"])
     actions = command.add_subparsers(
         dest="action", metavar="action", required=True)
-    run = actions.add_parser("run")
-    run.add_argument("--golden", required=True)
+    generate = actions.add_parser(
+        "generate",
+        help="scaffold an anchor-verified expectation set from the DB")
+    generate.add_argument("--force", action="store_true")
+    run = actions.add_parser(
+        "run", help="run the expectation set(s); write a JSON result record")
+    run.add_argument("--expectations", type=Path, default=None,
+                     help="one expectation file (default: every *.yaml in "
+                          "the workspace's expectations directory)")
     run.add_argument("--label", default="run")
     run.add_argument("--top-k", type=int, default=None)
-    run.add_argument("--mode", choices=("warm", "cold"), default="warm")
-    compare = actions.add_parser("compare")
-    compare.add_argument("result_a")
-    compare.add_argument("result_b")
-    listing = actions.add_parser("list")
-    listing.add_argument("--golden")
+    compare = actions.add_parser(
+        "compare", help="compare the newest result with previous runs")
+    compare.add_argument("--last", type=int, default=1, metavar="N",
+                         help="how many previous results to compare "
+                              "against (default 1)")
+    actions.add_parser("list", help="list saved result records")
     command.set_defaults(
-        handler=_handle_workspace_unsafe, workspace_required=True)
-    compare.set_defaults(workspace_required=False)
+        handler=_handle_accuracy, workspace_required=True)
 
     command = commands.add_parser("test", help=_HELP["test"])
     command.set_defaults(handler=_handle_test, workspace_required=False)

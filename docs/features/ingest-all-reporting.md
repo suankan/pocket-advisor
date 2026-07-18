@@ -256,7 +256,7 @@ records are accepted.
 
 ## Non-goals
 
-- Answer-quality or golden-set accuracy measurement.
+- Answer-quality or retrieval-expectation accuracy measurement.
 - Full custody, artifact-hash, SQLite, or FTS integrity verification.
 - Historical trend dashboards or cross-workspace run aggregation.
 - Changing stage transaction boundaries or retry semantics.

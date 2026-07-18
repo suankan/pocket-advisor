@@ -135,7 +135,6 @@ The following frozen operations cannot safely honor workspace isolation and
 therefore fail closed until their native ports land:
 
 - `daemon serve|status|stop`
-- `accuracy run|compare|list`
 - `verify`
 - `blob-index list-sources|lookup`
 - `wipe list|index`
@@ -143,6 +142,28 @@ therefore fail closed until their native ports land:
 Do not invoke their old `scripts/` implementations against the fresh schema.
 The only native wipe operation currently available is workspace-scoped
 `wipe state`.
+
+## Retrieval accuracy testing
+
+Native and workspace-bound. Expectation sets and JSON result records are
+workspace data under `<workspace-root>/search-accuracy-test/`
+(`expectations/*.yaml`, `results/<utc>__<label>.json`):
+
+```bash
+./pocket-advisor.py --workspace <id> accuracy generate          # anchor-verified scaffold (TODO questions)
+./pocket-advisor.py --workspace <id> accuracy run [--label L] [--expectations F] [--top-k N]
+./pocket-advisor.py --workspace <id> accuracy compare --last N  # newest vs N previous results
+./pocket-advisor.py --workspace <id> accuracy list
+```
+
+Expectations anchor only on durable identities — Message-IDs
+(`expect_any`) and thread stable keys (`expect_thread_key`). Verdicts:
+STRONG (direct match), THREAD(sum)/THREAD (thread packet selected), MISS,
+INVALID (anchor absent from this corpus), SKIPPED (TODO question not yet
+authored). `run` exits non-zero on any MISS or INVALID. Each run writes a
+schema-versioned JSON record with per-question verdict/rank/latency and
+the embed fingerprint, rerank model, top-k, and corpus counts for
+reproducible comparison.
 
 ## Verification
 

@@ -176,10 +176,12 @@ Always confirm this against `docs/status.md` and
   vector caches, while `chunks.text` stays a pure quote; email caches contain
   only `email_message_full.txt` and `email_message.txt`;
 - `query` uses the native hybrid leaf/thread retriever; workspace-scoped
-  `wipe state` is native; daemon, accuracy, verify, blob lookup, and remaining
+  `wipe state` and the retrieval-expectation `accuracy` suite
+  (generate/run/compare/list) are native; daemon, verify, blob lookup, and remaining
   wipe actions fail closed until their native ports land;
 - command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
-  `test`, help, and file-addressed `accuracy compare` are workspace-free;
+  `test`, and help are workspace-free; every `accuracy` action is
+  workspace-bound (native compare is `--last N`, not file-addressed);
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.

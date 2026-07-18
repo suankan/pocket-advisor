@@ -116,9 +116,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   across multiply mounted collections is intentional, and the retired
   `active:` registry key is rejected. Workspace-state wipe is native,
   confirmed, exact-path, and protected against overlap/symlink redirection.
-  Shared `fetch-model`, fixture `test`, help, and file-addressed
-  `accuracy compare` are workspace-free, reject a meaningless selector, and
-  do not resolve the registry.
+  Shared `fetch-model`, fixture `test`, and help are workspace-free,
+  reject a meaningless selector, and do not resolve the registry. (The
+  formerly workspace-free file-addressed `accuracy compare` was replaced
+  by the workspace-bound native `accuracy compare --last N`.)
 
 - **New CLI implemented** in `modules/cli.py` at `97ee193`, with workspace
   isolation/fail-closed enforcement at `23b0a42` and action-scoped selection at
@@ -129,9 +130,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   `ingest report [--last | PATH]`, `transactions report`, `db init`, and the
   10-test module runner are wired to the new engine. Removed stage spellings
   and `blob-index rebuild` are rejected, not aliased.
-- Real `query` dispatches to the native cold relational retriever and
-  `wipe state` is workspace-native. Daemon, accuracy, verify, blob lookup, and
-  vector-index wipe fail closed until their native ports land.
+- Real `query` dispatches to the native cold relational retriever;
+  `wipe state` and the retrieval-expectation `accuracy` suite
+  (generate/run/compare/list) are workspace-native. Daemon, verify, blob
+  lookup, and vector-index wipe fail closed until their native ports land.
 - The new ingest/report/query commands deliberately refuse older databases.
   The current partial state predates the stable-thread/summary schema and is
   intentionally refused; it requires a newly confirmed wipe and full ingest.

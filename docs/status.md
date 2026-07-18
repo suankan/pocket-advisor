@@ -33,6 +33,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `4037db7` | **Adapter retirement**: native workspace-local warm query daemon, deep custody/index verification, blob lookup, and vector-index maintenance; shared warm retrieval resources; root requirements/config defaults; retired `scripts/` tree and obsolete packages deleted; native suite 13/13 |
 | `99cc7b9` | **Quoted-reply duplicate-prefix fix**: detector v6 safely resolves a repeated 16-token parent prefix only through an exact 64-token confirmation of the earliest candidate; later nested and genuinely ambiguous matches remain uncut; reproduced finding documented and native suite 13/13 |
 | `b6b0391` | **Flat workspace-state layout**: `.state/workspace-<id>/` roots, `<id>.db`, and preserved state-owned `search-accuracy-tests/`; no nested state parent or workspace-root accuracy output; exact/symlink/wipe-preservation coverage; native suite 13/13 |
+| `838e037` | **PDF OCR validation-warning recovery**: a fresh derivative from non-zero OCRmyPDF proceeds to the authoritative `pdftotext` gate; warnings remain reviewable, stale outputs cannot be reused, prior failures retry, and successful recovery is idempotent; native suite 13/13 |
 
 Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -100,7 +101,18 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   surfaced as findings (run record `20260718T050815083153Z`). The native
   12-question expectation set then passed 12/12, including all four
   cross-lingual questions at rank 1. This workflow validates the complete RAG
-  platform without depending on any particular live workspace.
+  platform without depending on any particular live workspace. The two OCR
+  occurrences were subsequently recovered under `838e037`; the current test
+  state is 27/27 readable PDF occurrences with consistent 553-leaf and
+  7-navigation-vector indexes.
+- **PDF OCR validation-warning recovery (`838e037`):** when OCRmyPDF writes a
+  fresh derivative but returns non-zero during final validation, Stage 3 still
+  runs `pdftotext -layout`. Only a zero exit with a present, readable output is
+  accepted; the OCR anomaly is review-flagged. Stale outputs are removed before
+  attempts, prior error rows retry, and successful recovery clears their
+  obsolete failure state. The isolated malformed duplicate recovered as two
+  readable occurrences and ten chunks; the next full ingest performed no PDF
+  or embedding work.
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a

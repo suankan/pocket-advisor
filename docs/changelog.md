@@ -4,6 +4,32 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-18 — PDF OCR validation-warning recovery
+
+Implementation commit: `838e037`.
+
+- Made `pdftotext -layout` the final readability gate when OCRmyPDF completes
+  with a non-zero status after producing a fresh derivative. Success requires
+  a zero `pdftotext` exit, a present output file, and a readable text artifact;
+  the OCR diagnostic remains a review warning.
+- Removed stale OCR/text outputs before every attempt so an earlier derivative
+  cannot masquerade as current, made prior `extraction_method='error'` rows
+  retryable, and cleared obsolete failure details after successful recovery.
+- Preserved combined OCR and text diagnostics when the final extraction still
+  fails, while keeping successful warning-bearing PDFs searchable and visible
+  in the run-local finding summary.
+- Extended the isolated PDF fixture across the warning-success, hard-failure,
+  missing-output, retry, and post-recovery idempotence paths; locked the final
+  acceptance rule in `docs/design.md`.
+
+Verification: native suite 13/13; Python compilation and `git diff --check`
+clean. A read-only-source retry against the isolated test workspace recovered
+both occurrences of one malformed PDF, produced ten leaf chunks, converged at
+27/27 readable PDF occurrences and 553 leaf vectors, and was a no-op on the
+next full ingest. Originals were not modified.
+
+Deferred: none.
+
 ## 2026-07-18 — Flat workspace-state layout
 
 Implementation commit: `b6b0391` (locked design:

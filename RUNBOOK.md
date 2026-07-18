@@ -8,6 +8,9 @@ command. There is no active/default workspace registry setting:
 ```
 
 Top-level `./pocket-advisor.py --help` is the only state-free exception.
+This is the current syntax. A locked roadmap refinement will make shared
+`fetch-model`, fixture `test`, and native result-file comparison
+workspace-free; until that implementation ships, use the commands below.
 
 ## Setup
 

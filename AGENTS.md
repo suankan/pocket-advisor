@@ -14,7 +14,7 @@ For every platform task, load these files in order:
 4. `docs/design.md` — concise holistic solution architecture and system
    invariants;
 5. `docs/features/workspace-scoped-state.md` — locked per-workspace
-   database/cache and mandatory CLI workspace-selection design;
+   database/cache and command-scoped CLI workspace-selection design;
 6. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
    design (review-refined);
 7. `docs/roadmap.md` — ordered future work only.
@@ -108,10 +108,11 @@ and deleted at adapter retirement, not maintained.
   sequence one another.
 - The new database is fresh-schema only and deliberately refuses legacy
   state. Do not add compatibility migrations or shims.
-- Every workspace owns a separate database/cache/vector/log/runtime tree, and
-  every operational CLI command requires global `--workspace`. There is no
-  active/default workspace registry setting. Existing shared state is retired
-  and is neither migrated nor touched.
+- Every workspace owns a separate database/cache/vector/log/runtime tree.
+  Workspace-bound CLI actions require global `--workspace`; repository-global,
+  fixture-only, help, and explicitly file-addressed actions do not. There is
+  no active/default workspace registry setting. Existing shared state is
+  retired and is neither migrated nor touched.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
   retained for custody/manual inspection but are not text-extracted or
   embedded.
@@ -175,6 +176,9 @@ Always confirm this against `docs/status.md` and
 - `query` uses the native hybrid leaf/thread retriever; workspace-scoped
   `wipe state` is native; daemon, accuracy, verify, blob lookup, and remaining
   wipe actions fail closed until their native ports land;
+- implementation commit `23b0a42` still requires `--workspace` globally;
+  roadmap item 1 implements the locked command-scoped selector refinement
+  before cutover resumes;
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.

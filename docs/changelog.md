@@ -29,7 +29,7 @@ Verification: native module tests 9/9 through the mandatory-workspace CLI;
 frozen tests 11/11; Python compilation and `git diff --check` clean. No live
 workspace state was initialized, wiped, or ingested.
 
-Deferred: the production workspace cutover remains roadmap item 1 and requires
+Deferred: the production workspace cutover is roadmap item 2 and requires
 explicit confirmation immediately before its scoped wipe; daemon, accuracy,
 verify, blob-index lookup, and vector-index wipe remain fail-closed pending
 adapter retirement.

@@ -94,6 +94,12 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   across multiply mounted collections is intentional, and the retired
   `active:` registry key is rejected. Workspace-state wipe is native,
   confirmed, exact-path, and protected against overlap/symlink redirection.
+- **Command-scoped selector refinement locked (implementation pending):**
+  `docs/features/workspace-scoped-state.md` now requires selection only for
+  actions that genuinely access workspace scope. `fetch-model`, fixture
+  `test`, help, and future native `accuracy compare` are workspace-free and
+  must not load the registry; the current CLI still requires a selector for
+  all commands until roadmap item 1 lands.
 
 - **New CLI implemented** in `modules/cli.py` at `97ee193`, with mandatory
   workspace selection and frozen-command fail-closed enforcement completed at
@@ -122,10 +128,9 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover**. It requires explicit user
-confirmation immediately before the workspace-scoped production wipe, then a
-complete re-ingest. Adapter retirement, local answering, and experiments
-follow in order.
+The roadmap head is **1. Command-scoped workspace selection**. Implement and
+verify that locked refinement before the explicitly confirmed production
+cutover; adapter retirement, local answering, and experiments follow.
 
 ## Watch-outs
 

@@ -12,7 +12,8 @@ corpus-bearing computation on the local machine.
 Feature-level designs refine this document:
 
 - `docs/features/workspace-scoped-state.md` — one database and derived-state
-  tree per workspace, mandatory CLI workspace selection, and wipe isolation.
+  tree per workspace, command-scoped CLI workspace selection, and wipe
+  isolation.
 - `docs/features/embedding-design.md` — thread reconstruction, navigation
   summaries, dual indexes, hybrid retrieval, evidence expansion, and the
   future answering boundary.
@@ -43,11 +44,17 @@ workspaces that mount them. A collection is a read-only source; a workspace is
 the operational and retrieval boundary over one or more mounted collections.
 Optional mount purposes can further restrict a query.
 
-Every operational CLI invocation names its workspace explicitly:
+Every workspace-bound CLI invocation names its workspace explicitly:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
+
+Repository-global or explicitly file-addressed actions such as model download,
+fixture tests, help, and result-file comparison run without a workspace and
+must not load the registry. Selection is required by action scope, never as a
+ceremonial argument; the complete matrix is locked in
+`docs/features/workspace-scoped-state.md`.
 
 Each workspace owns an independent SQLite database, cache, vector indexes,
 logs, and runtime files under

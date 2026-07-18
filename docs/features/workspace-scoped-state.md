@@ -1,6 +1,8 @@
-# Workspace-Scoped Derived State
+# Workspace-Scoped Derived State and CLI Selection
 
-Status: **shipped 2026-07-18** in implementation commit `23b0a42`.
+Status: workspace isolation **shipped 2026-07-18** in implementation commit
+`23b0a42`; command-scoped selector refinement **locked 2026-07-18, pending
+implementation** in roadmap item 1.
 
 This feature replaces the original shared-state design. Each workspace owns
 one SQLite database and one complete derived-state tree. A workspace is an
@@ -15,10 +17,12 @@ database.
 2. **One cache and vector tree per workspace.** Parsed artifacts, OCR
    derivatives, leaf vectors, thread-summary vectors, logs, and daemon
    runtime files live below that workspace's state root.
-3. **`--workspace` is mandatory.** Every operational invocation of
-   `pocket-advisor.py` names the workspace explicitly. There is no
-   active/default workspace registry field. Top-level help may run without a
-   workspace because it opens no state and performs no operation.
+3. **`--workspace` is mandatory only for workspace-bound actions.** An action
+   requires selection when it reads workspace mounts or user data, opens a
+   workspace database, or reads/writes workspace cache, vectors, logs,
+   benchmark results, or runtime files. Repository-global, fixture-only, help,
+   and explicitly file-addressed actions must not require a workspace. There
+   is no active/default workspace registry field.
 4. **Duplication is accepted.** If two workspaces mount the same collection,
    each parses, stores, summarizes, and embeds it independently. Correct
    isolation and simple lifecycle operations take precedence over storage or
@@ -67,7 +71,8 @@ workspace playbooks remain workspace user data under
 
 ## CLI contract
 
-The workspace selector is a required global option placed before the command:
+Workspace-bound actions use a required global selector placed before the
+command:
 
 ```bash
 ./pocket-advisor.py --workspace case-documents-demo ingest all
@@ -76,10 +81,45 @@ The workspace selector is a required global option placed before the command:
 ./pocket-advisor.py --workspace test-workspace accuracy run --golden <path>
 ```
 
-The parser validates that the ID exists before opening a database, creating a
-directory, loading a model, or dispatching through the transitional adapter.
-Unknown or omitted workspace IDs fail loudly. The retired `active:` key is
-rejected as unknown rather than retained as inert metadata.
+The following actions are workspace-bound and require `--workspace`:
+
+| action | workspace dependency |
+|---|---|
+| `db init` | selected bound database |
+| `ingest ...` | selected mounts and derived state |
+| `transactions report` | selected transaction database and workspace files |
+| `query` | selected database, vectors, and mounts |
+| `daemon serve/status/stop` | selected database and runtime directory |
+| `wipe list/index/state` | selected vector or complete state tree |
+| `blob-index list-sources/lookup` | selected custody database and mounts |
+| `verify` | selected evidence and derived state |
+| `accuracy run/list` | selected retrieval state and workspace-owned results |
+
+These actions are workspace-free and must use no selector:
+
+```bash
+./pocket-advisor.py fetch-model
+./pocket-advisor.py test
+./pocket-advisor.py accuracy compare <result-a.json> <result-b.json>
+```
+
+- `fetch-model` reads global model configuration and writes only shared
+  repository-root `models/` weights.
+- `test` runs isolated fixtures and must remain usable when the workspace
+  registry is missing or invalid.
+- `accuracy compare` is a pure comparison of two explicit files. It becomes
+  available only when accuracy is natively ported; until then it still fails
+  closed.
+- Help at every parser level is workspace-free. A future `--version`,
+  workspace listing, global config validation, or shared-model inspection
+  action is workspace-free by the same scope rule.
+
+The parser first identifies the command/action, then enforces its scope.
+Workspace-bound actions reject an omitted or unknown ID before opening a
+database or creating any path. Workspace-free actions reject a supplied
+`--workspace` rather than silently ignoring it, and do not load or validate
+the workspace registry. The retired `active:` key remains rejected as
+unknown.
 
 During adapter retirement, a frozen command that cannot honor the selected
 workspace must fail closed. It must never fall back to the former shared
@@ -116,26 +156,30 @@ searchable if a collection is unmounted before the next clean rebuild.
 
 ## Acceptance criteria
 
-1. Every operational CLI command rejects an omitted or unknown
-   `--workspace`; top-level help remains available without opening state.
-2. Selecting workspace A cannot create, read, update, search, or delete any
+1. Every action is classified by the locked matrix above. Workspace-bound
+   actions reject omitted or unknown selection before side effects;
+   workspace-free actions reject an unnecessary selector.
+2. `fetch-model` and `test` run without loading the workspace registry;
+   parser help at every level remains state-free. Native `accuracy compare`
+   follows the same rule when ported.
+3. Selecting workspace A cannot create, read, update, search, or delete any
    file or database row below workspace B's state root.
-3. Two workspaces mounting the same collection produce independent databases,
+4. Two workspaces mounting the same collection produce independent databases,
    caches, FTS indexes, vectors, threads, summaries, and transaction tables.
-4. The same RFC Message-ID may be ingested independently into both workspace
+5. The same RFC Message-ID may be ingested independently into both workspace
    databases without collision or cross-workspace reuse.
-5. `wipe state` resolves and displays the exact selected state root, requires
+6. `wipe state` resolves and displays the exact selected state root, requires
    confirmation, deletes only that root, and leaves all evidence and other
    workspace state byte-identical.
-6. A copied or misaddressed database whose bound workspace ID differs from
+7. A copied or misaddressed database whose bound workspace ID differs from
    `--workspace` is refused before mutation.
-7. Pipeline stages and retrieval use the selected workspace carried by
+8. Pipeline stages and retrieval use the selected workspace carried by
    `PipelineContext`; tests fail if they call an implicit workspace selector.
-8. The transaction stage can rebuild one workspace without deleting another
+9. The transaction stage can rebuild one workspace without deleting another
    workspace's accounts, statements, transactions, or transfer links.
-9. Temporary-fixture tests cover two workspaces with a shared mounted
+10. Temporary-fixture tests cover two workspaces with a shared mounted
    collection as well as separate test collections.
-10. Current module and frozen self-tests remain passing; frozen operational
+11. Current module and frozen self-tests remain passing; frozen operational
     commands that are not workspace-safe are rejected until ported.
 
 ## Non-goals

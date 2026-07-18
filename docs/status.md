@@ -159,16 +159,18 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   `config.yaml` and is rejected as unknown by the new loader.
 - `email_message.txt` is both the human/retrieval evidence view and, for its
   authored body region only, the email leaf-chunk source.
-- Retired shared-layout derived state, if present, is never migrated or opened
-  by workspace-scoped commands. Its optional, explicitly confirmed cleanup is
-  tracked as an independent roadmap item.
+- Retired shared-layout derived state was manually removed by the operator on
+  2026-07-18; both `workspaces/.state/cache/` and
+  `workspaces/.state/pocket_advisor.db` are absent. Workspace-scoped commands
+  never migrated or opened it, and native `wipe state` remains deliberately
+  limited to one selected workspace.
 - venv is Python 3.14.6 and serves the native runtime only.
 
 ## Next steps
 
-The roadmap head is **1. Transaction parser coverage and legacy-state
-cleanup**. It is independent of generic end-to-end platform validation and
-does not block **2. Local answering pass** (`docs/roadmap.md`).
+The roadmap head is **1. Transaction parser coverage**. It is independent of
+generic end-to-end platform validation and does not block **2. Local answering
+pass** (`docs/roadmap.md`).
 
 ## Watch-outs
 

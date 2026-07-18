@@ -4,6 +4,22 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-18 — Retired shared-layout state removed
+
+Operational milestone (no implementation commit).
+
+- The operator manually deleted the retired shared cache and database at
+  `workspaces/.state/cache/` and
+  `workspaces/.state/pocket_advisor.db`.
+- Both exact paths were subsequently verified absent. No agent deletion or
+  workspace-state mutation was performed.
+- Native `wipe state` remains intentionally scoped to one explicitly selected
+  workspace; no `wipe legacy` command was added because there is no remaining
+  legacy target to service.
+
+Deferred: none. This cleanup is removed from the roadmap; transaction-parser
+coverage remains independent future work.
+
 ## 2026-07-18 — Quoted-reply duplicate-prefix compaction fix
 
 Implementation commit: `99cc7b9`.
@@ -55,9 +71,9 @@ Verification: native suite 13/13; Python compilation, `git diff --check`, and
 listing exercised against workspace-scoped state. No evidence or workspace
 derived state was changed.
 
-Deferred: none from Adapter retirement. Transaction-parser coverage and
-explicitly confirmed retired shared-state cleanup remain independent roadmap
-work.
+Deferred: none from Adapter retirement. Transaction-parser coverage remains
+independent roadmap work. Retired shared-state cleanup was subsequently
+completed manually by the operator.
 
 ## 2026-07-18 — Native retrieval-expectation accuracy suite
 
@@ -112,8 +128,9 @@ recorded at `8d9a1ae`; run record `20260718T050815083153Z`.
 - Established a complete, isolated rebuild/report/retrieval-validation
   workflow that does not depend on any particular live workspace.
 
-Deferred: broader statement-parser coverage and explicitly confirmed deletion
-of retired shared-layout state are independent operational follow-ups.
+Deferred: broader statement-parser coverage remains an independent operational
+follow-up. Retired shared-layout state was subsequently removed manually by
+the operator.
 
 ## 2026-07-18 — Full-ingest completion reporting and saved-record display
 

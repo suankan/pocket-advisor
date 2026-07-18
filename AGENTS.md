@@ -186,8 +186,8 @@ Always confirm this against `docs/status.md` and
 - generic end-to-end validation is available through an isolated workspace
   rebuild, saved ingest reporting, and the native retrieval-expectation suite;
   no particular live-workspace ingestion is a platform roadmap dependency;
-- retired shared-layout state is never opened by workspace-scoped commands;
-  its optional confirmed cleanup is tracked independently in the roadmap.
+- retired shared-layout state was manually removed by the operator on
+  2026-07-18; workspace-scoped commands never opened or migrated it.
 
 The committed continuation lives in `docs/roadmap.md`. When working-tree
 changes implement its head item, keep that item unshipped until implementation

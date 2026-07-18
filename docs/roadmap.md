@@ -4,21 +4,15 @@ Ordered future work only. Current state lives in `docs/status.md`; shipped
 roadmap history in `docs/changelog.md`; locked architecture in
 `docs/design.md`, with detailed feature decisions under `docs/features/`.
 
-## 1. Transaction parser coverage and legacy-state cleanup
+## 1. Transaction parser coverage
 
-These operational follow-ups are independent. They do not gate generic
-end-to-end platform validation or the local answering pass.
+This operational follow-up is independent. It does not gate generic end-to-end
+platform validation or the local answering pass.
 
 - Add statement parsers for unsupported institutions, currently including
   NAB, CBA, MEBank, AMP, Qantas cards, and Revolut. The transactions stage
   continues to flag every unsupported statement loudly and honestly; rerun
   `ingest transactions` for an affected workspace after each parser lands.
-- Provide an explicitly confirmed way to delete retired shared-layout state
-  (`workspaces/.state/cache/` and
-  `workspaces/.state/pocket_advisor.db`). Native `wipe state` deliberately
-  does not cover these paths, so use either a narrowly scoped one-off removal
-  or add a guarded `wipe legacy` action. No platform milestone depends on
-  this cleanup.
 
 ## 2. Local answering pass
 

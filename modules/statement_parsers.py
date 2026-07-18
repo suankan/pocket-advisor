@@ -129,9 +129,9 @@ _COUNT_PATTERN = re.compile(
     r"\b(?:number\s+of\s+transactions|transaction\s+count)\b[^0-9]*(\d+)",
     re.I,
 )
-_LINE_MONEY_RE = re.compile(
-    r"[+(-]?\s*\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{1,2})\)?-?"
-    r"(?:\s*(?:DR|CR))?\s*$",
+_ASSERTION_MONEY_RE = re.compile(
+    r"[+(-]?\s*\$?\s*(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{1,2}\)?-?"
+    r"(?:\s*(?:DR|CR))?",
     re.I,
 )
 
@@ -153,12 +153,17 @@ def discover_assertions(pages: list[str]) -> list[StatementAssertion]:
                     count=int(count_match.group(1))))
                 continue
             for kind, pattern in _SCAN_PATTERNS:
-                if not pattern.search(stripped):
+                label = pattern.search(stripped)
+                if label is None:
                     continue
-                tail = _LINE_MONEY_RE.search(stripped)
-                if tail is None:
+                # Bind the first monetary value after the recognized label.
+                # Summary rows may contain several fields (for example an
+                # opening balance followed by a loan limit); taking the final
+                # amount silently assigns the neighbouring field.
+                money = _ASSERTION_MONEY_RE.search(stripped[label.end():])
+                if money is None:
                     continue
-                amount = parse_amount_minor(tail.group(0))
+                amount = parse_amount_minor(money.group(0))
                 if amount is None or (kind, page_no) in seen:
                     continue
                 seen.add((kind, page_no))
@@ -188,10 +193,13 @@ def merge_assertions(
         count_conflict = previous.count is not None and item.count is not None \
             and previous.count != item.count
         if amount_conflict or count_conflict:
+            parser_value = previous.amount_minor \
+                if previous.amount_minor is not None else previous.count
+            scanner_value = item.amount_minor \
+                if item.amount_minor is not None else item.count
             raise ParserConflict(
                 f"assertion conflict on {item.kind} page {item.page_no}: "
-                f"parser says {previous.amount_minor or previous.count}, "
-                f"scanner says {item.amount_minor or item.count}")
+                f"parser says {parser_value}, scanner says {scanner_value}")
     return list(merged.values())
 
 

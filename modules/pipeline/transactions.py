@@ -660,7 +660,10 @@ class TransactionService:
         if parser is not None:
             parsed = parser.parse(text)
             parsed_statements = parsed if isinstance(parsed, list) else [parsed]
-            parsed_statements = [item for item in parsed_statements if item.rows]
+            parsed_statements = [
+                item for item in parsed_statements
+                if item.rows or item.assertions
+            ]
         if not parsed_statements:
             reason = "no parser knows this format" if parser is None else \
                 f"{parser.parser_id} found no transaction table"
@@ -737,8 +740,9 @@ class TransactionService:
                      row_offset + row.row_index,
                      row.raw_line),
                 )
-            row_offsets[item_id] = row_offset + max(
-                row.row_index for row in statement.rows) + 1
+            if statement.rows:
+                row_offsets[item_id] = row_offset + max(
+                    row.row_index for row in statement.rows) + 1
             for assertion in assertions:
                 self.conn.execute(
                     """INSERT INTO statement_assertions(

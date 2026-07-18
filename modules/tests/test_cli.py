@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import modules.cli as cli  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.domain import StageStats  # noqa: E402
+from modules.statement_parsers import ParserConflict  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -229,6 +230,12 @@ def test_orchestration() -> None:
 
 def test_ingest_reporting_failures_and_timings() -> None:
     fixed_now = lambda: datetime(2026, 7, 18, tzinfo=timezone.utc)
+    assert cli._stage_failure_reason(
+        RuntimeError("CORPUS NARRATIVE")) == "RuntimeError"
+    assert cli._stage_failure_reason(ParserConflict(
+        "assertion conflict on opening_balance page 1: "
+        "parser says 0, scanner says 45564003")) == \
+        "ParserConflict: assertion conflict on opening_balance page 1"
 
     # A failed stage keeps its original exception, records completed timing,
     # and marks every downstream stage not_run.

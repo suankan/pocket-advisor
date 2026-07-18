@@ -13,7 +13,7 @@ from modules.custody import sha256_bytes, sha256_file, write_verified
 
 
 MANIFEST_SCHEMA_VERSION = 1
-TRANSACTION_RECIPE_VERSION = "transactions-v1"
+TRANSACTION_RECIPE_VERSION = "transactions-v2"
 FINDING_KEYS = (
     "accounts_without_pdfs",
     "unparsed",

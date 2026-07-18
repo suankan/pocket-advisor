@@ -55,6 +55,9 @@ still showing a complete, useful workspace snapshot.
    readable PDF text, stale/missing eligible summaries, index-count divergence,
    failed statement validation, and current-run custody/review flags are rolled
    up. Old review-log rows alone do not keep a recovered workspace unhealthy.
+   A run-local PDF error count is not repeated when it exactly describes the
+   same current failed occurrences; PDF OCR-recovery and weak-date warnings are
+   emitted as separate categories rather than one opaque severity total.
 7. **No finding flood.** The final block prints counts and categories, never
    hundreds of transaction IDs or full OCR diagnostics. It points to the
    workspace review queue and dedicated detail commands when investigation is
@@ -77,7 +80,8 @@ still showing a complete, useful workspace snapshot.
     timestamps, timings, counter names, aggregate counts, model/index
     fingerprints, status, and finding categories. It must not contain email
     bodies, PDF text, transaction descriptions, questions, answers, or evidence
-    snippets.
+    snippets. A failed stage retains its exception type and an allowlisted,
+    structural failure category; arbitrary exception text is not serialized.
 11. **Reporting performs no model or corpus work.** It may query SQLite, read
     small index metadata/ID arrays, and inspect configured derived paths. It
     never walks collection roots, parses evidence, runs OCR, summarizes,
@@ -106,7 +110,7 @@ The stable human and JSON snapshot contains these sections:
 |---|---|
 | Run | workspace, start/end UTC, completion status, pipeline/report seconds |
 | Stages | stage name, outcome (`completed`, `skipped`, `failed`), duration, raw `StageStats`, skip/failure category |
-| Sources | candidates by email/PDF/other and candidate/error status; source count and bytes |
+| Sources | top-level custody sources from `source_blob_index`, joined to their email/PDF/other candidate status; source count and bytes exclude attached-email candidates |
 | Evidence | email/native-PDF item counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
 | Threads | total/singleton/multi-message threads; eligible/current/stale/missing summaries |
 | Search | leaf chunks by email/native-PDF/attached-PDF source; enriched-payload coverage; leaf and summary FTS counts; configured vector fingerprint and leaf/summary manifest counts; mismatches |
@@ -233,7 +237,9 @@ records are accepted.
 6. Missing/stale summaries and leaf/summary index divergence produce
    `COMPLETE WITH FINDINGS` and explicit aggregate categories.
 7. A tolerated OCR failure reports both occurrence count and unique source-hash
-   count while preserving successful completion semantics.
+   count while preserving successful completion semantics. The final findings
+   do not repeat the same PDF errors as both persistent and run-local totals,
+   and distinguish OCR-recovery warnings from weak-date warnings.
 8. A one-account fixture classifies unmatched transfer-like debits as
    `single_account_unverifiable`, emits no suspicious IDs in the completion
    block, and fixes the standalone transaction report wording too.
@@ -243,7 +249,9 @@ records are accepted.
     written only inside the selected workspace state, and round-trips against a
     versioned typed schema.
 11. A stage exception produces an `INCOMPLETE` partial report without running
-    downstream stages or masking the original failure.
+    downstream stages or masking the original failure. Its saved stage reason
+    retains aggregate-safe exception type/category context without corpus
+    narrative.
 12. Reporting failure after completed stages exits non-zero and clearly states
     that ingestion state may have committed successfully.
 13. The module test suite remains passing, and no test touches real corpus or

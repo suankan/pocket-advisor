@@ -166,8 +166,14 @@ class PdfTextStage(Stage):
         txt_path = txt_dir / f"{copy_path.stem}.txt"
         ocr_warning = ocr_to_derivative(
             copy_path, derivative, langs=self.config.ocr_langs)
+        pdf_source = derivative
+        if not derivative.is_file():
+            pdf_source = copy_path
+            fallback = "used verified original because no OCR derivative exists"
+            ocr_warning = f"{ocr_warning}; {fallback}" \
+                if ocr_warning else fallback
         try:
-            text = pdf_to_text(derivative, txt_path)
+            text = pdf_to_text(pdf_source, txt_path)
         except OcrError as exc:
             if ocr_warning:
                 raise OcrError(f"{ocr_warning}; {exc}") from exc

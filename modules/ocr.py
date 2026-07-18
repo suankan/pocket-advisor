@@ -24,8 +24,8 @@ from modules.config import OCRMYPDF_TIMEOUT_SEC, PDFTOTEXT_TIMEOUT_SEC
 # Versioned wrapper recipe. The complete extraction-method value also includes
 # local tool versions and language configuration, so successful old text is
 # reprocessed when its producing recipe is no longer current.
-PDF_TEXT_RECIPE_VERSION = 1
-EXTRACTION_METHOD = "pdf-text-v1"
+PDF_TEXT_RECIPE_VERSION = 2
+EXTRACTION_METHOD = "pdf-text-v2"
 
 
 class OcrError(RuntimeError):
@@ -69,6 +69,7 @@ def pdf_text_extraction_method(*, langs: str) -> str:
             "args": ["-layout"],
         },
         "accept_nonzero_ocr_output_when_pdftotext_succeeds": True,
+        "fallback_to_verified_original_when_derivative_missing": True,
     }
     payload = json.dumps(
         recipe, sort_keys=True, separators=(",", ":"),
@@ -97,9 +98,11 @@ def ocr_to_derivative(source: Path, derivative: Path,
          "--jobs", str(os.process_cpu_count() or 1),
          str(source), str(derivative)],
         timeout=OCRMYPDF_TIMEOUT_SEC)
-    if result.returncode == 0:
+    if result.returncode == 0 and derivative.is_file():
         return None
     detail = _detail(result)
+    if result.returncode == 0:
+        return "ocrmypdf exited 0 but did not create the derivative"
     return (f"ocrmypdf exited {result.returncode}"
             + (f": {detail}" if detail else ""))
 

@@ -140,6 +140,18 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _stage_failure_reason(exc: BaseException) -> str:
+    """Return aggregate-safe failure context for a persisted run record."""
+    name = type(exc).__name__
+    from modules.statement_parsers import ParserConflict
+    if not isinstance(exc, ParserConflict):
+        return name
+    # ParserConflict messages start with a structural category before the
+    # first colon. Values and raw-row detail remain out of aggregate records.
+    category = str(exc).partition(":")[0].strip()
+    return f"{name}: {category}" if category else name
+
+
 def _finalize_ingest_report(
         ctx: PipelineContext,
         *,
@@ -223,7 +235,7 @@ def run_ingest(
                     outcome="failed",
                     duration_seconds=round(clock() - stage_started, 6),
                     stats={},
-                    reason=type(exc).__name__,
+                    reason=_stage_failure_reason(exc),
                 ))
                 raise
             stages.append(StageRun(

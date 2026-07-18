@@ -1,6 +1,7 @@
 # Multiple Ingestion Errors
 
-Status: **investigated 2026-07-19; fixes pending**.
+Status: **fixes implemented and verified 2026-07-19; awaiting commit and live
+validation**.
 
 Run record:
 `workspaces/.state/workspace-case-documents-demo/logs/ingest-runs/20260718T144258177050Z.json`.
@@ -177,6 +178,39 @@ publication for all supported Westpac statements including the zero-activity
 period, accurate non-duplicated completion findings, consistent 1,008
 top-level-source reporting, and regression coverage using synthetic temporary
 fixtures only.
+
+## Resolution
+
+The implementation now addresses every regression identified above:
+
+- Stage 3 recipe `pdf-text-v2` prefers an OCR derivative but falls back to the
+  write-verified original when OCRmyPDF produces no derivative. A successful
+  `pdftotext -layout` extraction is required, and the OCR refusal remains a
+  review warning.
+- Generic balance assertion discovery binds the first decimal monetary value
+  after the recognized label instead of the last value on the line. Conflict
+  diagnostics preserve integer zero rather than formatting it as absent.
+- Transaction recipe `transactions-v2` accepts statements containing
+  assertions but no rows, so genuine zero-activity periods are published and
+  validated without an empty `max()` operation.
+- Ingest snapshots count top-level originals from the custody blob index,
+  excluding recursively discovered attached emails. PDF extraction failures,
+  OCR warnings, and weak-date warnings are reported as distinct categories
+  without equivalent run-flag duplicates.
+- Failed-stage run records retain a bounded structural `ParserConflict`
+  category while excluding statement values and arbitrary corpus narrative.
+
+Synthetic temporary-fixture regressions cover original-PDF fallback,
+multi-value and date-bearing assertion lines, zero-value diagnostics,
+zero-activity Westpac statements, top-level source accounting, finding
+deduplication, and safe failure reasons. No collection or workspace state was
+modified while implementing or verifying the fixes.
+
+The next operator-run `ingest all` will invalidate Stage 3 once because its
+recipe changed, rebuild the transaction state once because the transaction
+recipe changed, and provide the live-corpus acceptance check. No wipe is
+required. The 121 statements for institutions without parsers remain the
+independent roadmap parser-coverage item and are not part of this resolution.
 
 ## Original run transcript
 

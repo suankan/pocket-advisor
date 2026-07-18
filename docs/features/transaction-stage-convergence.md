@@ -92,11 +92,12 @@ or evidence changes must remain impossible to miss.
    `PDF_TEXT_RECIPE` fingerprint on every successful PDF occurrence. It covers
    the OCRmyPDF and `pdftotext` wrapper recipe, command options, OCR languages,
    relevant configuration, and normalized local `ocrmypdf`/`pdftotext` tool
-   versions. A successful row whose recorded fingerprint differs from the
-   current fingerprint is stale and must be reprocessed by `ingest pdfs`; it is
-   not permanently terminal merely because text already exists. The existing
-   extraction-method field carries this versioned recipe, so no schema change
-   is required.
+   versions, including the guarded verified-original fallback when OCRmyPDF
+   produces no derivative. A successful row whose recorded fingerprint differs
+   from the current fingerprint is stale and must be reprocessed by `ingest
+   pdfs`; it is not permanently terminal merely because text already exists.
+   The existing extraction-method field carries this versioned recipe, so no
+   schema change is required.
 10. **Regenerated text determines transaction invalidation.** `ingest all`
     already runs `pdfs` before `transactions`, so Stage 5 fingerprints the
     freshly converged `.txt` artifact. If an OCR/`pdftotext` recipe or tool
@@ -160,7 +161,7 @@ The persisted JSON contains operational metadata only:
 {
   "schema_version": 1,
   "workspace_id": "<id>",
-  "recipe_version": "transactions-v1",
+  "recipe_version": "transactions-v2",
   "input_digest": "<sha256>",
   "output_digest": "<sha256>",
   "built_at": "<utc>",

@@ -85,31 +85,35 @@ def _scalar(conn: sqlite3.Connection, sql: str,
 
 
 def _source_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
+    originals = (
+        " FROM source_blob_index b JOIN ingestion_candidates c"
+        " ON c.collection_id=b.source_id AND c.sha256=b.sha256"
+    )
     values = {
-        "originals": _scalar(conn, "SELECT count(*) FROM ingestion_candidates"),
+        "originals": _scalar(conn, "SELECT count(*)" + originals),
         "bytes": _scalar(
-            conn, "SELECT coalesce(sum(size_bytes), 0) FROM ingestion_candidates"),
+            conn, "SELECT coalesce(sum(b.size_bytes), 0)" + originals),
         "emails": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE document_type = 'email'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.document_type = 'email'"),
         "pdfs": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE document_type = 'pdf'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.document_type = 'pdf'"),
         "other": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE document_type = 'other'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.document_type = 'other'"),
         "candidate": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE status = 'candidate'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.status = 'candidate'"),
         "ingested": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE status = 'ingested'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.status = 'ingested'"),
         "skipped": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE status = 'skipped'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.status = 'skipped'"),
         "errors": _scalar(
-            conn, "SELECT count(*) FROM ingestion_candidates "
-                  "WHERE status = 'error'"),
+            conn, "SELECT count(*)" + originals
+                  + " WHERE c.status = 'error'"),
     }
     return values
 
@@ -408,7 +412,11 @@ def build_snapshot(
     )
 
 
-def snapshot_findings(snapshot: WorkspaceSnapshot) -> list[Finding]:
+def snapshot_findings(
+        snapshot: WorkspaceSnapshot,
+        *,
+        stages: list[StageRun] | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
 
     def add(severity: str, category: str, count: int) -> None:
@@ -427,6 +435,14 @@ def snapshot_findings(snapshot: WorkspaceSnapshot) -> list[Finding]:
             int(snapshot.threads["summaries_missing"]))
     add("error", "search_index_issues",
         len(snapshot.search["index_issues"]))
+
+    pdf_stats: dict[str, int] = {}
+    if stages is not None:
+        pdf_run = next((stage for stage in stages if stage.name == "pdfs"), None)
+        if pdf_run is not None:
+            pdf_stats = pdf_run.stats
+    add("warning", "pdf_ocr_warnings", pdf_stats.get("ocr_warnings", 0))
+    add("warning", "pdf_weak_dates", pdf_stats.get("weak_dates", 0))
 
     transactions = snapshot.transactions
     if transactions.get("enabled"):
@@ -453,6 +469,13 @@ def snapshot_findings(snapshot: WorkspaceSnapshot) -> list[Finding]:
                 int(input_findings.get(category, 0)))
 
     for category, count in snapshot.run_flags.items():
+        if category == "pdfs:error" \
+                and count == pdf_stats.get("ocr_errors", -1):
+            continue
+        if category == "pdfs:warning" and count == (
+                pdf_stats.get("ocr_warnings", 0)
+                + pdf_stats.get("weak_dates", 0)):
+            continue
         severity = category.rsplit(":", 1)[-1]
         if severity not in {"error", "warning"}:
             severity = "info"
@@ -485,7 +508,7 @@ def build_report(
         failed_stage: str | None = None,
 ) -> IngestRunReport:
     snapshot = build_snapshot(ctx, start_log_id=start_log_id)
-    findings = snapshot_findings(snapshot)
+    findings = snapshot_findings(snapshot, stages=stages)
     return IngestRunReport(
         schema_version=REPORT_SCHEMA_VERSION,
         workspace_id=ctx.workspace.id,

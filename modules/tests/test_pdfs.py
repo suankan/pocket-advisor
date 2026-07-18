@@ -44,8 +44,10 @@ STATEMENT_TEXT = ("ACME BANK\nStatement period 01/02/2026 - 28/02/2026\n"
 
 
 def fake_run_factory(calls: list[list[str]], fail_for: set[str],
-                     warn_for: set[str] | None = None):
+                     warn_for: set[str] | None = None,
+                     ocr_only_fail_for: set[str] | None = None):
     warn_for = warn_for or set()
+    ocr_only_fail_for = ocr_only_fail_for or set()
 
     def fake_run(args: list[str], timeout: int):
         calls.append(args)
@@ -54,6 +56,10 @@ def fake_run_factory(calls: list[list[str]], fail_for: set[str],
             return subprocess.CompletedProcess(
                 args, 0, b"fixture-tool 1.0\n", b"")
         source, target = Path(args[-2]), Path(args[-1])
+        if program == "ocrmypdf" and any(
+                marker in source.name for marker in ocr_only_fail_for):
+            return subprocess.CompletedProcess(
+                args, 2, b"", b"OCR refused signed or structured PDF")
         if any(marker in source.name for marker in fail_for):
             return subprocess.CompletedProcess(
                 args, 2, b"", b"simulated tool failure")
@@ -89,6 +95,8 @@ def build_fixtures(ws_dir: Path) -> None:
                        subtype="pdf", filename="broken.pdf")
     msg.add_attachment(b"%PDF-attached-WARNED", maintype="application",
                        subtype="pdf", filename="warned.pdf")
+    msg.add_attachment(b"%PDF-attached-FALLBACK", maintype="application",
+                       subtype="pdf", filename="fallback.pdf")
     (mail / "with-pdfs.eml").write_bytes(msg.as_bytes())
 
     (statements / "acme-feb.pdf").write_bytes(b"%PDF-native-acme")
@@ -119,7 +127,8 @@ def main() -> int:
 
         calls: list[list[str]] = []
         fake_run = fake_run_factory(
-            calls, fail_for={"broken"}, warn_for={"warned"})
+            calls, fail_for={"broken"}, warn_for={"warned"},
+            ocr_only_fail_for={"fallback"})
         with patch.object(ocr, "run_command", side_effect=fake_run):
             stats = PdfTextStage(ctx).run()
 
@@ -140,9 +149,10 @@ def main() -> int:
         assert (tmp / copy_rel).read_bytes() == b"%PDF-native-acme"
 
         # 3.2: OCR warning is tolerated only because pdftotext succeeds;
-        # attached.pdf + warned.pdf + native are readable, broken.pdf errors.
-        assert stats.get("ocr_ok") == 3, stats
-        assert stats.get("ocr_warnings") == 1, stats
+        # attached.pdf + warned.pdf + original-fallback + native are readable;
+        # broken.pdf fails both OCR and direct text extraction.
+        assert stats.get("ocr_ok") == 4, stats
+        assert stats.get("ocr_warnings") == 2, stats
         assert stats.get("ocr_errors") == 1, stats
         ok_att = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'attached.pdf'"
@@ -166,6 +176,20 @@ def main() -> int:
         ).fetchone()
         assert warning is not None, "non-zero OCR exit was not review-flagged"
         assert "pdftotext -layout succeeded" in warning["message"]
+        fallback = conn.execute(
+            "SELECT * FROM attachments WHERE filename = 'fallback.pdf'"
+        ).fetchone()
+        assert fallback["extraction_method"] == method
+        fallback_text = tmp / fallback["extracted_text_path"]
+        assert fallback_text.is_file()
+        fallback_derivative = fallback_text.parent.with_name("pdf-ocr") / \
+            f"{fallback_text.stem}-ocrmypdf.pdf"
+        assert not fallback_derivative.exists()
+        fallback_warning = conn.execute(
+            "SELECT message FROM ingestion_log WHERE stage='pdfs'"
+            " AND severity='warning' AND message LIKE 'attachment %verified original%'"
+        ).fetchone()
+        assert fallback_warning is not None
         broken = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
         ).fetchone()

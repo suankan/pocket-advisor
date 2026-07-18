@@ -28,6 +28,7 @@ from modules.statement_parsers import (  # noqa: E402
     ParserConflict,
     StatementAssertion,
     WestpacParser,
+    discover_assertions,
     merge_assertions,
     normalize_account_no,
     parse_amount_minor,
@@ -163,6 +164,24 @@ WESTPAC_FIXTURE = (
     "Westpac Banking Corporation ABN 33 007 457 141 AFSL 233714  Page 1 of 1\n"
 )
 
+WESTPAC_ZERO_FIXTURE = (
+    "                             Statement Period\n"
+    "                             16 February 2022 - 28 February 2022\n"
+    "\n"
+    "Westpac Choice               Account Name\n"
+    "                             TEST HOLDER\n"
+    "                             BSB          Account Number\n"
+    "                             111-222      99 8877\n"
+    "\n"
+    "TRANSACTIONS\n"
+    " DATE         TRANSACTION DESCRIPTION                DEBIT         CREDIT        BALANCE\n"
+    "\n"
+    " 16/02/22      STATEMENT OPENING BALANCE                                            0.00\n"
+    " 28/02/22      CLOSING BALANCE                                                      0.00\n"
+    "\n"
+    "Westpac Banking Corporation ABN 33 007 457 141 AFSL 233714  Page 1 of 1\n"
+)
+
 
 def add_fixture(
         ctx: PipelineContext,
@@ -274,6 +293,24 @@ def test_normalization() -> None:
         raise AssertionError("assertion conflict must fail")
     except ParserConflict:
         pass
+    scanner = discover_assertions([
+        "Opening Balance  $0.00      Limit  $455,640.03\n"
+        "Closing Balance  - $455,640.03\n"
+        "Total Credits as at 14/03/2022  $1,000.00",
+    ])
+    assert [(item.kind, item.amount_minor) for item in scanner] == [
+        ("opening_balance", 0), ("closing_balance", -45564003),
+        ("total_credits", 100000)]
+    try:
+        merge_assertions(
+            [StatementAssertion("opening_balance", 1, "parser",
+                                amount_minor=0)],
+            [StatementAssertion("opening_balance", 1, "scanner",
+                                amount_minor=45564003)],
+        )
+        raise AssertionError("zero-valued conflict must fail")
+    except ParserConflict as exc:
+        assert "parser says 0" in str(exc)
 
 
 def test_westpac_parser() -> None:
@@ -287,6 +324,10 @@ def test_westpac_parser() -> None:
     assert statement.rows[1].txn_date == "2026-01-03"
     assert statement.rows[1].amount_minor == -3000
     assert statement.rows[2].balance_after_minor == -3500
+    empty = WestpacParser().parse(WESTPAC_ZERO_FIXTURE)
+    assert empty.rows == []
+    assert [(item.kind, item.amount_minor) for item in empty.assertions] == [
+        ("opening_balance", 0), ("closing_balance", 0)]
 
 
 def build_context(
@@ -336,11 +377,19 @@ def test_stage(ctx: PipelineContext) -> None:
     add_fixture(ctx, 2, "personal-a", personal)
     add_fixture(ctx, 3, "personal-b", other)
     add_fixture(ctx, 4, "westpac", WESTPAC_FIXTURE)
+    add_fixture(ctx, 5, "westpac", WESTPAC_ZERO_FIXTURE)
 
     stats = TransactionsStage(ctx).run()
     assert stats.get("accounts") == 4, stats
-    assert stats.get("parsed") == 4, stats
+    assert stats.get("parsed") == 5, stats
     assert stats.get("links_auto") == 2, stats
+
+    empty = ctx.conn.execute(
+        "SELECT id, balance_ok FROM statements WHERE item_id = 5").fetchone()
+    assert empty is not None and empty["balance_ok"] == 1
+    assert ctx.conn.execute(
+        "SELECT count(*) FROM transactions WHERE statement_id = ?",
+        (empty["id"],)).fetchone()[0] == 0
 
     statement = ctx.conn.execute(
         "SELECT * FROM statements WHERE item_id = 1").fetchone()
@@ -567,7 +616,7 @@ def test_loud_failures(ctx: PipelineContext) -> None:
     log_count = ctx.conn.execute(
         "SELECT count(*) FROM ingestion_log").fetchone()[0]
     hit = TransactionsStage(ctx).run()
-    assert hit.get("unchanged") == 8, hit
+    assert hit.get("unchanged") == 9, hit
     assert ctx.conn.execute(
         "SELECT count(*) FROM ingestion_log").fetchone()[0] == log_count
     logs: list[str] = []

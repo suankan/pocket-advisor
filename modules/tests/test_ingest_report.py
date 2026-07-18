@@ -85,7 +85,17 @@ def populate(ctx: PipelineContext) -> None:
         ((1, ctx.workspace.id, "mail", "message.eml", "1" * 64, 10,
           "email"),
          (2, ctx.workspace.id, "bank", "statement.pdf", "2" * 64, 20,
-          "pdf")),
+          "pdf"),
+         (3, ctx.workspace.id, "mail", "?::attached.eml", "3" * 64, 5,
+          "email")),
+    )
+    conn.executemany(
+        """INSERT INTO source_blob_index(
+             workspace_id, source_id, sha256, relpath_within_source,
+             size_bytes, indexed_at)
+           VALUES (?, ?, ?, ?, ?, '2026-07-18T00:00:00Z')""",
+        ((ctx.workspace.id, "mail", "1" * 64, "message.eml", 10),
+         (ctx.workspace.id, "bank", "2" * 64, "statement.pdf", 20)),
     )
     conn.executemany(
         "INSERT INTO threads(id, stable_key, item_count) VALUES (?, ?, ?)",
@@ -161,6 +171,12 @@ def populate(ctx: PipelineContext) -> None:
            VALUES ('pdfs', 'error', ?, '2026-07-18T00:00:00Z')""",
         (SECRET,),
     )
+    conn.executemany(
+        """INSERT INTO ingestion_log(
+             stage, severity, message, occurred_at)
+           VALUES ('pdfs', 'warning', ?, '2026-07-18T00:00:00Z')""",
+        [(f"fixture PDF warning {index}",) for index in range(16)],
+    )
     conn.commit()
     build_indexes(ctx)
 
@@ -194,6 +210,10 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     second = build_snapshot(ctx, start_log_id=0)
     assert first == second
     assert first.sources["originals"] == 2
+    assert first.sources["bytes"] == 30
+    assert first.sources["emails"] == 1
+    assert first.sources["pdfs"] == 1
+    assert first.sources["ingested"] == 2
     assert first.evidence["pdf_readable"] == 1
     assert first.evidence["pdf_failed_occurrences"] == 1
     assert first.threads["summaries_current"] == 1
@@ -204,9 +224,14 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert first.transactions["coverage"]["single_account_unverifiable"] == 1
     assert first.transactions["coverage"]["suspicious"] == 0
 
-    stages = [StageRun(
-        name="discover", outcome="completed", duration_seconds=0.25,
-        stats={"new_emails": 1, "new_pdfs": 1})]
+    stages = [
+        StageRun(
+            name="discover", outcome="completed", duration_seconds=0.25,
+            stats={"new_emails": 1, "new_pdfs": 1}),
+        StageRun(
+            name="pdfs", outcome="completed", duration_seconds=1.0,
+            stats={"ocr_errors": 1, "ocr_warnings": 2, "weak_dates": 14}),
+    ]
     report = build_report(
         ctx,
         started_at="2026-07-18T00:00:00+00:00",
@@ -218,6 +243,12 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     )
     assert report.status == "COMPLETE WITH FINDINGS"
     assert Finding("error", "pdf_failures", 1) in report.findings
+    assert Finding("warning", "pdf_ocr_warnings", 2) in report.findings
+    assert Finding("warning", "pdf_weak_dates", 14) in report.findings
+    assert not any(finding.category == "run_flag:pdfs:error"
+                   for finding in report.findings)
+    assert not any(finding.category == "run_flag:pdfs:warning"
+                   for finding in report.findings)
     assert Finding("info", "single_account_unverifiable", 1) in \
         report.findings
     path = persist_report(report, ctx.config)

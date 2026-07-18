@@ -132,8 +132,10 @@ exist anywhere in the engine.
 2. `emails` — MIME parsing, per-email cache folders, attachment routing,
    attached-email/ZIP recursion, then authored-body derivation and the
    two readable message artifacts;
-3. `pdfs` — verified PDF collection, persistent OCR derivative using
-   `ocrmypdf --redo-ocr --clean`, then `pdftotext -layout`;
+3. `pdfs` — verified PDF collection, OCR derivative using
+   `ocrmypdf --redo-ocr --clean` when the tool can produce one, then
+   `pdftotext -layout`; structurally refused signed/tagged/form PDFs may use
+   the verified original as the text source with a review warning;
 4. `thread` — full thread reconstruction;
 5. `summaries` — local-LLM navigation summaries for complete multi-email
    threads; staleness maintenance always runs, and
@@ -158,8 +160,8 @@ exist; only CLI orchestration owns ordering.
   (envelope-relative offsets); the header block is never chunked — the
   embedded envelope prefix derives from DB fields.
 - Attached-email lineage is stored in `items.parent_item_id`.
-- PDFs retain `pdf-original/`, persistent `pdf-ocr/`, and
-  `pdf-to-text/` artifacts.
+- PDFs retain `pdf-original/` and `pdf-to-text/` artifacts plus a persistent
+  `pdf-ocr/` derivative whenever OCRmyPDF can produce one.
 - Only authored email body regions and PDF text artifacts are leaf-chunked.
   Generated thread summaries have a separate vector namespace and are always
   labeled as navigation, never evidence.

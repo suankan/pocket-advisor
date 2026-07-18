@@ -108,12 +108,15 @@ order:
 2. **emails** — parse MIME, render readable artifacts, route attachments,
    recursively process attached emails and ZIP members, then derive authored
    bodies after the run's message graph is available;
-3. **pdfs** — collect verified PDF copies, persist OCR derivatives using
+3. **pdfs** — collect verified PDF copies, request OCR derivatives using
    `ocrmypdf --redo-ocr --clean`, then extract layout-preserving text with
-   `pdftotext -layout`. Successful artifacts carry a versioned extraction
-   recipe covering wrappers, options, languages, configuration, and local tool
-   versions; a recipe mismatch requeues the PDF so downstream stages never
-   mistake old text for current text;
+   `pdftotext -layout`. If OCRmyPDF structurally refuses a signed, tagged, or
+   fillable PDF without producing a derivative, `pdftotext` gets one guarded
+   attempt against the verified original and the refusal remains a warning.
+   Successful artifacts carry a versioned extraction recipe covering wrappers,
+   options, languages, configuration, and local tool versions; a recipe
+   mismatch requeues the PDF so downstream stages never mistake old text for
+   current text;
 4. **thread** — reconstruct complete threads and direct reply relationships;
 5. **summaries** — maintain staleness and generate local-LLM navigation
    summaries for complete multi-message threads;
@@ -157,15 +160,19 @@ Chunk offsets are relative to that region, so rendered-envelope changes do not
 change chunk identity. The header block is never chunked; the embedding payload
 derives its stable envelope prefix from database fields.
 
-PDFs retain verified `pdf-original/`, persistent `pdf-ocr/`, and
-`pdf-to-text/` artifacts. Attached PDF artifacts remain under their carrying
-email folder; corpus-native PDF artifacts live at collection-cache level.
+PDFs retain verified `pdf-original/` and `pdf-to-text/` artifacts plus a
+persistent `pdf-ocr/` derivative whenever OCRmyPDF can produce one. Attached
+PDF artifacts remain under their carrying email folder; corpus-native PDF
+artifacts live at collection-cache level.
 OCRmyPDF may write a usable derivative and then return non-zero during its
 final structural validation. When a fresh derivative exists, Stage 3 still
 runs `pdftotext -layout`: a zero exit, present output file, and readable text
 artifact make the occurrence searchable, while the OCR anomaly remains a
-review warning. A failed or missing `pdftotext` output keeps the occurrence in
-the error queue for retry; stale derivatives and text outputs are never reused.
+review warning. When OCRmyPDF returns without a derivative, Stage 3 instead
+tries the verified original; the same successful-output gate applies and the
+OCR refusal remains reviewable. A failed or missing `pdftotext` output keeps
+the occurrence in the error queue for retry; stale derivatives and text
+outputs are never reused.
 
 Quoted-reply compaction is conservative: only exact normalized content from
 the resolved direct parent can authorize a cut. The first 16 parent tokens are
@@ -207,6 +214,10 @@ must either parse successfully or produce a loud unparsed, not-ingested, or
 account-mismatch finding. Rebuilds are deterministic and atomic, retaining
 statement assertions, transfer matching, reconciliation overrides, coverage
 reporting, tamper signals, and row-level citations.
+Recognized zero-activity statements remain valid statement-period evidence:
+their account, period, and assertions are stored with zero transaction rows.
+Generic assertion discovery binds the first monetary value after its label so
+an adjacent summary field such as a loan limit cannot masquerade as a balance.
 
 Workspace-owned `reconciliation.yaml` and `counterparties.yaml` remain user
 data outside engine state and survive state wipes.

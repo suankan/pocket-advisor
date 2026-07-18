@@ -1,16 +1,14 @@
 # Pocket Advisor Runbook
 
-All operational commands require an explicit workspace selector before the
-command. There is no active/default workspace registry setting:
+Workspace-bound commands require an explicit selector before the command.
+There is no active/default workspace registry setting:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
-Top-level `./pocket-advisor.py --help` is the only state-free exception.
-This is the current syntax. A locked roadmap refinement will make shared
-`fetch-model`, fixture `test`, and native result-file comparison
-workspace-free; until that implementation ships, use the commands below.
+Shared model download, fixture tests, parser help, and native result-file
+comparison are workspace-free and reject an unnecessary selector.
 
 ## Setup
 
@@ -18,7 +16,7 @@ workspace-free; until that implementation ships, use the commands below.
 python3.14 -m venv venv
 venv/bin/pip install -r requirements.txt
 ./pocket-advisor.py --workspace <workspace_id> db init
-./pocket-advisor.py --workspace <workspace_id> fetch-model
+./pocket-advisor.py fetch-model
 ```
 
 Workspace and collection mounts are declared in
@@ -144,7 +142,7 @@ The only native wipe operation currently available is workspace-scoped
 for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
-./pocket-advisor.py --workspace test-workspace test
+./pocket-advisor.py test
 for test_file in scripts/test_*.py; do
   venv/bin/python "$test_file"
 done

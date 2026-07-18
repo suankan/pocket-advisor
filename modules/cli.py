@@ -42,7 +42,7 @@ class RuntimeSelection:
 
 _HELP = {
     "db": "init — create the fresh SQLite schema",
-    "fetch-model": "download configured MLX model repos",
+    "fetch-model": "download configured MLX model repos (workspace-free)",
     "ingest": "all | discover | emails | pdfs | thread | summaries | embed | transactions",
     "transactions": "report — statement integrity and reconciliation report",
     "query": "one-off hybrid leaf/thread retrieval query",
@@ -50,8 +50,9 @@ _HELP = {
     "wipe": "state (native) | list/index (unavailable pending native port)",
     "blob-index": "list-sources | lookup — unavailable pending native port",
     "verify": "unavailable pending native port",
-    "accuracy": "run | compare | list — unavailable pending native port",
-    "test": "run every modules/tests/test_*.py self-test",
+    "accuracy": (
+        "run/list (workspace-bound) | compare (workspace-free) — unavailable"),
+    "test": "run every modules/tests/test_*.py self-test (workspace-free)",
 }
 _GROUPS = (
     ("setup", ("db", "fetch-model")),
@@ -70,8 +71,9 @@ def _epilog() -> str:
             lines.append(f"    {name:14} {_HELP[name]}")
     lines.extend((
         "",
-        "Usage: pocket-advisor.py --workspace <id> <command> ...",
-        "Per-command flags: pocket-advisor.py --workspace <id> <command> --help",
+        "Workspace-bound: pocket-advisor.py --workspace <id> <command> ...",
+        "Workspace-free:  pocket-advisor.py fetch-model | test | accuracy compare A B",
+        "Help:            pocket-advisor.py <command> --help",
     ))
     return "\n".join(lines)
 
@@ -172,8 +174,8 @@ def _handle_db(args: argparse.Namespace) -> int:
 def _handle_fetch_model(args: argparse.Namespace) -> int:
     from modules.embedding.loader import ModelStore
 
-    selection: RuntimeSelection = args.selection
-    config = selection.config
+    _ = args
+    config = Config.load()
     store = ModelStore(config.models_dir)
     embed = store.snapshot_dir(config.mlx_model_embed_text)
     print(f"Text embed model ready: {embed}")
@@ -275,9 +277,10 @@ def _handle_wipe_state(args: argparse.Namespace) -> int:
 
 def _handle_workspace_unsafe(args: argparse.Namespace) -> int:
     action = f" {args.action}" if getattr(args, "action", None) else ""
+    scope = "workspace-scoped " if args.workspace_required else ""
     raise SystemExit(
-        f"{args.command}{action}: unavailable until its native "
-        "workspace-scoped port lands; refusing the frozen shared-state "
+        f"{args.command}{action}: unavailable until its native {scope}"
+        "port lands; refusing the frozen shared-state "
         "implementation")
 
 
@@ -291,19 +294,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         dest="workspace_id",
-        required=True,
         metavar="ID",
-        help="required workspace id from workspaces/workspace-config.yaml",
+        help="workspace id required only for workspace-bound actions",
     )
     commands = parser.add_subparsers(
         dest="command", metavar="command", required=True)
 
     command = commands.add_parser("db", help=_HELP["db"])
     command.add_argument("action", choices=("init",))
-    command.set_defaults(handler=_handle_db)
+    command.set_defaults(handler=_handle_db, workspace_required=True)
 
     command = commands.add_parser("fetch-model", help=_HELP["fetch-model"])
-    command.set_defaults(handler=_handle_fetch_model)
+    command.set_defaults(handler=_handle_fetch_model, workspace_required=False)
 
     command = commands.add_parser(
         "ingest",
@@ -319,12 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="pipeline stage (default: all)",
     )
-    command.set_defaults(handler=_handle_ingest)
+    command.set_defaults(handler=_handle_ingest, workspace_required=True)
 
     command = commands.add_parser(
         "transactions", help=_HELP["transactions"])
     command.add_argument("action", choices=("report",))
-    command.set_defaults(handler=_handle_transactions)
+    command.set_defaults(handler=_handle_transactions, workspace_required=True)
 
     command = commands.add_parser("query", help=_HELP["query"])
     command.add_argument("question")
@@ -337,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--json", action="store_true")
     command.add_argument("--no-daemon", action="store_true")
     command.add_argument("--require-daemon", action="store_true")
-    command.set_defaults(handler=_handle_query)
+    command.set_defaults(handler=_handle_query, workspace_required=True)
 
     command = commands.add_parser("daemon", help=_HELP["daemon"])
     actions = command.add_subparsers(
@@ -346,7 +348,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--idle-sec", type=int, default=None)
     actions.add_parser("status")
     actions.add_parser("stop")
-    command.set_defaults(handler=_handle_workspace_unsafe, idle_sec=None)
+    command.set_defaults(
+        handler=_handle_workspace_unsafe,
+        idle_sec=None,
+        workspace_required=True,
+    )
 
     command = commands.add_parser("wipe", help=_HELP["wipe"])
     actions = command.add_subparsers(
@@ -359,7 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     wipe_index.add_argument("--force", action="store_true")
     wipe_state = actions.add_parser("state")
     wipe_state.add_argument("--yes", action="store_true")
-    command.set_defaults(handler=_handle_workspace_unsafe)
+    command.set_defaults(
+        handler=_handle_workspace_unsafe, workspace_required=True)
     wipe_state.set_defaults(handler=_handle_wipe_state)
 
     command = commands.add_parser("blob-index", help=_HELP["blob-index"])
@@ -370,10 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     lookup.add_argument("--source", "-s", required=True)
     lookup.add_argument("--sha256", required=True)
     lookup.add_argument("--no-verify", action="store_true")
-    command.set_defaults(handler=_handle_workspace_unsafe)
+    command.set_defaults(
+        handler=_handle_workspace_unsafe, workspace_required=True)
 
     command = commands.add_parser("verify", help=_HELP["verify"])
-    command.set_defaults(handler=_handle_workspace_unsafe)
+    command.set_defaults(
+        handler=_handle_workspace_unsafe, workspace_required=True)
 
     command = commands.add_parser("accuracy", help=_HELP["accuracy"])
     actions = command.add_subparsers(
@@ -388,15 +397,28 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("result_b")
     listing = actions.add_parser("list")
     listing.add_argument("--golden")
-    command.set_defaults(handler=_handle_workspace_unsafe)
+    command.set_defaults(
+        handler=_handle_workspace_unsafe, workspace_required=True)
+    compare.set_defaults(workspace_required=False)
 
     command = commands.add_parser("test", help=_HELP["test"])
-    command.set_defaults(handler=_handle_test)
+    command.set_defaults(handler=_handle_test, workspace_required=False)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    args.selection = _resolve_selection(args.workspace_id)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    action = getattr(args, "action", None)
+    label = f"{args.command} {action}" if action else args.command
+    if args.workspace_required:
+        if args.workspace_id is None:
+            parser.error(
+                f"{label}: --workspace ID is required before the command")
+        args.selection = _resolve_selection(args.workspace_id)
+    elif args.workspace_id is not None:
+        parser.error(
+            f"{label}: --workspace is not accepted for this "
+            "workspace-free action")
     handler: Callable[[argparse.Namespace], Any] = args.handler
     return int(handler(args) or 0)

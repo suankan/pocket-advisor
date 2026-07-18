@@ -1,8 +1,7 @@
 """Local MLX thread-summary generation.
 
 Corpus text never leaves the machine. The model snapshot must already live
-under ``models/`` (``pocket-advisor.py --workspace <id> fetch-model`` owns
-inbound downloads).
+under ``models/`` (``pocket-advisor.py fetch-model`` owns inbound downloads).
 """
 from typing import Protocol
 
@@ -43,7 +42,7 @@ class MlxSummaryGenerator:
             raise SystemExit(
                 f"thread summary model is not local:"
                 f" {config.mlx_model_thread_summary}. Run"
-                " './pocket-advisor.py --workspace <id> fetch-model' first.") from exc
+                " './pocket-advisor.py fetch-model' first.") from exc
 
         from mlx_lm import generate, load
         self._generate = generate

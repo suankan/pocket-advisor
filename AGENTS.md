@@ -217,7 +217,7 @@ Before handing off a change:
 for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
-./pocket-advisor.py --workspace test-workspace test
+./pocket-advisor.py test
 for test_file in scripts/test_*.py; do
   venv/bin/python "$test_file"
 done

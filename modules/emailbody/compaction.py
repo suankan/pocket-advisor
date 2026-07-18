@@ -1,15 +1,18 @@
-"""Quoted-reply compaction (R-19, detector version 5).
+"""Quoted-reply compaction (R-19, detector version 6).
 
 Derives each email's authored body region for ``email_message.txt`` from the
-lossless body region of ``email_message_full.txt``. The detector is ported
-unchanged from the shipped implementation — its behavior is specified
-and acceptance-tested in `docs_old/specs/quoted-reply-compaction.md`:
+lossless body region of ``email_message_full.txt``. The detector originated
+in the retired implementation documented under
+`docs_old/specs/quoted-reply-compaction.md`; the current conservative behavior
+and its regression fixes are maintained here and in the native tests:
 
 - Parent resolved strictly by normalized In-Reply-To → imported
   Message-ID. No fuzzy matching, hashing, or embeddings.
-- A cut is authorized ONLY by exact normalized containment: the
-  parent body's first 16 word-tokens (case-folded; punctuation, quote
-  markers and line wraps ignored) occurring exactly once in the child.
+- A cut is authorized ONLY by exact normalized containment. The initial
+  proof is the parent body's first 16 word-tokens (case-folded; punctuation,
+  quote markers and line wraps ignored). One occurrence is accepted. When
+  that minimum prefix repeats, a 64-token exact confirmation may disambiguate
+  only the earliest minimum-prefix occurrence; otherwise the body is retained.
 - Wrapper recognition (Gmail `On … wrote:`, Outlook reply headers,
   Gmail forwarded-message headers) can only EXPAND a proven cut over
   redundant wrapper metadata — never authorize one.
@@ -26,9 +29,10 @@ from pathlib import Path
 
 from modules.emailbody.artifacts import body_text
 
-COMPACTION_VERSION = 5
+COMPACTION_VERSION = 6
 PREFIX_TOKENS = 16
 MIN_PREFIX_TOKENS = 8
+DUPLICATE_CONFIRM_TOKENS = 64
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 _REPLY_HEADER = re.compile(
     r"^[ \t]*>*[ \t]*\*?(From|Sent|To|Cc|Subject)[ \t]*:\*?",
@@ -63,8 +67,9 @@ def find_parent_prefix(child_full: str, parent_full: str) -> int | None:
 
     Normalization ignores punctuation, quote markers, casing, and line
     wraps, but the word-token sequence must be exact. There is no fuzzy
-    score. A short or multiply-occurring prefix is ambiguous and is
-    retained.
+    score. A short prefix is retained. A repeated minimum prefix is retained
+    unless the longer exact-confirmation rule below selects only its earliest
+    occurrence.
     """
     parent = _tokens_with_offsets(parent_full)
     child = _tokens_with_offsets(child_full)
@@ -72,17 +77,43 @@ def find_parent_prefix(child_full: str, parent_full: str) -> int | None:
         return None
     needle = tuple(t[0] for t in parent[:PREFIX_TOKENS])
     n = len(needle)
-    hits: list[int] = []
+    hit_indexes: list[int] = []
     for i in range(0, len(child) - n + 1):
         if tuple(t[0] for t in child[i:i + n]) == needle:
-            hits.append(child[i][1])
-            if len(hits) > 1:
-                return None
-    if len(hits) != 1 or not child_full[:hits[0]].strip():
+            hit_indexes.append(i)
+    if not hit_indexes:
+        return None
+
+    if len(hit_indexes) == 1:
+        selected = hit_indexes[0]
+    else:
+        # A direct parent can begin by repeating text that also occurs in its
+        # own quoted history.  The 16-token safety prefix then appears twice
+        # in the child even though the direct quote is structurally clear.
+        # Resolve only when a substantially longer exact prefix confirms the
+        # earliest occurrence and eliminates every later occurrence.  Never
+        # select a later match: the earliest quote may be the real direct
+        # parent with a client-introduced divergence, while a nested copy
+        # happens to remain byte-equivalent after token normalization.
+        confirm_n = min(len(parent), DUPLICATE_CONFIRM_TOKENS)
+        if confirm_n <= n:
+            return None
+        confirmation = tuple(t[0] for t in parent[:confirm_n])
+        confirmed = [
+            i for i in hit_indexes
+            if i + confirm_n <= len(child)
+            and tuple(t[0] for t in child[i:i + confirm_n]) == confirmation
+        ]
+        if confirmed != [hit_indexes[0]]:
+            return None
+        selected = confirmed[0]
+
+    hit = child[selected][1]
+    if not child_full[:hit].strip():
         return None
     # Return the beginning of the containing line, removing any `>`
     # marker attached to the first parent token.
-    return child_full.rfind("\n", 0, hits[0]) + 1
+    return child_full.rfind("\n", 0, hit) + 1
 
 
 def _outlook_wrapper_start(child_full: str, body_start: int) -> int | None:

@@ -152,10 +152,16 @@ PDFs retain verified `pdf-original/`, persistent `pdf-ocr/`, and
 `pdf-to-text/` artifacts. Attached PDF artifacts remain under their carrying
 email folder; corpus-native PDF artifacts live at collection-cache level.
 
-Quoted-reply compaction is conservative: only an exact, unique match to the
-resolved direct parent's normalized body can authorize a cut. Missing,
-ambiguous, or interleaved parents preserve the full body. The frozen historical
-mechanics are documented in `docs_old/specs/quoted-reply-compaction.md`.
+Quoted-reply compaction is conservative: only exact normalized content from
+the resolved direct parent can authorize a cut. The first 16 parent tokens are
+the cross-client minimum. If that prefix repeats, version 6 may disambiguate
+only the earliest occurrence when the first 64 parent tokens (or the complete
+parent when shorter) match there exactly and nowhere else. It never selects a
+later nested match after the earliest candidate diverges. Missing, unresolved,
+still-ambiguous, or interleaved parents preserve the full body. Client wrapper
+recognition may only expand an already-proven cut. The frozen historical
+mechanics are documented in `docs_old/specs/quoted-reply-compaction.md`; native
+regression findings are tracked under `docs/bugs/`.
 
 ## Retrieval and answering
 

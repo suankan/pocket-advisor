@@ -12,7 +12,8 @@ from modules.config import Config, artifact_folder_name  # noqa: E402
 from modules.custody import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.domain import CandidateStatus, DocumentType  # noqa: E402
-from modules.emailbody import body_bytes  # noqa: E402
+from modules.emailbody import (COMPACTION_VERSION, body_bytes,
+                               find_quote_start)  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
@@ -37,6 +38,47 @@ PARENT_BODY = ("The settlement conference is scheduled for March twelve "
                "at the federal courthouse and both parties must attend "
                "with counsel present.")
 REPLY_AUTHORED = "Understood, I will bring the signed affidavit."
+
+
+def _quoted(text: str, marker: str = "> ") -> str:
+    return "\n".join(marker + line for line in text.splitlines())
+
+
+def test_duplicate_prefix_disambiguation() -> None:
+    """A repeated 16-token prefix needs stronger exact confirmation."""
+    repeated = " ".join(f"shared{i}" for i in range(16))
+    direct_tail = " ".join(f"direct{i}" for i in range(80))
+    nested_tail = " ".join(f"nested{i}" for i in range(80))
+    parent = (
+        f"{repeated} {direct_tail}\n\n"
+        "On Sun, 31 Dec 2023 at 09:00, Earlier <earlier@x.com> wrote:\n"
+        f"> {repeated} {nested_tail}\n"
+    )
+    wrapper = "On Mon, 1 Jan 2024 at 10:00, Parent <parent@x.com> wrote:"
+    child = f"Fresh authored reply.\n\n{wrapper}\n{_quoted(parent)}\n"
+
+    start, method = find_quote_start(child, parent)
+    assert start == child.index(wrapper), (start, child.index(wrapper))
+    assert method == "parent_prefix_exact+gmail_wrapper", method
+
+    # If the earliest (direct) occurrence diverges after the minimum prefix,
+    # a later exact nested copy must not be selected instead.
+    altered_direct = f"{repeated} client introduced divergent text"
+    misleading = (
+        f"Fresh authored reply.\n\n{wrapper}\n{_quoted(altered_direct)}\n\n"
+        "On Sun, 31 Dec 2023 at 09:00, Nested <nested@x.com> wrote:\n"
+        f"{_quoted(parent)}\n"
+    )
+    assert find_quote_start(misleading, parent) == (None, None)
+
+    # Two candidates that both survive the longer confirmation remain
+    # genuinely ambiguous.
+    duplicate = (
+        f"Fresh authored reply.\n\n{wrapper}\n{_quoted(parent)}\n\n"
+        "On Mon, 1 Jan 2024 at 10:00, Parent <parent@x.com> wrote:\n"
+        f"{_quoted(parent)}\n"
+    )
+    assert find_quote_start(duplicate, parent) == (None, None)
 
 
 def base_msg(mid: str, subject: str, body: str,
@@ -95,6 +137,7 @@ def build_fixtures(mail: Path, solicitor: Path) -> None:
 
 
 def main() -> int:
+    test_duplicate_prefix_disambiguation()
     with tempfile.TemporaryDirectory(prefix="pa_emails_") as td:
         tmp = Path(td)
         ws_dir = tmp / "workspaces"
@@ -167,6 +210,7 @@ def main() -> int:
         assert reply["body_compaction_parent_item_id"] == parent_row["id"]
         assert reply["body_quote_boundary_method"] == \
             "parent_prefix_exact+gmail_wrapper"
+        assert reply["body_compaction_version"] == COMPACTION_VERSION == 6
 
         # Duplicate Message-ID: one item, multiple membership rows.
         memberships = conn.execute(

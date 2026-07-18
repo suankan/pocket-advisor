@@ -2,7 +2,7 @@
 
 Status: locked 2026-07-17; implemented at `0fb9f6f`, refined
 2026-07-18 by incorporating the post-implementation review findings, and
-extended in the 2026-07-18 working tree with decision 10's envelope payload
+extended at `a48bf7b` with decision 10's envelope payload
 (the separate review-findings document is superseded by this text; its
 still-open items live in `docs/roadmap.md`).
 

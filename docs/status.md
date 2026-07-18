@@ -3,7 +3,8 @@
 The single status-tracking document for the platform (formerly
 `workspace-parsing-design-status.md`). Last updated: 2026-07-18.
 Locked architecture: `docs/workspace-parsing-design.md` and
-`docs/embedding-design.md`. Future work: `docs/roadmap.md`.
+`docs/embedding-design.md`. Shipped history: `docs/changelog.md`. Future work:
+`docs/roadmap.md`.
 
 ## Done
 
@@ -23,6 +24,7 @@ Locked architecture: `docs/workspace-parsing-design.md` and
 | `4a593ef` | **Privilege concept removed**: registry/schema/query privilege flags and restricted passes removed from the new engine; frozen adapter left untouched pending retirement |
 | `9b9e052` | **Review findings fixed**: always-on summary staleness, bounded/warm-ready reranking, global context budget, match dedup, operational warnings, aggregate visibility, missing-artifact handling, `item_count`, and ghost-root/disabled-generation coverage |
 | `625504a` | **Final payload/cache decisions locked**: envelope-enriched leaf payload + FTS shadow + recipe fingerprint, and exactly two readable message artifacts with authored-body-region chunking |
+| `a48bf7b` | **Envelope payload + message-artifact consolidation**: source-aware email/document/attachment payloads shared by dense and FTS retrieval; `envelope-v1` fingerprint separation; pure evidentiary chunk text; envelope-relative email offsets; final write-verified two-artifact email cache; comprehensive temp-fixture coverage |
 
 Current self-tests: all 8 `modules/tests/test_*.py` pass, including the new
 embedding/thread/retrieval fixture (`./pocket-advisor.py test`). The frozen
@@ -72,8 +74,8 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   `docs/embedding-design.md`; the separate review-findings document is
   deleted; open items (native daemon/accuracy, verify FTS
   integrity-check) moved to `docs/roadmap.md`.
-- **Envelope payload + two-artifact cache implemented (2026-07-18,
-  uncommitted):** leaf chunks keep pure `chunks.text` quotes while the dense
+- **Envelope payload + two-artifact cache implemented (`a48bf7b`):** leaf
+  chunks keep pure `chunks.text` quotes while the dense
   embedder and `chunks_fts.payload_shadow` consume the same From/Date/Subject/
   To-enriched payload (plus Document/Attachment filename context). The
   `envelope-v1` payload recipe participates in the vector fingerprint. Email
@@ -109,9 +111,10 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-Future work is tracked in `docs/roadmap.md` (in order: confirmed cutover
-resume, adapter retirement, local answering pass, experiments; payload A/B
-measurement follows the native accuracy port).
+The roadmap head is **1. Resume cutover**, which requires explicit user
+confirmation immediately before `wipe state`. After the full re-ingest:
+adapter retirement, local answering, and experiments follow in order; payload
+A/B measurement follows the native accuracy port.
 
 ## Watch-outs
 

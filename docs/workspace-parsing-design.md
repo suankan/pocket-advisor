@@ -79,8 +79,8 @@ Consequences (locked):
 ## Decision (2026-07-18): two message artifacts, no separate body files
 
 Each email's cache folder converges on exactly two readable message
-artifacts; the separate body files are retired (implemented as roadmap
-item 1, before the cutover re-ingest):
+artifacts; the separate body files are retired (implemented at `a48bf7b`,
+before the cutover re-ingest):
 
 - **`email_body_authored.txt` is dropped.** Its bytes are, by existing
   invariant, exactly the post-envelope content of `email_message.txt` —

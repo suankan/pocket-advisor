@@ -11,11 +11,12 @@ For every platform task, load these files in order:
 1. this file;
 2. `docs/status.md` — the single status-tracking document and pickup
    point;
-3. `docs/workspace-parsing-design.md` — locked ingestion architecture
+3. `docs/changelog.md` — shipped roadmap history, newest first;
+4. `docs/workspace-parsing-design.md` — locked ingestion architecture
    and acceptance decisions;
-4. `docs/embedding-design.md` — locked embedding/thread-retrieval
+5. `docs/embedding-design.md` — locked embedding/thread-retrieval
    design (review-refined);
-5. `docs/roadmap.md` — ordered future work.
+6. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -30,6 +31,36 @@ For case work, additionally load:
 3. its applicable domain playbook(s).
 
 Do not answer case questions from platform instructions alone.
+
+## Documentation lifecycle
+
+Keep the three current planning records distinct:
+
+- `docs/roadmap.md` contains only ordered, unshipped work.
+- `docs/status.md` is the concise current pickup point: completed commit table,
+  operating state, next action, and watch-outs.
+- `docs/changelog.md` is the durable, reverse-chronological history of shipped
+  roadmap items.
+
+When a roadmap item ships (implemented, verified, and committed):
+
+1. remove the completed item from `docs/roadmap.md`; renumber the remaining
+   items and repair every item-number cross-reference;
+2. move any genuinely unfinished or deferred sub-item to the appropriate
+   remaining roadmap item before removing the completed section;
+3. prepend a changelog entry with the date, shipped item title, implementation
+   commit, behavioral summary, verification performed, and any explicitly
+   deferred follow-up;
+4. add the implementation commit to the `docs/status.md` Done table, reconcile
+   Current operating state, and make Next steps name the new roadmap head;
+5. remove stale labels such as "uncommitted", "in progress", or "next" from
+   shipped work—do not leave completed sections parked in the roadmap.
+
+Perform this documentation transition immediately after the implementation
+commit while the context is fresh. It does not override the no-autocommit rule:
+if the current prompt does not authorize another commit, leave the doc
+transition in the working tree and report that clearly. Never update the
+archived `docs_old/` changelog.
 
 ## Hard rules
 
@@ -107,8 +138,8 @@ exist; only CLI orchestration owns ordering.
 
 - Each email, including attached emails, has one flat
   `<basename>__<sha8>/` folder.
-- Two readable message artifacts per email (2026-07-18 decision;
-  implemented with roadmap item 1): `email_message_full.txt` — envelope +
+- Two readable message artifacts per email (2026-07-18 decision; shipped at
+  `a48bf7b`): `email_message_full.txt` — envelope +
   lossless body, never compacted or embedded — and `email_message.txt` —
   envelope + Stage 2b authored body, write-verified. The authored body
   region of `email_message.txt` is the leaf-chunk source

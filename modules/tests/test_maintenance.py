@@ -100,6 +100,98 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
     return active_index_slug(ctx.config), leaf.meta_json.parent
 
 
+def _add_email_item(
+        ctx: PipelineContext, *, item_id: int, message_id: str,
+        parent_item_id: int | None, digest: str, candidate: bool = True,
+        membership: bool = True) -> None:
+    root = ctx.conn.execute(
+        "SELECT body_text_path, body_full_text_path FROM items "
+        "WHERE message_id='<maintenance@test>'"
+    ).fetchone()
+    ctx.conn.execute(
+        "INSERT INTO items(id, item_kind, message_id, parent_item_id, "
+        "body_text_path, body_full_text_path, ingested_at) "
+        "VALUES (?, 'email', ?, ?, ?, ?, 't')",
+        (item_id, message_id, parent_item_id, root["body_text_path"],
+         root["body_full_text_path"]),
+    )
+    if membership:
+        ctx.conn.execute(
+            "INSERT INTO item_memberships(item_id, workspace_id, "
+            "collection_id, filename, sha256, membership_kind, ingested_at) "
+            "VALUES (?, ?, 'mail', 'attached.eml', ?, 'email', 't')",
+            (item_id, ctx.workspace.id, digest),
+        )
+    if candidate:
+        ctx.conn.execute(
+            "INSERT INTO ingestion_candidates(workspace_id, collection_id, "
+            "relpath, sha256, size_bytes, document_type, status, "
+            "discovered_at) VALUES (?, 'mail', '?::attached.eml', ?, 1, "
+            "'email', 'ingested', 't')",
+            (ctx.workspace.id, digest),
+        )
+
+
+def test_attached_email_verification(ctx: PipelineContext) -> None:
+    root_id = int(ctx.conn.execute(
+        "SELECT id FROM items WHERE message_id='<maintenance@test>'"
+    ).fetchone()[0])
+    _add_email_item(
+        ctx, item_id=100, message_id="<attached-valid@test>",
+        parent_item_id=root_id, digest="a" * 64)
+    ctx.conn.commit()
+    report = verify_workspace(ctx)
+    assert report.ok, report.problems
+    assert report.checks["attached_email_lineages_verified"] == 1
+
+    # A synthetic candidate without physical lineage remains a missing
+    # top-level original; it is never exempted merely because of its relpath.
+    ctx.conn.execute("SAVEPOINT broken_top_level")
+    _add_email_item(
+        ctx, item_id=110, message_id="<attached-no-parent@test>",
+        parent_item_id=None, digest="b" * 64)
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any("discovered original has no blob-index row" in problem
+               for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO broken_top_level")
+    ctx.conn.execute("RELEASE broken_top_level")
+
+    # A parent relation is not sufficient: it must terminate at an item with
+    # blob-indexed custody.
+    ctx.conn.execute("SAVEPOINT broken_root")
+    _add_email_item(
+        ctx, item_id=120, message_id="<unindexed-root@test>",
+        parent_item_id=None, digest="c" * 64, candidate=False,
+        membership=False)
+    _add_email_item(
+        ctx, item_id=121, message_id="<attached-broken-root@test>",
+        parent_item_id=120, digest="d" * 64)
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any("no blob-indexed carrying original" in problem
+               for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO broken_root")
+    ctx.conn.execute("RELEASE broken_root")
+
+    # SQLite foreign keys permit a cycle between existing rows; verification
+    # must reject it even though PRAGMA foreign_key_check is clean.
+    ctx.conn.execute("SAVEPOINT cyclic_lineage")
+    _add_email_item(
+        ctx, item_id=130, message_id="<attached-cycle-a@test>",
+        parent_item_id=None, digest="e" * 64)
+    _add_email_item(
+        ctx, item_id=131, message_id="<attached-cycle-b@test>",
+        parent_item_id=130, digest="f" * 64)
+    ctx.conn.execute("UPDATE items SET parent_item_id=131 WHERE id=130")
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any("cyclic parent lineage" in problem
+               for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO cyclic_lineage")
+    ctx.conn.execute("RELEASE cyclic_lineage")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa_maintenance_") as td:
         root = Path(td)
@@ -141,6 +233,8 @@ def main() -> int:
         assert report.checks["indexed_originals_verified"] == 1
         assert report.checks["leaf_vectors"] == 1
         assert report.checks["thread_vectors"] == 1
+
+        test_attached_email_verification(ctx)
 
         output_digest, output_counts = transaction_output_state(conn)
         state = TransactionBuildState(

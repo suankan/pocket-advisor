@@ -4,6 +4,7 @@ import io
 import json
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +20,8 @@ from modules.embedding import (ModelStore, current_fingerprint, index_paths,
                                thread_vector_filename)  # noqa: E402
 from modules.ingest_report import (Finding, StageRun, build_report,
                                    build_snapshot, format_report,
-                                   persist_report)  # noqa: E402
+                                   persist_report,
+                                   snapshot_findings)  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
@@ -270,6 +272,42 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert not list(path.parent.glob("*.tmp"))
 
 
+def test_transaction_run_flag_dedup(ctx: PipelineContext) -> None:
+    snapshot = build_snapshot(ctx, start_log_id=10_000)
+    input_findings = {
+        "unparsed": 1,
+        "not_ingested": 2,
+        "mismatched": 3,
+        "duplicates": 4,
+        "missing_periods": 5,
+        "parse_issues": 6,
+        "links_ambiguous": 7,
+        "accounts_without_pdfs": 8,
+    }
+    transactions = dict(snapshot.transactions)
+    transactions["input_findings"] = input_findings
+    equivalent = replace(
+        snapshot,
+        transactions=transactions,
+        run_flags={"transactions:error": 6, "transactions:warning": 30},
+    )
+    findings = snapshot_findings(equivalent)
+    assert Finding("error", "transactions_unparsed", 1) in findings
+    assert Finding("warning", "transactions_links_ambiguous", 7) in findings
+    assert not any(finding.category.startswith("run_flag:transactions:")
+                   for finding in findings)
+
+    extra = replace(
+        equivalent,
+        run_flags={"transactions:error": 7, "transactions:warning": 31},
+    )
+    extra_findings = snapshot_findings(extra)
+    assert Finding("error", "run_flag:transactions:error", 7) in \
+        extra_findings
+    assert Finding("warning", "run_flag:transactions:warning", 31) in \
+        extra_findings
+
+
 def test_index_drift(ctx: PipelineContext) -> None:
     fingerprint = current_fingerprint(
         ctx.config, ModelStore(ctx.config.models_dir))
@@ -330,6 +368,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa_ingest_report_") as td:
         ctx = build_context(Path(td))
         test_snapshot_and_record(ctx)
+        test_transaction_run_flag_dedup(ctx)
         test_index_drift(ctx)
         ctx.conn.close()
     with tempfile.TemporaryDirectory(prefix="pa_ingest_report_cli_") as td:

@@ -210,7 +210,17 @@ _WESTPAC_ROW_RE = re.compile(r"^\s{0,6}(\d{2}/\d{2}/\d{2})\s+(.*\S)\s*$")
 _WESTPAC_PERIOD_RE = re.compile(
     r"Statement Period\s*\n\s*(\d{1,2} [A-Za-z]+ \d{4})\s*-\s*"
     r"(\d{1,2} [A-Za-z]+ \d{4})")
-_WESTPAC_ACCOUNT_RE = re.compile(r"(\d{3}-\d{3})\s{2,}([\d ]{4,20}\d)")
+_WESTPAC_ACCOUNT_RES = (
+    # Flexi/loan statements print a labelled, compact account form such as
+    # ``Account No. 037-186 40-5530``.
+    re.compile(
+        r"\bAccount\s+No\.?\s*:?\s*(\d{3}-\d{3})\s+"
+        r"([0-9][0-9 -]{2,18}[0-9])\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # Choice/Business One statements use a two-column BSB/account table.
+    re.compile(r"^\s*(\d{3}-\d{3})\s{2,}([\d ]{4,20}\d)\s*$", re.MULTILINE),
+)
 _WESTPAC_MONEY_RE = re.compile(r"-?\d{1,3}(?:,\d{3})*\.\d{2}")
 
 
@@ -222,7 +232,7 @@ class WestpacParser:
     The printed BSB and account number are normalized to digits.
     """
 
-    parser_id = "westpac-v1"
+    parser_id = "westpac-v2"
     bank = "Westpac"
 
     def detect(self, text: str) -> bool:
@@ -235,7 +245,11 @@ class WestpacParser:
             if period_match else None
         period_end = parse_long_date(period_match.group(2)) \
             if period_match else None
-        account_match = _WESTPAC_ACCOUNT_RE.search(pages[0])
+        account_match = next(
+            (match for pattern in _WESTPAC_ACCOUNT_RES
+             if (match := pattern.search(pages[0])) is not None),
+            None,
+        )
         display = (f"{account_match.group(1)} "
                    f"{account_match.group(2).strip()}") \
             if account_match else ""

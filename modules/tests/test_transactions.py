@@ -182,6 +182,12 @@ WESTPAC_ZERO_FIXTURE = (
     "Westpac Banking Corporation ABN 33 007 457 141 AFSL 233714  Page 1 of 1\n"
 )
 
+WESTPAC_FLEXI_ACCOUNT_FIXTURE = WESTPAC_ZERO_FIXTURE.replace(
+    "                             BSB          Account Number\n"
+    "                             111-222      99 8877\n",
+    "                             Account No. 037-186 40-5530\n",
+)
+
 
 def add_fixture(
         ctx: PipelineContext,
@@ -314,7 +320,9 @@ def test_normalization() -> None:
 
 
 def test_westpac_parser() -> None:
-    statement = WestpacParser().parse(WESTPAC_FIXTURE)
+    parser = WestpacParser()
+    assert parser.parser_id == "westpac-v2"
+    statement = parser.parse(WESTPAC_FIXTURE)
     assert statement.period_start == "2025-12-01"
     assert statement.period_end == "2026-01-31"
     assert statement.account_no_norm == "111222998877"
@@ -324,10 +332,15 @@ def test_westpac_parser() -> None:
     assert statement.rows[1].txn_date == "2026-01-03"
     assert statement.rows[1].amount_minor == -3000
     assert statement.rows[2].balance_after_minor == -3500
-    empty = WestpacParser().parse(WESTPAC_ZERO_FIXTURE)
+    assert statement.parse_issues == []
+    empty = parser.parse(WESTPAC_ZERO_FIXTURE)
     assert empty.rows == []
     assert [(item.kind, item.amount_minor) for item in empty.assertions] == [
         ("opening_balance", 0), ("closing_balance", 0)]
+    flexi = parser.parse(WESTPAC_FLEXI_ACCOUNT_FIXTURE)
+    assert flexi.account_no_display == "037-186 40-5530"
+    assert flexi.account_no_norm == "037186405530"
+    assert flexi.parse_issues == []
 
 
 def build_context(

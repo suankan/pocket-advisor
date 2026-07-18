@@ -444,6 +444,7 @@ def snapshot_findings(
     add("warning", "pdf_ocr_warnings", pdf_stats.get("ocr_warnings", 0))
     add("warning", "pdf_weak_dates", pdf_stats.get("weak_dates", 0))
 
+    transaction_run_totals: dict[str, int] = {}
     transactions = snapshot.transactions
     if transactions.get("enabled"):
         add("error", "statement_balance_failures",
@@ -460,13 +461,25 @@ def snapshot_findings(
         add("info", "single_account_unverifiable",
             int(coverage["single_account_unverifiable"]))
         input_findings = transactions.get("input_findings", {})
-        for category in ("unparsed", "not_ingested", "mismatched"):
+        error_categories = ("unparsed", "not_ingested", "mismatched")
+        warning_categories = (
+            "duplicates", "missing_periods", "parse_issues",
+            "links_ambiguous", "accounts_without_pdfs",
+        )
+        for category in error_categories:
             add("error", f"transactions_{category}",
                 int(input_findings.get(category, 0)))
-        for category in ("duplicates", "missing_periods", "parse_issues",
-                         "links_ambiguous", "accounts_without_pdfs"):
+        for category in warning_categories:
             add("warning", f"transactions_{category}",
                 int(input_findings.get(category, 0)))
+        transaction_run_totals = {
+            "transactions:error": sum(
+                int(input_findings.get(category, 0))
+                for category in error_categories),
+            "transactions:warning": sum(
+                int(input_findings.get(category, 0))
+                for category in warning_categories),
+        }
 
     for category, count in snapshot.run_flags.items():
         if category == "pdfs:error" \
@@ -475,6 +488,9 @@ def snapshot_findings(
         if category == "pdfs:warning" and count == (
                 pdf_stats.get("ocr_warnings", 0)
                 + pdf_stats.get("weak_dates", 0)):
+            continue
+        if category in transaction_run_totals \
+                and count == transaction_run_totals[category]:
             continue
         severity = category.rsplit(":", 1)[-1]
         if severity not in {"error", "warning"}:

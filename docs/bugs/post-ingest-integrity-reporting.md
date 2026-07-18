@@ -1,6 +1,6 @@
 # Post-ingest integrity and reporting false findings
 
-Status: **confirmed 2026-07-19; remediation planned**.
+Status: **fixed and verified on 2026-07-19**.
 
 Run record:
 `workspaces/.state/workspace-case-documents-demo/logs/ingest-runs/20260718T224236864142Z.json`.
@@ -142,3 +142,32 @@ fix remains path-independent and does not broaden the verification exemption.
 6. The 121 unsupported statements and genuine ambiguous transfer candidates
    remain visible as current findings.
 7. No test writes to collection evidence or live workspace state.
+
+## Resolution
+
+- Westpac parser `westpac-v2` now recognizes both the existing two-column
+  BSB/account layout and explicitly labelled compact account lines such as
+  `Account No. 037-186 40-5530`. Captured values continue to normalize to
+  digits before the stage's configured-account comparison.
+- Completion reporting now derives the structured transaction error and
+  warning totals and suppresses a same-severity run flag only on exact count
+  equivalence. A non-equivalent flag remains visible.
+- Verification now distinguishes attached-email candidates through proven
+  `parent_item_id` lineage. Every attached email must have custody membership,
+  an acyclic existing parent chain, and a terminal item with a mounted
+  blob-indexed original. Synthetic relpaths alone never grant an exemption.
+
+Temporary fixtures cover standard/Flexi account forms, equivalent and
+non-equivalent run flags, valid attached lineage, a synthetic candidate with
+no parent, a parent chain without an indexed carrying root, and a cycle.
+Every native test passes (13/13), Python compilation and `git diff --check`
+are clean.
+
+Read-only native verification of the existing `case-documents-demo` state now
+passes: 1,008 indexed originals, 1,027 memberships, 19 attached-email
+lineages, 3,691 derived artifacts, 10,541 leaf vectors, 126 navigation
+vectors, and the transaction manifest all reconcile. No live ingestion or
+workspace-state mutation was performed. The operator's next normal
+`ingest all` will rebuild Stage 5 once because the parser ID changed; that run
+is the live acceptance check for removal of the three Flexi warnings and the
+new completion-report rollup.

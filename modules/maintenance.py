@@ -207,27 +207,100 @@ def _verify_originals(ctx: PipelineContext, report: VerificationReport) -> None:
         for row in ctx.conn.execute(
             "SELECT collection_id, sha256 FROM ingestion_candidates")
     }
+    item_rows = ctx.conn.execute(
+        "SELECT id, item_kind, parent_item_id FROM items").fetchall()
+    item_kinds = {int(row["id"]): str(row["item_kind"])
+                  for row in item_rows}
+    parents = {
+        int(row["id"]): (
+            int(row["parent_item_id"])
+            if row["parent_item_id"] is not None else None)
+        for row in item_rows
+    }
+    membership_rows = ctx.conn.execute(
+        "SELECT collection_id, sha256, item_id FROM item_memberships"
+    ).fetchall()
+    memberships_by_item: dict[int, set[tuple[str, str]]] = {}
+    items_by_membership: dict[tuple[str, str], set[int]] = {}
+    for row in membership_rows:
+        item_id = int(row["item_id"])
+        key = (str(row["collection_id"]), str(row["sha256"]))
+        memberships_by_item.setdefault(item_id, set()).add(key)
+        items_by_membership.setdefault(key, set()).add(item_id)
+
+    lineage_ok: dict[int, bool] = {}
+    attached_verified = 0
+    for item_id, parent_item_id in parents.items():
+        if parent_item_id is None:
+            continue
+        if item_kinds[item_id] != "email":
+            _problem(
+                report,
+                f"item {item_id} has physical parent {parent_item_id} but "
+                f"is not an email")
+            lineage_ok[item_id] = False
+            continue
+        if not memberships_by_item.get(item_id):
+            _problem(
+                report,
+                f"attached email item {item_id} has no custody membership")
+            lineage_ok[item_id] = False
+            continue
+
+        visited = {item_id}
+        current_id = item_id
+        failure: str | None = None
+        while (parent_id := parents.get(current_id)) is not None:
+            if parent_id in visited:
+                failure = (
+                    f"attached email item {item_id} has cyclic parent "
+                    f"lineage at item {parent_id}")
+                break
+            if parent_id not in parents:
+                failure = (
+                    f"attached email item {item_id} has missing parent "
+                    f"item {parent_id}")
+                break
+            visited.add(parent_id)
+            current_id = parent_id
+        if failure is None and not any(
+                key in indexed and key[0] in collections
+                for key in memberships_by_item.get(
+                    current_id, set())):
+            failure = (
+                f"attached email item {item_id} has no blob-indexed "
+                f"carrying original")
+        if failure is not None:
+            _problem(report, failure)
+            lineage_ok[item_id] = False
+        else:
+            lineage_ok[item_id] = True
+            attached_verified += 1
+
+    attached_candidate_keys = {
+        key for key in candidate_keys - indexed
+        if any(parents.get(item_id) is not None and lineage_ok.get(item_id)
+               for item_id in items_by_membership.get(key, set()))
+    }
     for source_id, digest in candidate_keys - indexed:
+        if (source_id, digest) in attached_candidate_keys:
+            continue
         _problem(
             report,
             f"discovered original has no blob-index row: "
             f"{source_id}:{digest[:12]}…")
 
-    memberships = 0
-    for row in ctx.conn.execute(
-            "SELECT collection_id, sha256, item_id FROM item_memberships"):
-        memberships += 1
+    for row in membership_rows:
         key = (str(row["collection_id"]), str(row["sha256"]))
-        # Attached emails have custody memberships but are derived from a
-        # carrying original, so only memberships that also came through the
-        # Stage-1 candidate set require a source_blob_index row.
-        if key in candidate_keys and key not in indexed:
+        if key in candidate_keys and key not in indexed \
+                and key not in attached_candidate_keys:
             _problem(
                 report,
                 f"membership item {row['item_id']} has no blob-index row: "
                 f"{key[0]}:{key[1][:12]}…")
     report.checks["indexed_originals_verified"] = checked
-    report.checks["memberships_checked"] = memberships
+    report.checks["memberships_checked"] = len(membership_rows)
+    report.checks["attached_email_lineages_verified"] = attached_verified
 
 
 def _derived_path(ctx: PipelineContext, raw: str) -> Path:

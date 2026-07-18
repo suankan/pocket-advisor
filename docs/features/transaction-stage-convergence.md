@@ -115,13 +115,14 @@ or evidence changes must remain impossible to miss.
    forces a full rebuild.
 12. **Findings remain current without log spam.** The manifest stores aggregate
     counts only for input/build outcomes that are not otherwise durable rows:
-    unsupported, not-ingested, mismatched, duplicate, incomplete-period,
-    parser-issue, and ambiguous-link cases. Balance, assertion, and coverage
-    findings continue to derive from the live relational graph and are never
-    double-counted from the manifest. The ingest snapshot and `transactions
-    report` read the manifest outcomes on a cache hit and continue to point to
-    the existing detailed review queue. A skip does not append duplicate
-    review-log/CSV rows merely to keep a finding visible.
+    account-without-PDF, unsupported, not-ingested, mismatched, duplicate,
+    incomplete-period, parser-issue, and ambiguous-link cases. Balance,
+    assertion, and coverage findings continue to derive from the live
+    relational graph and are never double-counted from the manifest. The
+    ingest snapshot and `transactions report` read the manifest outcomes on a
+    cache hit and continue to point to the existing detailed review queue. A
+    skip does not append duplicate review-log/CSV rows merely to keep a finding
+    visible.
 13. **Publishing is fail-safe.** The stage computes the input digest before
     rebuilding, performs the existing database work in one transaction, and
     commits SQLite before atomically writing and read-verifying the manifest.
@@ -170,6 +171,7 @@ The persisted JSON contains operational metadata only:
     "transfer_links": 0
   },
   "findings": {
+    "accounts_without_pdfs": 0,
     "unparsed": 0,
     "not_ingested": 0,
     "mismatched": 0,

@@ -5,12 +5,18 @@ throwaway directory. No real collection or engine state is touched.
 """
 import sys
 import tempfile
+from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
+from modules.ocr import pdf_text_extraction_method  # noqa: E402
+from modules.pipeline import transactions as transactions_module  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.transactions import (  # noqa: E402
     TransactionService,
@@ -27,6 +33,7 @@ from modules.statement_parsers import (  # noqa: E402
     parse_amount_minor,
     parse_long_date,
 )
+from modules.transaction_state import load_transaction_state  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
 
@@ -89,6 +96,11 @@ workspaces:
     collections:
       - id: business
 """
+
+
+@lru_cache(maxsize=1)
+def fixture_extraction_method() -> str:
+    return pdf_text_extraction_method(langs="eng+rus")
 
 
 def statement_text(
@@ -188,9 +200,11 @@ def add_fixture(
          f"{item_id}.pdf", sha),
     )
     ctx.conn.execute(
-        """INSERT INTO item_file_meta(item_id, extracted_text_path)
-           VALUES (?, ?)""",
-        (item_id, str(text_path.relative_to(ctx.config.project_root))),
+        """INSERT INTO item_file_meta(
+             item_id, extracted_text_path, extraction_method)
+           VALUES (?, ?, ?)""",
+        (item_id, str(text_path.relative_to(ctx.config.project_root)),
+         fixture_extraction_method()),
     )
     ctx.conn.commit()
 
@@ -232,10 +246,11 @@ def add_email_attachment_fixtures(
             """INSERT INTO attachments(
                  item_id, filename, content_type, sha256,
                  extracted_text_path, extraction_method)
-               VALUES (?, ?, 'application/pdf', ?, ?, 'ocrmypdf-redo+pdftotext-layout')""",
+               VALUES (?, ?, 'application/pdf', ?, ?, ?)""",
             (item_id, f"statement-{index}.pdf",
              f"{item_id * 100 + index:064x}",
-             str(text_path.relative_to(ctx.config.project_root))),
+             str(text_path.relative_to(ctx.config.project_root)),
+             fixture_extraction_method()),
         )
     ctx.conn.commit()
 
@@ -370,6 +385,113 @@ def test_stage(ctx: PipelineContext) -> None:
     assert isinstance(report["buckets"]["external"], list)
 
 
+def test_convergence(ctx: PipelineContext) -> None:
+    text = statement_text(
+        "111-222 333444", "2026-01-01", "2026-01-31", "10.00",
+        [("2026-01-05", "", "Convergence fixture", "-1.00", "9.00")],
+        "9.00", "0.00", "1.00", count=1)
+    add_fixture(ctx, 100, "business", text)
+
+    first = TransactionsStage(ctx).run()
+    assert first.get("parsed") == 1, first
+    assert ctx.config.transaction_manifest_path.is_file()
+    state = load_transaction_state(
+        ctx.config.transaction_manifest_path, ctx.workspace.id)
+    assert state is not None and state.counts["transactions"] == 1
+    parsed_at = ctx.conn.execute(
+        "SELECT parsed_at FROM statements").fetchone()[0]
+    log_count = ctx.conn.execute(
+        "SELECT count(*) FROM ingestion_log").fetchone()[0]
+
+    second = TransactionsStage(ctx).run()
+    assert second.get("unchanged") == 1, second
+    assert second.get("rows") == 1, second
+    assert ctx.conn.execute(
+        "SELECT parsed_at FROM statements").fetchone()[0] == parsed_at
+    assert ctx.conn.execute(
+        "SELECT count(*) FROM ingestion_log").fetchone()[0] == log_count
+
+    # Report-only watchlists do not invalidate the graph.
+    (ctx.workspace.root / "counterparties.yaml").write_text(
+        "- name: Fixture\n  patterns: ['convergence']\n", encoding="utf-8")
+    assert TransactionsStage(ctx).run().get("unchanged") == 1
+
+    # Current holder metadata survives exact account/owner convergence.
+    ctx.conn.execute("UPDATE holders SET notes='preserve me'")
+    ctx.conn.commit()
+
+    # Changed Stage 3 text bytes force a full rebuild even with one source SHA.
+    text_path = ctx.config.state_dir / "fixture-text" / "100.txt"
+    text_path.write_text(text + "\n", encoding="utf-8")
+    changed = TransactionsStage(ctx).run()
+    assert changed.get("parsed") == 1 and changed.get("unchanged") == 0
+    assert ctx.conn.execute("SELECT notes FROM holders").fetchone()[0] == \
+        "preserve me"
+
+    # Parser registration changes are semantic transaction inputs.
+    with patch(
+            "modules.pipeline.transactions.PARSERS",
+            (*transactions_module.PARSERS,
+             SimpleNamespace(parser_id="fixture-new-v1"))):
+        assert TransactionsStage(ctx).run().get("parsed") == 1
+    assert TransactionsStage(ctx).run().get("parsed") == 1
+
+    # Live relational tampering cannot produce a false hit.
+    ctx.conn.execute(
+        "UPDATE transactions SET description_raw='tampered'")
+    ctx.conn.commit()
+    repaired = TransactionsStage(ctx).run()
+    assert repaired.get("parsed") == 1, repaired
+    assert ctx.conn.execute(
+        "SELECT description_raw FROM transactions").fetchone()[0] == \
+        "Convergence fixture"
+
+    forced = TransactionsStage(ctx, force=True).run()
+    assert forced.get("parsed") == 1 and forced.get("unchanged") == 0
+
+    # Malformed manifests fail closed to a rebuild.
+    ctx.config.transaction_manifest_path.write_text("{}\n", encoding="utf-8")
+    assert TransactionsStage(ctx).run().get("parsed") == 1
+
+    # A post-commit manifest failure leaves valid rows but cannot create a hit.
+    text_path.write_text(text + "\n\n", encoding="utf-8")
+    with patch(
+            "modules.pipeline.transactions.persist_transaction_state",
+            side_effect=OSError("synthetic manifest failure")):
+        try:
+            TransactionsStage(ctx).run()
+            raise AssertionError("manifest publication failure must surface")
+        except OSError as exc:
+            assert "synthetic manifest failure" in str(exc)
+    assert ctx.conn.execute("SELECT count(*) FROM transactions").fetchone()[0] \
+        == 1
+    assert TransactionsStage(ctx).run().get("parsed") == 1
+
+    # Named Stage 5 never mutates the graph from stale Stage 3 text.
+    ctx.conn.execute(
+        "UPDATE item_file_meta SET extraction_method='pdf-text-v0:old'"
+        " WHERE item_id=100")
+    ctx.conn.commit()
+    rows_before = ctx.conn.execute(
+        "SELECT count(*) FROM transactions").fetchone()[0]
+    try:
+        TransactionsStage(ctx).run()
+        raise AssertionError("stale PDF-text recipe must abort before rebuild")
+    except SystemExit as exc:
+        assert "run `ingest pdfs` first" in str(exc)
+    assert ctx.conn.execute(
+        "SELECT count(*) FROM transactions").fetchone()[0] == rows_before
+
+    # Removing the final bank collection clears the retired graph once and
+    # removes convergence state; a never-enabled follow-up is a no-op.
+    ctx.workspace = replace(ctx.workspace, mounts=())
+    cleared = TransactionsStage(ctx).run()
+    assert cleared.get("cleared") == 1, cleared
+    assert ctx.conn.execute("SELECT count(*) FROM accounts").fetchone()[0] == 0
+    assert not ctx.config.transaction_manifest_path.exists()
+    assert TransactionsStage(ctx).run().counts == {}
+
+
 def test_loud_failures(ctx: PipelineContext) -> None:
     # Unknown ingested layout.
     add_fixture(ctx, 10, "business", "SOMEBANK\nunknown layout\n")
@@ -440,6 +562,20 @@ def test_loud_failures(ctx: PipelineContext) -> None:
            JOIN statements s ON s.id = t.statement_id
            WHERE s.item_id = 15 ORDER BY t.row_index""")]
     assert attached_rows == [0, 1]
+
+    # Current input findings survive a convergence hit without duplicate logs.
+    log_count = ctx.conn.execute(
+        "SELECT count(*) FROM ingestion_log").fetchone()[0]
+    hit = TransactionsStage(ctx).run()
+    assert hit.get("unchanged") == 8, hit
+    assert ctx.conn.execute(
+        "SELECT count(*) FROM ingestion_log").fetchone()[0] == log_count
+    logs: list[str] = []
+    report = report_transactions(ctx, log=logs.append)
+    assert report["input_findings"]["unparsed"] == 1
+    assert report["input_findings"]["not_ingested"] == 1
+    assert report["input_findings"]["mismatched"] == 1
+    assert any("CURRENT unparsed: 1" in line for line in logs), logs
 
 
 def test_override_and_watchlist(ctx: PipelineContext) -> None:
@@ -530,6 +666,10 @@ def test_single_account_coverage(ctx: PipelineContext) -> None:
 def main() -> int:
     test_normalization()
     test_westpac_parser()
+    with tempfile.TemporaryDirectory(prefix="pa_transactions_converge_") as td:
+        ctx = build_context(Path(td), SINGLE_ACCOUNT_REGISTRY_YAML)
+        test_convergence(ctx)
+        ctx.conn.close()
     with tempfile.TemporaryDirectory(prefix="pa_transactions_") as td:
         ctx = build_context(Path(td))
         test_stage(ctx)

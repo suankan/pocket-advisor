@@ -167,6 +167,12 @@ def main() -> int:
         assert a.config.db_path != b.config.db_path
         assert a.config.cache_dir != b.config.cache_dir
         assert a.config.vectors_dir != b.config.vectors_dir
+        assert a.config.transaction_manifest_path != \
+            b.config.transaction_manifest_path
+        assert a.config.transaction_manifest_path.is_relative_to(
+            a.config.state_dir)
+        assert b.config.transaction_manifest_path.is_relative_to(
+            b.config.state_dir)
 
         ingest_mail(a)
         ingest_mail(b)

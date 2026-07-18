@@ -24,9 +24,12 @@ from typing import Any
 import yaml
 
 from modules.domain import StageStats
+from modules.custody import sha256_file
+from modules.ocr import pdf_text_extraction_method
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import now_iso
 from modules.statement_parsers import (
+    PARSERS,
     ParsedStatement,
     ParserConflict,
     StatementAssertion,
@@ -34,6 +37,16 @@ from modules.statement_parsers import (
     discover_assertions,
     merge_assertions,
     normalize_account_no,
+)
+from modules.transaction_state import (
+    FINDING_KEYS,
+    TRANSACTION_RECIPE_VERSION,
+    TransactionBuildState,
+    TransactionStateError,
+    canonical_digest,
+    load_transaction_state,
+    persist_transaction_state,
+    transaction_output_state,
 )
 from modules.workspace import Collection
 
@@ -53,6 +66,24 @@ _TRANSFERISH_RE = re.compile(
 
 type Log = Callable[[str], None]
 type RowDict = dict[str, Any]
+
+
+def _pdfinfo_version() -> str:
+    try:
+        result = subprocess.run(
+            ["pdfinfo", "-v"], capture_output=True, text=True,
+            timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    output = (result.stdout + result.stderr).strip()
+    return output.splitlines()[0].strip() if output else "unavailable"
+
+
+def _file_sha(path: Path) -> str:
+    try:
+        return sha256_file(path)
+    except OSError:
+        return "missing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,21 +440,33 @@ class TransactionService:
         """
         rows = self.conn.execute(
             """SELECT * FROM (
-                 SELECT b.relpath_within_source AS relpath, b.sha256,
+                 SELECT 'native' AS occurrence_kind,
+                        b.relpath_within_source AS relpath,
+                        b.sha256 AS source_sha256,
+                        b.sha256 AS document_sha256,
                         m.item_id, f.extracted_text_path,
-                        f.extracted_copy_path
+                        f.extracted_copy_path, f.extracted_copy_sha256,
+                        f.extraction_method, i.message_id,
+                        NULL AS attachment_id
                  FROM source_blob_index b
                  LEFT JOIN item_memberships m
                    ON m.collection_id = b.source_id AND m.sha256 = b.sha256
                  LEFT JOIN item_file_meta f ON f.item_id = m.item_id
+                 LEFT JOIN items i ON i.id = m.item_id
                  WHERE b.source_id = ?
                  UNION ALL
-                 SELECT m.filename || '::' || coalesce(a.filename, 'attachment')
+                 SELECT 'attachment' AS occurrence_kind,
+                        m.filename || '::' || coalesce(a.filename, 'attachment')
                           AS relpath,
-                        a.sha256, a.item_id, a.extracted_text_path,
-                        a.extracted_copy_path
+                        m.sha256 AS source_sha256,
+                        a.sha256 AS document_sha256,
+                        a.item_id, a.extracted_text_path,
+                        a.extracted_copy_path, a.extracted_copy_sha256,
+                        a.extraction_method, i.message_id,
+                        a.id AS attachment_id
                  FROM attachments a
                  JOIN item_memberships m ON m.item_id = a.item_id
+                 JOIN items i ON i.id = a.item_id
                  WHERE m.collection_id = ?
                    AND lower(coalesce(a.filename, '')) LIKE '%.pdf'
                )
@@ -432,18 +475,89 @@ class TransactionService:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def parse(self, collections: tuple[Collection, ...], stats: StageStats) \
-            -> None:
+    def input_digest(
+            self,
+            collections: tuple[Collection, ...],
+            extraction_method: str,
+    ) -> tuple[str, dict[str, list[RowDict]], tuple[str, ...]]:
+        """Hash semantic Stage 5 inputs; paths and mtimes are provenance only."""
+        files_by_collection: dict[str, list[RowDict]] = {}
+        inventory: list[dict[str, Any]] = []
+        stale_paths: list[str] = []
+        for collection in sorted(collections, key=lambda item: item.id):
+            files = [row for row in self.account_files(collection)
+                     if str(row["relpath"]).lower().endswith(".pdf")]
+            files_by_collection[collection.id] = files
+            for row in files:
+                raw_path = row.get("extracted_text_path")
+                if row.get("item_id") is None or not raw_path:
+                    text_digest = "not_ingested"
+                elif row.get("extraction_method") not in (
+                        extraction_method, None, "error"):
+                    text_digest = "stale"
+                    stale_paths.append(
+                        f"{collection.id}/{row.get('relpath')}")
+                elif row.get("extraction_method") != extraction_method:
+                    text_digest = "not_ingested"
+                else:
+                    text_digest = _file_sha(
+                        self.ctx.config.project_root / str(raw_path))
+                inventory.append({
+                    "collection_id": collection.id,
+                    "occurrence_kind": row.get("occurrence_kind"),
+                    "source_sha256": row.get("source_sha256"),
+                    "document_sha256": row.get("document_sha256"),
+                    "copy_sha256": row.get("extracted_copy_sha256"),
+                    "item_id": row.get("item_id"),
+                    "message_id": row.get("message_id"),
+                    "text_sha256": text_digest,
+                })
+        inventory.sort(key=canonical_digest)
+
+        accounts = []
+        for collection in sorted(collections, key=lambda item: item.id):
+            account = collection.bank_account
+            assert account is not None
+            accounts.append({
+                "collection_id": collection.id,
+                "bsb": account.bsb,
+                "account_number": account.account_number,
+                "owners": sorted(account.owners),
+                "type": account.type,
+                "currency": "AUD",
+                "label": collection.description or collection.title
+                or collection.id,
+            })
+
+        reconciliation_path = self.ctx.workspace.root / "reconciliation.yaml"
+        reconciliation_digest = _file_sha(reconciliation_path) \
+            if reconciliation_path.is_file() else "absent"
+        payload = {
+            "workspace_id": self.ctx.workspace.id,
+            "recipe_version": TRANSACTION_RECIPE_VERSION,
+            "parser_ids": sorted(parser.parser_id for parser in PARSERS),
+            "pdfinfo_version": _pdfinfo_version(),
+            "accounts": accounts,
+            "inventory": inventory,
+            "reconciliation_sha256": reconciliation_digest,
+        }
+        return (canonical_digest(payload), files_by_collection,
+                tuple(sorted(stale_paths)))
+
+    def parse(
+            self,
+            collections: tuple[Collection, ...],
+            files_by_collection: dict[str, list[RowDict]],
+            extraction_method: str,
+            stats: StageStats,
+    ) -> None:
         reconciliation = load_reconciliation(self.ctx.workspace.root)
         excluded_items = {
             int(item["item_id"])
             for item in reconciliation["exclude"]
             if isinstance(item, dict) and item.get("item_id") is not None
         }
-        account_ids = self.seed_accounts(collections)
-        for table in ("transfer_links", "statement_assertions",
-                      "transactions", "statements"):
-            self.conn.execute(f"DELETE FROM {table}")
+        account_ids = self.reset_graph(collections)
 
         seen_statement_keys: set[tuple[int, int, str | None]] = set()
         row_offsets: dict[int, int] = defaultdict(int)
@@ -453,9 +567,7 @@ class TransactionService:
             account_id = account_ids[collection.id]
             configured_digits = normalize_account_no(
                 account.bsb + account.account_number)
-            files = self.account_files(collection)
-            pdfs = [row for row in files
-                    if str(row["relpath"]).lower().endswith(".pdf")]
+            pdfs = files_by_collection.get(collection.id, [])
             if not pdfs:
                 self.ctx.review.flag(
                     collection.id, "transactions", "warning",
@@ -465,7 +577,40 @@ class TransactionService:
             for file_row in pdfs:
                 self._parse_file(
                     collection, configured_digits, account_id, file_row,
-                    excluded_items, seen_statement_keys, row_offsets, stats)
+                    excluded_items, seen_statement_keys, row_offsets,
+                    extraction_method, stats)
+
+    def reset_graph(
+            self,
+            collections: tuple[Collection, ...],
+    ) -> dict[str, int]:
+        """Clear all graph rows and converge configured accounts/owners."""
+        for table in ("transfer_links", "statement_assertions",
+                      "transactions", "statements"):
+            self.conn.execute(f"DELETE FROM {table}")
+        self.conn.execute("DELETE FROM account_owners")
+        current_ids = [collection.id for collection in collections]
+        current_owners = sorted({
+            owner
+            for collection in collections
+            for owner in (collection.bank_account.owners
+                          if collection.bank_account is not None else ())
+        })
+        if current_ids:
+            placeholders = ",".join("?" for _ in current_ids)
+            self.conn.execute(
+                f"DELETE FROM accounts WHERE config_id NOT IN ({placeholders})",
+                current_ids)
+        else:
+            self.conn.execute("DELETE FROM accounts")
+        if current_owners:
+            placeholders = ",".join("?" for _ in current_owners)
+            self.conn.execute(
+                f"DELETE FROM holders WHERE display_name NOT IN ({placeholders})",
+                current_owners)
+        else:
+            self.conn.execute("DELETE FROM holders")
+        return self.seed_accounts(collections)
 
     def _parse_file(
             self,
@@ -476,12 +621,22 @@ class TransactionService:
             excluded_items: set[int],
             seen_statement_keys: set[tuple[int, int, str | None]],
             row_offsets: dict[int, int],
+            extraction_method: str,
             stats: StageStats,
     ) -> None:
         filename = str(file_row["relpath"]).rsplit("/", 1)[-1]
         if file_row["item_id"] is None or not file_row["extracted_text_path"]:
             message = (f"NOT INGESTED: {filename} — run `ingest pdfs` after "
                        "`ingest discover`, then retry transactions")
+            self.ctx.review.flag(
+                f"{collection.id}/{filename}", "transactions", "error",
+                message)
+            self.log(f"transactions: {collection.id}: {message}")
+            stats.inc("not_ingested")
+            return
+        if file_row.get("extraction_method") != extraction_method:
+            message = (f"STALE PDF TEXT: {filename} — run `ingest pdfs`"
+                       " before retrying transactions")
             self.ctx.review.flag(
                 f"{collection.id}/{filename}", "transactions", "error",
                 message)
@@ -609,6 +764,7 @@ class TransactionService:
                 self.ctx.review.flag(
                     f"{collection.id}/{filename}", "transactions", "warning",
                     issue)
+                stats.inc("parse_issues")
 
     def link(self, stats: StageStats) -> None:
         reconciliation = load_reconciliation(self.ctx.workspace.root)
@@ -669,30 +825,121 @@ class TransactionService:
             stats.inc("links_ambiguous")
 
     def report(self) -> dict[str, Any]:
-        return _build_report(
+        report = _build_report(
             self.conn,
             self.ctx.workspace.root,
             log=self.log,
         )
+        try:
+            state = load_transaction_state(
+                self.ctx.config.transaction_manifest_path,
+                self.ctx.workspace.id)
+        except TransactionStateError as exc:
+            report["input_findings"] = {}
+            self.log(f"TRANSACTION BUILD STATE INVALID: {exc}")
+            return report
+        findings = state.findings if state is not None else {}
+        report["input_findings"] = findings
+        for key, count in sorted(findings.items()):
+            if count:
+                self.log(f"CURRENT {key}: {count} — see review queue")
+        return report
+
+
+def has_transaction_state(ctx: PipelineContext) -> bool:
+    manifest_path = getattr(ctx.config, "transaction_manifest_path", None)
+    if manifest_path is not None and manifest_path.is_file():
+        return True
+    return ctx.conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM accounts LIMIT 1)"
+        " OR EXISTS(SELECT 1 FROM statements LIMIT 1)"
+        " OR EXISTS(SELECT 1 FROM transactions LIMIT 1)"
+    ).fetchone()[0] == 1
+
+
+def _manifest_findings(stats: StageStats) -> dict[str, int]:
+    return {key: stats.get(key) for key in FINDING_KEYS}
 
 
 class TransactionsStage(Stage):
     name = "transactions"
+
+    def __init__(self, ctx: PipelineContext, *, force: bool = False):
+        super().__init__(ctx)
+        self.force = force
 
     def run(self) -> StageStats:
         stats = StageStats()
         service = TransactionService(self.ctx)
         collections = service.bank_collections()
         if not collections:
+            if not has_transaction_state(self.ctx):
+                return stats
+            try:
+                service.reset_graph(())
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
+            self.config.transaction_manifest_path.unlink(missing_ok=True)
+            stats.inc("cleared")
             return stats
+
+        extraction_method = pdf_text_extraction_method(
+            langs=self.config.ocr_langs)
+        input_digest, files_by_collection, stale_paths = service.input_digest(
+            collections, extraction_method)
+        if stale_paths:
+            preview = ", ".join(stale_paths[:3])
+            more = f" (+{len(stale_paths) - 3} more)" \
+                if len(stale_paths) > 3 else ""
+            raise SystemExit(
+                "transactions: stale PDF-text recipe for "
+                f"{preview}{more}; run `ingest pdfs` first")
+        manifest: TransactionBuildState | None = None
+        if not self.force:
+            try:
+                manifest = load_transaction_state(
+                    self.config.transaction_manifest_path,
+                    self.ctx.workspace.id)
+            except TransactionStateError:
+                manifest = None
+        if manifest is not None and manifest.input_digest == input_digest:
+            output_digest, counts = transaction_output_state(self.conn)
+            if output_digest == manifest.output_digest \
+                    and counts == manifest.counts:
+                stats.inc("accounts", counts["accounts"])
+                stats.inc("unchanged", counts["statements"])
+                stats.inc("rows", counts["transactions"])
+                return stats
+
         try:
             stats.inc("accounts", len(collections))
-            service.parse(collections, stats)
+            service.parse(
+                collections, files_by_collection, extraction_method, stats)
             service.link(stats)
             self.conn.commit()
         except BaseException:
             self.conn.rollback()
             raise
+
+        confirmed_digest, _, confirmed_stale = service.input_digest(
+            collections, extraction_method)
+        if confirmed_digest != input_digest or confirmed_stale:
+            raise RuntimeError(
+                "transaction inputs changed during rebuild; manifest not "
+                "published — retry the stage")
+        output_digest, counts = transaction_output_state(self.conn)
+        persist_transaction_state(
+            self.config.transaction_manifest_path,
+            TransactionBuildState(
+                workspace_id=self.ctx.workspace.id,
+                input_digest=input_digest,
+                output_digest=output_digest,
+                built_at=now_iso(),
+                counts=counts,
+                findings=_manifest_findings(stats),
+            ))
         return stats
 
 

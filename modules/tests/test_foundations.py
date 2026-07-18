@@ -61,6 +61,8 @@ def test_config(tmp: Path) -> None:
     assert cfg.state_dir == ws_dir / ".state" / "workspace-matter-x"
     assert cfg.db_path == cfg.state_dir / "matter-x.db"
     assert cfg.runtime_dir == cfg.state_dir / "runtime"
+    assert cfg.transaction_manifest_path == \
+        cfg.state_dir / "logs" / "transactions" / "build-state.json"
     assert cfg.accuracy_tests_dir == \
         cfg.state_dir / "search-accuracy-tests"
     cache = cfg.collection_cache("own/solicitor")

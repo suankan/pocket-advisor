@@ -13,14 +13,19 @@ re-running pdftotext is free.
 
 Subprocesses go through `run_command` so tests can patch one seam.
 """
+import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
 
 from modules.config import OCRMYPDF_TIMEOUT_SEC, PDFTOTEXT_TIMEOUT_SEC
 
-# Method label recorded on every row this pipeline extracts.
-EXTRACTION_METHOD = "ocrmypdf_redo_clean_pdftotext_layout"
+# Versioned wrapper recipe. The complete extraction-method value also includes
+# local tool versions and language configuration, so successful old text is
+# reprocessed when its producing recipe is no longer current.
+PDF_TEXT_RECIPE_VERSION = 1
+EXTRACTION_METHOD = "pdf-text-v1"
 
 
 class OcrError(RuntimeError):
@@ -34,6 +39,42 @@ def run_command(args: list[str],
 
 def _detail(result: subprocess.CompletedProcess[bytes]) -> str:
     return result.stderr.decode("utf-8", errors="replace").strip()
+
+
+def _tool_version(args: list[str]) -> str:
+    result = run_command(args, timeout=20)
+    if result.returncode != 0:
+        detail = _detail(result)
+        raise OcrError(
+            f"cannot fingerprint {' '.join(args)} ({result.returncode})"
+            + (f": {detail}" if detail else ""))
+    output = (result.stdout + result.stderr).decode(
+        "utf-8", errors="replace").strip()
+    if not output:
+        raise OcrError(f"cannot fingerprint {' '.join(args)}: empty version")
+    return output.splitlines()[0].strip()
+
+
+def pdf_text_extraction_method(*, langs: str) -> str:
+    """Return the current Stage 3 recipe fingerprint recorded in SQLite."""
+    recipe = {
+        "recipe_version": PDF_TEXT_RECIPE_VERSION,
+        "ocrmypdf": {
+            "version": _tool_version(["ocrmypdf", "--version"]),
+            "args": ["--redo-ocr", "--clean", "--output-type", "pdf",
+                     "--optimize", "0", "--language", langs],
+        },
+        "pdftotext": {
+            "version": _tool_version(["pdftotext", "-v"]),
+            "args": ["-layout"],
+        },
+        "accept_nonzero_ocr_output_when_pdftotext_succeeds": True,
+    }
+    payload = json.dumps(
+        recipe, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return f"{EXTRACTION_METHOD}:{digest}"
 
 
 def ocr_to_derivative(source: Path, derivative: Path,

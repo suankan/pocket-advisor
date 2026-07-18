@@ -2,6 +2,7 @@
 import json
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,12 @@ from modules.review import ReviewLog  # noqa: E402
 from modules.wipe import (active_index_slug, format_index_list,  # noqa: E402
                           wipe_indexes)
 from modules.workspace import Registry  # noqa: E402
+from modules.transaction_state import (  # noqa: E402
+    TransactionBuildState,
+    empty_findings,
+    persist_transaction_state,
+    transaction_output_state,
+)
 
 
 REGISTRY = """\
@@ -134,6 +141,28 @@ def main() -> int:
         assert report.checks["indexed_originals_verified"] == 1
         assert report.checks["leaf_vectors"] == 1
         assert report.checks["thread_vectors"] == 1
+
+        output_digest, output_counts = transaction_output_state(conn)
+        state = TransactionBuildState(
+            workspace_id=workspace.id,
+            input_digest="0" * 64,
+            output_digest=output_digest,
+            built_at=datetime.now(timezone.utc).isoformat(),
+            counts=output_counts,
+            findings=empty_findings(),
+        )
+        persist_transaction_state(config.transaction_manifest_path, state)
+        report = verify_workspace(ctx)
+        assert report.ok, report.problems
+        assert report.checks["transaction_manifest"] == "present"
+        broken = state.as_dict()
+        broken["output_digest"] = "f" * 64
+        config.transaction_manifest_path.write_text(json.dumps(broken))
+        report = verify_workspace(ctx)
+        assert not report.ok
+        assert any("manifest output digest mismatch" in problem
+                   for problem in report.problems)
+        persist_transaction_state(config.transaction_manifest_path, state)
 
         inactive = config.vectors_dir / "text" / "inactive__4d__deadbeef"
         inactive.mkdir(parents=True)

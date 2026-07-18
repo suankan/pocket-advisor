@@ -217,6 +217,10 @@ class Config:
         return self.logs_dir / "review_queue.csv"
 
     @property
+    def transaction_manifest_path(self) -> Path:
+        return self.logs_dir / "transactions" / "build-state.json"
+
+    @property
     def vectors_dir(self) -> Path:
         return self.state_dir / "vectors"
 

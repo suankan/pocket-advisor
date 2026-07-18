@@ -127,8 +127,13 @@ def _stage_class(name: str) -> type[Stage]:
             raise ValueError(f"unknown pipeline stage: {name}")
 
 
-def _execute_stage(ctx: PipelineContext, name: str) -> StageStats:
-    return _stage_class(name)(ctx).execute()
+def _execute_stage(
+        ctx: PipelineContext, name: str, *, force_transactions: bool = False,
+) -> StageStats:
+    stage_class = _stage_class(name)
+    if name == "transactions":
+        return stage_class(ctx, force=force_transactions).execute()
+    return stage_class(ctx).execute()
 
 
 def _utc_now() -> datetime:
@@ -174,6 +179,7 @@ def run_ingest(
         stage: str,
         selection: RuntimeSelection,
         *,
+        force_transactions: bool = False,
         clock: Callable[[], float] = time.monotonic,
         utc_now: Callable[[], datetime] = _utc_now,
 ) -> int:
@@ -195,7 +201,10 @@ def run_ingest(
         raise
     try:
         if stage != "all":
-            _execute_stage(ctx, stage)
+            if force_transactions:
+                _execute_stage(ctx, stage, force_transactions=True)
+            else:
+                _execute_stage(ctx, stage)
             return 0
 
         from modules.ingest_report import STAGE_ORDER, StageRun
@@ -249,7 +258,8 @@ def run_ingest(
             has_bank_collections = any(
                 collection.is_bank_transactions
                 for collection in ctx.workspace.collections)
-            if has_bank_collections:
+            from modules.pipeline.transactions import has_transaction_state
+            if has_bank_collections or has_transaction_state(ctx):
                 execute("transactions")
             else:
                 reason = "no mounted bank-transactions collections"
@@ -348,12 +358,16 @@ def _handle_fetch_model(args: argparse.Namespace) -> int:
 
 
 def _handle_ingest(args: argparse.Namespace) -> int:
+    if args.force and args.stage != "transactions":
+        raise SystemExit(
+            "ingest: --force applies only to 'ingest transactions'")
     if args.stage == "report":
         return _show_ingest_report(args)
     if args.record is not None or args.last:
         raise SystemExit(
             "ingest: --last / a record path apply only to 'ingest report'")
-    return run_ingest(args.stage, args.selection)
+    return run_ingest(
+        args.stage, args.selection, force_transactions=args.force)
 
 
 def _show_ingest_report(args: argparse.Namespace) -> int:
@@ -662,6 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="display the workspace's latest saved run record "
              "(ingest report only; this is also the default)",
+    )
+    command.add_argument(
+        "--force",
+        action="store_true",
+        help="force a full rebuild (ingest transactions only)",
     )
     command.set_defaults(handler=_handle_ingest, workspace_required=True)
 

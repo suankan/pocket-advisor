@@ -29,7 +29,7 @@ from modules.config import artifact_folder_name
 from modules.custody import CustodyError, sha256_bytes, write_verified
 from modules.docdates import extract_document_date
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
-from modules.ocr import EXTRACTION_METHOD, OcrError, ocr_to_derivative, \
+from modules.ocr import OcrError, ocr_to_derivative, pdf_text_extraction_method, \
     pdf_to_text
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
@@ -123,26 +123,39 @@ class PdfTextStage(Stage):
     # -- 3.2 OCR + text extraction -------------------------------------------
 
     def _ocr_pending(self, stats: StageStats) -> None:
+        extraction_method = pdf_text_extraction_method(
+            langs=self.config.ocr_langs)
         attachment_jobs = self.conn.execute(
-            "SELECT id, filename, extracted_copy_path FROM attachments"
-            " WHERE (extraction_method IS NULL OR extraction_method = 'error')"
-            " AND extracted_copy_path IS NOT NULL ORDER BY id").fetchall()
+            "SELECT id, filename, extracted_copy_path, extraction_method"
+            " FROM attachments WHERE extracted_copy_path IS NOT NULL"
+            " AND (content_type = 'application/pdf'"
+            " OR lower(coalesce(filename, '')) LIKE '%.pdf')"
+            " AND (extraction_method IS NULL OR extraction_method = 'error'"
+            " OR extraction_method != ?) ORDER BY id",
+            (extraction_method,)).fetchall()
         native_jobs = self.conn.execute(
-            "SELECT m.item_id, m.extracted_copy_path, i.subject"
+            "SELECT m.item_id, m.extracted_copy_path, m.extraction_method,"
+            " i.subject"
             " FROM item_file_meta m JOIN items i ON i.id = m.item_id"
             " WHERE (m.extraction_method IS NULL"
-            " OR m.extraction_method = 'error')"
+            " OR m.extraction_method = 'error'"
+            " OR m.extraction_method != ?)"
             " AND m.extracted_copy_path IS NOT NULL"
-            " ORDER BY m.item_id").fetchall()
+            " ORDER BY m.item_id", (extraction_method,)).fetchall()
+
+        for row in (*attachment_jobs, *native_jobs):
+            previous = row["extraction_method"]
+            if previous not in (None, "error", extraction_method):
+                stats.inc("recipe_stale")
 
         progress = Progress("pdf to text",
                             total=len(attachment_jobs) + len(native_jobs))
         for row in attachment_jobs:
             progress.step(note=row["filename"] or f"attachment {row['id']}")
-            self._ocr_attachment(row, stats)
+            self._ocr_attachment(row, extraction_method, stats)
         for row in native_jobs:
             progress.step(note=row["subject"] or f"item {row['item_id']}")
-            self._ocr_native(row, stats)
+            self._ocr_native(row, extraction_method, stats)
         progress.done()
 
     def _extract(self, copy_path: Path) -> tuple[str, Path, str | None]:
@@ -171,7 +184,8 @@ class PdfTextStage(Stage):
             f"{label}: {warning}; pdftotext -layout succeeded")
         stats.inc("ocr_warnings")
 
-    def _ocr_attachment(self, row, stats: StageStats) -> None:
+    def _ocr_attachment(self, row, extraction_method: str,
+                        stats: StageStats) -> None:
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
             _, txt_path, ocr_warning = self._extract(copy_path)
@@ -192,13 +206,14 @@ class PdfTextStage(Stage):
             "UPDATE attachments SET extraction_method = ?,"
             " extracted_text_path = ?, skip_reason = NULL, processed_at = ?"
             " WHERE id = ?",
-            (EXTRACTION_METHOD,
+            (extraction_method,
              str(txt_path.relative_to(self.config.project_root)),
              now_iso(), row["id"]))
         self.conn.commit()
         stats.inc("ocr_ok")
 
-    def _ocr_native(self, row, stats: StageStats) -> None:
+    def _ocr_native(self, row, extraction_method: str,
+                    stats: StageStats) -> None:
         item_id = int(row["item_id"])
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
@@ -231,7 +246,7 @@ class PdfTextStage(Stage):
             " doc_date_detail = ?, doc_date_raw = ?, skip_reason = NULL,"
             " processed_at = ?"
             " WHERE item_id = ?",
-            (EXTRACTION_METHOD, txt_rel, doc_date.date_iso, doc_date.source,
+            (extraction_method, txt_rel, doc_date.date_iso, doc_date.source,
              doc_date.detail, doc_date.raw, now_iso(), item_id))
         self.conn.execute(
             "UPDATE items SET date_utc = ?, date_raw = ?,"

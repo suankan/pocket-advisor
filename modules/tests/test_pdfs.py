@@ -50,6 +50,9 @@ def fake_run_factory(calls: list[list[str]], fail_for: set[str],
     def fake_run(args: list[str], timeout: int):
         calls.append(args)
         program = args[0]
+        if args[1:] in (["--version"], ["-v"]):
+            return subprocess.CompletedProcess(
+                args, 0, b"fixture-tool 1.0\n", b"")
         source, target = Path(args[-2]), Path(args[-1])
         if any(marker in source.name for marker in fail_for):
             return subprocess.CompletedProcess(
@@ -144,7 +147,8 @@ def main() -> int:
         ok_att = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'attached.pdf'"
         ).fetchone()
-        assert ok_att["extraction_method"] == ocr.EXTRACTION_METHOD
+        method = ok_att["extraction_method"]
+        assert method.startswith(f"{ocr.EXTRACTION_METHOD}:")
         txt_path = tmp / ok_att["extracted_text_path"]
         assert "pdf-to-text" in str(txt_path) and txt_path.is_file()
         derivative = (txt_path.parent.with_name("pdf-ocr") /
@@ -153,7 +157,7 @@ def main() -> int:
         warned = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'warned.pdf'"
         ).fetchone()
-        assert warned["extraction_method"] == ocr.EXTRACTION_METHOD
+        assert warned["extraction_method"] == method
         assert (tmp / warned["extracted_text_path"]).is_file()
         warning = conn.execute(
             "SELECT severity, message FROM ingestion_log"
@@ -169,7 +173,8 @@ def main() -> int:
         assert "simulated tool failure" in broken["skip_reason"]
 
         # ocrmypdf flag shape: --redo-ocr --clean, never --deskew.
-        ocr_calls = [c for c in calls if c[0] == "ocrmypdf"]
+        ocr_calls = [c for c in calls if c[0] == "ocrmypdf"
+                     and "--redo-ocr" in c]
         assert all(c[1:3] == ["--redo-ocr", "--clean"] for c in ocr_calls)
         assert all("--deskew" not in c and "--clean-final" not in c
                    for c in ocr_calls)
@@ -202,11 +207,12 @@ def main() -> int:
             stats2 = PdfTextStage(ctx).run()
         assert stats2.get("ocr_ok", ) == 1, stats2
         assert stats2.get("native_new", ) == 0, stats2
-        assert [call[0] for call in calls2] == ["ocrmypdf", "pdftotext"]
+        assert [call[0] for call in calls2] == [
+            "ocrmypdf", "pdftotext", "ocrmypdf", "pdftotext"]
         broken = conn.execute(
             "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
         ).fetchone()
-        assert broken["extraction_method"] == ocr.EXTRACTION_METHOD
+        assert broken["extraction_method"] == method
         assert broken["skip_reason"] is None
         assert (tmp / broken["extracted_text_path"]).is_file()
 
@@ -222,12 +228,27 @@ def main() -> int:
             else:
                 raise AssertionError("missing pdftotext output was accepted")
 
+        # A successful artifact from an older extraction recipe is stale and
+        # is regenerated even though its source PDF is unchanged.
+        conn.execute(
+            "UPDATE attachments SET extraction_method='pdf-text-v0:old'"
+            " WHERE filename='warned.pdf'")
+        conn.commit()
         calls3: list[list[str]] = []
         with patch.object(ocr, "run_command",
                           side_effect=fake_run_factory(calls3, set())):
             stats3 = PdfTextStage(ctx).run()
-        assert stats3.get("ocr_ok", ) == 0, stats3
-        assert calls3 == [], calls3
+        assert stats3.get("recipe_stale") == 1, stats3
+        assert stats3.get("ocr_ok") == 1, stats3
+        assert [call[0] for call in calls3] == [
+            "ocrmypdf", "pdftotext", "ocrmypdf", "pdftotext"]
+
+        calls4: list[list[str]] = []
+        with patch.object(ocr, "run_command",
+                          side_effect=fake_run_factory(calls4, set())):
+            stats4 = PdfTextStage(ctx).run()
+        assert stats4.get("ocr_ok") == 0, stats4
+        assert [call[0] for call in calls4] == ["ocrmypdf", "pdftotext"]
 
         conn.close()
     print("test_pdfs: all ok")

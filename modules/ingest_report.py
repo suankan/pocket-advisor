@@ -22,6 +22,8 @@ from modules.embedding import (ModelStore, current_fingerprint, index_paths,
                                thread_vector_filename)
 from modules.pipeline.base import PipelineContext
 from modules.pipeline.transactions import classify_transaction_coverage
+from modules.transaction_state import (TransactionStateError,
+                                       load_transaction_state)
 
 
 REPORT_SCHEMA_VERSION = 1
@@ -344,6 +346,11 @@ def _transaction_snapshot(ctx: PipelineContext) -> dict[str, Any]:
         return {"enabled": False}
     conn = ctx.conn
     coverage = classify_transaction_coverage(conn).counts()
+    try:
+        manifest = load_transaction_state(
+            ctx.config.transaction_manifest_path, ctx.workspace.id)
+    except TransactionStateError:
+        manifest = None
     return {
         "enabled": True,
         "accounts": _scalar(conn, "SELECT count(*) FROM accounts"),
@@ -364,6 +371,7 @@ def _transaction_snapshot(ctx: PipelineContext) -> dict[str, Any]:
                   "WHERE passed IS NULL"),
         "transfer_links": _scalar(conn, "SELECT count(*) FROM transfer_links"),
         "coverage": coverage,
+        "input_findings": manifest.findings if manifest is not None else {},
     }
 
 
@@ -435,6 +443,14 @@ def snapshot_findings(snapshot: WorkspaceSnapshot) -> list[Finding]:
             int(coverage["suspicious"]))
         add("info", "single_account_unverifiable",
             int(coverage["single_account_unverifiable"]))
+        input_findings = transactions.get("input_findings", {})
+        for category in ("unparsed", "not_ingested", "mismatched"):
+            add("error", f"transactions_{category}",
+                int(input_findings.get(category, 0)))
+        for category in ("duplicates", "missing_periods", "parse_issues",
+                         "links_ambiguous", "accounts_without_pdfs"):
+            add("warning", f"transactions_{category}",
+                int(input_findings.get(category, 0)))
 
     for category, count in snapshot.run_flags.items():
         severity = category.rsplit(":", 1)[-1]

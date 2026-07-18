@@ -85,6 +85,8 @@ def test_grammar() -> None:
         "discover"
     assert parser.parse_args([*WS, "ingest", "transactions"]).stage == \
         "transactions"
+    assert parser.parse_args([
+        *WS, "ingest", "transactions", "--force"]).force is True
     assert parser.parse_args([*WS, "transactions", "report"]).action == \
         "report"
     assert parser.parse_args([*WS, "blob-index", "list-sources"]).action == \
@@ -141,6 +143,21 @@ def test_grammar() -> None:
     parse_must_fail([
         *WS, "query", "question", "--no-daemon", "--require-daemon"])
 
+    # --force is parsed centrally but only the transaction stage accepts it.
+    for stage in ("all", "pdfs", "report"):
+        args = parser.parse_args([*WS, "ingest", stage, "--force"])
+        args.selection = fake_selection()
+        try:
+            cli._handle_ingest(args)
+            raise AssertionError(f"ingest {stage} --force must be rejected")
+        except SystemExit as exc:
+            assert "ingest transactions" in str(exc)
+    args = parser.parse_args([*WS, "ingest", "transactions", "--force"])
+    args.selection = fake_selection()
+    with patch.object(cli, "run_ingest", return_value=0) as runner:
+        assert cli._handle_ingest(args) == 0
+    assert runner.call_args.kwargs["force_transactions"] is True
+
 
 def test_orchestration() -> None:
     def record_stage(executed: list[str], name: str) -> StageStats:
@@ -164,6 +181,22 @@ def test_orchestration() -> None:
     assert [item.name for item in stages] == executed
     assert all(item.outcome == "completed" for item in stages)
     assert context.conn.closed
+
+    # Removing the final bank mount still executes one cleanup when prior
+    # transaction state exists.
+    executed.clear()
+    selection = fake_selection(embed=False, bank=False)
+    context = fake_context(embed=False, bank=False)
+    with patch.object(cli, "_open_context", return_value=context), \
+            patch.object(cli, "_execute_stage",
+                         side_effect=lambda _, name:
+                         record_stage(executed, name)), \
+            patch("modules.pipeline.transactions.has_transaction_state",
+                  return_value=True), \
+            patch.object(cli, "_finalize_ingest_report"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        cli.run_ingest("all", selection)
+    assert executed[-1] == "transactions", executed
 
     # Config gates apply only to `all`; summaries always maintains staleness.
     executed.clear()

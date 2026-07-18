@@ -14,6 +14,9 @@ from modules.embedding import (ModelStore, current_fingerprint, index_paths,
                                meta_fingerprint, thread_index_paths,
                                thread_vector_filename)
 from modules.pipeline.base import PipelineContext
+from modules.transaction_state import (TransactionStateError,
+                                       load_transaction_state,
+                                       transaction_output_state)
 from modules.workspace import Collection
 
 
@@ -428,6 +431,22 @@ def _verify_transactions(ctx: PipelineContext, report: VerificationReport) -> No
         _problem(report, f"transactions: {failed} non-excluded statements failed")
     if failed_assertions:
         _problem(report, f"transactions: {failed_assertions} assertions failed")
+    manifest_path = ctx.config.transaction_manifest_path
+    if not manifest_path.is_file():
+        report.checks["transaction_manifest"] = "missing (rebuild on next run)"
+        return
+    try:
+        state = load_transaction_state(manifest_path, ctx.workspace.id)
+    except TransactionStateError as exc:
+        _problem(report, f"transactions: invalid convergence manifest: {exc}")
+        return
+    assert state is not None
+    digest, counts = transaction_output_state(ctx.conn)
+    report.checks["transaction_manifest"] = "present"
+    if digest != state.output_digest:
+        _problem(report, "transactions: manifest output digest mismatch")
+    if counts != state.counts:
+        _problem(report, "transactions: manifest output counts mismatch")
 
 
 def verify_workspace(ctx: PipelineContext) -> VerificationReport:

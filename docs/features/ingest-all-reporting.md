@@ -1,0 +1,231 @@
+# Full-Ingest Completion Reporting
+
+Status: **locked 2026-07-18; not yet implemented**. Implementation is roadmap
+item 1.
+
+This feature makes every successful or failed `ingest all` invocation end with
+one concise, trustworthy account of what the run did and what searchable state
+now exists. It replaces manual SQLite/vector inspection for routine ingestion
+assessment without turning ingestion into the future full `verify` command.
+
+## Objective
+
+```text
+stage progress and one-line counters
+                 |
+       CLI records stage timings
+                 |
+      post-run read-only snapshot
+                 |
+  terminal summary + local JSON record
+```
+
+The report answers two different questions and must keep them separate:
+
+1. **This run:** which stages ran or were skipped, how long each took, and what
+   work their `StageStats` recorded.
+2. **Workspace now:** how many sources, readable artifacts, threads, summaries,
+   chunks, vectors, statements, transactions, and current findings exist after
+   the run converged.
+
+An unchanged idempotent rerun should therefore show little or no new work while
+still showing a complete, useful workspace snapshot.
+
+## Locked decisions
+
+1. **Default for `ingest all` only.** The final report is unconditional for the
+   full orchestrated pipeline. A named-stage invocation retains its progress and
+   one-line `StageStats`; it must not imply that prerequisites or downstream
+   indexes were audited.
+2. **CLI-owned orchestration.** Timing, completion state, and report invocation
+   belong to `modules/cli.py`. A typed reporting service may query state and
+   format results, but it is not a pipeline stage. Stages remain independent,
+   do not call one another, and continue to return `StageStats`.
+3. **Delta and snapshot are distinct.** Stage counters are run-local deltas.
+   Workspace totals come from the converged SQLite rows and the configured
+   vector-index manifests after all enabled stages finish.
+4. **Wall-clock timings use a monotonic clock.** Record every attempted stage
+   from immediately before `execute()` through its return, plus total pipeline
+   time. A skipped stage records a reason, not a misleading zero duration. The
+   post-run audit/render duration is reported separately from pipeline time.
+5. **Existing progress remains.** Per-item progress bars and current stage
+   summary lines remain visible. The completion report is a compact final block,
+   not a replacement for live progress.
+6. **Current-state findings drive the assessment.** Candidate errors, missing
+   readable PDF text, stale/missing eligible summaries, index-count divergence,
+   failed statement validation, and current-run custody/review flags are rolled
+   up. Old review-log rows alone do not keep a recovered workspace unhealthy.
+7. **No finding flood.** The final block prints counts and categories, never
+   hundreds of transaction IDs or full OCR diagnostics. It points to the
+   workspace review queue and dedicated detail commands when investigation is
+   needed.
+8. **Transaction classification handles limited coverage honestly.** With only
+   one mounted account, an unmatched transfer-like debit is
+   `single_account_unverifiable`, not “all accounts covered” or suspicious.
+   `suspicious` requires at least one other configured account and complete
+   statement coverage for every such account on the transaction date. The same
+   shared classifier must govern both the ingest rollup and `transactions
+   report`. Single-account unverifiability is an informational coverage
+   limitation and does not, by itself, downgrade a run to `COMPLETE WITH
+   FINDINGS`.
+9. **A machine-readable record is written by default.** Every `ingest all`
+   attempt writes one aggregate-only, schema-versioned JSON report below
+   `<workspace-state>/logs/ingest-runs/`. It is workspace-derived operational
+   state, is removed by that workspace's `wipe state`, and is never a source of
+   truth for retrieval.
+10. **No corpus narrative in the run record.** JSON may contain workspace ID,
+    timestamps, timings, counter names, aggregate counts, model/index
+    fingerprints, status, and finding categories. It must not contain email
+    bodies, PDF text, transaction descriptions, questions, answers, or evidence
+    snippets.
+11. **Reporting performs no model or corpus work.** It may query SQLite, read
+    small index metadata/ID arrays, and inspect configured derived paths. It
+    never walks collection roots, parses evidence, runs OCR, summarizes,
+    embeds, or loads the vector matrix.
+12. **This is not full verification.** Default reporting checks cheap
+    relational/index cardinality and freshness invariants. Custody rehashing,
+    SQLite/FTS integrity commands, artifact hash verification, and exhaustive
+    reconciliation remain the responsibility of the future native `verify`
+    command.
+
+## Report data contract
+
+The stable human and JSON snapshot contains these sections:
+
+| section | minimum fields |
+|---|---|
+| Run | workspace, start/end UTC, completion status, pipeline/report seconds |
+| Stages | stage name, outcome (`completed`, `skipped`, `failed`), duration, raw `StageStats`, skip/failure category |
+| Sources | candidates by email/PDF/other and candidate/error status; source count and bytes |
+| Evidence | email/native-PDF item counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
+| Threads | total/singleton/multi-message threads; eligible/current/stale/missing summaries |
+| Search | leaf chunks by email/native-PDF/attached-PDF source; enriched-payload coverage; leaf and summary FTS counts; configured vector fingerprint and leaf/summary manifest counts; mismatches |
+| Transactions | mounted accounts, statements, rows, statement balance status, assertion passed/failed/unassessed, links, and aggregate coverage buckets |
+| Findings | new run flags by stage/severity plus current-state issue categories and the review-queue path |
+
+The reporter derives semantic totals rather than exposing accidental schema
+details. For example, native-PDF chunks currently retain
+`source_type='email_body'`, so the native-PDF total must join through
+`items.item_kind`; it must not label all such chunks as email text.
+
+Vector state is current only when the configured fingerprint's manifest and ID
+arrays exist and agree with the eligible SQLite entity IDs. The report reads ID
+arrays but not `vectors.npy`. If embedding is disabled, it says so explicitly
+and does not claim that a pre-existing vector cache is current.
+
+## Transaction rollup
+
+The shared transaction classifier reports mutually exclusive buckets:
+
+- `matched` — either endpoint of a stored automatic/manual transfer link;
+- `external` — an unmatched debit whose description is not transfer-like;
+- `coverage_unknown` — transfer-like, unmatched, and at least one other account
+  lacks statement coverage on that date;
+- `single_account_unverifiable` — transfer-like and unmatched when no other
+  account is configured;
+- `suspicious` — transfer-like and unmatched when one or more other accounts
+  exist and all of them are covered on that date.
+
+The completion block prints only bucket counts. `transactions report` may show
+row IDs for investigation, but uses the same names and must never describe an
+empty set of other accounts as “all accounts covered.” `coverage_unknown` and
+`suspicious` are findings; `single_account_unverifiable` is a visible coverage
+note rather than an anomaly claim.
+
+Assertion totals always distinguish `passed`, `failed`, and `unassessed`.
+Supplemental extracted assertions with no validation target are not silently
+called passed, but they also do not make the run unhealthy when the statement's
+required assertion set is present and `balance_ok=1`. A failed required
+assertion or a statement with no usable assertion set remains a finding.
+
+## Completion and exit semantics
+
+- **COMPLETE:** every required/enabled stage returned and the post-run snapshot
+  has no current findings.
+- **COMPLETE WITH FINDINGS:** every required/enabled stage returned, but one or
+  more reviewable/current-state findings remain. This preserves the existing
+  successful exit status for tolerated per-document failures such as an OCR
+  error.
+- **INCOMPLETE:** a stage raised or was interrupted. The CLI prints and records
+  completed timings/counters where possible, identifies the failed stage, and
+  preserves the original non-zero exit/exception semantics. Later stages are
+  `not_run`, never `skipped`.
+- **REPORT FAILED:** stages completed but the required snapshot or JSON record
+  could not be produced. The already committed stage work is not rolled back;
+  the command exits non-zero because its default reporting contract was not
+  fulfilled.
+
+A reporting failure must never mask an earlier pipeline exception. If the
+database was never opened safely, the CLI emits the best available terminal
+run/timing block but does not create a report elsewhere.
+
+JSON records are written atomically and write-verified. Their filenames use a
+collision-resistant UTC run timestamp, and the terminal prints the exact path
+of the created record. No `latest` symlink or cross-workspace catalogue is
+created.
+
+## Human output shape
+
+The renderer uses stable labels and terminal-safe plain text. Exact alignment
+is presentation detail; the information hierarchy is locked:
+
+```text
+INGEST COMPLETE WITH FINDINGS — workspace test — pipeline 4m38s
+
+This run
+  discover       completed    0.1s   new_emails=33, new_pdfs=4
+  ...
+  transactions   completed    0.2s   accounts=1, parsed=4
+
+Workspace now
+  Sources       37 originals — 33 emails, 4 PDFs
+  PDFs          25/27 readable — 2 failed occurrences, 1 unique blob
+  Threads       14 — 6/6 eligible summaries current, 0 stale
+  Search        516 leaf + 6 navigation vectors — indexes consistent
+  Transactions  4 statements, 1488 rows — 4 balance-ok, 0 failed
+
+Findings
+  PDFs          2 OCR failures (1 unique blob)
+  Coverage      335 transfers unverifiable with one mounted account (info)
+  Review queue  <workspace-state>/logs/review_queue.csv
+
+Run report: <workspace-state>/logs/ingest-runs/<timestamp>.json
+```
+
+## Acceptance criteria
+
+1. A full run always attempts a final report; a named-stage run does not.
+2. Tests inject a fake monotonic clock and prove stage/total timing boundaries,
+   skipped reasons, and failed-stage handling without sleeps.
+3. An unchanged second run distinguishes zero/minimal work from unchanged,
+   non-zero workspace totals and performs no unnecessary model work.
+4. Snapshot counts agree with SQLite and the current vector manifests/ID
+   arrays without loading `vectors.npy` or reading collection files.
+5. The reporter distinguishes email, native-PDF, and attached-PDF chunks even
+   while native PDFs retain the compatibility `source_type` value.
+6. Missing/stale summaries and leaf/summary index divergence produce
+   `COMPLETE WITH FINDINGS` and explicit aggregate categories.
+7. A tolerated OCR failure reports both occurrence count and unique source-hash
+   count while preserving successful completion semantics.
+8. A one-account fixture classifies unmatched transfer-like debits as
+   `single_account_unverifiable`, emits no suspicious IDs in the completion
+   block, and fixes the standalone transaction report wording too.
+9. Multi-account fixtures cover matched, external, coverage-unknown, and truly
+   suspicious transactions using the same shared classifier.
+10. The JSON record contains no corpus text or transaction descriptions, is
+    written only inside the selected workspace state, and round-trips against a
+    versioned typed schema.
+11. A stage exception produces an `INCOMPLETE` partial report without running
+    downstream stages or masking the original failure.
+12. Reporting failure after completed stages exits non-zero and clearly states
+    that ingestion state may have committed successfully.
+13. Existing module and frozen test suites remain passing, and no test touches
+    real corpus or live workspace state.
+
+## Non-goals
+
+- Answer-quality or golden-set accuracy measurement.
+- Full custody, artifact-hash, SQLite, or FTS integrity verification.
+- Historical trend dashboards or cross-workspace run aggregation.
+- Changing stage transaction boundaries or retry semantics.
+- Printing evidence content or every review finding in the default summary.

@@ -17,6 +17,8 @@ Feature-level designs refine this document:
 - `docs/features/embedding-design.md` — thread reconstruction, navigation
   summaries, dual indexes, hybrid retrieval, evidence expansion, and the
   future answering boundary.
+- `docs/features/ingest-all-reporting.md` — default full-ingest timing,
+  converged-state statistics, finding rollups, and local run records.
 
 If a feature document is more specific, it governs that feature. Neither
 feature document may weaken the custody, privacy, or evidence rules here.
@@ -117,6 +119,13 @@ only CLI orchestration owns ordering and gates.
 Stages are idempotent and resumable. A failure is loud and reviewable while
 independent work continues where custody permits. Summary-staleness maintenance
 always runs; configuration gates only the generative pass.
+
+Every `ingest all` attempt ends with the CLI-owned completion report locked in
+`docs/features/ingest-all-reporting.md`: run-local stage work and monotonic
+timings remain distinct from a read-only snapshot of the workspace's converged
+evidence, retrieval, and transaction state. The concise report is printed by
+default and stored as aggregate-only JSON below that workspace's logs. It is an
+operational assessment, not a substitute for the native full `verify` command.
 
 ## Derived artifacts
 

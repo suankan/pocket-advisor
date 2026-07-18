@@ -17,7 +17,9 @@ For every platform task, load these files in order:
    database/cache and command-scoped CLI workspace-selection design;
 6. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
    design (review-refined);
-7. `docs/roadmap.md` — ordered future work only.
+7. `docs/features/ingest-all-reporting.md` — locked default full-ingest
+   timing, statistics, and finding-summary design;
+8. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical

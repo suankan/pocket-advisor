@@ -126,10 +126,13 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover**. It requires explicit user
-confirmation immediately before the workspace-scoped production wipe, then a
-complete re-ingest. Adapter retirement, local answering, and experiments
-follow.
+The roadmap head is **1. Default full-ingest completion report**, locked in
+`docs/features/ingest-all-reporting.md`. Implement the CLI-owned timing and
+post-run snapshot before the production cutover so subsequent `ingest all`
+runs produce a concise human assessment and local machine-readable run record
+by default. Resume cutover (still requiring explicit confirmation immediately
+before the workspace-scoped production wipe), adapter retirement, local
+answering, and experiments follow.
 
 ## Watch-outs
 

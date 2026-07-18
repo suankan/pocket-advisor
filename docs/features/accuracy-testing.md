@@ -81,8 +81,9 @@ directory, merged in sorted order with globally unique ids.
 6. Fixture tests cover the full cycle (scaffold → author → run → persist
    → compare → list) against synthetic corpora with fake embedders; no
    test touches real workspace state.
-7. The 12-question test-workspace set passes end-to-end through the real
-   models (verified 2026-07-18: 12/12, 100% thread-or-better).
+7. An isolated validation workspace can be rebuilt and its expectation set run
+   end-to-end through the real models (verified 2026-07-18: 12/12, 100%
+   thread-or-better).
 
 ## Non-goals
 

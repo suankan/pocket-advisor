@@ -78,10 +78,10 @@ Workspace-bound actions use a required global selector placed before the
 command:
 
 ```bash
-./pocket-advisor.py --workspace case-documents-demo ingest all
-./pocket-advisor.py --workspace case-documents-demo query "question"
-./pocket-advisor.py --workspace test-workspace wipe state
-./pocket-advisor.py --workspace test-workspace accuracy run --expectations <path>
+./pocket-advisor.py --workspace <id> ingest all
+./pocket-advisor.py --workspace <id> query "question"
+./pocket-advisor.py --workspace <id> wipe state
+./pocket-advisor.py --workspace <id> accuracy run --expectations <path>
 ```
 
 The following actions are workspace-bound and require `--workspace`:
@@ -155,8 +155,8 @@ searchable if a collection is unmounted before the next clean rebuild.
 - The existing shared `workspaces/.state/pocket_advisor.db`, cache, and vector
   layout is not migrated in place. After implementation, each required
   workspace is explicitly wiped/initialized and fully re-ingested.
-- The production cutover must not resume until this feature is implemented;
-  otherwise new work would be written into the retired shared layout.
+- Workspace-scoped commands never write into the retired shared layout; its
+  optional cleanup is a separate, explicitly confirmed operation.
 
 ## Acceptance criteria
 

@@ -123,7 +123,7 @@ workspace untouched:
 ```
 
 The command requires interactive confirmation unless `--yes` is supplied.
-For a production clean-break cutover, obtain explicit user confirmation
+For any destructive workspace rebuild, obtain explicit user confirmation
 immediately before the wipe even when using `--yes`.
 
 Existing shared state at `workspaces/.state/pocket_advisor.db` and its former

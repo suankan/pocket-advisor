@@ -341,7 +341,7 @@ loader or make it silently ignore unknown configuration.
    labels; generated summaries are visibly non-evidentiary.
 9. All tests use temporary synthetic fixtures. No test modifies corpus or
    live derived state.
-10. The existing and new self-test suites pass before cutover resumes.
+10. The existing and new self-test suites pass before embedding changes ship.
 11. With `summarize_threads` disabled, a changed thread is still marked
     stale and leaves both summary retrieval legs; no model is loaded;
     re-enabling regenerates it.

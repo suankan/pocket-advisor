@@ -85,9 +85,10 @@ archived `docs_old/` changelog.
    repository has no remote and must never be pushed.
 5. **No autocommit.** Commit only when the user's current prompt explicitly
    requests it. Permission does not carry to later prompts.
-6. **No unsupervised cutover wipe.** The clean-break migration requires
-   `wipe state` followed by a complete re-ingest. Obtain explicit user
-   confirmation immediately before that wipe.
+6. **No unsupervised state deletion.** Obtain explicit user confirmation
+   immediately before any workspace-state wipe or retired shared-state
+   cleanup. A workspace rebuild requires `wipe state` followed by a complete
+   re-ingest, but it is an operator-owned action, not a platform roadmap gate.
 
 There is no privileged-content concept. It was removed by decision on
 2026-07-18 (`docs/design.md`): the sole user already owns
@@ -185,9 +186,11 @@ Always confirm this against `docs/status.md` and
 - command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
   `test`, and help are workspace-free; every `accuracy` action is
   workspace-bound (native compare is `--last N`, not file-addressed);
-- legacy state was wiped; discovery and emails completed, and the cutover
-  run was stopped by the user during PDFs, leaving partial derived state that
-  predates the new stable-thread schema and must not be resumed in place.
+- generic end-to-end validation is available through an isolated workspace
+  rebuild, saved ingest reporting, and the native retrieval-expectation suite;
+  no particular live-workspace ingestion is a platform roadmap dependency;
+- retired shared-layout state is never opened by workspace-scoped commands;
+  its optional confirmed cleanup is tracked independently in the roadmap.
 
 The committed continuation lives in `docs/roadmap.md`. When working-tree
 changes implement its head item, keep that item unshipped until implementation

@@ -30,21 +30,18 @@ adapter-retirement phase ahead of schedule.
   "retrieval expectation set"; durable anchors only (Message-IDs, thread
   stable keys).
 
-Verification: 12-question test-workspace expectation set passes 12/12
-(100% thread-or-better) through the real models — this doubled as the
-cutover Russian QA (all four cross-lingual questions rank-1). Module
-suite 11/11 with the new fixture; frozen suite untouched; `git diff
---check` clean.
+Verification: an isolated 12-question expectation set passes 12/12 (100%
+thread-or-better) through the real models, with all four cross-lingual
+questions at rank 1. Module suite 11/11 with the new fixture; frozen suite
+untouched; `git diff --check` clean.
 
-Deferred: legacy production anchor migration, the test-workspace
-rebuild/timing run, and the `envelope-v1` vs plain-payload A/B remain in
-adapter retirement (roadmap item 2).
+Deferred: frozen accuracy-code deletion remains in adapter retirement
+(roadmap item 1); the `envelope-v1` versus plain-payload A/B is an experiment.
 
-## 2026-07-18 — Cutover rehearsal completed on the test workspace
+## 2026-07-18 — Generic end-to-end platform rehearsal completed
 
 Operational milestone (no implementation commit); scope reduction
-recorded at `8d9a1ae`; run record
-`workspaces/.state/workspaces/test/logs/ingest-runs/20260718T050815083153Z.json`.
+recorded at `8d9a1ae`; run record `20260718T050815083153Z`.
 
 - Ran a from-scratch `ingest all` over the extended test corpus — 60
   originals (56 emails including a newly added Russian thread, 4 native
@@ -54,19 +51,13 @@ recorded at `8d9a1ae`; run record
   consistent), 7/7 eligible summaries generated, 4 Westpac statements /
   1488 rows balance-ok, 2 tolerated OCR failures correctly reported as
   findings with review-queue entries.
-- Established production cost rates: OCR ~3.3 s/PDF, summaries
-  ~8.1 s/message, embedding ~0.27 s/chunk → ~2–3 hours estimated for the
-  production corpus (~812 emails, ~196 PDFs), interruption-safe.
-- Reduced roadmap item 1 (Resume cutover) accordingly: the cutover motion
-  is fully rehearsed, no pre-wipe is needed (the production workspace tree
-  does not exist; ingestion is additive), and the only remaining go/no-go
-  input is human QA of Russian summary/retrieval quality on the test
-  workspace.
+- Established reusable performance rates: OCR ~3.3 s/PDF, summaries
+  ~8.1 s/message, and embedding ~0.27 s/chunk.
+- Established a complete, isolated rebuild/report/retrieval-validation
+  workflow that does not depend on any particular live workspace.
 
-Deferred: Russian QA, then the explicitly confirmed production
-`ingest all`; statement parsers for the ~120 unparsed production
-statements; confirmed deletion of the ~410 MB legacy shared-layout state
-after the new state validates.
+Deferred: broader statement-parser coverage and explicitly confirmed deletion
+of retired shared-layout state are independent operational follow-ups.
 
 ## 2026-07-18 — Full-ingest completion reporting and saved-record display
 
@@ -94,11 +85,10 @@ Implementation commit: `78e705a`.
 Verification: native module tests 10/10 (including the new reporting and
 CLI-display fixtures); frozen tests 11/11; `git diff --check` clean;
 `ingest report --last` verified end-to-end against a real saved record in
-the isolated test workspace. No live corpus or production workspace state
-was touched.
+an isolated validation workspace. No live corpus or workspace state was
+touched.
 
-Deferred: the explicitly confirmed production cutover is now the roadmap
-head; full custody/FTS integrity verification remains with the native
+Deferred: full custody/FTS integrity verification remains with the native
 `verify` port in adapter retirement.
 
 ## 2026-07-18 — Command-scoped workspace selection
@@ -121,8 +111,8 @@ Verification: workspace-free native test command 9/9; frozen tests 11/11;
 Python compilation and `git diff --check` clean. No live workspace state was
 touched.
 
-Deferred: the explicitly confirmed production cutover is roadmap item 2;
-native `accuracy compare` remains part of adapter retirement.
+Deferred: native accuracy and the remaining frozen-command retirement work
+were tracked separately; native accuracy has since shipped.
 
 ## 2026-07-18 — Workspace-scoped state and mandatory workspace selection
 
@@ -149,10 +139,10 @@ Verification: native module tests 9/9 through the mandatory-workspace CLI;
 frozen tests 11/11; Python compilation and `git diff --check` clean. No live
 workspace state was initialized, wiped, or ingested.
 
-Deferred: the production workspace cutover is roadmap item 2 and requires
-explicit confirmation immediately before its scoped wipe; daemon, accuracy,
-verify, blob-index lookup, and vector-index wipe remain fail-closed pending
-adapter retirement.
+Deferred: daemon, accuracy, verify, blob-index lookup, and vector-index wipe
+remain fail-closed pending adapter retirement. Native accuracy has since
+shipped; operator-chosen workspace rebuilds remain outside the platform
+roadmap and require immediate confirmation before a scoped wipe.
 
 ## 2026-07-18 — Envelope-enriched payload + message-artifact consolidation
 

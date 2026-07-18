@@ -220,7 +220,7 @@ confirm selected-workspace wipe
 → run the native retrieval-expectation accuracy suite
 ```
 
-No automatic cutover wipe is permitted.
+No automatic workspace or retired shared-state deletion is permitted.
 
 ## System acceptance invariants
 

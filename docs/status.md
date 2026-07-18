@@ -91,15 +91,15 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   document payloads, FTS envelope hits, fingerprint separation, pure snippets,
   offsets, and the final cache layout.
 
-- **Cutover rehearsal completed (2026-07-18):** a from-scratch
-  `ingest all` on the test workspace — 60 originals, 56 emails including
-  a Russian thread, 4 native PDFs — finished in 11m06s with consistent
-  indexes (554 leaf + 7 navigation vectors), 7/7 summaries generated,
-  1488 balance-ok transaction rows, and 2 tolerated OCR failures
-  surfaced as findings (run record `20260718T050815083153Z`). Measured
-  rates put the production run at ~2–3 hours. Remaining before
-  production cutover: human QA of the Russian summary/retrieval
-  quality, then the explicit go (roadmap item 1).
+- **Generic end-to-end validation completed (2026-07-18):** a from-scratch
+  `ingest all` on an isolated validation workspace — 60 originals, 56 emails
+  including a Russian thread, and 4 native PDFs — finished in 11m06s with
+  consistent indexes (554 leaf + 7 navigation vectors), 7/7 summaries
+  generated, 1488 balance-ok transaction rows, and 2 tolerated OCR failures
+  surfaced as findings (run record `20260718T050815083153Z`). The native
+  12-question expectation set then passed 12/12, including all four
+  cross-lingual questions at rank 1. This workflow validates the complete RAG
+  platform without depending on any particular live workspace.
 - **Full-ingest completion reporting implemented (`78e705a`):** every
   `ingest all` ends with the locked report contract from
   `docs/features/ingest-all-reporting.md` — per-stage timings/outcomes, a
@@ -136,30 +136,26 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
   (generate/run/compare/list) are workspace-native. Daemon, verify, blob
   lookup, and vector-index wipe fail closed until their native ports land.
 - The new ingest/report/query commands deliberately refuse older databases.
-  The current partial state predates the stable-thread/summary schema and is
-  intentionally refused; it requires a newly confirmed wipe and full ingest.
+  State predating the stable-thread/summary schema is intentionally refused;
+  any operator-chosen workspace rebuild requires a confirmed wipe and full
+  ingest, independently of platform development.
 - The retired `ingestion.ocr.small_image_bytes` key has been removed from
   `config.yaml` and is rejected as unknown by the new loader.
 - `email_message.txt` is both the human/retrieval evidence view and, for its
   authored body region only, the email leaf-chunk source.
-- Cutover started on 2026-07-17: the legacy `.state` was wiped, discovery
-  and email parsing completed, then ingestion was stopped by the user during
-  the PDF stage. Partial shared-layout derived state remains and will not be
-  migrated into workspace-scoped state; no ingestion/OCR process is running.
+- Retired shared-layout derived state, if present, is never migrated or opened
+  by workspace-scoped commands. Its optional, explicitly confirmed cleanup is
+  tracked as an independent roadmap item.
 - venv is Python 3.14.6; old and new code share it.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover**, fully de-risked: the
-test-workspace rehearsal completed (11m06s from-scratch run incl. a
-Russian thread), and the Russian QA passed 2026-07-18 via the
-12-question retrieval expectation set (12/12, all cross-lingual
-questions rank-1). No pre-wipe is needed — the production tree does not
-exist and ingestion is additive. Cutover awaits only the explicit go:
-the ~2–3 h production `ingest all` with report/review-queue triage;
-statement parsers and the confirmed legacy shared-state deletion
-follow. Adapter retirement, the local answering pass, and experiments
-come after (`docs/roadmap.md`).
+The roadmap head is **1. Adapter retirement**. It is not gated by ingestion,
+re-ingestion, or validation of any particular live workspace: the isolated
+rebuild/report/accuracy workflow already provides generic end-to-end platform
+validation. Transaction parser coverage and explicitly confirmed legacy
+shared-state cleanup are independent roadmap item 2; neither blocks adapter
+retirement or the local answering pass (`docs/roadmap.md`).
 
 ## Watch-outs
 

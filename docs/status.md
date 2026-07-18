@@ -29,9 +29,10 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `c6df0a3` | **Command-scoped workspace selection**: workspace required only for actions that access workspace scope; registry-free shared model fetch and fixture tests; file-addressed accuracy comparison classified workspace-free; meaningless selectors rejected; exhaustive CLI action-matrix coverage |
 | `78e705a` | **Full-ingest completion reporting + saved-record display**: typed end-of-run report (stage timings/outcomes, read-only workspace snapshot, finding rollups); atomic schema-versioned JSON record per run; shared honest transaction-coverage classifier; `ingest report [--last \| PATH]` re-renders any saved record through the same formatter without opening the database |
 | `e07ac2c` | **Summaries-stage progress reporting**: explicit stale-count/model-loading line, per-message progress bar with heartbeat across all stale threads, and bar-safe failure lines — the generative pass can no longer look hung |
+| `3d8d9d7` | **Native retrieval-expectation accuracy suite**: workspace-bound `accuracy generate/run/compare/list`; anchor-verified scaffolds with human-authored questions; schema-versioned JSON result records with per-question verdict/rank/latency and environment fingerprints; `compare --last N` with drift warnings; "golden set" naming retired; verified 12/12 on the test workspace |
 
-Current self-tests: all 10 `modules/tests/test_*.py` pass, including the
-workspace-isolation and ingest-reporting fixtures
+Current self-tests: all 11 `modules/tests/test_*.py` pass, including the
+workspace-isolation, ingest-reporting, and accuracy fixtures
 (`./pocket-advisor.py test`). The frozen
 `scripts/test_*.py` suite also passes 11/11 on the 3.14 venv.
 
@@ -149,14 +150,16 @@ Any parser/override failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Resume cutover**, scope reduced after the full
-test-workspace rehearsal (11m06s from-scratch run incl. a Russian
-thread): no pre-wipe is needed — the production tree does not exist and
-ingestion is additive. Remaining: Russian summary/retrieval QA on the
-test workspace, then on explicit go the ~2–3 h production `ingest all`
-with report/review-queue triage; statement parsers and the confirmed
-legacy shared-state deletion follow. Adapter retirement, the local
-answering pass, and experiments come after (`docs/roadmap.md`).
+The roadmap head is **1. Resume cutover**, fully de-risked: the
+test-workspace rehearsal completed (11m06s from-scratch run incl. a
+Russian thread), and the Russian QA passed 2026-07-18 via the
+12-question retrieval expectation set (12/12, all cross-lingual
+questions rank-1). No pre-wipe is needed — the production tree does not
+exist and ingestion is additive. Cutover awaits only the explicit go:
+the ~2–3 h production `ingest all` with report/review-queue triage;
+statement parsers and the confirmed legacy shared-state deletion
+follow. Adapter retirement, the local answering pass, and experiments
+come after (`docs/roadmap.md`).
 
 ## Watch-outs
 

@@ -14,10 +14,10 @@ completion report. The cutover motion itself is fully rehearsed; no
 pre-wipe is needed because the production workspace tree does not exist
 yet and ingestion is purely additive.
 
-1. **Russian QA on the test workspace** (the one remaining go/no-go
-   input, ~15 minutes): read the generated Russian thread summary and
-   run a few Russian-language queries; confirm summary fidelity and
-   cross-lingual retrieval quality.
+1. **Russian QA: passed 2026-07-18** via the 12-question retrieval
+   expectation set (all four cross-lingual questions STRONG at rank 1;
+   the Russian thread's English summary verified faithful). No go/no-go
+   input remains — cutover awaits only the explicit go.
 2. **On explicit go:**
    `./pocket-advisor.py --workspace case-documents-demo ingest all` —
    full build from corpora including summaries and the dual vector

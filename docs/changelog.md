@@ -4,6 +4,42 @@ Reverse-chronological history of shipped platform roadmap items. Current
 operating state lives in `docs/status.md`; future work lives only in
 `docs/roadmap.md`.
 
+## 2026-07-18 — Native retrieval-expectation accuracy suite
+
+Implementation commit: `3d8d9d7` (locked design:
+`docs/features/accuracy-testing.md`). Ships the accuracy portion of the
+adapter-retirement phase ahead of schedule.
+
+- Added workspace-generic, workspace-bound `accuracy
+  generate/run/compare/list` in `modules/accuracy.py`; sets and results
+  live under `<workspace-root>/search-accuracy-test/` as gitignored
+  workspace data.
+- `generate` scaffolds anchor-verified entries (summarized threads,
+  documents) with TODO questions for human authoring; `--force` guards
+  overwrites.
+- `run` executes warm through the real retriever and writes a
+  schema-versioned, write-verified JSON record per run: per-question
+  verdict (STRONG / THREAD(sum) / THREAD / MISS / INVALID / SKIPPED),
+  rank, matched anchor, latency, aggregates, and an environment block
+  (embed fingerprint, rerank model, top-k, corpus counts,
+  expectation-set SHA); exits non-zero on MISS or INVALID.
+- `compare --last N` reports per-run aggregates, every per-question
+  verdict/rank change, and expectation-set drift; replaces the planned
+  file-addressed workspace-free compare.
+- Retired the "golden set" naming across live docs in favour of
+  "retrieval expectation set"; durable anchors only (Message-IDs, thread
+  stable keys).
+
+Verification: 12-question test-workspace expectation set passes 12/12
+(100% thread-or-better) through the real models — this doubled as the
+cutover Russian QA (all four cross-lingual questions rank-1). Module
+suite 11/11 with the new fixture; frozen suite untouched; `git diff
+--check` clean.
+
+Deferred: legacy production anchor migration, the test-workspace
+rebuild/timing run, and the `envelope-v1` vs plain-payload A/B remain in
+adapter retirement (roadmap item 2).
+
 ## 2026-07-18 — Cutover rehearsal completed on the test workspace
 
 Operational milestone (no implementation commit); scope reduction

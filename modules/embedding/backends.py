@@ -113,6 +113,9 @@ class TextBackend:
     def embed_one(self, text: str, is_query: bool = False):
         return self._inner.embed_one(text, is_query=is_query)
 
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)
+
 
 def get_backend(config: Config, store: ModelStore) -> TextBackend:
     return TextBackend(store, config.mlx_model_embed_text)

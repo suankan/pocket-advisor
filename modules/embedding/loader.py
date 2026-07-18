@@ -147,6 +147,17 @@ class MlxTextEmbedder:
                                      task_type=task)
         return finalize_vec(out[0], self.dim)
 
+    def count_tokens(self, text: str) -> int:
+        """Real unpadded token count of one input (telemetry only)."""
+        if getattr(self, "_count_tokenizer", None) is None:
+            if self._mode == "merged":
+                self._count_tokenizer = self._tokenizer
+            else:
+                from tokenizers import Tokenizer
+                self._count_tokenizer = Tokenizer.from_file(
+                    str(self.repo_dir / "tokenizer.json"))
+        return len(self._count_tokenizer.encode(text).ids)
+
 
 class MlxReranker:
     """jina-reranker-v3-mlx listwise reranker."""

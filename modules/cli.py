@@ -220,6 +220,7 @@ def run_ingest(
             return 0
 
         from modules.ingest_report import STAGE_ORDER, StageRun
+        from modules.telemetry import HOT_STAGE_NAMES
 
         stages: list[StageRun] = []
         start_log_id = int(ctx.conn.execute(
@@ -227,6 +228,8 @@ def run_ingest(
 
         def execute(name: str) -> None:
             stage_started = clock()
+            if name in HOT_STAGE_NAMES:
+                ctx.telemetry.mark_entered(name)
             try:
                 stats = _execute_stage(ctx, name)
             except BaseException as exc:
@@ -238,6 +241,10 @@ def run_ingest(
                     reason=_stage_failure_reason(exc),
                 ))
                 raise
+            if name in HOT_STAGE_NAMES:
+                # Seals partial as measured; a stage-recorded deliberate
+                # not_applicable gate is preserved.
+                ctx.telemetry.mark_measured(name)
             stages.append(StageRun(
                 name=name,
                 outcome="completed",
@@ -246,6 +253,8 @@ def run_ingest(
             ))
 
         def skip(name: str, reason: str) -> None:
+            if name in HOT_STAGE_NAMES:
+                ctx.telemetry.mark_not_applicable(name)
             stages.append(StageRun(
                 name=name,
                 outcome="skipped",

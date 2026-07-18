@@ -20,10 +20,12 @@ from modules.embedding import (ModelStore, current_fingerprint, index_paths,
                                thread_vector_filename)  # noqa: E402
 from modules.ingest_report import (Finding, StageRun, build_report,
                                    build_snapshot, format_report,
-                                   persist_report,
+                                   load_report, persist_report,
                                    snapshot_findings)  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
+from modules.telemetry import (TelemetryError,
+                               performance_from_json)  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
 
@@ -207,6 +209,50 @@ def build_indexes(ctx: PipelineContext) -> None:
         "built_at": "fixture"}), encoding="utf-8")
 
 
+def fill_measured_telemetry(ctx: PipelineContext) -> None:
+    """A reconciling measured record shaped like a small real run."""
+    summaries = ctx.telemetry.summaries
+    summaries.state = "measured"
+    summaries.eligible_threads = 2
+    summaries.pending_threads = 1
+    summaries.unchanged_threads = 1
+    summaries.completed_threads = 1
+    summaries.input_messages = 2
+    summaries.input_segments = 3
+    summaries.generation_calls = 3
+    summaries.total_input_tokens = 1200
+    summaries.hierarchical_threads = 1
+    tiers = summaries.new_tiers()
+    tiers[0].threads = 1
+    tiers[0].generation_calls = 3
+    summaries.timings_seconds.model_execution = 1.25
+    embed = ctx.telemetry.embed
+    embed.state = "measured"
+    embed.queues.leaf.pending_entities = 3
+    embed.queues.leaf.input_tokens = 900
+    embed.queues.leaf.successful_entities = 3
+    embed.queues.summary.pending_entities = 1
+    embed.queues.summary.input_tokens = 80
+    embed.queues.summary.successful_entities = 1
+    embed.verified_cache_publications = 4
+    embed.timings_seconds.model_execution = 0.5
+    pdfs = ctx.telemetry.pdfs
+    pdfs.state = "measured"
+    pdfs.occurrences_considered = 2
+    pdfs.pending_occurrences = 2
+    pdfs.unique_transforms = 2
+    pdfs.successful_transforms = 1
+    pdfs.failed_transforms = 1
+    pdfs.direct_original_fallbacks = 1
+    pdfs.resources.configured_worker_count = 1
+    pdfs.resources.configured_per_child_jobs = 10
+    pdfs.resources.configured_global_cpu_budget = 10
+    pdfs.resources.observed_peak_workers = 1
+    pdfs.timings_seconds.transform_wall = 2.5
+    pdfs.timings_seconds.ocr_process_total = 2.0
+    pdfs.timings_seconds.text_process_total = 0.25
+
+
 def test_snapshot_and_record(ctx: PipelineContext) -> None:
     first = build_snapshot(ctx, start_log_id=0)
     second = build_snapshot(ctx, start_log_id=0)
@@ -234,6 +280,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
             name="pdfs", outcome="completed", duration_seconds=1.0,
             stats={"ocr_errors": 1, "ocr_warnings": 2, "weak_dates": 14}),
     ]
+    fill_measured_telemetry(ctx)
     report = build_report(
         ctx,
         started_at="2026-07-18T00:00:00+00:00",
@@ -258,18 +305,117 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     raw = path.read_text(encoding="utf-8")
     assert SECRET not in raw
     payload = json.loads(raw)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["workspace_id"] == "report-test"
     assert payload["snapshot"]["search"]["leaf_vectors"] == 3
     assert payload["record_path"].endswith(".json")
+    performance = payload["performance"]
+    assert performance["summaries"]["state"] == "measured"
+    assert performance["summaries"]["length_tiers"][0] == {
+        "upper_bound_tokens": 8192, "threads": 1, "generation_calls": 3}
+    assert performance["summaries"]["length_tiers"][-1][
+        "upper_bound_tokens"] is None
+    assert performance["embed"]["queues"]["leaf"]["input_tokens"] == 900
+    assert performance["pdfs"]["resources"][
+        "process_tree_peak_rss_bytes"] is None
+    assert performance["pdfs"]["timings_seconds"]["transform_wall"] == 2.5
+    # The persisted record round-trips the complete typed telemetry.
+    loaded = load_report(path)
+    assert loaded.performance == ctx.telemetry
     rendered = format_report(report, path)
     assert "INGEST COMPLETE WITH FINDINGS" in rendered
+    assert "summaries     measured — 1 pending, 3 calls, 1200 input tokens" \
+        in rendered
+    assert "embed         measured — 3 leaf + 1 summary pending, 4 published" \
+        in rendered
+    assert "pdfs          measured — 2 occurrences / 2 unique, workers=1" \
+        " jobs=10" in rendered
+    assert format_report(loaded, path) == rendered
     assert "3 leaf + 1 navigation vectors" in rendered
     assert "single_account_unverifiable=1" in rendered
     assert "CORPUS NARRATIVE" not in rendered
     second_path = persist_report(report, ctx.config)
     assert second_path != path and second_path.name.endswith("-1.json")
     assert not list(path.parent.glob("*.tmp"))
+
+    # A version-1 or malformed record aborts with a clear message.
+    stale = dict(payload)
+    stale["schema_version"] = 1
+    wrong_version = path.parent / "wrong-version.json"
+    wrong_version.write_text(json.dumps(stale), encoding="utf-8")
+    try:
+        load_report(wrong_version)
+        raise AssertionError("schema_version 1 must be rejected")
+    except SystemExit as exc:
+        assert "unsupported schema_version" in str(exc)
+    wrong_version.unlink()
+
+
+def test_telemetry_contract(ctx: PipelineContext) -> None:
+    """Typo-strict schema: unknown/missing fields, invalid values, and
+    impossible reconciliations are rejected on load."""
+    good = ctx.telemetry.as_json_dict()
+    assert performance_from_json(good) == ctx.telemetry
+
+    def must_reject(mutate, expected: str) -> None:
+        payload = json.loads(json.dumps(good))
+        mutate(payload)
+        try:
+            performance_from_json(payload)
+            raise AssertionError(f"expected rejection: {expected}")
+        except TelemetryError as exc:
+            assert expected in str(exc), (expected, str(exc))
+
+    must_reject(lambda p: p["summaries"].update(surprise=1),
+                "unknown fields")
+    must_reject(lambda p: p["summaries"].pop("generation_calls"),
+                "missing required fields")
+    must_reject(lambda p: p["embed"]["queues"]["leaf"].update(
+        pending_entities=-1), "non-negative")
+    must_reject(lambda p: p["pdfs"]["timings_seconds"].update(
+        transform_wall="fast"), "must be a number")
+    must_reject(lambda p: p["summaries"].update(state="finished"),
+                "state must be one of")
+    must_reject(lambda p: p["summaries"].update(completed_threads=2),
+                "completed+failed")
+    must_reject(lambda p: p["summaries"].update(one_shot_threads=9),
+                "one_shot+hierarchical")
+    must_reject(lambda p: p["embed"]["queues"]["summary"].update(
+        failed_entities=5), "successful+failed")
+    must_reject(lambda p: p["embed"].update(verified_cache_publications=9),
+                "verified_cache_publications")
+    must_reject(lambda p: p["pdfs"].update(successful_transforms=5),
+                "successful+failed transforms")
+    must_reject(lambda p: p["summaries"]["length_tiers"].insert(
+        0, {"upper_bound_tokens": None, "threads": 0,
+            "generation_calls": 0}), "unbounded tier must be last")
+    must_reject(lambda p: p["summaries"]["length_tiers"].insert(
+        1, {"upper_bound_tokens": 4096, "threads": 0,
+            "generation_calls": 0}), "strictly ascend")
+
+    # A partial stage may report fewer outcomes than pending, never more.
+    partial = json.loads(json.dumps(good))
+    partial["summaries"]["state"] = "partial"
+    partial["summaries"]["completed_threads"] = 0
+    partial["summaries"]["failed_threads"] = 0
+    partial["summaries"]["one_shot_threads"] = 0
+    partial["summaries"]["hierarchical_threads"] = 0
+    assert performance_from_json(partial).summaries.state == "partial"
+    partial["summaries"]["completed_threads"] = 2
+    try:
+        performance_from_json(partial)
+        raise AssertionError("partial over-claim must be rejected")
+    except TelemetryError as exc:
+        assert "partial record" in str(exc)
+
+    # A gated or never-entered stage must not carry counters.
+    zero_states = json.loads(json.dumps(good))
+    zero_states["summaries"]["state"] = "not_applicable"
+    try:
+        performance_from_json(zero_states)
+        raise AssertionError("not_applicable with counters must be rejected")
+    except TelemetryError as exc:
+        assert "zero counters" in str(exc)
 
 
 def test_transaction_run_flag_dedup(ctx: PipelineContext) -> None:
@@ -362,12 +508,22 @@ workspaces:
     assert payload["status"] == "COMPLETE"
     assert [stage["outcome"] for stage in payload["stages"][-2:]] == \
         ["skipped", "skipped"]
+    # Hot-stage states are explicit: gated stages are not_applicable, the
+    # executed PDF stage is measured even with zero pending work.
+    performance = payload["performance"]
+    assert performance["summaries"]["state"] == "not_applicable"
+    assert performance["embed"]["state"] == "not_applicable"
+    assert performance["pdfs"]["state"] == "measured"
+    assert performance["pdfs"]["pending_occurrences"] == 0
+    assert "summaries     not_applicable" in rendered
+    assert "pdfs          measured — 0 occurrences / 0 unique" in rendered
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa_ingest_report_") as td:
         ctx = build_context(Path(td))
         test_snapshot_and_record(ctx)
+        test_telemetry_contract(ctx)
         test_transaction_run_flag_dedup(ctx)
         test_index_drift(ctx)
         ctx.conn.close()

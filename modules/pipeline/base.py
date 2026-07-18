@@ -7,12 +7,13 @@ sequencing lives in cli.py alone.
 """
 import sqlite3
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from modules.config import Config
 from modules.domain import StageStats
 from modules.review import ReviewLog
+from modules.telemetry import PerformanceTelemetry
 from modules.workspace import Registry, Workspace
 
 
@@ -25,6 +26,10 @@ class PipelineContext:
     workspace: Workspace
     conn: sqlite3.Connection
     review: ReviewLog
+    # Hot-stage aggregate performance recorder. Always present so stage
+    # instrumentation is unconditional; only `ingest all` persists it.
+    telemetry: PerformanceTelemetry = field(
+        default_factory=PerformanceTelemetry)
 
 
 class Stage(ABC):

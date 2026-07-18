@@ -1,5 +1,6 @@
 """Stage 4a — deterministic, local-LLM summaries of complete threads."""
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,14 @@ class _BrokenThread:
     thread_id: int
     stable_key: str
     missing_path: Path
+
+
+@dataclass(slots=True)
+class _GenerationMetrics:
+    """Aggregate telemetry for one thread's generation pass."""
+    input_tokens: int = 0
+    segments: int = 0
+    calls: int = 0
 
 
 def _segments(text: str, size: int):
@@ -95,10 +104,19 @@ class ThreadSummaryStage(Stage):
         self.conn.commit()
 
         if not self.config.summarize_threads:
+            # Deliberate gate: telemetry records not_applicable, not a
+            # measured zero.
+            self.ctx.telemetry.mark_not_applicable(self.name)
             stats.inc("generation_disabled")
             return stats
+
+        perf = self.ctx.telemetry.summaries
+        perf.eligible_threads = len(work) + len(broken)
+        perf.pending_threads = len(stale)
+        perf.unchanged_threads = len(work) - len(stale)
         if not stale:
             return stats
+        perf.new_tiers()
 
         print(f"summaries: {len(stale)} stale"
               f" {'thread' if len(stale) == 1 else 'threads'} — loading"
@@ -109,8 +127,13 @@ class ThreadSummaryStage(Stage):
             "generate thread summaries",
             total=sum(len(job.messages) for job in stale))
         for job in stale:
+            # The current rolling implementation always takes the
+            # multi-call path, so every pending thread is hierarchical.
+            perf.hierarchical_threads += 1
+            metrics = _GenerationMetrics()
             try:
-                summary = self._generate(job, generator, progress)
+                summary = self._generate(job, generator, progress, metrics)
+                publish_started = time.monotonic()
                 self.conn.execute(
                     """INSERT INTO thread_summaries
                        (thread_id, summary_text, source_digest,
@@ -128,7 +151,13 @@ class ThreadSummaryStage(Stage):
                      self.config.mlx_model_thread_summary,
                      SUMMARY_PROMPT_VERSION, now_iso()))
                 self.conn.commit()
+                perf.timings_seconds.publication += \
+                    time.monotonic() - publish_started
                 stats.inc("generated")
+                perf.completed_threads += 1
+                tier = perf.tier_for(metrics.input_tokens)
+                tier.threads += 1
+                tier.generation_calls += metrics.calls
             except Exception as exc:
                 self.conn.rollback()
                 progress.println(
@@ -139,6 +168,11 @@ class ThreadSummaryStage(Stage):
                     f"{type(exc).__name__}: {exc}")
                 self.conn.commit()
                 stats.inc("failed")
+                perf.failed_threads += 1
+            perf.input_messages += len(job.messages)
+            perf.input_segments += metrics.segments
+            perf.generation_calls += metrics.calls
+            perf.total_input_tokens += metrics.input_tokens
         progress.done()
         return stats
 
@@ -195,19 +229,30 @@ class ThreadSummaryStage(Stage):
             and row["prompt_version"] == SUMMARY_PROMPT_VERSION
 
     def _generate(self, job: _ThreadWork, generator: SummaryGenerator,
-                  progress: Progress) -> str:
+                  progress: Progress,
+                  metrics: _GenerationMetrics) -> str:
+        timings = self.ctx.telemetry.summaries.timings_seconds
+        count_tokens = getattr(generator, "count_tokens", None)
         summary = ""
         for position, message in enumerate(job.messages, 1):
             progress.step(note=(
                 f"thread {job.thread_id} · msg {position}/"
                 f"{len(job.messages)} · {message.message_id}"))
+            render_started = time.monotonic()
             text = message.path.read_text(encoding="utf-8")
+            if count_tokens is not None:
+                metrics.input_tokens += count_tokens(text)
             parts = tuple(_segments(
                 text, self.config.thread_summary_segment_chars))
+            timings.input_render += time.monotonic() - render_started
             for index, segment in enumerate(parts, 1):
                 label = (f"{message.message_id}, {message.date_utc},"
                          f" segment {index}/{len(parts)}")
+                metrics.segments += 1
+                metrics.calls += 1
+                model_started = time.monotonic()
                 summary = generator.update(summary, segment, label)
+                timings.model_execution += time.monotonic() - model_started
         if not summary.strip():
             raise RuntimeError("thread summary is empty")
         return summary.strip()

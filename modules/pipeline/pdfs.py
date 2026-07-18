@@ -22,6 +22,8 @@
 Native PDFs also get a document date (docdates priority chain);
 weak sources (filename/mtime) are review-flagged for verification.
 """
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -148,8 +150,24 @@ class PdfTextStage(Stage):
             if previous not in (None, "error", extraction_method):
                 stats.inc("recipe_stale")
 
-        progress = Progress("pdf to text",
-                            total=len(attachment_jobs) + len(native_jobs))
+        pending = len(attachment_jobs) + len(native_jobs)
+        perf = self.ctx.telemetry.pdfs
+        perf.occurrences_considered = self._count_occurrences()
+        perf.pending_occurrences = pending
+        # The sequential implementation runs one transform per pending
+        # occurrence: no within-workspace reuse yet, so every transform
+        # input counts as unique and the whole stage is one worker whose
+        # OCR child may take every reported core.
+        perf.unique_transforms = pending
+        if pending:
+            jobs = os.process_cpu_count() or 1
+            perf.resources.configured_worker_count = 1
+            perf.resources.configured_per_child_jobs = jobs
+            perf.resources.configured_global_cpu_budget = jobs
+            perf.resources.observed_peak_workers = 1
+
+        transform_started = time.monotonic()
+        progress = Progress("pdf to text", total=pending)
         for row in attachment_jobs:
             progress.step(note=row["filename"] or f"attachment {row['id']}")
             self._ocr_attachment(row, extraction_method, stats)
@@ -157,27 +175,51 @@ class PdfTextStage(Stage):
             progress.step(note=row["subject"] or f"item {row['item_id']}")
             self._ocr_native(row, extraction_method, stats)
         progress.done()
+        perf.timings_seconds.transform_wall += \
+            time.monotonic() - transform_started
+
+    def _count_occurrences(self) -> int:
+        """All collected PDF occurrences examined for text freshness."""
+        attachment_total = int(self.conn.execute(
+            "SELECT count(*) FROM attachments"
+            " WHERE extracted_copy_path IS NOT NULL"
+            " AND (content_type = 'application/pdf'"
+            " OR lower(coalesce(filename, '')) LIKE '%.pdf')"
+        ).fetchone()[0])
+        native_total = int(self.conn.execute(
+            "SELECT count(*) FROM item_file_meta"
+            " WHERE extracted_copy_path IS NOT NULL").fetchone()[0])
+        return attachment_total + native_total
 
     def _extract(self, copy_path: Path) -> tuple[str, Path, str | None]:
         """OCR derivative + text artifact next to a pdf-original/ copy."""
+        perf = self.ctx.telemetry.pdfs
         ocr_dir = copy_path.parent.with_name("pdf-ocr")
         txt_dir = copy_path.parent.with_name("pdf-to-text")
         derivative = ocr_dir / f"{copy_path.stem}-ocrmypdf.pdf"
         txt_path = txt_dir / f"{copy_path.stem}.txt"
+        ocr_started = time.monotonic()
         ocr_warning = ocr_to_derivative(
             copy_path, derivative, langs=self.config.ocr_langs)
+        perf.timings_seconds.ocr_process_total += \
+            time.monotonic() - ocr_started
         pdf_source = derivative
         if not derivative.is_file():
             pdf_source = copy_path
+            perf.direct_original_fallbacks += 1
             fallback = "used verified original because no OCR derivative exists"
             ocr_warning = f"{ocr_warning}; {fallback}" \
                 if ocr_warning else fallback
+        text_started = time.monotonic()
         try:
             text = pdf_to_text(pdf_source, txt_path)
         except OcrError as exc:
             if ocr_warning:
                 raise OcrError(f"{ocr_warning}; {exc}") from exc
             raise
+        finally:
+            perf.timings_seconds.text_process_total += \
+                time.monotonic() - text_started
         return text, txt_path, ocr_warning
 
     def _record_ocr_warning(self, path: str, label: str,
@@ -192,10 +234,13 @@ class PdfTextStage(Stage):
 
     def _ocr_attachment(self, row, extraction_method: str,
                         stats: StageStats) -> None:
+        perf = self.ctx.telemetry.pdfs
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
             _, txt_path, ocr_warning = self._extract(copy_path)
+            perf.successful_transforms += 1
         except (OcrError, OSError) as exc:
+            perf.failed_transforms += 1
             self.review.flag(row["extracted_copy_path"], self.name, "error",
                              f"attachment {row['id']}: {exc}")
             self.conn.execute(
@@ -220,11 +265,14 @@ class PdfTextStage(Stage):
 
     def _ocr_native(self, row, extraction_method: str,
                     stats: StageStats) -> None:
+        perf = self.ctx.telemetry.pdfs
         item_id = int(row["item_id"])
         copy_path = self.config.project_root / row["extracted_copy_path"]
         try:
             text, txt_path, ocr_warning = self._extract(copy_path)
+            perf.successful_transforms += 1
         except (OcrError, OSError) as exc:
+            perf.failed_transforms += 1
             self.review.flag(row["extracted_copy_path"], self.name, "error",
                              f"item {item_id}: {exc}")
             self.conn.execute(

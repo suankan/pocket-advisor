@@ -17,6 +17,7 @@ failed chunk is retried next run. Each run rebuilds vectors.npy +
 vectors_ids.npy from that cache.
 """
 import json
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -116,10 +117,14 @@ class EmbedStage(Stage):
         stats.inc("embedded_chunks", chunk_done)
         stats.inc("embedded_threads", thread_done)
         stats.inc("failed", chunk_failed + thread_failed)
+        perf = self.ctx.telemetry.embed
+        assembly_started = time.monotonic()
         stats.inc("index_size",
                   self._rebuild_matrix(paths, fingerprint))
         stats.inc("thread_index_size",
                   self._rebuild_thread_matrix(thread_paths, fingerprint))
+        perf.timings_seconds.matrix_assembly += \
+            time.monotonic() - assembly_started
         return stats
 
     # -- chunking ------------------------------------------------------------
@@ -239,16 +244,31 @@ class EmbedStage(Stage):
         rows = self.conn.execute(
             "SELECT id, payload_shadow FROM chunks").fetchall()
         pending = [r for r in rows if r["id"] not in have]
+        perf = self.ctx.telemetry.embed
+        queue = perf.queues.leaf
+        queue.pending_entities = len(pending)
+        count_tokens = getattr(backend, "count_tokens", None)
         done, failed = 0, 0
         progress = Progress("embed text chunks", total=len(pending))
         for row in pending:
             progress.step(note=f"chunk {row['id']}")
+            if count_tokens is not None:
+                queue.input_tokens += count_tokens(row["payload_shadow"])
             try:
+                model_started = time.monotonic()
                 vec = backend.embed_one(row["payload_shadow"])
+                perf.timings_seconds.model_execution += \
+                    time.monotonic() - model_started
+                publish_started = time.monotonic()
                 np.save(vecs_dir / f"{row['id']}.npy", vec)
+                perf.timings_seconds.cache_publication += \
+                    time.monotonic() - publish_started
                 done += 1
+                queue.successful_entities += 1
+                perf.verified_cache_publications += 1
             except Exception as exc:
                 failed += 1
+                queue.failed_entities += 1
                 progress.println(f"  embed FAIL chunk {row['id']}:"
                                  f" {type(exc).__name__}: {exc}")
                 self.review.flag(f"chunk:{row['id']}", self.name, "error",
@@ -264,18 +284,33 @@ class EmbedStage(Stage):
 
     def _embed_pending_threads(self, backend, paths: IndexPaths,
                                pending) -> tuple[int, int]:
+        perf = self.ctx.telemetry.embed
+        queue = perf.queues.summary
+        queue.pending_entities = len(pending)
+        count_tokens = getattr(backend, "count_tokens", None)
         done, failed = 0, 0
         progress = Progress("embed thread summaries", total=len(pending))
         for row in pending:
             progress.step(note=f"thread {row['thread_id']}")
             target = paths.vecs_dir / thread_vector_filename(
                 row["thread_id"], row["summary_text"])
+            if count_tokens is not None:
+                queue.input_tokens += count_tokens(row["summary_text"])
             try:
+                model_started = time.monotonic()
                 vec = backend.embed_one(row["summary_text"])
+                perf.timings_seconds.model_execution += \
+                    time.monotonic() - model_started
+                publish_started = time.monotonic()
                 np.save(target, vec)
+                perf.timings_seconds.cache_publication += \
+                    time.monotonic() - publish_started
                 done += 1
+                queue.successful_entities += 1
+                perf.verified_cache_publications += 1
             except Exception as exc:
                 failed += 1
+                queue.failed_entities += 1
                 progress.println(
                     f"  embed FAIL thread {row['thread_id']}:"
                     f" {type(exc).__name__}: {exc}")

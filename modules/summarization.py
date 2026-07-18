@@ -25,6 +25,8 @@ class SummaryGenerator(Protocol):
     def update(self, current_summary: str, message_segment: str,
                segment_label: str) -> str: ...
 
+    def count_tokens(self, text: str) -> int: ...
+
 
 class MlxSummaryGenerator:
     """One session-warm, greedy local ``mlx-lm`` text summarizer.
@@ -48,6 +50,11 @@ class MlxSummaryGenerator:
         self._generate = generate
         self._model, self._tokenizer = load(str(repo_dir))
         self._max_tokens = config.thread_summary_max_tokens
+
+    def count_tokens(self, text: str) -> int:
+        """Real model-tokenizer token count of one input text
+        (aggregate telemetry only — the text itself is never recorded)."""
+        return len(self._tokenizer.encode(text))
 
     def update(self, current_summary: str, message_segment: str,
                segment_label: str) -> str:

@@ -49,12 +49,15 @@ def fake_selection(*, embed: bool = True, bank: bool = False):
 
 
 def fake_context(*, embed: bool, bank: bool):
+    from modules.telemetry import PerformanceTelemetry
+
     selection = fake_selection(embed=embed, bank=bank)
     return SimpleNamespace(
         config=selection.config,
         registry=selection.registry,
         workspace=selection.workspace,
         conn=FakeConnection(),
+        telemetry=PerformanceTelemetry(),
     )
 
 
@@ -275,6 +278,11 @@ def test_ingest_reporting_failures_and_timings() -> None:
     ]
     assert [item.duration_seconds for item in call["stages"][:3]] == \
         [1.0, 1.0, 1.0]
+    # Telemetry survives the failure: the entered hot stage stays partial,
+    # never-entered hot stages remain not_run.
+    assert context.telemetry.pdfs.state == "partial"
+    assert context.telemetry.summaries.state == "not_run"
+    assert context.telemetry.embed.state == "not_run"
     assert context.conn.closed
 
     # A required report failure does not roll back completed stages, but the
@@ -380,10 +388,11 @@ def test_ingest_report_display(tmp: Path) -> None:
     from modules.ingest_report import (Finding, IngestRunReport, StageRun,
                                        format_report, latest_report_path,
                                        load_report, persist_report)
+    from modules.telemetry import PerformanceTelemetry
 
     config = SimpleNamespace(project_root=tmp, logs_dir=tmp / "logs")
     report = IngestRunReport(
-        schema_version=1,
+        schema_version=2,
         workspace_id="matter-x",
         started_at="2026-07-18T00:00:00+00:00",
         ended_at="2026-07-18T00:00:05+00:00",
@@ -391,6 +400,7 @@ def test_ingest_report_display(tmp: Path) -> None:
         pipeline_seconds=5.0,
         report_seconds=0.01,
         stages=[StageRun("discover", "completed", 1.0, {"new": 2})],
+        performance=PerformanceTelemetry(),
         snapshot=None,
         findings=[Finding("error", "pdf_failures", 2)],
     )
@@ -399,8 +409,10 @@ def test_ingest_report_display(tmp: Path) -> None:
     loaded = load_report(path)
     assert loaded.workspace_id == "matter-x"
     assert loaded.stages[0].stats == {"new": 2}
+    assert loaded.performance == report.performance
     rendered = format_report(loaded, path)
     assert "INGEST COMPLETE" in rendered
+    assert "summaries     not_run" in rendered
     assert "pdf_failures=2" in rendered
 
     # CLI dispatch: `ingest report` (and --last) render the saved record;

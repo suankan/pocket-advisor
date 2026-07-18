@@ -22,11 +22,13 @@ from modules.embedding import (ModelStore, current_fingerprint, index_paths,
                                thread_vector_filename)
 from modules.pipeline.base import PipelineContext
 from modules.pipeline.transactions import classify_transaction_coverage
+from modules.telemetry import (MEASURED, PARTIAL, PerformanceTelemetry,
+                               performance_from_json)
 from modules.transaction_state import (TransactionStateError,
                                        load_transaction_state)
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 STAGE_ORDER = (
     "discover", "emails", "pdfs", "thread", "summaries", "embed",
     "transactions",
@@ -69,6 +71,7 @@ class IngestRunReport:
     pipeline_seconds: float
     report_seconds: float
     stages: list[StageRun]
+    performance: PerformanceTelemetry
     snapshot: WorkspaceSnapshot | None
     findings: list[Finding]
     failed_stage: str | None = None
@@ -525,6 +528,7 @@ def build_report(
 ) -> IngestRunReport:
     snapshot = build_snapshot(ctx, start_log_id=start_log_id)
     findings = snapshot_findings(snapshot, stages=stages)
+    ctx.telemetry.validate()
     return IngestRunReport(
         schema_version=REPORT_SCHEMA_VERSION,
         workspace_id=ctx.workspace.id,
@@ -534,6 +538,7 @@ def build_report(
         pipeline_seconds=round(pipeline_seconds, 6),
         report_seconds=round(report_seconds, 6),
         stages=stages,
+        performance=ctx.telemetry,
         snapshot=snapshot,
         findings=findings,
         failed_stage=failed_stage,
@@ -603,6 +608,7 @@ def load_report(path: Path) -> IngestRunReport:
             pipeline_seconds=float(data["pipeline_seconds"]),
             report_seconds=float(data["report_seconds"]),
             stages=[StageRun(**stage) for stage in data["stages"]],
+            performance=performance_from_json(data["performance"]),
             snapshot=WorkspaceSnapshot(**snapshot)
             if snapshot is not None else None,
             findings=[Finding(**finding) for finding in data["findings"]],
@@ -631,6 +637,37 @@ def _noun(count: int, singular: str, plural: str | None = None) -> str:
     return singular if count == 1 else (plural or f"{singular}s")
 
 
+def _performance_lines(performance: PerformanceTelemetry) -> list[str]:
+    """One compact line per hot stage; the JSON keeps the full structure."""
+    summaries = performance.summaries
+    embed = performance.embed
+    pdfs = performance.pdfs
+    lines = ["", "Performance"]
+    if summaries.state in (MEASURED, PARTIAL):
+        detail = (f" — {summaries.pending_threads} pending,"
+                  f" {summaries.generation_calls} calls,"
+                  f" {summaries.total_input_tokens} input tokens")
+    else:
+        detail = ""
+    lines.append(f"  summaries     {summaries.state}{detail}")
+    if embed.state in (MEASURED, PARTIAL):
+        detail = (f" — {embed.queues.leaf.pending_entities} leaf +"
+                  f" {embed.queues.summary.pending_entities} summary"
+                  f" pending, {embed.verified_cache_publications} published")
+    else:
+        detail = ""
+    lines.append(f"  embed         {embed.state}{detail}")
+    if pdfs.state in (MEASURED, PARTIAL):
+        detail = (f" — {pdfs.pending_occurrences} occurrences /"
+                  f" {pdfs.unique_transforms} unique,"
+                  f" workers={pdfs.resources.configured_worker_count}"
+                  f" jobs={pdfs.resources.configured_per_child_jobs}")
+    else:
+        detail = ""
+    lines.append(f"  pdfs          {pdfs.state}{detail}")
+    return lines
+
+
 def format_report(report: IngestRunReport, record_path: Path | None) -> str:
     lines = [
         "",
@@ -648,6 +685,8 @@ def format_report(report: IngestRunReport, record_path: Path | None) -> str:
             f"  {stage.name:14} {stage.outcome:10} "
             f"{_format_duration(stage.duration_seconds):>7}"
             + (f"   {detail}" if detail else ""))
+
+    lines.extend(_performance_lines(report.performance))
 
     snapshot = report.snapshot
     if snapshot is not None:

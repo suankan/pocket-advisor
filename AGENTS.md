@@ -28,7 +28,7 @@ not update archived documents.
 For case work, additionally load:
 
 1. `workspaces/workspace-config.yaml`;
-2. the active workspace's `WORKSPACE.md`;
+2. the selected workspace's `WORKSPACE.md`;
 3. its applicable domain playbook(s).
 
 Do not answer case questions from platform instructions alone.
@@ -103,15 +103,15 @@ and deleted at adapter retirement, not maintained.
   ported (adapter retirement); delete it only after the replacement is
   complete.
 - `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
-  only in `modules/cli.py`; the root entrypoint temporarily supplies the
-  frozen retrieval/maintenance adapter. Stage modules never parse arguments
-  or sequence one another.
+  only in `modules/cli.py`. Frozen commands that have not been ported to
+  workspace-scoped state fail closed; stage modules never parse arguments or
+  sequence one another.
 - The new database is fresh-schema only and deliberately refuses legacy
   state. Do not add compatibility migrations or shims.
-- Locked target (not yet implemented): every workspace owns a separate
-  database/cache/vector/log/runtime tree and every operational CLI command
-  requires global `--workspace`. Until roadmap item 1 lands, follow
-  `docs/status.md` for the still-shared runtime and do not resume cutover.
+- Every workspace owns a separate database/cache/vector/log/runtime tree, and
+  every operational CLI command requires global `--workspace`. There is no
+  active/default workspace registry setting. Existing shared state is retired
+  and is neither migrated nor touched.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
   retained for custody/manual inspection but are not text-extracted or
   embedded.
@@ -172,22 +172,20 @@ Always confirm this against `docs/status.md` and
 - leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
   vector caches, while `chunks.text` stays a pure quote; email caches contain
   only `email_message_full.txt` and `email_message.txt`;
-- `query` uses the native hybrid leaf/thread retriever; daemon, accuracy,
-  verify, wipe, and blob lookup still use the frozen adapter — the frozen
-  `daemon`/`accuracy` commands expect retired columns and must not run
-  against the fresh schema;
+- `query` uses the native hybrid leaf/thread retriever; workspace-scoped
+  `wipe state` is native; daemon, accuracy, verify, blob lookup, and remaining
+  wipe actions fail closed until their native ports land;
 - legacy state was wiped; discovery and emails completed, and the cutover
   run was stopped by the user during PDFs, leaving partial derived state that
   predates the new stable-thread schema and must not be resumed in place.
 
-The ordered continuation lives in `docs/roadmap.md` (workspace-scoped state
-and mandatory selection, confirmed cutover resume, adapter retirement,
-answering pass, experiments; the payload A/B measurement waits for the native
-accuracy port).
+The committed continuation lives in `docs/roadmap.md`. When working-tree
+changes implement its head item, keep that item unshipped until implementation
+is verified and committed, then perform the documentation lifecycle above.
 
 ## Transaction-stage constraints
 
-- Scope only collections mounted on the active workspace and marked
+- Scope only collections mounted on the selected workspace and marked
   `ingestion-type: bank-transactions`.
 - One marked collection represents one account; seed holders/accounts from
   its registry metadata.
@@ -200,7 +198,7 @@ accuracy port).
 - Keep assertion validation, deterministic rebuilds, transfer matching,
   reconciliation overrides, coverage reporting, tamper signals, and row-level
   citations.
-- `reconciliation.yaml` and `counterparties.yaml` remain in the active
+- `reconciliation.yaml` and `counterparties.yaml` remain in the selected
   workspace folder, not engine state.
 - Preserve `source_type='email_body'` for native-PDF chunks; both the
   native retriever and the remaining frozen commands read it. Revisit
@@ -215,7 +213,7 @@ Before handing off a change:
 for test_file in modules/tests/test_*.py; do
   venv/bin/python "$test_file"
 done
-./pocket-advisor.py test
+./pocket-advisor.py --workspace test-workspace test
 for test_file in scripts/test_*.py; do
   venv/bin/python "$test_file"
 done

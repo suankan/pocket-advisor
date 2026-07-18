@@ -40,7 +40,7 @@ class ModelStore:
             raise FileNotFoundError(
                 f"{repo_id}: no local snapshot at {dest} and"
                 " local_files_only=True — fetch it first:"
-                " ./pocket-advisor.py fetch-model")
+                " ./pocket-advisor.py --workspace <id> fetch-model")
         from huggingface_hub import snapshot_download
         return Path(snapshot_download(repo_id=repo_id, local_dir=dest))
 

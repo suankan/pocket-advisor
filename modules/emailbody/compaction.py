@@ -250,8 +250,8 @@ def compact_authored_bodies(conn: sqlite3.Connection,
             raise SystemExit(
                 f"lossless full body missing for item {row['id']}"
                 f" ({full_path}). Regenerate derived state:"
-                " './pocket-advisor.py wipe state' then"
-                " './pocket-advisor.py ingest'.")
+                " './pocket-advisor.py --workspace <id> wipe state' then"
+                " './pocket-advisor.py --workspace <id> ingest all'.")
         full_texts[row["id"]] = body_text(
             full_path.read_bytes(), source=full_path)
 
@@ -307,8 +307,9 @@ def compact_authored_bodies(conn: sqlite3.Connection,
                 "quoted-reply compaction would change authored bodies for"
                 f" {len(planned_item_ids)} email(s), but {n_chunks}"
                 " existing chunks"
-                " would become stale. Run './pocket-advisor.py wipe state'"
-                " then './pocket-advisor.py ingest'. Originals are"
+                " would become stale. Run './pocket-advisor.py --workspace"
+                " <id> wipe state' then './pocket-advisor.py --workspace"
+                " <id> ingest all'. Originals are"
                 " untouched.")
 
     return CompactionResult(stats, authored_bodies)

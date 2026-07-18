@@ -1,6 +1,6 @@
 """Stage 1 — Discovery: build the ingestion working set.
 
-Walks every collection mounted on the active workspace. Originals are
+Walks every collection mounted on the selected workspace. Originals are
 opened read-only (hashing only — classification is extension-based;
 Stage 1 never parses content). One walk feeds BOTH tables:
 
@@ -52,7 +52,7 @@ class DiscoverStage(Stage):
     def run(self) -> StageStats:
         stats = StageStats()
         workspace = self.ctx.workspace
-        collections = self.registry.active_collections()
+        collections = workspace.collections
 
         jobs: list[tuple[Collection, Path]] = []
         walkable: list[Collection] = []

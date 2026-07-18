@@ -8,6 +8,7 @@ loader aborts with a migration pointer.
 Every validation failure aborts loudly (SystemExit) — a registry typo
 must never silently change what gets ingested or searched.
 """
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -16,6 +17,7 @@ import yaml
 from modules.config import Config
 
 INGESTION_TYPES = ("general", "bank-transactions")
+WORKSPACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 _TOP_KEYS = frozenset({"schema_version", "collections", "workspaces"})
 _COLL_KEYS = frozenset({"id", "title", "description", "path",
@@ -25,7 +27,7 @@ _COLL_KEYS = frozenset({"id", "title", "description", "path",
 # statement-ingestion scope for exactly one bank account.
 _BANK_KEYS = _COLL_KEYS | frozenset({"bsb", "account_number", "owners",
                                      "type"})
-_WS_KEYS = frozenset({"id", "active", "path", "title", "collections"})
+_WS_KEYS = frozenset({"id", "path", "title", "collections"})
 _MOUNT_KEYS = frozenset({"id", "purposes"})
 
 
@@ -71,7 +73,6 @@ class Workspace:
     id: str
     path: str
     title: str
-    active: bool
     root: Path
     mounts: tuple[Mount, ...] = field(default_factory=tuple)
 
@@ -83,6 +84,16 @@ class Workspace:
     def collection_ids(self) -> frozenset[str]:
         return frozenset(c.id for c in self.collections)
 
+    def collections_for_purpose(
+            self, purpose: str | None = None) -> tuple[Collection, ...]:
+        """Mounted collections, optionally filtered by an R-05 purpose."""
+        return tuple(
+            mount.collection
+            for mount in self.mounts
+            if purpose is None or not mount.purposes
+            or purpose in mount.purposes
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Registry:
@@ -90,28 +101,26 @@ class Registry:
     workspaces: tuple[Workspace, ...]
     collections: tuple[Collection, ...]
 
-    def active(self) -> Workspace:
+    def workspace_by_id(self, workspace_id: str) -> Workspace | None:
         for ws in self.workspaces:
-            if ws.active:
+            if ws.id == workspace_id:
                 return ws
-        raise SystemExit("workspace-config: no active workspace")
+        return None
+
+    def require_workspace(self, workspace_id: str) -> Workspace:
+        workspace = self.workspace_by_id(workspace_id)
+        if workspace is not None:
+            return workspace
+        available = ", ".join(sorted(ws.id for ws in self.workspaces))
+        raise SystemExit(
+            f"workspace-config: unknown workspace {workspace_id!r}; "
+            f"available: {available}")
 
     def collection_by_id(self, collection_id: str) -> Collection | None:
         for coll in self.collections:
             if coll.id == collection_id:
                 return coll
         return None
-
-    def active_collections(self,
-                           purpose: str | None = None) -> tuple[Collection, ...]:
-        """Collections mounted on the active workspace, optionally
-        filtered by an R-05 purpose tag (empty purposes = every purpose)."""
-        out = []
-        for mount in self.active().mounts:
-            if purpose is None or not mount.purposes \
-                    or purpose in mount.purposes:
-                out.append(mount.collection)
-        return tuple(out)
 
     @classmethod
     def load(cls, config: Config) -> Registry:
@@ -223,6 +232,10 @@ def _load_workspace(raw: dict, label: str, ws_dir: Path,
         _die(f"{label} must be a mapping")
     _check_keys(raw, _WS_KEYS, label)
     ws_id = _require_str(raw, "id", label)
+    if WORKSPACE_ID_RE.fullmatch(ws_id) is None:
+        _die(
+            f"{label}: id must match [A-Za-z0-9][A-Za-z0-9._-]*, "
+            f"got {ws_id!r}")
     rel_path = _safe_rel_path(raw.get("path") or ws_id, label)
     title = raw.get("title") or ws_id
     if not isinstance(title, str):
@@ -257,8 +270,7 @@ def _load_workspace(raw: dict, label: str, ws_dir: Path,
 
     return Workspace(
         id=ws_id, path=rel_path, title=title.strip(),
-        active=bool(raw.get("active", False)), root=root,
-        mounts=tuple(mounts))
+        root=root, mounts=tuple(mounts))
 
 
 def _load(path: Path, ws_dir: Path) -> Registry:
@@ -301,11 +313,6 @@ def _load(path: Path, ws_dir: Path) -> Registry:
             _die(f"duplicate workspace id {ws.id!r}")
         seen_ws.add(ws.id)
         workspaces.append(ws)
-
-    active_count = sum(1 for w in workspaces if w.active)
-    if active_count != 1:
-        _die("exactly one workspace must have active: true"
-             f" (found {active_count})")
 
     return Registry(
         workspaces_dir=ws_dir.resolve(),

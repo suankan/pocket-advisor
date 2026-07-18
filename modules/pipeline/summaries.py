@@ -89,7 +89,7 @@ class ThreadSummaryStage(Stage):
             self.review.flag(
                 f"thread:{job.stable_key}", self.name, "error",
                 f"readable email missing: {job.missing_path};"
-                " run './pocket-advisor.py ingest emails'")
+                " run './pocket-advisor.py --workspace <id> ingest emails'")
             stats.inc("missing_artifacts")
         self.conn.commit()
 

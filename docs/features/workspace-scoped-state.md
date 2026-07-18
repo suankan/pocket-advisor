@@ -16,8 +16,8 @@ database.
    derivatives, leaf vectors, thread-summary vectors, logs, and daemon
    runtime files live below that workspace's state root.
 3. **`--workspace` is mandatory.** Every operational invocation of
-   `pocket-advisor.py` names the workspace explicitly. The registry's
-   `active:` field supplies no CLI default. Top-level help may run without a
+   `pocket-advisor.py` names the workspace explicitly. There is no
+   active/default workspace registry field. Top-level help may run without a
    workspace because it opens no state and performs no operation.
 4. **Duplication is accepted.** If two workspaces mount the same collection,
    each parses, stores, summarizes, and embeds it independently. Correct
@@ -28,8 +28,8 @@ database.
    corpus-derived artifact is shared between workspaces.
 6. **Workspace selection is explicit in runtime context.** Stages and
    retrieval receive the selected `Workspace` through `PipelineContext` and
-   operate only on its mounts. They never rediscover a workspace through
-   `Registry.active()` or an equivalent implicit lookup.
+   operate only on its mounts. They never rediscover a workspace through an
+   implicit registry lookup.
 7. **Workspace state deletion is exact and local.** `wipe state` deletes only
    the selected workspace state root after validating its resolved path and
    obtaining confirmation. It never deletes the common `.state` parent or
@@ -78,8 +78,8 @@ The workspace selector is a required global option placed before the command:
 
 The parser validates that the ID exists before opening a database, creating a
 directory, loading a model, or dispatching through the transitional adapter.
-Unknown or omitted workspace IDs fail loudly. `active:` may remain registry
-metadata, but it has no operational effect on CLI selection.
+Unknown or omitted workspace IDs fail loudly. The retired `active:` key is
+rejected as unknown rather than retained as inert metadata.
 
 During adapter retirement, a frozen command that cannot honor the selected
 workspace must fail closed. It must never fall back to the former shared
@@ -130,8 +130,7 @@ searchable if a collection is unmounted before the next clean rebuild.
 6. A copied or misaddressed database whose bound workspace ID differs from
    `--workspace` is refused before mutation.
 7. Pipeline stages and retrieval use the selected workspace carried by
-   `PipelineContext`; tests fail if they call an implicit active-workspace
-   selector.
+   `PipelineContext`; tests fail if they call an implicit workspace selector.
 8. The transaction stage can rebuild one workspace without deleting another
    workspace's accounts, statements, transactions, or transfer links.
 9. Temporary-fixture tests cover two workspaces with a shared mounted
@@ -145,6 +144,6 @@ searchable if a collection is unmounted before the next clean rebuild.
 - Shared collection databases, attached SQLite databases, or a global
   metadata catalogue.
 - Cross-workspace parsed-artifact or vector deduplication.
-- Automatic selection from `active: true`, current directory, environment
+- Automatic selection from registry metadata, current directory, environment
   variables, or last-used state.
 - In-place migration of the retired shared database.

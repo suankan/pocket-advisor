@@ -65,7 +65,6 @@ collections:
     type: business
 workspaces:
   - id: test-matter
-    active: true
     path: test-matter
     collections:
       - id: business
@@ -266,11 +265,15 @@ def build_context(tmp: Path) -> PipelineContext:
     for collection in ("business", "personal-a", "personal-b", "westpac"):
         (workspaces / "corpora" / collection).mkdir(parents=True)
     (workspaces / "test-matter").mkdir()
-    config = Config(project_root=tmp, workspaces_dir=workspaces)
-    conn = Database(config.db_path).open()
+    base = Config(project_root=tmp, workspaces_dir=workspaces)
+    registry = Registry.load(base)
+    workspace = registry.require_workspace("test-matter")
+    config = base.for_workspace(workspace.id)
+    conn = Database(config.db_path, workspace.id).open()
     return PipelineContext(
         config=config,
-        registry=Registry.load(config),
+        registry=registry,
+        workspace=workspace,
         conn=conn,
         review=ReviewLog(conn, config.review_queue_csv),
     )

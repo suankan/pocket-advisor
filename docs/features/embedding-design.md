@@ -243,10 +243,10 @@ workspaces/.state/workspaces/<workspace_id>/vectors/text/<fingerprint>/
 ## Retrieval
 
 Candidate visibility is computed once per query, always as concrete id
-sets — the workspace mount filter is always active, so there is no
+sets — the workspace mount filter is always enforced, so there is no
 unfiltered fast path and no nullable filter type. Thread summaries are
 searchable only for threads whose every item is visible through the
-active mounts (whole-thread visibility, one aggregate query). The query
+selected workspace mounts (whole-thread visibility, one aggregate query). The query
 also reports operational warnings: chunks not yet embedded under the
 current model, and chunking-config drift since the index was built.
 

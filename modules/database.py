@@ -5,9 +5,8 @@ wipe + full re-ingest, so this module carries no legacy migrations.
 A database created by the old scripts/ tree is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.
 
-Retrieval compatibility: items / chunks / chunks_fts / threads and the
-transactions family keep their old names and columns (the frozen
-retrieval stack keeps working); new in this schema are
+Schema continuity: items / chunks / chunks_fts / threads and the transactions
+family keep their established names and columns; new in this schema are
 `ingestion_candidates` (the Stage 1 working set) and
 `items.parent_item_id` (attached-email lineage).
 """
@@ -15,6 +14,11 @@ import sqlite3
 from pathlib import Path
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS workspace_metadata (
+    singleton    INTEGER PRIMARY KEY CHECK (singleton = 1),
+    workspace_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ingestion_candidates (
     id            INTEGER PRIMARY KEY,
     workspace_id  TEXT,
@@ -360,19 +364,28 @@ _LEGACY_TABLES = ("emails", "email_files", "documents", "page_images")
 
 
 class LegacyDatabaseError(SystemExit):
-    def __init__(self, db_path: Path, marker: str):
+    def __init__(self, db_path: Path, workspace_id: str, marker: str):
         super().__init__(
             f"database {db_path} is not the current fresh schema "
             f"(found {marker}). This engine has no migration chain — "
-            "run `./pocket-advisor.py wipe state` (confirmed, wipes ALL "
-            "derived state) and re-ingest from corpora.")
+            "run `./pocket-advisor.py --workspace "
+            f"{workspace_id} wipe state` (confirmed; wipes only that "
+            "workspace's derived state) and re-ingest from corpora.")
+
+
+class WorkspaceDatabaseError(SystemExit):
+    """A database is unbound, misbound, or contains foreign workspace rows."""
+
+    def __init__(self, db_path: Path, message: str):
+        super().__init__(f"database {db_path}: {message}")
 
 
 class Database:
     """Connection factory + schema owner for the engine SQLite DB."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, workspace_id: str):
         self.path = path
+        self.workspace_id = workspace_id
 
     def connect(self) -> sqlite3.Connection:
         # timeout: wait for other writers (daemon, parallel CLI) instead
@@ -387,18 +400,43 @@ class Database:
         """Connect AND ensure the schema — the normal entry point."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = self.connect()
-        self._refuse_legacy(conn)
-        conn.executescript(SCHEMA)
-        conn.executescript(FTS_SCHEMA)
-        conn.commit()
-        return conn
+        try:
+            tables = self._tables(conn)
+            is_new = not tables
+            self._refuse_legacy(conn, tables)
+            if not is_new:
+                self._require_workspace_binding(conn)
+                self._verify_workspace_rows(conn, tables)
+            conn.executescript(SCHEMA)
+            conn.executescript(FTS_SCHEMA)
+            if is_new:
+                conn.execute(
+                    "INSERT INTO workspace_metadata"
+                    " (singleton, workspace_id) VALUES (1, ?)",
+                    (self.workspace_id,))
+            self._require_workspace_binding(conn)
+            self._verify_workspace_rows(conn, self._tables(conn))
+            conn.commit()
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
-    def _refuse_legacy(self, conn: sqlite3.Connection) -> None:
-        tables = {row["name"] for row in conn.execute(
+    @staticmethod
+    def _tables(conn: sqlite3.Connection) -> set[str]:
+        return {row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    def _refuse_legacy(
+            self, conn: sqlite3.Connection, tables: set[str]) -> None:
         for marker in _LEGACY_TABLES:
             if marker in tables:
-                raise LegacyDatabaseError(self.path, f"table {marker!r}")
+                raise LegacyDatabaseError(
+                    self.path, self.workspace_id, f"table {marker!r}")
+        if tables and "workspace_metadata" not in tables:
+            raise LegacyDatabaseError(
+                self.path, self.workspace_id,
+                "workspace binding metadata missing")
         if "items" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(items)")}
@@ -406,7 +444,8 @@ class Database:
             missing = required - columns
             if missing:
                 raise LegacyDatabaseError(
-                    self.path, "items missing " + ", ".join(sorted(missing)))
+                    self.path, self.workspace_id,
+                    "items missing " + ", ".join(sorted(missing)))
         if "threads" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(threads)")}
@@ -414,17 +453,50 @@ class Database:
             missing = required - columns
             if missing:
                 raise LegacyDatabaseError(
-                    self.path, "threads missing "
+                    self.path, self.workspace_id, "threads missing "
                     + ", ".join(sorted(missing)))
         if "chunks" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(chunks)")}
             if "payload_shadow" not in columns:
                 raise LegacyDatabaseError(
-                    self.path, "chunks missing payload_shadow")
+                    self.path, self.workspace_id,
+                    "chunks missing payload_shadow")
         if "chunks_fts" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(chunks_fts)")}
             if "payload_shadow" not in columns:
                 raise LegacyDatabaseError(
-                    self.path, "chunks_fts missing payload_shadow")
+                    self.path, self.workspace_id,
+                    "chunks_fts missing payload_shadow")
+
+    def _require_workspace_binding(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT workspace_id FROM workspace_metadata"
+            " WHERE singleton = 1").fetchone()
+        if row is None:
+            raise WorkspaceDatabaseError(
+                self.path, "workspace binding row is missing")
+        bound = str(row["workspace_id"])
+        if bound != self.workspace_id:
+            raise WorkspaceDatabaseError(
+                self.path,
+                f"bound to workspace {bound!r}, not selected workspace "
+                f"{self.workspace_id!r}")
+
+    def _verify_workspace_rows(
+            self, conn: sqlite3.Connection, tables: set[str]) -> None:
+        for table in ("ingestion_candidates", "item_memberships",
+                      "source_blob_index"):
+            if table not in tables:
+                continue
+            row = conn.execute(
+                f"SELECT workspace_id FROM {table}"
+                " WHERE workspace_id IS NOT NULL AND workspace_id != ?"
+                " LIMIT 1",
+                (self.workspace_id,)).fetchone()
+            if row is not None:
+                raise WorkspaceDatabaseError(
+                    self.path,
+                    f"{table} contains row for workspace "
+                    f"{row['workspace_id']!r}; expected {self.workspace_id!r}")

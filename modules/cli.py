@@ -1,14 +1,15 @@
 """Pocket Advisor's sole argparse surface and pipeline orchestrator.
 
-Ingestion and cold retrieval run through typed ``modules/`` code directly.
-Maintenance, daemon, and quality commands remain temporarily delegated by
-``pocket-advisor.py`` to the frozen ``scripts/`` implementation; this module
-receives that adapter as a callback and never imports from the frozen tree.
+Ingestion, cold retrieval, and workspace-state wiping run through typed
+``modules/`` code directly. Remaining frozen operational commands fail closed
+until their native workspace-scoped ports land; this module never imports the
+frozen tree.
 """
 import argparse
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from modules.config import Config
 from modules.database import Database
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import ReviewLog
-from modules.workspace import Registry
+from modules.workspace import Registry, Workspace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +31,13 @@ INGEST_STAGES = (
     "embed",
     "transactions",
 )
-type LegacyDispatch = Callable[[argparse.Namespace], int]
+@dataclass(frozen=True, slots=True)
+class RuntimeSelection:
+    """Validated workspace selection, resolved before any command effects."""
+
+    config: Config
+    registry: Registry
+    workspace: Workspace
 
 
 _HELP = {
@@ -39,11 +46,11 @@ _HELP = {
     "ingest": "all | discover | emails | pdfs | thread | summaries | embed | transactions",
     "transactions": "report — statement integrity and reconciliation report",
     "query": "one-off hybrid leaf/thread retrieval query",
-    "daemon": "serve | status | stop — session-warm query daemon",
-    "wipe": "list | index | state — explicit derived-state deletion",
-    "blob-index": "list-sources | lookup — custody path tooling",
-    "verify": "integrity check",
-    "accuracy": "run | compare | list — golden-set retrieval accuracy",
+    "daemon": "serve | status | stop — unavailable pending native port",
+    "wipe": "state (native) | list/index (unavailable pending native port)",
+    "blob-index": "list-sources | lookup — unavailable pending native port",
+    "verify": "unavailable pending native port",
+    "accuracy": "run | compare | list — unavailable pending native port",
     "test": "run every modules/tests/test_*.py self-test",
 }
 _GROUPS = (
@@ -61,17 +68,32 @@ def _epilog() -> str:
         lines.append(f"  {group}:")
         for name in names:
             lines.append(f"    {name:14} {_HELP[name]}")
-    lines.extend(("", "Per-command flags: pocket-advisor.py <command> --help"))
+    lines.extend((
+        "",
+        "Usage: pocket-advisor.py --workspace <id> <command> ...",
+        "Per-command flags: pocket-advisor.py --workspace <id> <command> --help",
+    ))
     return "\n".join(lines)
 
 
-def _open_context() -> PipelineContext:
-    config = Config.load()
-    registry = Registry.load(config)
-    conn = Database(config.db_path).open()
+def _resolve_selection(workspace_id: str) -> RuntimeSelection:
+    base_config = Config.load()
+    registry = Registry.load(base_config)
+    workspace = registry.require_workspace(workspace_id)
+    return RuntimeSelection(
+        config=base_config.for_workspace(workspace.id),
+        registry=registry,
+        workspace=workspace,
+    )
+
+
+def _open_context(selection: RuntimeSelection) -> PipelineContext:
+    config = selection.config
+    conn = Database(config.db_path, selection.workspace.id).open()
     return PipelineContext(
         config=config,
-        registry=registry,
+        registry=selection.registry,
+        workspace=selection.workspace,
         conn=conn,
         review=ReviewLog(conn, config.review_queue_csv),
     )
@@ -109,9 +131,9 @@ def _execute_stage(ctx: PipelineContext, name: str) -> None:
     _stage_class(name)(ctx).execute()
 
 
-def run_ingest(stage: str) -> int:
+def run_ingest(stage: str, selection: RuntimeSelection) -> int:
     """Execute one named stage or the complete ordered pipeline."""
-    ctx = _open_context()
+    ctx = _open_context(selection)
     try:
         if stage != "all":
             _execute_stage(ctx, stage)
@@ -128,7 +150,7 @@ def run_ingest(stage: str) -> int:
             print("embed: skipped (ingestion.embed_text=false)")
         has_bank_collections = any(
             collection.is_bank_transactions
-            for collection in ctx.registry.active_collections())
+            for collection in ctx.workspace.collections)
         if has_bank_collections:
             _execute_stage(ctx, "transactions")
         else:
@@ -138,18 +160,20 @@ def run_ingest(stage: str) -> int:
         ctx.conn.close()
 
 
-def _handle_db(_: argparse.Namespace) -> int:
-    config = Config.load()
-    conn = Database(config.db_path).open()
+def _handle_db(args: argparse.Namespace) -> int:
+    selection: RuntimeSelection = args.selection
+    config = selection.config
+    conn = Database(config.db_path, selection.workspace.id).open()
     conn.close()
     print(f"database initialized: {config.db_path}")
     return 0
 
 
-def _handle_fetch_model(_: argparse.Namespace) -> int:
+def _handle_fetch_model(args: argparse.Namespace) -> int:
     from modules.embedding.loader import ModelStore
 
-    config = Config.load()
+    selection: RuntimeSelection = args.selection
+    config = selection.config
     store = ModelStore(config.models_dir)
     embed = store.snapshot_dir(config.mlx_model_embed_text)
     print(f"Text embed model ready: {embed}")
@@ -169,13 +193,13 @@ def _handle_fetch_model(_: argparse.Namespace) -> int:
 
 
 def _handle_ingest(args: argparse.Namespace) -> int:
-    return run_ingest(args.stage)
+    return run_ingest(args.stage, args.selection)
 
 
-def _handle_transactions(_: argparse.Namespace) -> int:
+def _handle_transactions(args: argparse.Namespace) -> int:
     from modules.pipeline.transactions import report_transactions
 
-    ctx = _open_context()
+    ctx = _open_context(args.selection)
     try:
         report_transactions(ctx)
         return 0
@@ -190,7 +214,7 @@ def _handle_query(args: argparse.Namespace) -> int:
         raise SystemExit(
             "query: the new relational retriever currently runs cold; "
             "--require-daemon is unavailable until the daemon port lands")
-    ctx = _open_context()
+    ctx = _open_context(args.selection)
     try:
         top_k = args.top_k or ctx.config.default_top_k
         if top_k <= 0:
@@ -237,27 +261,39 @@ def _handle_test(_: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def _legacy_handler(
-        dispatch: LegacyDispatch | None,
-) -> Callable[[argparse.Namespace], int]:
-    def handle(args: argparse.Namespace) -> int:
-        if dispatch is None:
-            raise RuntimeError(
-                f"legacy command {args.command!r} needs the entrypoint adapter")
-        return int(dispatch(args) or 0)
+def _handle_wipe_state(args: argparse.Namespace) -> int:
+    from modules.wipe import wipe_state
 
-    return handle
+    selection: RuntimeSelection = args.selection
+    return wipe_state(
+        selection.config,
+        selection.registry,
+        selection.workspace,
+        yes=args.yes,
+    )
 
 
-def build_parser(
-        legacy_dispatch: LegacyDispatch | None = None,
-) -> argparse.ArgumentParser:
-    legacy = _legacy_handler(legacy_dispatch)
+def _handle_workspace_unsafe(args: argparse.Namespace) -> int:
+    action = f" {args.action}" if getattr(args, "action", None) else ""
+    raise SystemExit(
+        f"{args.command}{action}: unavailable until its native "
+        "workspace-scoped port lands; refusing the frozen shared-state "
+        "implementation")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pocket-advisor.py",
         description="Pocket Advisor — local evidence ingestion and retrieval",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_epilog(),
+    )
+    parser.add_argument(
+        "--workspace",
+        dest="workspace_id",
+        required=True,
+        metavar="ID",
+        help="required workspace id from workspaces/workspace-config.yaml",
     )
     commands = parser.add_subparsers(
         dest="command", metavar="command", required=True)
@@ -310,7 +346,7 @@ def build_parser(
     serve.add_argument("--idle-sec", type=int, default=None)
     actions.add_parser("status")
     actions.add_parser("stop")
-    command.set_defaults(handler=legacy, idle_sec=None)
+    command.set_defaults(handler=_handle_workspace_unsafe, idle_sec=None)
 
     command = commands.add_parser("wipe", help=_HELP["wipe"])
     actions = command.add_subparsers(
@@ -323,21 +359,21 @@ def build_parser(
     wipe_index.add_argument("--force", action="store_true")
     wipe_state = actions.add_parser("state")
     wipe_state.add_argument("--yes", action="store_true")
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_workspace_unsafe)
+    wipe_state.set_defaults(handler=_handle_wipe_state)
 
     command = commands.add_parser("blob-index", help=_HELP["blob-index"])
     actions = command.add_subparsers(
         dest="action", metavar="action", required=True)
     actions.add_parser("list-sources")
     lookup = actions.add_parser("lookup")
-    lookup.add_argument("--workspace", "-w", required=True)
     lookup.add_argument("--source", "-s", required=True)
     lookup.add_argument("--sha256", required=True)
     lookup.add_argument("--no-verify", action="store_true")
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_workspace_unsafe)
 
     command = commands.add_parser("verify", help=_HELP["verify"])
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_workspace_unsafe)
 
     command = commands.add_parser("accuracy", help=_HELP["accuracy"])
     actions = command.add_subparsers(
@@ -352,18 +388,15 @@ def build_parser(
     compare.add_argument("result_b")
     listing = actions.add_parser("list")
     listing.add_argument("--golden")
-    command.set_defaults(handler=legacy)
+    command.set_defaults(handler=_handle_workspace_unsafe)
 
     command = commands.add_parser("test", help=_HELP["test"])
     command.set_defaults(handler=_handle_test)
     return parser
 
 
-def main(
-        argv: list[str] | None = None,
-        *,
-        legacy_dispatch: LegacyDispatch | None = None,
-) -> int:
-    args = build_parser(legacy_dispatch).parse_args(argv)
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    args.selection = _resolve_selection(args.workspace_id)
     handler: Callable[[argparse.Namespace], Any] = args.handler
     return int(handler(args) or 0)

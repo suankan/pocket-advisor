@@ -14,7 +14,8 @@ from modules.config import (Config, artifact_folder_name,  # noqa: E402
                             safe_component)
 from modules.custody import (CustodyError, sha256_bytes,  # noqa: E402
                              write_verified)
-from modules.database import Database, LegacyDatabaseError  # noqa: E402
+from modules.database import (Database, LegacyDatabaseError,  # noqa: E402
+                              WorkspaceDatabaseError)
 from modules.domain import (Candidate, CandidateStatus,  # noqa: E402
                             DocumentType, StageStats)
 from modules.embedding import (PAYLOAD_RECIPE, fingerprint_slug)  # noqa: E402
@@ -38,7 +39,6 @@ collections:
     type: daily-transactions
 workspaces:
   - id: matter-x
-    active: true
     path: matter-x
     collections:
       - id: general-mail
@@ -50,9 +50,18 @@ workspaces:
 
 def test_config(tmp: Path) -> None:
     ws_dir = tmp / "workspaces"
-    cfg = Config(project_root=tmp, workspaces_dir=ws_dir)
-    assert cfg.state_dir == ws_dir / ".state"
+    base = Config(project_root=tmp, workspaces_dir=ws_dir)
+    assert base.state_root == ws_dir / ".state"
+    assert base.workspaces_state_dir == ws_dir / ".state" / "workspaces"
+    try:
+        _ = base.state_dir
+        raise AssertionError("unselected config must not resolve state")
+    except RuntimeError as exc:
+        assert "before workspace selection" in str(exc)
+    cfg = base.for_workspace("matter-x")
+    assert cfg.state_dir == ws_dir / ".state" / "workspaces" / "matter-x"
     assert cfg.db_path.name == "pocket_advisor.db"
+    assert cfg.runtime_dir == cfg.state_dir / "runtime"
     cache = cfg.collection_cache("own/solicitor")
     assert cache.root == cfg.cache_dir / "own_solicitor"
 
@@ -98,7 +107,7 @@ def test_workspace(tmp: Path) -> None:
     cfg = Config(project_root=tmp, workspaces_dir=ws_dir)
     reg = Registry.load(cfg)
 
-    ws = reg.active()
+    ws = reg.require_workspace("matter-x")
     assert ws.id == "matter-x"
     assert ws.collection_ids == {"general-mail", "own-solicitor",
                                  "acct-daily"}
@@ -110,14 +119,31 @@ def test_workspace(tmp: Path) -> None:
     assert bank.bank_account.account_number == "12345678"
     assert bank.bank_account.owners == ("Alex",)
     # purpose filter: only unrestricted mounts + tagged mount
-    drafting = {c.id for c in reg.active_collections("drafting")}
+    drafting = {c.id for c in ws.collections_for_purpose("drafting")}
     assert drafting == {"general-mail", "own-solicitor", "acct-daily"}
-    other = {c.id for c in reg.active_collections("research")}
+    other = {c.id for c in ws.collections_for_purpose("research")}
     assert other == {"general-mail", "acct-daily"}
+    assert reg.workspace_by_id("missing") is None
+    try:
+        reg.require_workspace("missing")
+        raise AssertionError("unknown workspace must abort")
+    except SystemExit as exc:
+        assert "unknown workspace" in str(exc)
+
+    # The retired `active:` selector is rejected, not silently ignored.
+    with_active = REGISTRY_YAML.replace(
+        "  - id: matter-x\n", "  - id: matter-x\n    active: true\n")
+    (ws_dir / "workspace-config.yaml").write_text(with_active)
+    try:
+        Registry.load(cfg)
+        raise AssertionError("retired active workspace key must abort")
+    except SystemExit as exc:
+        assert "unknown key(s): active" in str(exc)
+    (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
 
     # v1 registries are refused with a migration pointer
     (ws_dir / "workspace-config.yaml").write_text(
-        "schema_version: 1\nworkspaces: [{id: x, active: true}]\n")
+        "schema_version: 1\nworkspaces: [{id: x}]\n")
     try:
         Registry.load(cfg)
         raise AssertionError("v1 registry must be refused")
@@ -125,10 +151,23 @@ def test_workspace(tmp: Path) -> None:
         assert "no longer supported" in str(e)
     (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
 
+    # Workspace IDs map directly to state path components; unsafe IDs abort.
+    unsafe = REGISTRY_YAML.replace("id: matter-x", "id: ../matter-x")
+    (ws_dir / "workspace-config.yaml").write_text(unsafe)
+    try:
+        Registry.load(cfg)
+        raise AssertionError("unsafe workspace id must abort")
+    except SystemExit as exc:
+        assert "id must match" in str(exc)
+    (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
+
 
 def test_database(tmp: Path) -> None:
-    db = Database(tmp / "state" / "t.db")
+    db = Database(tmp / "state" / "t.db", "w")
     conn = db.open()
+    assert conn.execute(
+        "SELECT workspace_id FROM workspace_metadata WHERE singleton=1"
+    ).fetchone()[0] == "w"
     conn.execute(
         "INSERT INTO ingestion_candidates (workspace_id, collection_id,"
         " relpath, sha256, size_bytes, document_type, status,"
@@ -176,6 +215,28 @@ def test_database(tmp: Path) -> None:
     assert envelope_hit is not None
     conn.close()
 
+    # A database is permanently bound to the selected workspace.
+    try:
+        Database(db.path, "other").open()
+        raise AssertionError("misbound database must be refused")
+    except WorkspaceDatabaseError as exc:
+        assert "bound to workspace 'w'" in str(exc)
+
+    contaminated = Database(tmp / "state" / "contaminated.db", "w")
+    bad = contaminated.open()
+    bad.execute(
+        "INSERT INTO ingestion_candidates (workspace_id, collection_id,"
+        " relpath, sha256, document_type, discovered_at)"
+        " VALUES ('other', 'c', 'x.eml', ?, 'email', 't')",
+        ("f" * 64,))
+    bad.commit()
+    bad.close()
+    try:
+        contaminated.open()
+        raise AssertionError("foreign workspace row must be refused")
+    except WorkspaceDatabaseError as exc:
+        assert "contains row for workspace 'other'" in str(exc)
+
     # legacy DB refused, never patched
     legacy = tmp / "state" / "legacy.db"
     raw = sqlite3.connect(legacy)
@@ -183,7 +244,7 @@ def test_database(tmp: Path) -> None:
     raw.commit()
     raw.close()
     try:
-        Database(legacy).open()
+        Database(legacy, "w").open()
         raise AssertionError("legacy DB must be refused")
     except LegacyDatabaseError as e:
         assert "wipe state" in str(e)
@@ -196,7 +257,7 @@ def test_custody_review(tmp: Path) -> None:
     assert out.read_bytes() == data
     assert isinstance(CustodyError("x"), RuntimeError)
 
-    db = Database(tmp / "state" / "r.db")
+    db = Database(tmp / "state" / "r.db", "w")
     conn = db.open()
     csv_path = tmp / "logs" / "review_queue.csv"
     review = ReviewLog(conn, csv_path)

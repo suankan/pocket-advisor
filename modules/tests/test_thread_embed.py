@@ -27,7 +27,6 @@ collections:
     path: corpora/mail
 workspaces:
   - id: matter-x
-    active: true
     collections:
       - id: mail
 """
@@ -80,10 +79,13 @@ def main() -> int:
         ws_dir = tmp / "workspaces"
         ws_dir.mkdir(parents=True)
         (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
-        cfg = Config(project_root=tmp, workspaces_dir=ws_dir)
-        conn = Database(cfg.db_path).open()
+        base = Config(project_root=tmp, workspaces_dir=ws_dir)
+        registry = Registry.load(base)
+        workspace = registry.require_workspace("matter-x")
+        cfg = base.for_workspace(workspace.id)
+        conn = Database(cfg.db_path, workspace.id).open()
         ctx = PipelineContext(
-            config=cfg, registry=Registry.load(cfg), conn=conn,
+            config=cfg, registry=registry, workspace=workspace, conn=conn,
             review=ReviewLog(conn, cfg.review_queue_csv))
 
         a = insert_item(conn, tmp, "<a@x>", "Settlement", "Original text.",

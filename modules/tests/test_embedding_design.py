@@ -34,7 +34,6 @@ collections:
     path: corpora/mail
 workspaces:
   - id: matter-x
-    active: true
     collections:
       - id: mail
 """
@@ -102,14 +101,17 @@ def main() -> int:
         workspaces = root / "workspaces"
         workspaces.mkdir()
         (workspaces / "workspace-config.yaml").write_text(REGISTRY_YAML)
-        cfg = Config(project_root=root, workspaces_dir=workspaces,
-                     rerank_enabled=False)
+        base = Config(project_root=root, workspaces_dir=workspaces,
+                      rerank_enabled=False)
+        registry = Registry.load(base)
+        workspace = registry.require_workspace("matter-x")
+        cfg = base.for_workspace(workspace.id)
         assert cfg.mlx_model_thread_summary == \
             "mlx-community/Qwen3.5-4B-MLX-4bit"
         importlib.import_module("mlx_lm.models.qwen3_5")
-        conn = Database(cfg.db_path).open()
+        conn = Database(cfg.db_path, workspace.id).open()
         ctx = PipelineContext(
-            config=cfg, registry=Registry.load(cfg), conn=conn,
+            config=cfg, registry=registry, workspace=workspace, conn=conn,
             review=ReviewLog(conn, cfg.review_queue_csv))
 
         a = insert_email(conn, root, "<a@x>", "Project", "Opening note.",
@@ -296,7 +298,8 @@ def main() -> int:
         ThreadStage(ctx).run()
         off_ctx = PipelineContext(
             config=replace(cfg, summarize_threads=False),
-            registry=ctx.registry, conn=conn, review=ctx.review)
+            registry=ctx.registry, workspace=ctx.workspace,
+            conn=conn, review=ctx.review)
         with patch.object(summaries_mod, "get_summary_generator",
                           side_effect=AssertionError("must not load")):
             off_stats = ThreadSummaryStage(off_ctx).run()

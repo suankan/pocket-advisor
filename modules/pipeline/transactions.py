@@ -1,6 +1,6 @@
 """Stage 5 — structured bank transactions.
 
-For each active, mounted collection marked ``bank-transactions`` this stage:
+For each selected-workspace collection marked ``bank-transactions`` this stage:
 
 1. seeds account ownership from registry metadata;
 2. rebuilds statements, assertions, and transaction rows from Stage 3 text;
@@ -319,7 +319,7 @@ class TransactionService:
 
     def bank_collections(self) -> tuple[Collection, ...]:
         return tuple(collection for collection
-                     in self.ctx.registry.active_collections()
+                     in self.ctx.workspace.collections
                      if collection.is_bank_transactions)
 
     def seed_accounts(

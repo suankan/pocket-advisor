@@ -55,7 +55,7 @@ def allowed_chunk_ids(ctx: PipelineContext,
         params.append(options.thread_id)
 
     mounts = {collection.id for collection in
-              ctx.registry.active_collections(options.purpose)}
+              ctx.workspace.collections_for_purpose(options.purpose)}
     if not mounts:
         return set()
     marks = ",".join("?" for _ in mounts)
@@ -80,7 +80,7 @@ def visible_item_ids(ctx: PipelineContext,
     afterward.
     """
     mounts = {collection.id for collection in
-              ctx.registry.active_collections(options.purpose)}
+              ctx.workspace.collections_for_purpose(options.purpose)}
     if not mounts:
         return set()
     marks = ",".join("?" for _ in mounts)
@@ -329,7 +329,7 @@ def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
     if pending:
         warnings.append(
             f"{pending} chunks not yet embedded under the current model —"
-            " run ./pocket-advisor.py ingest embed; semantic results may"
+            " run ./pocket-advisor.py --workspace <id> ingest embed; semantic results may"
             " be incomplete")
     if paths.meta_json.is_file():
         built = meta_fingerprint(json.loads(paths.meta_json.read_text()))
@@ -360,7 +360,7 @@ def run_search(ctx: PipelineContext, question: str,
         allowed_threads = set()
 
     # Summaries are searchable only for threads whose EVERY item is
-    # visible through the active mounts (whole-thread visibility).
+    # visible through the selected workspace's mounts (whole-thread visibility).
     current_summary_threads = {int(row["thread_id"]) for row in conn.execute(
         "SELECT thread_id FROM thread_summaries WHERE is_stale=0").fetchall()}
     _load_temp_ids(conn, "_visible_items", visible_items)

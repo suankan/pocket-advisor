@@ -13,7 +13,7 @@ Implement the locked design in
   top-level help remains state-free;
 - resolve the selected workspace explicitly and carry it in
   `PipelineContext`; remove pipeline/retrieval dependence on implicit
-  `Registry.active()` selection;
+  workspace selection;
 - give each workspace its own bound SQLite database, cache, vectors, logs,
   and runtime tree below `workspaces/.state/workspaces/<workspace_id>/`;
 - retain shared model weights only and accept complete derived-state

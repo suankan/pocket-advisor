@@ -7,7 +7,7 @@ needs it — no module-global mutation, no import-time side effects.
 
 Cache layout (`docs/design.md`):
 
-    workspaces/.state/cache/<collection_id>/
+    workspaces/.state/workspaces/<workspace_id>/cache/<collection_id>/
         <email_basename>__<sha8>/           EmailCacheFolder
             email_message_full.txt
             email_message.txt
@@ -20,7 +20,7 @@ touch the filesystem; stages mkdir the directories they actually write.
 """
 import sys
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +112,7 @@ class EmailCacheFolder:
 
 @dataclass(frozen=True, slots=True)
 class CollectionCache:
-    """`.state/cache/<collection_id>/` — engine-only derived state."""
+    """Workspace-local `cache/<collection_id>/` derived state."""
 
     root: Path
 
@@ -144,6 +144,8 @@ class Config:
 
     project_root: Path = PROJECT_ROOT
     workspaces_dir: Path = PROJECT_ROOT / "workspaces"
+    # Runtime-only selection. It is never loaded from config.yaml.
+    workspace_id: str | None = None
 
     # -- ingestion knobs ---------------------------------------------------
     ocr_langs: str = "eng+rus"
@@ -175,10 +177,32 @@ class Config:
     daemon_idle_sec: int = 1800
     thread_context_chars: int = 120_000
 
-    # -- derived paths (shared engine state, one DB for all workspaces) ----
+    # -- derived paths ----------------------------------------------------
+    # Model weights are shared; every corpus-derived path requires an
+    # explicit workspace selection and lives below that workspace's root.
+    @property
+    def state_root(self) -> Path:
+        return self.workspaces_dir / STATE_DIRNAME
+
+    @property
+    def workspaces_state_dir(self) -> Path:
+        return self.state_root / "workspaces"
+
+    def for_workspace(self, workspace_id: str) -> Config:
+        """Return this immutable config bound to one selected workspace."""
+        if not workspace_id:
+            raise ValueError("workspace_id must be non-empty")
+        return replace(self, workspace_id=workspace_id)
+
+    def _selected_workspace_id(self) -> str:
+        if self.workspace_id is None:
+            raise RuntimeError(
+                "workspace-scoped path requested before workspace selection")
+        return self.workspace_id
+
     @property
     def state_dir(self) -> Path:
-        return self.workspaces_dir / STATE_DIRNAME
+        return self.workspaces_state_dir / self._selected_workspace_id()
 
     @property
     def db_path(self) -> Path:
@@ -199,6 +223,10 @@ class Config:
     @property
     def vectors_dir(self) -> Path:
         return self.state_dir / "vectors"
+
+    @property
+    def runtime_dir(self) -> Path:
+        return self.state_dir / "runtime"
 
     @property
     def models_dir(self) -> Path:

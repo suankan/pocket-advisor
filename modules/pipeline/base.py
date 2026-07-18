@@ -22,12 +22,9 @@ class PipelineContext:
 
     config: Config
     registry: Registry
+    workspace: Workspace
     conn: sqlite3.Connection
     review: ReviewLog
-
-    @property
-    def workspace(self) -> Workspace:
-        return self.registry.active()
 
 
 class Stage(ABC):

@@ -19,6 +19,8 @@ Feature-level designs refine this document:
   future answering boundary.
 - `docs/features/ingest-all-reporting.md` — default full-ingest timing,
   converged-state statistics, finding rollups, and local run records.
+- `docs/features/ingestion-performance.md` — measured clean-build bottlenecks
+  and the proposed summary, embedding, and PDF-transform optimization work.
 - `docs/features/accuracy-testing.md` — native retrieval-expectation suites,
   workspace-owned results, and comparison workflow.
 - `docs/features/query-daemon.md` — workspace-local warm retrieval resource

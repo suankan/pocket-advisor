@@ -21,11 +21,14 @@ For every platform task, load these files in order:
    timing, statistics, and finding-summary design;
 8. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
    freshness plus Stage 5 convergence, findings, and force-rebuild design;
-9. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
+9. `docs/features/ingestion-performance.md` — proposed measured optimization
+   work for summaries, embedding, and PDF transforms; implementation choices
+   remain benchmark-driven;
+10. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
    and accuracy-measurement design;
-10. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
+11. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
    service design;
-11. `docs/roadmap.md` — ordered future work only.
+12. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical

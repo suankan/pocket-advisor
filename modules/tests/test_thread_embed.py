@@ -13,11 +13,13 @@ import modules.pipeline.embed as embed_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.emailbody import body_text  # noqa: E402
-from modules.embedding import PAYLOAD_RECIPE, index_paths  # noqa: E402
+from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
+                               index_paths)
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
 from modules.pipeline.thread import ThreadStage  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
+from modules.telemetry import PerformanceTelemetry  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
 REGISTRY_YAML = """\
@@ -34,11 +36,13 @@ workspaces:
 DIM = 4
 FINGERPRINT = {"backend": "mlx", "model": "fake/model", "dim": DIM,
                "chunk_chars": 1500, "chunk_overlap": 200,
-               "payload_recipe": PAYLOAD_RECIPE}
+               "payload_recipe": PAYLOAD_RECIPE,
+               "execution_recipe": EMBED_EXECUTION_RECIPE}
 
 
 class FakeBackend:
     def __init__(self, fail_texts: set[str] = frozenset()):
+        self.dim = DIM
         self.fail_texts = fail_texts
         self.embedded_texts: list[str] = []
 
@@ -49,6 +53,12 @@ class FakeBackend:
         seed = sum(text.encode()) % 97 + 1
         vec = np.arange(1, DIM + 1, dtype=np.float32) * seed
         return vec / np.linalg.norm(vec)
+
+    def embed_many(self, texts: list[str], *, pad_to_tokens: int):
+        return [self.embed_one(text) for text in texts]
+
+    def count_tokens(self, text: str, is_query: bool = False) -> int:
+        return len(text.split()) + 2
 
 
 def insert_item(conn, tmp: Path, mid: str, subject: str, body: str,
@@ -218,10 +228,14 @@ def main() -> int:
         assert estats2.get("payloads_updated") == 0, estats2
         assert estats2.get("embedded", ) == 0, estats2
 
-        # Failure is retried on the next run (per-chunk cache semantics).
+        # One bad member bisects its batch without losing the successful peer;
+        # the missing entity alone is retried on the next run.
         e = insert_item(conn, tmp, "<e@x>", "Late arrival", "New text.",
                         "2024-04-01T10:00:00+00:00", "alice@x", "bob@y")
+        f = insert_item(conn, tmp, "<f@x>", "Late peer", "Peer text.",
+                        "2024-04-02T10:00:00+00:00", "alice@x", "bob@y")
         conn.commit()
+        ctx.telemetry = PerformanceTelemetry()
         with patch.object(embed_mod, "current_fingerprint",
                           return_value=dict(FINGERPRINT)), \
              patch.object(embed_mod, "get_backend",
@@ -229,14 +243,30 @@ def main() -> int:
                               fail_texts={"New text."})):
             estats3 = EmbedStage(ctx).run()
         assert estats3.get("failed") == 1 and \
-            estats3.get("index_size") == 6, estats3
+            estats3.get("embedded") == 1 and \
+            estats3.get("index_size") == 7, estats3
+        queue = ctx.telemetry.embed.queues.leaf
+        assert queue.bisection_fallbacks >= 1, queue
+        assert queue.individual_fallbacks >= 1, queue
+        assert queue.successful_entities == 1 and \
+            queue.failed_entities == 1, queue
+        assert ctx.telemetry.embed.verified_cache_publications == 1
+        e_chunk = conn.execute(
+            "SELECT id FROM chunks WHERE item_id = ?", (e,)).fetchone()[0]
+        f_chunk = conn.execute(
+            "SELECT id FROM chunks WHERE item_id = ?", (f,)).fetchone()[0]
+        assert not (paths.vecs_dir / f"{e_chunk}.npy").exists()
+        assert (paths.vecs_dir / f"{f_chunk}.npy").is_file()
+        assert not any(path.name.endswith(".tmp")
+                       for path in paths.vecs_dir.iterdir())
+        ctx.telemetry = PerformanceTelemetry()
         with patch.object(embed_mod, "current_fingerprint",
                           return_value=dict(FINGERPRINT)), \
              patch.object(embed_mod, "get_backend",
                           return_value=FakeBackend()):
             estats4 = EmbedStage(ctx).run()
         assert estats4.get("embedded") == 1 and \
-            estats4.get("index_size") == 7, estats4
+            estats4.get("index_size") == 8, estats4
 
         conn.close()
     print("test_thread_embed: all ok")

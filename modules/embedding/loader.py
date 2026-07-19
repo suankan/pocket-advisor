@@ -137,6 +137,8 @@ class MlxTextEmbedder:
                 str(self.repo_dir / "tokenizer.json"))
             self._multi = None
             self._mode = "merged"
+        self._token_cache: dict[tuple[str, bool], tuple[int, ...]] = {}
+        self._token_uses: dict[tuple[str, bool], int] = {}
 
     def embed_one(self, text: str, is_query: bool = False) -> np.ndarray:
         task = "retrieval.query" if is_query else "retrieval.passage"
@@ -147,16 +149,66 @@ class MlxTextEmbedder:
                                      task_type=task)
         return finalize_vec(out[0], self.dim)
 
-    def count_tokens(self, text: str) -> int:
-        """Real unpadded token count of one input (telemetry only)."""
-        if getattr(self, "_count_tokenizer", None) is None:
-            if self._mode == "merged":
-                self._count_tokenizer = self._tokenizer
+    def _tokenizer_for_batch(self):
+        return self._multi.tokenizer if self._mode == "multitask" \
+            else self._tokenizer
+
+    def _token_ids(self, text: str, is_query: bool) -> tuple[int, ...]:
+        """Tokenize exactly the prefixed input consumed by Jina.
+
+        Stage 4 calls count_tokens before embed_many, so this small transient
+        cache makes successful pending entities tokenize exactly once. Entries
+        are consumed by embed_many; query-time embed_one remains independent.
+        """
+        key = (text, is_query)
+        cached = self._token_cache.get(key)
+        if cached is not None:
+            return cached
+        prefix = "Query: " if is_query else "Document: "
+        ids = tuple(
+            self._tokenizer_for_batch().encode(prefix + text).ids[:8192])
+        self._token_cache[key] = ids
+        return ids
+
+    def count_tokens(self, text: str, is_query: bool = False) -> int:
+        """Real unpadded model-input tokens, including Jina's task prefix."""
+        key = (text, is_query)
+        ids = self._token_ids(text, is_query)
+        self._token_uses[key] = self._token_uses.get(key, 0) + 1
+        return len(ids)
+
+    def embed_many(self, texts: list[str], *,
+                   pad_to_tokens: int) -> list[np.ndarray]:
+        """Embed passages in one explicitly padded, mask-stable MLX shape."""
+        if not texts:
+            return []
+        import mlx.core as mx
+
+        encoded = [self._token_ids(text, False) for text in texts]
+        longest = max(len(ids) for ids in encoded)
+        if longest > pad_to_tokens:
+            raise ValueError(
+                f"embedding bucket {pad_to_tokens} is shorter than"
+                f" {longest}-token input")
+        if pad_to_tokens > 8192:
+            raise ValueError("embedding bucket exceeds model limit 8192")
+        input_ids = [list(ids) + [0] * (pad_to_tokens - len(ids))
+                     for ids in encoded]
+        attention_mask = [[1] * len(ids) + [0] *
+                          (pad_to_tokens - len(ids)) for ids in encoded]
+        core = self._multi.model if self._mode == "multitask" else self._model
+        output = core(mx.array(input_ids), mx.array(attention_mask))
+        mx.eval(output)
+        vectors = to_numpy(output)
+        for text in texts:
+            key = (text, False)
+            uses = self._token_uses.get(key, 0)
+            if uses > 1:
+                self._token_uses[key] = uses - 1
             else:
-                from tokenizers import Tokenizer
-                self._count_tokenizer = Tokenizer.from_file(
-                    str(self.repo_dir / "tokenizer.json"))
-        return len(self._count_tokenizer.encode(text).ids)
+                self._token_uses.pop(key, None)
+                self._token_cache.pop(key, None)
+        return [finalize_vec(vector, self.dim) for vector in vectors]
 
 
 class MlxReranker:

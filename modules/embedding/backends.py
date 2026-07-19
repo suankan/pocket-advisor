@@ -1,8 +1,8 @@
 """Text-embedding identity and per-model vector cache resolution.
 
-Fingerprint = model repo + dim + chunking knobs + payload recipe. Each distinct
-fingerprint gets its own cache directory (see index_paths) — switching
-models never deletes another model's cache; switching back reuses it
+Fingerprint = model repo + dim + chunking knobs + payload/execution recipes.
+Each distinct fingerprint gets its own cache directory (see index_paths) —
+switching models never deletes another model's cache; switching back reuses it
 (`docs_old/specs/multi-model-vector-cache.md`).
 """
 import hashlib
@@ -14,6 +14,17 @@ from modules.config import Config
 from modules.embedding.loader import (MlxTextEmbedder, ModelStore,
                                       infer_embed_dim, read_config_json)
 from modules.embedding.payloads import PAYLOAD_RECIPE
+
+
+# Repository-owned benchmark decisions. They are deliberately not config knobs:
+# changing any of them changes execution identity and therefore selects a fresh
+# cache directory through EMBED_EXECUTION_RECIPE.
+EMBED_BUCKET_WIDTH = 32
+EMBED_MAX_TOKENS = 8192
+EMBED_BATCH_SIZE = 8
+EMBED_EXECUTION_RECIPE = "bucket32-batch8-v1"
+EMBED_NUMERICAL_MAX_ABS = 0.01
+EMBED_NUMERICAL_MIN_COSINE = 0.9999
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +56,7 @@ def current_fingerprint(config: Config, store: ModelStore) -> dict:
         "chunk_chars": config.chunk_chars,
         "chunk_overlap": config.chunk_overlap,
         "payload_recipe": PAYLOAD_RECIPE,
+        "execution_recipe": EMBED_EXECUTION_RECIPE,
     }
 
 
@@ -59,6 +71,7 @@ def meta_fingerprint(meta: dict) -> dict:
         "chunk_chars": meta.get("chunk_chars"),
         "chunk_overlap": meta.get("chunk_overlap"),
         "payload_recipe": meta.get("payload_recipe"),
+        "execution_recipe": meta.get("execution_recipe"),
     }
 
 
@@ -104,7 +117,7 @@ def thread_vector_filename(thread_id: int, summary_text: str) -> str:
 
 
 class TextBackend:
-    """Thin adapter: the embed_one contract for embed / query."""
+    """Thin adapter over single-query and batched passage execution."""
 
     def __init__(self, store: ModelStore, repo_id: str):
         self._inner = MlxTextEmbedder(store, repo_id)
@@ -113,8 +126,11 @@ class TextBackend:
     def embed_one(self, text: str, is_query: bool = False):
         return self._inner.embed_one(text, is_query=is_query)
 
-    def count_tokens(self, text: str) -> int:
-        return self._inner.count_tokens(text)
+    def embed_many(self, texts: list[str], *, pad_to_tokens: int):
+        return self._inner.embed_many(texts, pad_to_tokens=pad_to_tokens)
+
+    def count_tokens(self, text: str, is_query: bool = False) -> int:
+        return self._inner.count_tokens(text, is_query=is_query)
 
 
 def get_backend(config: Config, store: ModelStore) -> TextBackend:

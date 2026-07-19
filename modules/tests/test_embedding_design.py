@@ -16,7 +16,8 @@ import modules.pipeline.summaries as summaries_mod  # noqa: E402
 import modules.retrieval as retrieval_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
-from modules.embedding import (PAYLOAD_RECIPE, index_paths,  # noqa: E402
+from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
+                               index_paths,
                                thread_index_paths)
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
@@ -41,14 +42,23 @@ workspaces:
 DIM = 4
 FINGERPRINT = {"backend": "mlx", "model": "fake/model", "dim": DIM,
                "chunk_chars": 1500, "chunk_overlap": 200,
-               "payload_recipe": PAYLOAD_RECIPE}
+               "payload_recipe": PAYLOAD_RECIPE,
+               "execution_recipe": EMBED_EXECUTION_RECIPE}
 
 
 class FakeEmbedder:
+    dim = DIM
+
     def embed_one(self, text: str, is_query: bool = False):
         seed = sum(text.encode()) % 97 + 1
         vec = np.arange(1, DIM + 1, dtype=np.float32) * seed
         return vec / np.linalg.norm(vec)
+
+    def embed_many(self, texts: list[str], *, pad_to_tokens: int):
+        return [self.embed_one(text) for text in texts]
+
+    def count_tokens(self, text: str, is_query: bool = False) -> int:
+        return len(text.split()) + 2
 
 
 class FakeSummarizer:

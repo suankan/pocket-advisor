@@ -17,15 +17,21 @@ failed chunk is retried next run. Each run rebuilds vectors.npy +
 vectors_ids.npy from that cache.
 """
 import json
+import os
+import tempfile
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
+from modules.custody import write_verified
 from modules.domain import StageStats
 from modules.emailbody import body_text as message_body_text
-from modules.embedding import (IndexPaths, ModelStore,
+from modules.embedding import (EMBED_BATCH_SIZE, EMBED_BUCKET_WIDTH,
+                               EMBED_MAX_TOKENS, IndexPaths, ModelStore,
                                chunking_fields_changed, current_fingerprint,
                                enriched_payload, get_backend, index_paths,
                                meta_fingerprint, thread_index_paths,
@@ -33,6 +39,57 @@ from modules.embedding import (IndexPaths, ModelStore,
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.transliteration import proper_noun_shadow
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingEmbedding:
+    entity_id: int
+    text: str
+    target: Path
+    note: str
+    review_key: str
+
+
+def _validated_vector(vector, dim: int) -> np.ndarray:
+    result = np.asarray(vector, dtype=np.float32).reshape(-1)
+    if result.shape != (dim,):
+        raise ValueError(
+            f"embedding shape {result.shape} != expected ({dim},)")
+    if not np.isfinite(result).all():
+        raise ValueError("embedding contains non-finite values")
+    return result
+
+
+def _atomic_publish_array(target: Path, array: np.ndarray) -> None:
+    """Write, read-verify, then atomically publish one numpy artifact."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_temp = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    temp = Path(raw_temp)
+    try:
+        with temp.open("wb") as handle:
+            np.save(handle, array, allow_pickle=False)
+        observed = np.load(temp, allow_pickle=False)
+        if observed.dtype != array.dtype or observed.shape != array.shape \
+                or not np.array_equal(observed, array, equal_nan=True):
+            raise OSError(f"numpy write verification failed for {target}")
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _atomic_publish_json(target: Path, value: dict) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_temp = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    temp = Path(raw_temp)
+    try:
+        write_verified(temp, json.dumps(value, indent=2).encode("utf-8"))
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def chunk_text(text: str, chunk_chars: int,
@@ -236,46 +293,22 @@ class EmbedStage(Stage):
                     or old["chunk_overlap"] != fingerprint["chunk_overlap"]:
                 meta["chunk_chars"] = fingerprint["chunk_chars"]
                 meta["chunk_overlap"] = fingerprint["chunk_overlap"]
-                paths.meta_json.write_text(json.dumps(meta, indent=2))
+                _atomic_publish_json(paths.meta_json, meta)
         return paths
 
     def _embed_pending(self, backend, vecs_dir,
                        have: set[int]) -> tuple[int, int]:
         rows = self.conn.execute(
-            "SELECT id, payload_shadow FROM chunks").fetchall()
+            "SELECT id, payload_shadow FROM chunks ORDER BY id").fetchall()
         pending = [r for r in rows if r["id"] not in have]
-        perf = self.ctx.telemetry.embed
-        queue = perf.queues.leaf
-        queue.pending_entities = len(pending)
-        count_tokens = getattr(backend, "count_tokens", None)
-        done, failed = 0, 0
-        progress = Progress("embed text chunks", total=len(pending))
-        for row in pending:
-            progress.step(note=f"chunk {row['id']}")
-            if count_tokens is not None:
-                queue.input_tokens += count_tokens(row["payload_shadow"])
-            try:
-                model_started = time.monotonic()
-                vec = backend.embed_one(row["payload_shadow"])
-                perf.timings_seconds.model_execution += \
-                    time.monotonic() - model_started
-                publish_started = time.monotonic()
-                np.save(vecs_dir / f"{row['id']}.npy", vec)
-                perf.timings_seconds.cache_publication += \
-                    time.monotonic() - publish_started
-                done += 1
-                queue.successful_entities += 1
-                perf.verified_cache_publications += 1
-            except Exception as exc:
-                failed += 1
-                queue.failed_entities += 1
-                progress.println(f"  embed FAIL chunk {row['id']}:"
-                                 f" {type(exc).__name__}: {exc}")
-                self.review.flag(f"chunk:{row['id']}", self.name, "error",
-                                 f"{type(exc).__name__}: {exc}")
-        progress.done()
-        self.conn.commit()
-        return done, failed
+        jobs = [_PendingEmbedding(
+            entity_id=int(row["id"]), text=row["payload_shadow"],
+            target=vecs_dir / f"{row['id']}.npy",
+            note=f"chunk {row['id']}", review_key=f"chunk:{row['id']}")
+            for row in pending]
+        return self._embed_queue(
+            backend, jobs, self.ctx.telemetry.embed.queues.leaf,
+            "embed text chunks")
 
     def _thread_rows(self):
         return self.conn.execute(
@@ -284,39 +317,135 @@ class EmbedStage(Stage):
 
     def _embed_pending_threads(self, backend, paths: IndexPaths,
                                pending) -> tuple[int, int]:
+        jobs = [_PendingEmbedding(
+            entity_id=int(row["thread_id"]), text=row["summary_text"],
+            target=paths.vecs_dir / thread_vector_filename(
+                row["thread_id"], row["summary_text"]),
+            note=f"thread {row['thread_id']}",
+            review_key=f"thread:{row['thread_id']}") for row in pending]
+        return self._embed_queue(
+            backend, jobs, self.ctx.telemetry.embed.queues.summary,
+            "embed thread summaries")
+
+    @staticmethod
+    def _bucket_for(token_count: int) -> int:
+        if token_count < 1:
+            token_count = 1
+        if token_count > EMBED_MAX_TOKENS:
+            raise ValueError(
+                f"embedding input exceeds {EMBED_MAX_TOKENS} tokens")
+        return min(
+            EMBED_MAX_TOKENS,
+            ((token_count + EMBED_BUCKET_WIDTH - 1) //
+             EMBED_BUCKET_WIDTH) * EMBED_BUCKET_WIDTH)
+
+    def _embed_queue(self, backend, jobs: list[_PendingEmbedding], queue,
+                     progress_label: str) -> tuple[int, int]:
+        """Embed one namespace with deterministic buckets and failure splits."""
         perf = self.ctx.telemetry.embed
-        queue = perf.queues.summary
-        queue.pending_entities = len(pending)
-        count_tokens = getattr(backend, "count_tokens", None)
-        done, failed = 0, 0
-        progress = Progress("embed thread summaries", total=len(pending))
-        for row in pending:
-            progress.step(note=f"thread {row['thread_id']}")
-            target = paths.vecs_dir / thread_vector_filename(
-                row["thread_id"], row["summary_text"])
-            if count_tokens is not None:
-                queue.input_tokens += count_tokens(row["summary_text"])
+        queue.pending_entities = len(jobs)
+        progress = Progress(progress_label, total=len(jobs))
+        buckets: dict[int, list[tuple[_PendingEmbedding, int]]] = {}
+        outcomes: list[tuple[_PendingEmbedding, Exception | None]] = []
+
+        for job in jobs:
             try:
-                model_started = time.monotonic()
-                vec = backend.embed_one(row["summary_text"])
+                token_count = backend.count_tokens(job.text)
+                queue.input_tokens += token_count
+                bucket = self._bucket_for(token_count)
+                buckets.setdefault(bucket, []).append((job, token_count))
+            except Exception as exc:
+                outcomes.append((job, exc))
+        queue.bucket_count = len(buckets)
+
+        def model_many(batch, bucket: int):
+            queue.microbatch_count += 1
+            queue.padding_tokens += sum(
+                bucket - token_count for _, token_count in batch)
+            started = time.monotonic()
+            try:
+                result = backend.embed_many(
+                    [job.text for job, _ in batch],
+                    pad_to_tokens=bucket)
+            finally:
                 perf.timings_seconds.model_execution += \
-                    time.monotonic() - model_started
-                publish_started = time.monotonic()
-                np.save(target, vec)
+                    time.monotonic() - started
+            if len(result) != len(batch):
+                raise ValueError(
+                    f"batch returned {len(result)} vectors for"
+                    f" {len(batch)} entities")
+            return result
+
+        def model_one(job: _PendingEmbedding):
+            queue.individual_fallbacks += 1
+            started = time.monotonic()
+            try:
+                return backend.embed_one(job.text)
+            finally:
+                perf.timings_seconds.model_execution += \
+                    time.monotonic() - started
+
+        def publish(job: _PendingEmbedding, vector) -> Exception | None:
+            try:
+                checked = _validated_vector(vector, backend.dim)
+            except Exception:
+                try:
+                    checked = _validated_vector(model_one(job), backend.dim)
+                except Exception as exc:
+                    return exc
+            started = time.monotonic()
+            try:
+                _atomic_publish_array(job.target, checked)
+            except Exception as exc:
+                return exc
+            finally:
                 perf.timings_seconds.cache_publication += \
-                    time.monotonic() - publish_started
+                    time.monotonic() - started
+            perf.verified_cache_publications += 1
+            return None
+
+        def execute(batch, bucket: int) -> None:
+            try:
+                vectors = model_many(batch, bucket)
+            except Exception as batch_exc:
+                if len(batch) > 1:
+                    queue.bisection_fallbacks += 1
+                    middle = len(batch) // 2
+                    execute(batch[:middle], bucket)
+                    execute(batch[middle:], bucket)
+                    return
+                job, _ = batch[0]
+                try:
+                    vector = model_one(job)
+                except Exception as exc:
+                    outcomes.append((job, exc))
+                    return
+                outcomes.append((job, publish(job, vector)))
+                return
+            for (job, _), vector in zip(batch, vectors, strict=True):
+                outcomes.append((job, publish(job, vector)))
+
+        for bucket in sorted(buckets):
+            bucket_jobs = buckets[bucket]
+            for start in range(0, len(bucket_jobs), EMBED_BATCH_SIZE):
+                batch = bucket_jobs[start:start + EMBED_BATCH_SIZE]
+                progress.start(note=batch[0][0].note)
+                execute(batch, bucket)
+
+        done = failed = 0
+        for job, error in outcomes:
+            progress.step(note=job.note)
+            if error is None:
                 done += 1
                 queue.successful_entities += 1
-                perf.verified_cache_publications += 1
-            except Exception as exc:
-                failed += 1
-                queue.failed_entities += 1
-                progress.println(
-                    f"  embed FAIL thread {row['thread_id']}:"
-                    f" {type(exc).__name__}: {exc}")
-                self.review.flag(
-                    f"thread:{row['thread_id']}", self.name, "error",
-                    f"{type(exc).__name__}: {exc}")
+                continue
+            failed += 1
+            queue.failed_entities += 1
+            progress.println(
+                f"  embed FAIL {job.note}: {type(error).__name__}: {error}")
+            self.review.flag(
+                job.review_key, self.name, "error",
+                f"{type(error).__name__}: {error}")
         progress.done()
         self.conn.commit()
         return done, failed
@@ -331,19 +460,21 @@ class EmbedStage(Stage):
             path = paths.vecs_dir / f"{cid}.npy"
             if not path.is_file():
                 continue  # not embedded yet (or failed) — retried next run
-            vecs.append(np.load(path))
+            vecs.append(_validated_vector(
+                np.load(path, allow_pickle=False), fingerprint["dim"]))
             ids.append(cid)
 
         paths.vectors_npy.parent.mkdir(parents=True, exist_ok=True)
         matrix = np.stack(vecs) if vecs else \
             np.zeros((0, fingerprint["dim"]), dtype=np.float32)
-        np.save(paths.vectors_npy, matrix)
-        np.save(paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
-        paths.meta_json.write_text(json.dumps({
+        _atomic_publish_array(paths.vectors_npy, matrix)
+        _atomic_publish_array(
+            paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
+        _atomic_publish_json(paths.meta_json, {
             **fingerprint,
             "count": len(ids),
             "built_at": datetime.now(timezone.utc).isoformat(),
-        }, indent=2))
+        })
         return len(ids)
 
     def _rebuild_thread_matrix(self, paths: IndexPaths,
@@ -358,21 +489,22 @@ class EmbedStage(Stage):
             path = paths.vecs_dir / filename
             if not path.is_file():
                 continue
-            vecs.append(np.load(path))
+            vecs.append(_validated_vector(
+                np.load(path, allow_pickle=False), fingerprint["dim"]))
             ids.append(row["thread_id"])
-
-        for path in paths.vecs_dir.glob("*.npy"):
-            if path.name not in expected:
-                path.unlink()
 
         matrix = np.stack(vecs) if vecs else \
             np.zeros((0, fingerprint["dim"]), dtype=np.float32)
-        np.save(paths.vectors_npy, matrix)
-        np.save(paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
-        paths.meta_json.write_text(json.dumps({
+        _atomic_publish_array(paths.vectors_npy, matrix)
+        _atomic_publish_array(
+            paths.vectors_ids_npy, np.asarray(ids, dtype=np.int64))
+        _atomic_publish_json(paths.meta_json, {
             **fingerprint,
             "kind": "thread_summaries",
             "count": len(ids),
             "built_at": datetime.now(timezone.utc).isoformat(),
-        }, indent=2))
+        })
+        for path in paths.vecs_dir.glob("*.npy"):
+            if path.name not in expected:
+                path.unlink()
         return len(ids)

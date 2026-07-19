@@ -25,8 +25,9 @@ Feature-level designs refine this document:
   converged-state statistics, finding rollups, and local run records.
 - `docs/features/ingestion-performance.md` — measured clean-build bottlenecks
   and the proposed summary, embedding, and PDF-transform optimization work.
-- `docs/features/accuracy-testing.md` — native retrieval-expectation suites,
-  workspace-owned results, and comparison workflow.
+- `docs/features/accuracy-testing.md` — native retrieval-expectation suites
+   with local-LLM questions generated from authored email bodies and PDF text,
+   workspace-owned results, and comparison workflow.
 - `docs/features/query-daemon.md` — workspace-local warm retrieval resource
   lifetime, Unix-socket protocol, and query fallback behavior.
 
@@ -257,7 +258,8 @@ data outside engine state and survive state wipes.
 ## Lifecycle
 
 Engine-derived workspace state is regenerable; evidence, workspace user data,
-and human-authored retrieval tests are not. `wipe state` validates the
+and preserved retrieval-expectation suites (machine-generated or hand-authored)
+are not deleted by wipe. `wipe state` validates the
 explicitly selected flat workspace root and, after immediate user
 confirmation, deletes only its regenerable children. It never deletes the
 common `.state` parent, a collection root, `search-accuracy-tests/`, playbooks,

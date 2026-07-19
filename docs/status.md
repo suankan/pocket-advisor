@@ -286,13 +286,14 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. PDF-to-text pipeline**
-(`docs/features/pdf-to-text-pipeline-design.md`): replace the inherited nested
-OCR topology with byte-bounded `--jobs 1` document workers and
-coordinator-only publication over the shipped graph. Transaction parser
-coverage is now item 2. Any real workspace cutover to the new fresh schema is
-an operator-owned `wipe state` plus complete re-ingest, requiring explicit
-confirmation immediately before deletion; it is not a platform roadmap gate.
+The roadmap head is **1. Content-generated accuracy questions**
+(`docs/features/accuracy-testing.md`, redesign locked 2026-07-19): replace
+scaffold TODO `accuracy generate` with local-MLX questions from authored email
+bodies and PDF text, then score them with retrieval-only `accuracy run`.
+PDF-to-text pipeline is item 2; transaction parser coverage is item 3. Any real
+workspace cutover to the new fresh schema is an operator-owned `wipe state`
+plus complete re-ingest, requiring explicit confirmation immediately before
+deletion; it is not a platform roadmap gate.
 
 ## Watch-outs
 

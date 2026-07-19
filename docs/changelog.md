@@ -4,6 +4,35 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — PDF-to-text pipeline, interrupt-safe shutdown, core-count workers
+
+Implementation commit: `bf62292` (roadmap item: 1. PDF-to-text pipeline; design
+`docs/features/pdf-to-text-pipeline-design.md`).
+
+- Replaced the inherited nested OCR topology with a shared work-stealing queue
+  over the content-addressed document graph. Documents are admitted
+  largest-first so heavy PDFs are pulled early; each worker runs
+  `ocrmypdf --jobs 1` then `pdftotext -layout`. The coordinator is the sole
+  SQLite/publication/review owner and publishes deterministically by
+  `document_id` (`ocr.py`, `pdf_transforms.py`, `pipeline/pdfs.py`).
+- Added `WorkerPoolProgress` with a per-worker current/total line and per-job
+  timer (`progress.py`), wired into the PDF stage.
+- Made Ctrl+C interrupt-safe: a one-shot global interrupt flag, prompt child
+  process termination, and pool unwind that skips remaining queued PDFs;
+  `cli.main` catches `KeyboardInterrupt` and exits with code 130 plus a single
+  `KeyboardInterrupt — interrupted` line (no traceback).
+- Removed the `ingestion.pdf_workers` config knob. Workers are now fixed at
+  `min(logical CPU cores, pending PDF count)` — a deliberate political decision
+  after benchmarking showed linear wall-time scaling with worker count and no
+  memory pressure on hundreds of PDFs. Each worker runs one `--jobs 1` ocrmypdf
+  child, so the pool is the sole parallelism axis.
+- Extended ingest-report telemetry (schema v3) with pending-admission bytes,
+  text-only/unchanged/OCR-warning document counters, and queue-wait totals
+  (`telemetry.py`, `ingest_report.py`).
+
+Verification: full native module suite and `./pocket-advisor.py test` pass
+14/14; `git diff --check` is clean. No collection evidence was modified.
+
 ## 2026-07-19 — Content-generated accuracy questions
 
 Implementation commit: `a6557fe` (design `ff5ddfd`; roadmap item:

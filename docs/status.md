@@ -44,6 +44,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `88fc235` | **Content-addressed evidence graph**: fresh-schema `emails`/`documents` identities with source and attachment occurrences; graph-owned artifacts, PDFs, chunks, retrieval, verification, reporting, accuracy, and transactions; multi-parent attached-email/ZIP lineage; native suite 14/14 |
 | `ff5ddfd` | **Content-generated accuracy design locked**: local-MLX questions from authored bodies/PDF text; retrieval-only `run`; `generated.yaml` contract |
 | `a6557fe` | **Content-generated accuracy questions**: `accuracy generate` synthesizes scorable expectations via local MLX; `run` scores retrieval anchors with generator env identity; live test workspace 25/25 / 100% thread-or-better; native suite 14/14 |
+| `bf62292` | **PDF-to-text pipeline + interrupt-safe shutdown + core-count workers**: shared work-stealing queue with largest-first admission and coordinator-only deterministic publication; per-worker progress; Ctrl+C exits cleanly (code 130, no traceback); `pdf_workers` knob removed, workers = min(cores, pending); ingest-report telemetry v3; native suite 14/14 |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -215,11 +216,11 @@ failure rolls the whole Stage 5 rebuild back.
   source/carrier occurrence. Attached emails use `attachments.child_email_id`,
   so deduplication no longer loses multi-parent or ZIP lineage. Each email has
   one readable artifact pair and each document one verified source/product
-  namespace; threading, chunks, retrieval/citation expansion, PDF transforms,
+  namespace;   threading, chunks, retrieval/citation expansion, PDF transforms,
   reporting, accuracy, verification, and transactions use graph identities
   directly. Retired databases are refused rather than migrated. The preceding
-  PDF-transform work remains the current Stage 3 product/freshness mechanism;
-  its worker-topology replacement remains the roadmap head.
+  PDF-transform work is the current Stage 3 product/freshness mechanism; its
+  worker-topology was replaced by the shared work-stealing queue at `bf62292`.
 - **Content-generated accuracy questions (`a6557fe`, design `ff5ddfd`):**
   `accuracy generate` loads the local thread-summary MLX model and writes
   scorable `expectations/generated.yaml` from authored email bodies and PDF
@@ -230,6 +231,23 @@ failure rolls the whole Stage 5 rebuild back.
   the suite is machine-generated. Live isolated test workspace: 25 generated
   in ~1m07s, then 25/25 scored with 0 miss and 100% thread-or-better. TODO
   placeholders remain only for leftover hand scaffolds.
+- **PDF-to-text pipeline (`bf62292`, design `docs/features/pdf-to-text-pipeline-design.md`):**
+  Stage 3 now runs a shared work-stealing queue over the content-addressed
+  document graph. Documents are admitted largest-first so heavy PDFs are pulled
+  early; each worker runs `ocrmypdf --jobs 1` then `pdftotext -layout` and never
+  touches SQLite. The coordinator publishes deterministically by `document_id`
+  and owns all review findings. `WorkerPoolProgress` shows a per-worker
+  current/total line with a per-job timer. Ctrl+C is interrupt-safe: a one-shot
+  global flag terminates in-flight child processes promptly, the pool skips
+  remaining queued PDFs, and `cli.main` exits with code 130 after printing a
+  single `KeyboardInterrupt — interrupted` line (no traceback). The
+  `ingestion.pdf_workers` knob is removed; workers are fixed at
+  `min(logical CPU cores, pending PDF count)` — a deliberate political decision
+  after benchmarking showed linear wall-time scaling with worker count and no
+  memory pressure on hundreds of PDFs. Ingest-report telemetry is schema v3 with
+  pending-admission bytes, text-only/unchanged/OCR-warning document counters,
+  and queue-wait totals. The roadmap head (PDF-to-text pipeline) has shipped;
+  the new head is transaction parser coverage.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns the flat
@@ -298,11 +316,9 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. PDF-to-text pipeline**
-(`docs/features/pdf-to-text-pipeline-design.md`): replace the inherited nested
-OCR topology with byte-bounded `--jobs 1` document workers and
-coordinator-only publication over the shipped graph. Transaction parser
-coverage is item 2. Any real workspace cutover to the new fresh schema is an
+The roadmap head is now **1. Transaction parser coverage** (NAB, CBA, MEBank,
+AMP, Qantas cards, Revolut). The prior head, the PDF-to-text pipeline, shipped
+at `bf62292`. Any real workspace cutover to the new fresh schema is an
 operator-owned `wipe state` plus complete re-ingest, requiring explicit
 confirmation immediately before deletion; it is not a platform roadmap gate.
 
@@ -328,3 +344,9 @@ confirmation immediately before deletion; it is not a platform roadmap gate.
   Each workspace's first fresh-schema rebuild produces current products; no
   migration shim adopts retired state. Later text-only recipe changes reuse
   current verified OCR products, and unchanged runs perform no transform work.
+- Stage 3 worker count is no longer configurable: it is
+  `min(logical CPU cores, pending PDF count)`, each worker running one
+  `ocrmypdf --jobs 1` child. The retired `ingestion.pdf_workers` key is
+  rejected as unknown by the loader; do not reintroduce a per-worker knob
+  without re-benchmarking the memory/thermal ceiling on a large scan-heavy
+  corpus.

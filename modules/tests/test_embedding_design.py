@@ -15,6 +15,7 @@ import modules.pipeline.embed as embed_mod  # noqa: E402
 import modules.pipeline.summaries as summaries_mod  # noqa: E402
 import modules.retrieval as retrieval_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
+from modules.custody import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
                                index_paths,
@@ -82,30 +83,40 @@ def insert_email(conn, root: Path, mid: str, subject: str, body: str,
                  date: str, from_addr: str, to_addr: str,
                  in_reply_to: str | None = None,
                  references: str | None = None) -> int:
+    """Insert one synthetic `emails` + `email_sources` row pair mirroring
+    Stage 2's column list (`modules/pipeline/emails.py`). Identity is now
+    `emails.sha256` (the real UNIQUE key — `message_id` is a plain,
+    non-unique column post-cutover), so it is synthesized deterministically
+    from this call's full content: repeated distinct calls never collide,
+    and the same inputs always resolve to the same row.
+    """
     folder = root / "cache" / mid.strip("<>").replace("@", "_")
     folder.mkdir(parents=True, exist_ok=True)
     message = folder / "email_message.txt"
     message.write_text(
         f"Date: {date}\nFrom: {from_addr}\nTo: {to_addr}\nCc: "
         f"\nSubject: {subject}\n\n{body}")
+    sha = sha256_bytes("\x1f".join((
+        mid, subject, body, date, from_addr, to_addr,
+        in_reply_to or "", references or "")).encode("utf-8"))
     to_json = json.dumps([{"name": None, "addr": to_addr}])
     cur = conn.execute(
-        """INSERT INTO items
-           (item_kind, message_id, subject, subject_normalized, date_utc,
+        """INSERT INTO emails
+           (sha256, message_id, subject, subject_normalized, date_utc,
             from_addr, to_addrs, cc_addrs, in_reply_to, references_raw,
             body_text_path, ingested_at)
-           VALUES ('email', ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 't')""",
-        (mid, subject, subject.removeprefix("Re: ").lower(), date,
+           VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 't')""",
+        (sha, mid, subject, subject.removeprefix("Re: ").lower(), date,
          from_addr, to_json, in_reply_to, references,
          str(message.relative_to(root))))
-    item_id = int(cur.lastrowid)
+    email_id = int(cur.lastrowid)
     conn.execute(
-        """INSERT INTO item_memberships
-           (item_id, workspace_id, collection_id, filename, sha256,
-            membership_kind, ingested_at)
-           VALUES (?, 'matter-x', 'mail', ?, ?, 'email', 't')""",
-        (item_id, f"{mid}.eml", mid))
-    return item_id
+        """INSERT INTO email_sources
+           (email_id, workspace_id, collection_id, relpath,
+            file_size_bytes, discovered_at)
+           VALUES (?, 'matter-x', 'mail', ?, ?, 't')""",
+        (email_id, f"{mid}.eml", len(body.encode("utf-8"))))
+    return email_id
 
 
 def main() -> int:
@@ -139,16 +150,16 @@ def main() -> int:
 
         ThreadStage(ctx).run()
         row_a = conn.execute(
-            "SELECT thread_id FROM items WHERE id=?", (a,)).fetchone()
+            "SELECT thread_id FROM emails WHERE id=?", (a,)).fetchone()
         thread_id = row_a["thread_id"]
         thread = conn.execute(
             "SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
         assert thread["stable_key"] == "<a@x>"
         assert conn.execute(
-            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (b,)).fetchone()[0] == a
         assert conn.execute(
-            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (c,)).fetchone()[0] is None
 
         summarizer = FakeSummarizer()
@@ -169,7 +180,7 @@ def main() -> int:
         # Stable rerun: same thread id and no summary model load.
         ThreadStage(ctx).run()
         assert conn.execute(
-            "SELECT thread_id FROM items WHERE id=?", (a,)).fetchone()[0] \
+            "SELECT thread_id FROM emails WHERE id=?", (a,)).fetchone()[0] \
             == thread_id
         with patch.object(summaries_mod, "get_summary_generator",
                           side_effect=AssertionError("must not load")):
@@ -209,8 +220,8 @@ def main() -> int:
                    for match in packet["matches"])
         assert len(packet["messages"]) == 3
         reply = next(message for message in packet["messages"]
-                     if message["item_id"] == b)
-        assert reply["reply_parent_item_id"] == a
+                     if message["email_id"] == b)
+        assert reply["reply_parent_email_id"] == a
         assert "Subject: Re: Project" in reply["email_message"]
 
         # A changed thread marks the old summary stale on failure, then
@@ -277,12 +288,12 @@ def main() -> int:
         conn.commit()
         ThreadStage(ctx).run()
         ghost_thread = conn.execute(
-            "SELECT thread_id FROM items WHERE id=?", (r,)).fetchone()[0]
+            "SELECT thread_id FROM emails WHERE id=?", (r,)).fetchone()[0]
         assert conn.execute(
             "SELECT stable_key FROM threads WHERE id=?",
             (ghost_thread,)).fetchone()[0] == "<g@x>"
         assert conn.execute(
-            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (r,)).fetchone()[0] is None
 
         g = insert_email(conn, root, "<g@x>", "Ghost", "Fence agreed.",
@@ -290,13 +301,13 @@ def main() -> int:
         conn.commit()
         ThreadStage(ctx).run()
         assert conn.execute(
-            "SELECT thread_id FROM items WHERE id=?",
+            "SELECT thread_id FROM emails WHERE id=?",
             (r,)).fetchone()[0] == ghost_thread
         assert conn.execute(
-            "SELECT thread_id FROM items WHERE id=?",
+            "SELECT thread_id FROM emails WHERE id=?",
             (g,)).fetchone()[0] == ghost_thread
         assert conn.execute(
-            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (r,)).fetchone()[0] == g
         with patch.object(summaries_mod, "get_summary_generator",
                           return_value=FakeSummarizer()):

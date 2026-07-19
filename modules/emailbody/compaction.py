@@ -268,8 +268,8 @@ def compact_authored_bodies(conn: sqlite3.Connection,
     rows = conn.execute(
         """SELECT id, message_id, in_reply_to, body_text_path,
                   body_full_text_path
-             FROM items
-            WHERE item_kind = 'email' AND body_full_text_path IS NOT NULL
+             FROM emails
+            WHERE body_full_text_path IS NOT NULL
             ORDER BY id""").fetchall()
     by_mid = {row["message_id"]: row for row in rows}
     stats = {"compacted": 0, "retained": 0, "boundaries": 0}
@@ -279,14 +279,14 @@ def compact_authored_bodies(conn: sqlite3.Connection,
         full_path = project_root / row["body_full_text_path"]
         if not full_path.is_file():
             raise SystemExit(
-                f"lossless full body missing for item {row['id']}"
+                f"lossless full body missing for email {row['id']}"
                 f" ({full_path}). Regenerate derived state:"
                 " './pocket-advisor.py --workspace <id> wipe state' then"
                 " './pocket-advisor.py --workspace <id> ingest all'.")
         full_texts[row["id"]] = body_text(
             full_path.read_bytes(), source=full_path)
 
-    planned_item_ids: list[int] = []
+    planned_email_ids: list[int] = []
     authored_bodies: dict[int, str] = {}
     for row in rows:
         full = full_texts[row["id"]]
@@ -309,14 +309,14 @@ def compact_authored_bodies(conn: sqlite3.Connection,
             except (UnicodeDecodeError, ValueError):
                 pass
         if target != current:
-            planned_item_ids.append(row["id"])
+            planned_email_ids.append(row["id"])
 
         conn.execute(
-            """UPDATE items
+            """UPDATE emails
                   SET body_quote_start = ?,
                       body_quote_boundary_method = ?,
                       body_compaction_method = ?,
-                      body_compaction_parent_item_id = ?,
+                      body_compaction_parent_email_id = ?,
                       body_compaction_removed_chars = ?,
                       body_compaction_version = ?
                 WHERE id = ?""",
@@ -327,16 +327,16 @@ def compact_authored_bodies(conn: sqlite3.Connection,
              COMPACTION_VERSION, row["id"]))
         stats["compacted" if should_compact else "retained"] += 1
 
-    if planned_item_ids:
-        marks = ",".join("?" for _ in planned_item_ids)
+    if planned_email_ids:
+        marks = ",".join("?" for _ in planned_email_ids)
         n_chunks = conn.execute(
-            f"SELECT COUNT(*) FROM chunks WHERE item_id IN ({marks})",
-            planned_item_ids).fetchone()[0]
+            f"SELECT COUNT(*) FROM chunks WHERE email_id IN ({marks})",
+            planned_email_ids).fetchone()[0]
         if n_chunks:
             conn.rollback()
             raise SystemExit(
                 "quoted-reply compaction would change authored bodies for"
-                f" {len(planned_item_ids)} email(s), but {n_chunks}"
+                f" {len(planned_email_ids)} email(s), but {n_chunks}"
                 " existing chunks"
                 " would become stale. Run './pocket-advisor.py --workspace"
                 " <id> wipe state' then './pocket-advisor.py --workspace"

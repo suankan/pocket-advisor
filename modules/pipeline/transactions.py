@@ -86,6 +86,22 @@ def _file_sha(path: Path) -> str:
         return "missing"
 
 
+def _document_source_path(config, sha256: str) -> Path | None:
+    """Locate a document's verified source copy for pdfinfo metadata.
+
+    Documents are content-addressed at `documents/<sha256>/source/`, but
+    a document's original extension is a per-occurrence detail (many
+    filenames can name the same content) rather than part of its
+    identity, so this globs the source directory instead of assuming a
+    fixed extension.
+    """
+    source_dir = config.document_artifacts(sha256).source_dir
+    if not source_dir.is_dir():
+        return None
+    matches = sorted(source_dir.glob("original*"))
+    return matches[0] if matches else None
+
+
 @dataclass(frozen=True, slots=True)
 class TransactionCoverage:
     """Mutually exclusive transfer-coverage classifications.
@@ -316,7 +332,7 @@ def _business_days_between(first: str, second: str) -> int:
 def _linkable_transactions(conn: sqlite3.Connection) -> list[RowDict]:
     return [dict(row) for row in conn.execute(
         """SELECT t.id, t.account_id, t.txn_date, t.amount_minor,
-                  t.currency, s.item_id, t.row_index
+                  t.currency, s.document_id, t.row_index
            FROM transactions t
            JOIN statements s ON s.id = t.statement_id
            WHERE s.excluded = 0 AND t.account_id IS NOT NULL
@@ -432,45 +448,67 @@ class TransactionService:
         return account_ids
 
     def account_files(self, collection: Collection) -> list[RowDict]:
-        """Return native and email-attached PDFs in the marked collection.
+        """Return the marked collection's PDF documents, one row per
+        document_id no matter how many times it occurs.
 
-        Native files resolve through the custody blob index. Attached PDFs
-        inherit collection provenance from their parent email membership and
-        use their own verified copy/text paths.
+        A document is content-addressed, so the same statement can be
+        both natively mounted (document_sources) AND separately emailed
+        (attachments -> the carrying email's email_sources occurrence in
+        this collection) — both provenance kinds are aggregated onto the
+        single row for that document_id, so a doubly-occurring statement
+        never appears twice. Every row resolves extraction state directly
+        through documents.extracted_text_path/extraction_method; there is
+        no more per-occurrence extraction state to reconcile.
         """
         rows = self.conn.execute(
-            """SELECT * FROM (
-                 SELECT 'native' AS occurrence_kind,
-                        b.relpath_within_source AS relpath,
-                        b.sha256 AS source_sha256,
-                        b.sha256 AS document_sha256,
-                        m.item_id, f.extracted_text_path,
-                        f.extracted_copy_path, f.extracted_copy_sha256,
-                        f.extraction_method, i.message_id,
-                        NULL AS attachment_id
-                 FROM source_blob_index b
-                 LEFT JOIN item_memberships m
-                   ON m.collection_id = b.source_id AND m.sha256 = b.sha256
-                 LEFT JOIN item_file_meta f ON f.item_id = m.item_id
-                 LEFT JOIN items i ON i.id = m.item_id
-                 WHERE b.source_id = ?
-                 UNION ALL
-                 SELECT 'attachment' AS occurrence_kind,
-                        m.filename || '::' || coalesce(a.filename, 'attachment')
-                          AS relpath,
-                        m.sha256 AS source_sha256,
-                        a.sha256 AS document_sha256,
-                        a.item_id, a.extracted_text_path,
-                        a.extracted_copy_path, a.extracted_copy_sha256,
-                        a.extraction_method, i.message_id,
-                        a.id AS attachment_id
-                 FROM attachments a
-                 JOIN item_memberships m ON m.item_id = a.item_id
-                 JOIN items i ON i.id = a.item_id
-                 WHERE m.collection_id = ?
-                   AND lower(coalesce(a.filename, '')) LIKE '%.pdf'
-               )
-               ORDER BY relpath""",
+            """WITH provenance AS (
+                    -- Discovery is the authoritative native-PDF inventory.
+                    -- Keep a NULL document_id when Stage 3 has not yet
+                    -- materialized the content-addressed document: the
+                    -- caller must report that custody-visible statement as
+                    -- not ingested rather than silently omitting it.
+                    SELECT d.id AS document_id,
+                           c.sha256 AS document_sha256,
+                           d.extracted_text_path,
+                           d.extraction_method,
+                           s.relpath_within_source AS relpath,
+                           NULL AS message_id,
+                           'native' AS occurrence_kind,
+                           c.id AS missing_document_key
+                      FROM ingestion_candidates c
+                      JOIN source_blob_index s
+                        ON s.source_id = c.collection_id
+                       AND s.sha256 = c.sha256
+                      LEFT JOIN documents d ON d.sha256 = c.sha256
+                     WHERE c.collection_id = ?
+                       AND c.document_type = 'pdf'
+                    UNION ALL
+                    SELECT a.document_id,
+                           d.sha256 AS document_sha256,
+                           d.extracted_text_path,
+                           d.extraction_method,
+                           es.relpath || '::' ||
+                             coalesce(a.filename, 'attachment') AS relpath,
+                           e.message_id,
+                           'attachment' AS occurrence_kind,
+                           NULL AS missing_document_key
+                      FROM attachments a
+                      JOIN documents d ON d.id = a.document_id
+                      JOIN emails e ON e.id = a.email_id
+                      JOIN email_sources es ON es.email_id = e.id
+                       AND es.collection_id = ?
+                     WHERE a.document_id IS NOT NULL
+                  )
+                  SELECT document_id, document_sha256, extracted_text_path,
+                         extraction_method,
+                         GROUP_CONCAT(DISTINCT relpath) AS relpath,
+                         GROUP_CONCAT(DISTINCT occurrence_kind) AS
+                           occurrence_kinds,
+                         GROUP_CONCAT(DISTINCT message_id) AS message_ids
+                    FROM provenance
+                   GROUP BY document_id, document_sha256, extracted_text_path,
+                            extraction_method, missing_document_key
+                   ORDER BY relpath""",
             (collection.id, collection.id),
         ).fetchall()
         return [dict(row) for row in rows]
@@ -485,12 +523,11 @@ class TransactionService:
         inventory: list[dict[str, Any]] = []
         stale_paths: list[str] = []
         for collection in sorted(collections, key=lambda item: item.id):
-            files = [row for row in self.account_files(collection)
-                     if str(row["relpath"]).lower().endswith(".pdf")]
+            files = self.account_files(collection)
             files_by_collection[collection.id] = files
             for row in files:
                 raw_path = row.get("extracted_text_path")
-                if row.get("item_id") is None or not raw_path:
+                if not raw_path:
                     text_digest = "not_ingested"
                 elif row.get("extraction_method") not in (
                         extraction_method, None, "error"):
@@ -504,12 +541,10 @@ class TransactionService:
                         self.ctx.config.project_root / str(raw_path))
                 inventory.append({
                     "collection_id": collection.id,
-                    "occurrence_kind": row.get("occurrence_kind"),
-                    "source_sha256": row.get("source_sha256"),
+                    "occurrence_kinds": row.get("occurrence_kinds"),
                     "document_sha256": row.get("document_sha256"),
-                    "copy_sha256": row.get("extracted_copy_sha256"),
-                    "item_id": row.get("item_id"),
-                    "message_id": row.get("message_id"),
+                    "document_id": row.get("document_id"),
+                    "message_ids": row.get("message_ids"),
                     "text_sha256": text_digest,
                 })
         inventory.sort(key=canonical_digest)
@@ -552,10 +587,10 @@ class TransactionService:
             stats: StageStats,
     ) -> None:
         reconciliation = load_reconciliation(self.ctx.workspace.root)
-        excluded_items = {
-            int(item["item_id"])
+        excluded_documents = {
+            int(item["document_id"])
             for item in reconciliation["exclude"]
-            if isinstance(item, dict) and item.get("item_id") is not None
+            if isinstance(item, dict) and item.get("document_id") is not None
         }
         account_ids = self.reset_graph(collections)
 
@@ -577,7 +612,7 @@ class TransactionService:
             for file_row in pdfs:
                 self._parse_file(
                     collection, configured_digits, account_id, file_row,
-                    excluded_items, seen_statement_keys, row_offsets,
+                    excluded_documents, seen_statement_keys, row_offsets,
                     extraction_method, stats)
 
     def reset_graph(
@@ -618,14 +653,14 @@ class TransactionService:
             configured_digits: str,
             account_id: int,
             file_row: RowDict,
-            excluded_items: set[int],
+            excluded_documents: set[int],
             seen_statement_keys: set[tuple[int, int, str | None]],
             row_offsets: dict[int, int],
             extraction_method: str,
             stats: StageStats,
     ) -> None:
         filename = str(file_row["relpath"]).rsplit("/", 1)[-1]
-        if file_row["item_id"] is None or not file_row["extracted_text_path"]:
+        if file_row["document_id"] is None or not file_row["extracted_text_path"]:
             message = (f"NOT INGESTED: {filename} — run `ingest pdfs` after "
                        "`ingest discover`, then retry transactions")
             self.ctx.review.flag(
@@ -644,7 +679,7 @@ class TransactionService:
             stats.inc("not_ingested")
             return
 
-        item_id = int(file_row["item_id"])
+        document_id = int(file_row["document_id"])
         text_path = self.ctx.config.project_root / file_row["extracted_text_path"]
         if not text_path.is_file():
             message = f"text cache missing for {filename} — rerun `ingest pdfs`"
@@ -675,8 +710,8 @@ class TransactionService:
             stats.inc("unparsed")
             return
 
-        copy_path = self.ctx.config.project_root / file_row["extracted_copy_path"] \
-            if file_row["extracted_copy_path"] else None
+        copy_path = _document_source_path(
+            self.ctx.config, file_row["document_sha256"])
         metadata = pdf_metadata(copy_path)
         for statement in parsed_statements:
             if configured_digits and statement.account_no_norm and not (
@@ -700,31 +735,31 @@ class TransactionService:
                     "statement period is incomplete; coverage and continuity "
                     "reporting will exclude it")
                 stats.inc("missing_periods")
-            key = (item_id, account_id, statement.period_start)
+            key = (document_id, account_id, statement.period_start)
             if key in seen_statement_keys:
                 self.ctx.review.flag(
                     f"{collection.id}/{filename}", "transactions", "warning",
-                    "duplicate account+period in one item — skipped")
+                    "duplicate account+period in one document — skipped")
                 stats.inc("duplicates")
                 continue
             seen_statement_keys.add(key)
             cursor = self.conn.execute(
                 """INSERT INTO statements(
-                     item_id, account_id, period_start, period_end,
+                     document_id, account_id, period_start, period_end,
                      opening_balance_minor, closing_balance_minor, parser_id,
                      balance_ok, pdf_producer, pdf_created, pdf_modified,
                      parsed_at, excluded)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (item_id, account_id, statement.period_start,
+                (document_id, account_id, statement.period_start,
                  statement.period_end,
                  _first_amount(assertions, "opening_balance"),
                  _last_amount(assertions, "closing_balance"),
                  statement.parser_id, balance_ok, metadata["producer"],
                  metadata["created"], metadata["modified"], now_iso(),
-                 int(item_id in excluded_items)),
+                 int(document_id in excluded_documents)),
             )
             statement_id = int(cursor.lastrowid)
-            row_offset = row_offsets[item_id]
+            row_offset = row_offsets[document_id]
             for row in statement.rows:
                 self.conn.execute(
                     """INSERT INTO transactions(
@@ -741,7 +776,7 @@ class TransactionService:
                      row.raw_line),
                 )
             if statement.rows:
-                row_offsets[item_id] = row_offset + max(
+                row_offsets[document_id] = row_offset + max(
                     row.row_index for row in statement.rows) + 1
             for assertion in assertions:
                 self.conn.execute(
@@ -776,11 +811,11 @@ class TransactionService:
         transactions = _linkable_transactions(self.conn)
         by_key: dict[tuple[int, int], RowDict] = {}
         for row in transactions:
-            key = (int(row["item_id"]), int(row["row_index"]))
+            key = (int(row["document_id"]), int(row["row_index"]))
             if key in by_key:
                 raise RuntimeError(
                     "transaction override key is ambiguous: "
-                    f"item_id={key[0]}, row_index={key[1]}")
+                    f"document_id={key[0]}, row_index={key[1]}")
             by_key[key] = row
 
         linked: set[int] = set()
@@ -788,12 +823,13 @@ class TransactionService:
             pair: list[RowDict] = []
             for side in ("from", "to"):
                 reference = override.get(side) or {}
-                key = (reference.get("item_id"), reference.get("row_index"))
+                key = (reference.get("document_id"),
+                       reference.get("row_index"))
                 transaction = by_key.get(key)
                 if transaction is None:
                     raise SystemExit(
                         "reconciliation.yaml links: no transaction at "
-                        f"item_id={key[0]} row_index={key[1]}")
+                        f"document_id={key[0]} row_index={key[1]}")
                 pair.append(transaction)
             outgoing, incoming = pair
             business_days = _business_days_between(
@@ -822,7 +858,8 @@ class TransactionService:
         for ambiguity in ambiguities:
             outgoing = ambiguity["egress"]
             self.ctx.review.flag(
-                f"item:{outgoing['item_id']}/row:{outgoing['row_index']}",
+                f"document:{outgoing['document_id']}/row:"
+                f"{outgoing['row_index']}",
                 "transactions", "warning",
                 f"ambiguous transfer match: {len(ambiguity['candidates'])} "
                 "candidates; add reconciliation.yaml link")
@@ -1151,7 +1188,7 @@ def _build_report(
                     for pattern in counterparty.get("patterns", [])]
         hits = [dict(row) for row in conn.execute(
             """SELECT t.id, t.txn_date, t.amount_minor, t.description_raw,
-                      s.item_id, t.page_no
+                      s.document_id, t.page_no
                FROM transactions t
                JOIN statements s ON s.id = t.statement_id
                WHERE s.excluded = 0""")

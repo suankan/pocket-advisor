@@ -149,17 +149,17 @@ def transaction_output_state(
         "SELECT display_name, notes FROM holders ORDER BY display_name")]
 
     statement_rows = conn.execute(
-        "SELECT s.id, i.message_id, s.item_id, a.config_id, s.period_start,"
+        "SELECT s.id, d.sha256, s.document_id, a.config_id, s.period_start,"
         " s.period_end, s.opening_balance_minor, s.closing_balance_minor,"
         " s.parser_id, s.balance_ok, s.pdf_producer, s.pdf_created,"
         " s.pdf_modified, s.excluded FROM statements s"
-        " JOIN items i ON i.id=s.item_id"
+        " JOIN documents d ON d.id=s.document_id"
         " LEFT JOIN accounts a ON a.id=s.account_id"
-        " ORDER BY i.message_id, a.config_id, s.period_start, s.id").fetchall()
+        " ORDER BY d.sha256, a.config_id, s.period_start, s.id").fetchall()
     statements: list[dict[str, Any]] = []
     statement_keys: dict[int, tuple[Any, ...]] = {}
     for row in statement_rows:
-        key = (row["message_id"], row["item_id"], row["config_id"],
+        key = (row["sha256"], row["document_id"], row["config_id"],
                row["period_start"], row["period_end"])
         statement_keys[int(row["id"])] = key
         statements.append({key_name: row[key_name] for key_name in row.keys()

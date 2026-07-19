@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import modules.pipeline.embed as embed_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
+from modules.custody import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.emailbody import body_text  # noqa: E402
 from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
@@ -65,22 +66,38 @@ def insert_item(conn, tmp: Path, mid: str, subject: str, body: str,
                 date_utc: str, from_addr: str, to_addr: str,
                 in_reply_to: str | None = None,
                 references: str | None = None) -> int:
+    """Insert one synthetic `emails` + `email_sources` row pair mirroring
+    Stage 2's column list (`modules/pipeline/emails.py`). Identity is now
+    `emails.sha256` (the real UNIQUE key — `message_id` is a plain,
+    non-unique column post-cutover), synthesized deterministically from
+    this call's content so distinct calls never collide.
+    """
     body_path = tmp / "messages" / \
         f"{mid.strip('<>').replace('@', '_')}" / "email_message.txt"
     body_path.parent.mkdir(parents=True, exist_ok=True)
     body_path.write_text(
         f"Date: {date_utc}\nFrom: {from_addr}\nTo: {to_addr}\nCc: "
         f"\nSubject: {subject}\n\n{body}", encoding="utf-8")
+    sha = sha256_bytes("\x1f".join((
+        mid, subject, body, date_utc, from_addr, to_addr,
+        in_reply_to or "", references or "")).encode("utf-8"))
     to_json = json.dumps([{"name": None, "addr": to_addr}])
     cur = conn.execute(
-        """INSERT INTO items (item_kind, message_id, subject,
+        """INSERT INTO emails (sha256, message_id, subject,
            subject_normalized, date_utc, from_addr, to_addrs, cc_addrs,
            in_reply_to, references_raw, body_text_path, ingested_at)
-           VALUES ('email', ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 't')""",
-        (mid, subject, subject.removeprefix("Re: ").lower(), date_utc,
+           VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 't')""",
+        (sha, mid, subject, subject.removeprefix("Re: ").lower(), date_utc,
          from_addr, to_json, in_reply_to, references,
          str(body_path.relative_to(tmp))))
-    return int(cur.lastrowid)
+    email_id = int(cur.lastrowid)
+    conn.execute(
+        """INSERT INTO email_sources
+           (email_id, workspace_id, collection_id, relpath,
+            file_size_bytes, discovered_at)
+           VALUES (?, 'matter-x', 'mail', ?, ?, 't')""",
+        (email_id, f"{mid}.eml", len(body.encode("utf-8"))))
+    return email_id
 
 
 def main() -> int:
@@ -118,7 +135,7 @@ def main() -> int:
         assert tstats.get("method_singleton") == 1, tstats
         assert tstats.get("threads") == 2, tstats
         threads = {row["message_id"]: row["thread_id"] for row in
-                   conn.execute("SELECT message_id, thread_id FROM items")}
+                   conn.execute("SELECT message_id, thread_id FROM emails")}
         assert threads["<a@x>"] == threads["<b@x>"] == threads["<c@x>"]
         assert threads["<d@x>"] != threads["<a@x>"]
         rep = conn.execute(
@@ -127,36 +144,53 @@ def main() -> int:
         assert rep["item_count"] == 3 and \
             rep["representative_subject"] == "Settlement"
 
-        # attachment text artifact + a skipped one (never chunked)
+        # An email-carried document with extracted text + a skipped one
+        # (never chunked) — `documents` is 1:1 with content identity, so an
+        # `attachments` occurrence row links each to the carrying email.
         att_txt = tmp / "att" / "1.txt"
         att_txt.parent.mkdir(parents=True)
         att_txt.write_text("Statement line items text.", encoding="utf-8")
+        doc1 = conn.execute(
+            """INSERT INTO documents (sha256, media_kind, size_bytes,
+                      extraction_method, extracted_text_path, is_skipped,
+                      ingested_at)
+               VALUES ('doc-sha-x', 'pdf', 123,
+                       'ocrmypdf_redo_clean_pdftotext_layout', ?, 0, 't')""",
+            (str(att_txt.relative_to(tmp)),)).lastrowid
         conn.execute(
-            "INSERT INTO attachments (item_id, filename, sha256,"
-            " extraction_method, extracted_text_path) VALUES"
-            " (?, 's.pdf', 'x', 'ocrmypdf_redo_clean_pdftotext_layout', ?)",
-            (a, str(att_txt.relative_to(tmp))))
+            """INSERT INTO attachments
+                      (email_id, document_id, filename, ordinal, ingested_at)
+               VALUES (?, ?, 's.pdf', 0, 't')""", (a, doc1))
+        doc2 = conn.execute(
+            """INSERT INTO documents (sha256, media_kind, size_bytes,
+                      extraction_method, is_skipped, skip_reason,
+                      ingested_at)
+               VALUES ('doc-sha-y', 'image', 456, 'stored_only', 1,
+                       'image', 't')""").lastrowid
         conn.execute(
-            "INSERT INTO attachments (item_id, filename, sha256,"
-            " extraction_method, is_skipped, skip_reason) VALUES"
-            " (?, 'logo.png', 'y', 'stored_only', 1, 'image')", (a,))
+            """INSERT INTO attachments
+                      (email_id, document_id, filename, ordinal, ingested_at)
+               VALUES (?, ?, 'logo.png', 1, 't')""", (a, doc2))
 
-        # Native PDF text continues through body_text_path/source_type
-        # 'email_body', but receives a Document: filename payload.
+        # A native document (mounted directly, not carried by any email) is
+        # chunked via source_type 'document_text' and receives a
+        # "Document: <name>" payload prefix (modules/embedding/payloads.py).
         doc_path = tmp / "docs" / "notice.txt"
         doc_path.parent.mkdir(parents=True)
         doc_path.write_text("Native filing content.", encoding="utf-8")
-        doc = conn.execute(
-            """INSERT INTO items (item_kind, message_id, subject,
-                      body_text_path, ingested_at)
-               VALUES ('file', '<file@x>', 'notice.pdf', ?, 't')""",
+        doc3 = conn.execute(
+            """INSERT INTO documents (sha256, media_kind, size_bytes,
+                      extraction_method, extracted_text_path, is_skipped,
+                      ingested_at)
+               VALUES ('native-sha', 'pdf', 789, 'pdftotext_layout', ?, 0,
+                       't')""",
             (str(doc_path.relative_to(tmp)),)).lastrowid
         conn.execute(
-            """INSERT INTO item_memberships
-                      (item_id, workspace_id, collection_id, filename,
-                       sha256, membership_kind, ingested_at)
-               VALUES (?, 'matter-x', 'mail', 'notice.pdf', 'native-sha',
-                       'file', 't')""", (doc,))
+            """INSERT INTO document_sources
+                      (document_id, workspace_id, collection_id, relpath,
+                       file_size_bytes, discovered_at)
+               VALUES (?, 'matter-x', 'mail', 'notice.pdf', 789, 't')""",
+            (doc3,))
         conn.commit()
 
         # -- embedding -------------------------------------------------------
@@ -175,8 +209,8 @@ def main() -> int:
         payloads = conn.execute(
             """SELECT chunks.text, chunks.char_start, chunks.char_end,
                       chunks.payload_shadow, chunks.source_type,
-                      items.message_id
-                 FROM chunks JOIN items ON items.id = chunks.item_id
+                      emails.message_id
+                 FROM chunks LEFT JOIN emails ON emails.id = chunks.email_id
                 ORDER BY chunks.id""").fetchall()
         reply_chunk = next(row for row in payloads
                            if row["message_id"] == "<b@x>")
@@ -186,16 +220,21 @@ def main() -> int:
             "From: bob@y\nDate: 2024-01-02T10:00:00+00:00\n"
             "Subject: Re: Settlement\nTo: alice@x\n\n")
         message_path = tmp / conn.execute(
-            "SELECT body_text_path FROM items WHERE id = ?", (b,)).fetchone()[0]
+            "SELECT body_text_path FROM emails WHERE id = ?",
+            (b,)).fetchone()[0]
         authored = body_text(message_path.read_bytes(), source=message_path)
         assert authored[reply_chunk["char_start"]:
                         reply_chunk["char_end"]] == reply_chunk["text"]
-        attachment_chunk = next(row for row in payloads
-                                if row["source_type"] == "attachment")
-        assert attachment_chunk["payload_shadow"].startswith(
-            "Attachment: s.pdf\nFrom: alice@x\nDate: ")
-        document_chunk = next(row for row in payloads
-                              if row["message_id"] == "<file@x>")
+        attachment_chunk = next(
+            row for row in payloads
+            if row["source_type"] == "document_text"
+            and row["payload_shadow"].startswith("Document: s.pdf"))
+        assert attachment_chunk["payload_shadow"] == \
+            "Document: s.pdf\n\nStatement line items text."
+        document_chunk = next(
+            row for row in payloads
+            if row["source_type"] == "document_text"
+            and row["payload_shadow"].startswith("Document: notice.pdf"))
         assert document_chunk["payload_shadow"] == \
             "Document: notice.pdf\n\nNative filing content."
         assert set(backend.embedded_texts) == {
@@ -206,7 +245,7 @@ def main() -> int:
         assert fts_envelope >= 3
 
         shadow = conn.execute(
-            "SELECT translit_shadow FROM chunks WHERE item_id = ? AND"
+            "SELECT translit_shadow FROM chunks WHERE email_id = ? AND"
             " source_type = 'email_body'", (b,)).fetchone()[0]
         assert "Kseni" in shadow, shadow   # proper-noun shadow present
 
@@ -252,9 +291,9 @@ def main() -> int:
             queue.failed_entities == 1, queue
         assert ctx.telemetry.embed.verified_cache_publications == 1
         e_chunk = conn.execute(
-            "SELECT id FROM chunks WHERE item_id = ?", (e,)).fetchone()[0]
+            "SELECT id FROM chunks WHERE email_id = ?", (e,)).fetchone()[0]
         f_chunk = conn.execute(
-            "SELECT id FROM chunks WHERE item_id = ?", (f,)).fetchone()[0]
+            "SELECT id FROM chunks WHERE email_id = ?", (f,)).fetchone()[0]
         assert not (paths.vecs_dir / f"{e_chunk}.npy").exists()
         assert (paths.vecs_dir / f"{f_chunk}.npy").is_file()
         assert not any(path.name.endswith(".tmp")

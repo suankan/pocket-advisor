@@ -1,22 +1,25 @@
-"""Typed configuration and cache layout.
+"""Typed configuration and content-addressed cache layout.
 
 Config is an immutable dataclass built from code defaults overlaid with
 the committed platform config.yaml. It is
 constructed once (Config.load) and passed explicitly to everything that
 needs it — no module-global mutation, no import-time side effects.
 
-Cache layout (`docs/design.md`):
+Cache layout (`docs/features/ingestion-design-v2.md`):
 
-    workspaces/.state/workspace-<workspace_id>/cache/<collection_id>/
-        <email_basename>__<sha8>/           EmailCacheFolder
+    workspaces/.state/workspace-<workspace_id>/
+        emails/<email-sha256>/
             email_message_full.txt
             email_message.txt
-            attachments/{pdf-original,pdf-ocr,pdf-to-text,
-                         images,zip-archives,other}/
-        pdf-original/  pdf-ocr/  pdf-to-text/   (corpora-native PDFs)
+        documents/<document-sha256>/
+            source/              verified workspace-local copy
+            transforms/           PDF product form owned by
+                                  pdf-to-text-pipeline-design.md
 
-CollectionCache / EmailCacheFolder are pure path objects: they never
+EmailArtifacts / DocumentArtifacts are pure path objects: they never
 touch the filesystem; stages mkdir the directories they actually write.
+Every unique email/document is materialized once per workspace, keyed by
+its own SHA-256 — never by collection or filename.
 """
 import sys
 from collections.abc import Callable, Iterator
@@ -47,29 +50,13 @@ PDFTOTEXT_TIMEOUT_SEC = 300
 STATE_DIRNAME = ".state"
 
 
-def safe_component(name: str, max_len: int = 120) -> str:
-    """A single filesystem-safe path component from an arbitrary name.
-
-    Keeps the name human-readable (spaces, unicode preserved); replaces
-    only separators/controls that would change path meaning.
-    """
-    cleaned = "".join(
-        "_" if (c in '/\\:\x00' or ord(c) < 32) else c for c in name).strip()
-    return (cleaned or "_unnamed")[:max_len]
-
-
-def artifact_folder_name(filename: str, sha256: str) -> str:
-    """`<basename>__<sha8>` — human-readable AND collision-proof."""
-    return f"{safe_component(filename)}__{sha256[:8]}"
-
-
 # ---------------------------------------------------------------------------
-# Cache layout
+# Content-addressed cache layout
 
 
 @dataclass(frozen=True, slots=True)
-class EmailCacheFolder:
-    """Per-email cache folder (one per email, incl. attached emails)."""
+class EmailArtifacts:
+    """Content-addressed per-email folder: `emails/<sha256>/`."""
 
     root: Path
 
@@ -81,57 +68,26 @@ class EmailCacheFolder:
     def message(self) -> Path:
         return self.root / "email_message.txt"
 
-    @property
-    def attachments_dir(self) -> Path:
-        return self.root / "attachments"
-
-    @property
-    def pdf_original_dir(self) -> Path:
-        return self.attachments_dir / "pdf-original"
-
-    @property
-    def pdf_ocr_dir(self) -> Path:
-        return self.attachments_dir / "pdf-ocr"
-
-    @property
-    def pdf_text_dir(self) -> Path:
-        return self.attachments_dir / "pdf-to-text"
-
-    @property
-    def images_dir(self) -> Path:
-        return self.attachments_dir / "images"
-
-    @property
-    def zip_dir(self) -> Path:
-        return self.attachments_dir / "zip-archives"
-
-    @property
-    def other_dir(self) -> Path:
-        return self.attachments_dir / "other"
-
 
 @dataclass(frozen=True, slots=True)
-class CollectionCache:
-    """Workspace-local `cache/<collection_id>/` derived state."""
+class DocumentArtifacts:
+    """Content-addressed per-document folder: `documents/<sha256>/`."""
 
     root: Path
 
-    def email_folder(self, filename: str, sha256: str) -> EmailCacheFolder:
-        return EmailCacheFolder(
-            self.root / artifact_folder_name(filename, sha256))
-
-    # Corpora-native PDFs (not email-borne) live at collection level.
     @property
-    def pdf_original_dir(self) -> Path:
-        return self.root / "pdf-original"
+    def source_dir(self) -> Path:
+        return self.root / "source"
 
-    @property
-    def pdf_ocr_dir(self) -> Path:
-        return self.root / "pdf-ocr"
+    def source_path(self, original_filename: str | None) -> Path:
+        ext = Path(original_filename or "").suffix.lower()
+        return self.source_dir / f"original{ext}"
 
     @property
-    def pdf_text_dir(self) -> Path:
-        return self.root / "pdf-to-text"
+    def transforms_dir(self) -> Path:
+        """PDF product form/layout is owned by the separate PDF
+        document-to-text pipeline design; this reserves the location."""
+        return self.root / "transforms"
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +160,12 @@ class Config:
         return self.state_dir / f"{self._selected_workspace_id()}.db"
 
     @property
-    def cache_dir(self) -> Path:
-        return self.state_dir / "cache"
+    def emails_dir(self) -> Path:
+        return self.state_dir / "emails"
 
     @property
-    def pdf_transform_dir(self) -> Path:
-        """Workspace-local canonical PDF products; never cross-workspace."""
-        return self.state_dir / "pdf-transforms"
+    def documents_dir(self) -> Path:
+        return self.state_dir / "documents"
 
     @property
     def logs_dir(self) -> Path:
@@ -245,8 +200,11 @@ class Config:
     def registry_path(self) -> Path:
         return self.workspaces_dir / "workspace-config.yaml"
 
-    def collection_cache(self, collection_id: str) -> CollectionCache:
-        return CollectionCache(self.cache_dir / safe_component(collection_id))
+    def email_artifacts(self, sha256: str) -> EmailArtifacts:
+        return EmailArtifacts(self.emails_dir / sha256)
+
+    def document_artifacts(self, sha256: str) -> DocumentArtifacts:
+        return DocumentArtifacts(self.documents_dir / sha256)
 
     # -- construction -------------------------------------------------------
 

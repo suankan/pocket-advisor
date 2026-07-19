@@ -59,20 +59,20 @@ def email_bytes() -> bytes:
 
 
 def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
-    item = ctx.conn.execute(
-        "SELECT id, thread_id FROM items WHERE message_id='<maintenance@test>'"
+    email = ctx.conn.execute(
+        "SELECT id, thread_id FROM emails WHERE message_id='<maintenance@test>'"
     ).fetchone()
     ctx.conn.execute(
-        "INSERT INTO chunks(source_type, item_id, chunk_index, text, "
+        "INSERT INTO chunks(source_type, email_id, chunk_index, text, "
         "payload_shadow) VALUES ('email_body', ?, 0, 'verified evidence', "
         "'Subject: Maintenance fixture verified evidence')",
-        (item["id"],),
+        (email["id"],),
     )
     ctx.conn.execute(
         "INSERT INTO thread_summaries(thread_id, summary_text, source_digest, "
         "generator_model, prompt_version, generated_at) "
         "VALUES (?, 'fixture summary', 'digest', 'fake', 1, 't')",
-        (item["thread_id"],),
+        (email["thread_id"],),
     )
     ctx.conn.commit()
 
@@ -88,108 +88,201 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
 
     thread = thread_index_paths(ctx.config, fingerprint)
     thread.vecs_dir.mkdir(parents=True)
-    vector_name = thread_vector_filename(item["thread_id"], "fixture summary")
+    vector_name = thread_vector_filename(email["thread_id"], "fixture summary")
     np.save(thread.vecs_dir / vector_name,
             np.array([0, 1, 0, 0], dtype=np.float32))
     np.save(thread.vectors_npy,
             np.array([[0, 1, 0, 0]], dtype=np.float32))
     np.save(thread.vectors_ids_npy,
-            np.array([item["thread_id"]], dtype=np.int64))
+            np.array([email["thread_id"]], dtype=np.int64))
     thread.meta_json.write_text(json.dumps({**fingerprint, "count": 1,
                                             "built_at": "2026-07-18T00:00:00Z"}))
     return active_index_slug(ctx.config), leaf.meta_json.parent
 
 
-def _add_email_item(
-        ctx: PipelineContext, *, item_id: int, message_id: str,
-        parent_item_id: int | None, digest: str, candidate: bool = True,
-        membership: bool = True) -> None:
-    root = ctx.conn.execute(
-        "SELECT body_text_path, body_full_text_path FROM items "
+def _root_email(ctx: PipelineContext) -> tuple[int, str, str]:
+    """The real EmailStage-ingested root: (id, body_text_path,
+    body_full_text_path) — reused as the (already on-disk, already
+    write-verified) artifact pair for every synthetic ``emails`` row below,
+    since ``_verify_artifacts`` only checks that the path exists, not that
+    it is unique to one row."""
+    row = ctx.conn.execute(
+        "SELECT id, body_text_path, body_full_text_path FROM emails "
         "WHERE message_id='<maintenance@test>'"
     ).fetchone()
+    return int(row["id"]), row["body_text_path"], row["body_full_text_path"]
+
+
+def _insert_email(
+        ctx: PipelineContext, *, email_id: int, sha256: str,
+        message_id: str,
+        body_text_path: str, body_full_text_path: str) -> None:
     ctx.conn.execute(
-        "INSERT INTO items(id, item_kind, message_id, parent_item_id, "
+        "INSERT INTO emails(id, sha256, message_id, "
         "body_text_path, body_full_text_path, ingested_at) "
-        "VALUES (?, 'email', ?, ?, ?, ?, 't')",
-        (item_id, message_id, parent_item_id, root["body_text_path"],
-         root["body_full_text_path"]),
+        "VALUES (?, ?, ?, ?, ?, 't')",
+        (email_id, sha256, message_id, body_text_path,
+         body_full_text_path),
     )
-    if membership:
-        ctx.conn.execute(
-            "INSERT INTO item_memberships(item_id, workspace_id, "
-            "collection_id, filename, sha256, membership_kind, ingested_at) "
-            "VALUES (?, ?, 'mail', 'attached.eml', ?, 'email', 't')",
-            (item_id, ctx.workspace.id, digest),
-        )
-    if candidate:
-        ctx.conn.execute(
-            "INSERT INTO ingestion_candidates(workspace_id, collection_id, "
-            "relpath, sha256, size_bytes, document_type, status, "
-            "discovered_at) VALUES (?, 'mail', '?::attached.eml', ?, 1, "
-            "'email', 'ingested', 't')",
-            (ctx.workspace.id, digest),
-        )
+
+
+def _insert_child_attachment(
+        ctx: PipelineContext, *, parent_email_id: int, child_email_id: int,
+) -> None:
+    ctx.conn.execute(
+        "INSERT INTO attachments(email_id, child_email_id, filename, ordinal, "
+        "ingested_at) VALUES (?, ?, 'attached.eml', 0, 't')",
+        (parent_email_id, child_email_id),
+    )
+
+
+def _insert_email_source(
+        ctx: PipelineContext, *, email_id: int, collection_id: str,
+        relpath: str) -> None:
+    ctx.conn.execute(
+        "INSERT INTO email_sources(email_id, workspace_id, collection_id, "
+        "relpath, discovered_at) VALUES (?, ?, ?, ?, 't')",
+        (email_id, ctx.workspace.id, collection_id, relpath),
+    )
 
 
 def test_attached_email_verification(ctx: PipelineContext) -> None:
-    root_id = int(ctx.conn.execute(
-        "SELECT id FROM items WHERE message_id='<maintenance@test>'"
-    ).fetchone()[0])
-    _add_email_item(
-        ctx, item_id=100, message_id="<attached-valid@test>",
-        parent_item_id=root_id, digest="a" * 64)
+    """Attached-email lineage is the attachments child-email graph."""
+    root_id, body_text_path, body_full_text_path = _root_email(ctx)
+
+    def add(email_id: int, sha256: str, message_id: str) -> None:
+        _insert_email(
+            ctx, email_id=email_id, sha256=sha256, message_id=message_id,
+            body_text_path=body_text_path,
+            body_full_text_path=body_full_text_path)
+
+    # -- valid: the child is carried by the blob-indexed root. -------------
+    add(100, "a" * 64, "<attached-valid@test>")
+    _insert_child_attachment(ctx, parent_email_id=root_id, child_email_id=100)
     ctx.conn.commit()
     report = verify_workspace(ctx)
     assert report.ok, report.problems
     assert report.checks["attached_email_lineages_verified"] == 1
 
-    # A synthetic candidate without physical lineage remains a missing
-    # top-level original; it is never exempted merely because of its relpath.
-    ctx.conn.execute("SAVEPOINT broken_top_level")
-    _add_email_item(
-        ctx, item_id=110, message_id="<attached-no-parent@test>",
-        parent_item_id=None, digest="b" * 64)
+    # -- broken: neither top-level source nor carrying attachment. ----------
+    ctx.conn.execute("SAVEPOINT no_occurrence")
+    add(110, "b" * 64, "<attached-no-occurrence@test>")
     report = verify_workspace(ctx)
     assert not report.ok
-    assert any("discovered original has no blob-index row" in problem
-               for problem in report.problems)
-    ctx.conn.execute("ROLLBACK TO broken_top_level")
-    ctx.conn.execute("RELEASE broken_top_level")
+    assert any(
+        "email 110 has no verified source or attachment lineage" in problem
+        for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO no_occurrence")
+    ctx.conn.execute("RELEASE no_occurrence")
 
-    # A parent relation is not sufficient: it must terminate at an item with
-    # blob-indexed custody.
-    ctx.conn.execute("SAVEPOINT broken_root")
-    _add_email_item(
-        ctx, item_id=120, message_id="<unindexed-root@test>",
-        parent_item_id=None, digest="c" * 64, candidate=False,
-        membership=False)
-    _add_email_item(
-        ctx, item_id=121, message_id="<attached-broken-root@test>",
-        parent_item_id=120, digest="d" * 64)
+    # -- broken: a top-level (parent-less) email whose own occurrence was
+    # never blob-indexed — a synthetic candidate is not exempted merely
+    # because it carries a relpath. ------------------------------------------
+    ctx.conn.execute("SAVEPOINT uncustodied_root")
+    add(120, "c" * 64, "<uncustodied-root@test>")
+    _insert_email_source(
+        ctx, email_id=120, collection_id="mail",
+        relpath="?::uncustodied-root.eml")
     report = verify_workspace(ctx)
     assert not report.ok
-    assert any("no blob-indexed carrying original" in problem
+    assert any("email source occurrence" in problem
                for problem in report.problems)
-    ctx.conn.execute("ROLLBACK TO broken_root")
-    ctx.conn.execute("RELEASE broken_root")
+    ctx.conn.execute("ROLLBACK TO uncustodied_root")
+    ctx.conn.execute("RELEASE uncustodied_root")
 
-    # SQLite foreign keys permit a cycle between existing rows; verification
-    # must reject it even though PRAGMA foreign_key_check is clean.
+    # -- broken: an attachment parent has no root source. -------------------
+    ctx.conn.execute("SAVEPOINT root_without_occurrence")
+    add(130, "d" * 64, "<root-without-occurrence@test>")
+    add(131, "e" * 64, "<attached-broken-root@test>")
+    _insert_child_attachment(ctx, parent_email_id=130, child_email_id=131)
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any(
+        "email 131 has no verified source or attachment lineage"
+        in problem for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO root_without_occurrence")
+    ctx.conn.execute("RELEASE root_without_occurrence")
+
+    # -- broken: a cycle of attached-email occurrences. ---------------------
     ctx.conn.execute("SAVEPOINT cyclic_lineage")
-    _add_email_item(
-        ctx, item_id=130, message_id="<attached-cycle-a@test>",
-        parent_item_id=None, digest="e" * 64)
-    _add_email_item(
-        ctx, item_id=131, message_id="<attached-cycle-b@test>",
-        parent_item_id=130, digest="f" * 64)
-    ctx.conn.execute("UPDATE items SET parent_item_id=131 WHERE id=130")
+    add(140, "f" * 64, "<attached-cycle-a@test>")
+    add(141, "g" * 64, "<attached-cycle-b@test>")
+    _insert_child_attachment(ctx, parent_email_id=140, child_email_id=141)
+    _insert_child_attachment(ctx, parent_email_id=141, child_email_id=140)
     report = verify_workspace(ctx)
     assert not report.ok
-    assert any("cyclic parent lineage" in problem
+    assert any("attached-email lineage cycle" in problem
                for problem in report.problems)
     ctx.conn.execute("ROLLBACK TO cyclic_lineage")
     ctx.conn.execute("RELEASE cyclic_lineage")
+
+
+def test_document_occurrence_verification(ctx: PipelineContext) -> None:
+    """Document-occurrence coverage (Pass 2 of ``_verify_originals``): every
+    ``document_sources``/``attachments`` row must trace to a real
+    ``ingestion_candidates`` entry (or, for attachments, to a carrying email
+    with verified custody lineage) — a gap on either side is a problem, not
+    silently accepted noise."""
+
+    def add_document(document_id: int, sha256: str) -> None:
+        ctx.conn.execute(
+            "INSERT INTO documents(id, sha256, media_kind, size_bytes, "
+            "ingested_at) VALUES (?, ?, 'pdf', 1, 't')",
+            (document_id, sha256))
+
+    # -- broken: a document_sources occurrence with no matching
+    # ingestion_candidates row (the candidate was never discovered). ---------
+    ctx.conn.execute("SAVEPOINT ghost_document_source")
+    add_document(200, "1" * 64)
+    ctx.conn.execute(
+        "INSERT INTO document_sources(document_id, workspace_id, "
+        "collection_id, relpath, discovered_at) "
+        "VALUES (200, ?, 'mail', 'ghost.pdf', 't')",
+        (ctx.workspace.id,))
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any(
+        "document occurrence mail:ghost.pdf has no matching "
+        "candidate/blob-indexed original" in problem
+        for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO ghost_document_source")
+    ctx.conn.execute("RELEASE ghost_document_source")
+
+    # -- broken: an ingested pdf candidate with no document_sources row at
+    # all (registered as discovered, never actually collected). --------------
+    ctx.conn.execute("SAVEPOINT missing_document_source")
+    ctx.conn.execute(
+        "INSERT INTO ingestion_candidates(workspace_id, collection_id, "
+        "relpath, sha256, document_type, status, discovered_at) "
+        "VALUES (?, 'mail', 'never-collected.pdf', ?, 'pdf', 'ingested', "
+        "'t')",
+        (ctx.workspace.id, "2" * 64))
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any("has no document_sources row" in problem
+               for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO missing_document_source")
+    ctx.conn.execute("RELEASE missing_document_source")
+
+    # -- broken: an attachments occurrence carried by an email that itself
+    # has no verified custody lineage (no email_sources occurrence). ---------
+    ctx.conn.execute("SAVEPOINT uncustodied_carrier")
+    root_id, body_text_path, body_full_text_path = _root_email(ctx)
+    _insert_email(
+        ctx, email_id=210, sha256="3" * 64,
+        message_id="<uncustodied-carrier@test>",
+        body_text_path=body_text_path,
+        body_full_text_path=body_full_text_path)
+    add_document(201, "4" * 64)
+    ctx.conn.execute(
+        "INSERT INTO attachments(email_id, document_id, filename, "
+        "ordinal, ingested_at) VALUES (210, 201, 'attached.pdf', 0, 't')")
+    report = verify_workspace(ctx)
+    assert not report.ok
+    assert any("has no verified custody lineage" in problem
+               for problem in report.problems)
+    ctx.conn.execute("ROLLBACK TO uncustodied_carrier")
+    ctx.conn.execute("RELEASE uncustodied_carrier")
 
 
 def main() -> int:
@@ -235,6 +328,7 @@ def main() -> int:
         assert report.checks["thread_vectors"] == 1
 
         test_attached_email_verification(ctx)
+        test_document_occurrence_verification(ctx)
 
         output_digest, output_counts = transaction_output_state(conn)
         state = TransactionBuildState(

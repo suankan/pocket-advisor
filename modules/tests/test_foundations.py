@@ -10,8 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from modules.config import (Config, artifact_folder_name,  # noqa: E402
-                            safe_component)
+from modules.config import Config  # noqa: E402
 from modules.custody import (CustodyError, copy_verified,  # noqa: E402
                              sha256_bytes,
                              write_verified)
@@ -62,20 +61,26 @@ def test_config(tmp: Path) -> None:
     assert cfg.state_dir == ws_dir / ".state" / "workspace-matter-x"
     assert cfg.db_path == cfg.state_dir / "matter-x.db"
     assert cfg.runtime_dir == cfg.state_dir / "runtime"
-    assert cfg.pdf_transform_dir == cfg.state_dir / "pdf-transforms"
     assert cfg.transaction_manifest_path == \
         cfg.state_dir / "logs" / "transactions" / "build-state.json"
     assert cfg.accuracy_tests_dir == \
         cfg.state_dir / "search-accuracy-tests"
-    cache = cfg.collection_cache("own/solicitor")
-    assert cache.root == cfg.cache_dir / "own_solicitor"
 
-    folder = cache.email_folder("2024-01-05 1230.eml", "a" * 64)
-    assert folder.root.name == "2024-01-05 1230.eml__aaaaaaaa"
-    assert folder.message_full.name == "email_message_full.txt"
-    assert folder.message.name == "email_message.txt"
-    assert folder.pdf_text_dir == folder.root / "attachments" / "pdf-to-text"
-    assert cache.pdf_text_dir == cache.root / "pdf-to-text"
+    assert cfg.emails_dir == cfg.state_dir / "emails"
+    assert cfg.documents_dir == cfg.state_dir / "documents"
+
+    email_artifacts = cfg.email_artifacts("a" * 64)
+    assert email_artifacts.root == cfg.emails_dir / ("a" * 64)
+    assert email_artifacts.message_full.name == "email_message_full.txt"
+    assert email_artifacts.message.name == "email_message.txt"
+
+    doc_artifacts = cfg.document_artifacts("b" * 64)
+    assert doc_artifacts.root == cfg.documents_dir / ("b" * 64)
+    assert doc_artifacts.source_dir == doc_artifacts.root / "source"
+    assert doc_artifacts.source_path("Statement.PDF") == \
+        doc_artifacts.source_dir / "original.pdf"
+    assert doc_artifacts.source_path(None) == doc_artifacts.source_dir / "original"
+    assert doc_artifacts.transforms_dir == doc_artifacts.root / "transforms"
 
     # yaml overlay: known keys apply, deprecated warn+ignore, retired and
     # unknown keys abort.
@@ -105,8 +110,6 @@ def test_config(tmp: Path) -> None:
     except SystemExit as e:
         assert "no_such_knob" in str(e)
 
-    assert safe_component("a/b\\c:d") == "a_b_c_d"
-    assert artifact_folder_name("x.pdf", "ff" * 32) == "x.pdf__ffffffff"
     plain = {"model": "fake/model", "dim": 4, "payload_recipe": "plain-v1"}
     enriched = {**plain, "payload_recipe": PAYLOAD_RECIPE}
     assert fingerprint_slug(plain) != fingerprint_slug(enriched)
@@ -209,12 +212,16 @@ def test_database(tmp: Path) -> None:
     except sqlite3.IntegrityError:
         pass
 
-    # items.parent_item_id round-trips; FTS triggers fire
-    conn.execute("INSERT INTO items (message_id, ingested_at)"
-                 " VALUES ('<m1>', 't')")
-    conn.execute("INSERT INTO items (message_id, parent_item_id,"
-                 " ingested_at) VALUES ('<m2>', 1, 't')")
-    conn.execute("INSERT INTO chunks (source_type, item_id, chunk_index,"
+    # Attached-email lineage belongs to an attachment occurrence; FTS triggers
+    # still fire for email chunks.
+    conn.execute("INSERT INTO emails (sha256, message_id, ingested_at)"
+                 " VALUES (?, '<m1>', 't')", ("f1" * 32,))
+    conn.execute("INSERT INTO emails (sha256, message_id, ingested_at)"
+                 " VALUES (?, '<m2>', 't')", ("f2" * 32,))
+    conn.execute(
+        "INSERT INTO attachments(email_id, child_email_id, filename, ordinal,"
+        " ingested_at) VALUES (1, 2, 'forwarded.eml', 0, 't')")
+    conn.execute("INSERT INTO chunks (source_type, email_id, chunk_index,"
                  " text, payload_shadow) VALUES"
                  " ('email_body', 1, 0, 'hello custody',"
                  "  'Subject: envelopeonlyterm\\n\\nhello custody')")
@@ -249,17 +256,84 @@ def test_database(tmp: Path) -> None:
     except WorkspaceDatabaseError as exc:
         assert "contains row for workspace 'other'" in str(exc)
 
-    # legacy DB refused, never patched
-    legacy = tmp / "state" / "legacy.db"
-    raw = sqlite3.connect(legacy)
+
+def test_legacy_database_detection(tmp: Path) -> None:
+    """Three-tier legacy detection (see modules/database.py docstring +
+    `_refuse_legacy`): an ancient-engine marker table, the immediately
+    prior (pre-v2) schema shape, and a wrong-shape current-generation
+    table name are each refused — a fully valid current DB is not, and
+    reopening it is idempotent.
+
+    `emails`/`documents` are THIS schema's own table names (an even
+    earlier engine generation used those same names with an incompatible
+    shape), so table-name presence alone cannot distinguish the schema
+    generation this cutover retires — hence the column-shape checks
+    covered by tier 3 below.
+    """
+    # Tier 1: an ancient-engine marker table is always refused, regardless
+    # of anything else in the database.
+    for marker in ("email_files", "page_images"):
+        db_path = tmp / "state" / f"ancient-{marker}.db"
+        raw = sqlite3.connect(db_path)
+        raw.execute(f"CREATE TABLE {marker} (id INTEGER PRIMARY KEY)")
+        raw.commit()
+        raw.close()
+        try:
+            Database(db_path, "w").open()
+            raise AssertionError(
+                f"ancient-engine marker table {marker!r} must be refused")
+        except LegacyDatabaseError as exc:
+            assert "wipe state" in str(exc)
+
+    # Tier 2: the immediately-prior (pre-v2) items/*-based schema shape
+    # is refused — these table names no longer exist in the current
+    # schema at all.
+    for marker in ("items", "item_memberships", "item_file_meta"):
+        db_path = tmp / "state" / f"pre-v2-{marker}.db"
+        raw = sqlite3.connect(db_path)
+        raw.execute(f"CREATE TABLE {marker} (id INTEGER PRIMARY KEY)")
+        raw.commit()
+        raw.close()
+        try:
+            Database(db_path, "w").open()
+            raise AssertionError(f"pre-v2 table {marker!r} must be refused")
+        except LegacyDatabaseError as exc:
+            assert "wipe state" in str(exc)
+
+    # Tier 3: a wrong-shape `emails` table (this schema's own table name,
+    # but missing sha256) is refused via column-shape
+    # detection — NOT via bare table-name presence. workspace_metadata is
+    # included so the shape check is actually reached rather than being
+    # preempted by the "workspace binding metadata missing" check.
+    wrong_shape = tmp / "state" / "wrong-shape.db"
+    raw = sqlite3.connect(wrong_shape)
+    raw.execute(
+        "CREATE TABLE workspace_metadata (singleton INTEGER PRIMARY KEY"
+        " CHECK (singleton = 1), workspace_id TEXT NOT NULL)")
+    raw.execute(
+        "INSERT INTO workspace_metadata (singleton, workspace_id)"
+        " VALUES (1, 'w')")
     raw.execute("CREATE TABLE emails (id INTEGER PRIMARY KEY)")
     raw.commit()
     raw.close()
     try:
-        Database(legacy, "w").open()
-        raise AssertionError("legacy DB must be refused")
-    except LegacyDatabaseError as e:
-        assert "wipe state" in str(e)
+        Database(wrong_shape, "w").open()
+        raise AssertionError("wrong-shape emails table must be refused")
+    except LegacyDatabaseError as exc:
+        assert "emails missing" in str(exc)
+        assert "sha256" in str(exc)
+
+    # Tier 4: a database created by the current Database.open() (full
+    # valid schema) succeeds, and reopening it with the same
+    # workspace_id is idempotent — no error, no re-creation surprises.
+    fresh = tmp / "state" / "fresh.db"
+    conn = Database(fresh, "w").open()
+    conn.close()
+    conn2 = Database(fresh, "w").open()
+    assert conn2.execute(
+        "SELECT workspace_id FROM workspace_metadata WHERE singleton = 1"
+    ).fetchone()[0] == "w"
+    conn2.close()
 
 
 def test_custody_review(tmp: Path) -> None:
@@ -308,6 +382,7 @@ def main() -> int:
         test_config(tmp)
         test_workspace(tmp)
         test_database(tmp)
+        test_legacy_database_detection(tmp)
         test_custody_review(tmp)
         test_domain()
     print("test_foundations: all ok")

@@ -7,9 +7,10 @@ Stage 1 never parses content). One walk feeds BOTH tables:
 - ingestion_candidates — the working set, keyed (collection_id, sha256).
   email/pdf files enter as status='candidate'; anything else is
   recorded as status='skipped' (custody-visible, never processed).
-- source_blob_index — pure custody cache (sha256 → relpath), replaced
-  per collection on every run. This absorbs the old `blob-index
-  rebuild`.
+- source_blob_index — pure custody cache of every observed source path,
+  replaced per collection on every run. The durable blob identity remains
+  `(collection_id, sha256)`; duplicate paths deliberately remain visible
+  as distinct occurrences.
 
 Idempotency and custody:
 - A sha already recorded for the collection is counted as known.
@@ -99,17 +100,15 @@ class DiscoverStage(Stage):
     def _refresh_blob_index(self, workspace_id: str, coll: Collection,
                             files: list[FoundFile],
                             stats: StageStats) -> None:
-        """Replace this collection's rows from the walk (first relpath
-        wins for duplicate content within one collection)."""
+        """Replace this collection's rows from the walk.
+
+        Multiple paths may carry identical bytes. They are one durable blob
+        identity but several source occurrences, so all rows are retained.
+        """
         now = now_iso()
         self.conn.execute(
             "DELETE FROM source_blob_index WHERE source_id = ?", (coll.id,))
-        seen: set[str] = set()
         for file in files:
-            if file.sha256 in seen:
-                stats.inc("blob_dupes")
-                continue
-            seen.add(file.sha256)
             self.conn.execute(
                 "INSERT INTO source_blob_index"
                 " (workspace_id, source_id, sha256, relpath_within_source,"

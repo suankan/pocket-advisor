@@ -100,7 +100,7 @@ def main() -> int:
         assert generator.modes == [
             "segment", "segment", "segment", "reduce"], generator.modes
         thread_id = conn.execute(
-            "SELECT thread_id FROM items WHERE id=?", (first,)).fetchone()[0]
+            "SELECT thread_id FROM emails WHERE id=?", (first,)).fetchone()[0]
         summary = conn.execute(
             "SELECT summary_text, prompt_version FROM thread_summaries"
             " WHERE thread_id=?", (thread_id,)).fetchone()
@@ -123,10 +123,10 @@ def main() -> int:
         # remains in the same deterministic thread; hierarchy never rewrites
         # relational evidence to obtain its speedup.
         assert conn.execute(
-            "SELECT reply_parent_item_id FROM items WHERE id=?",
+            "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (second,)).fetchone()[0] == first
         assert conn.execute(
-            "SELECT COUNT(DISTINCT thread_id) FROM items").fetchone()[0] == 1
+            "SELECT COUNT(DISTINCT thread_id) FROM emails").fetchone()[0] == 1
 
         # Beginning/middle/end expectations are answerable through the
         # generated navigation namespace rather than by direct leaf echo.

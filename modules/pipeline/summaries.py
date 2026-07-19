@@ -276,9 +276,8 @@ class ThreadSummaryStage(Stage):
         threads = self.conn.execute(
             """SELECT threads.id, threads.stable_key
                  FROM threads
-                WHERE (SELECT COUNT(*) FROM items
-                       WHERE items.thread_id = threads.id
-                         AND items.item_kind = 'email') >= 2
+                WHERE (SELECT COUNT(*) FROM emails
+                       WHERE emails.thread_id = threads.id) >= 2
                 ORDER BY threads.stable_key""").fetchall()
         work: list[_ThreadWork] = []
         broken: list[_BrokenThread] = []
@@ -286,8 +285,8 @@ class ThreadSummaryStage(Stage):
             rows = self.conn.execute(
                 """SELECT message_id, COALESCE(date_utc, '') AS date_utc,
                           body_text_path
-                     FROM items
-                    WHERE thread_id = ? AND item_kind = 'email'
+                     FROM emails
+                    WHERE thread_id = ?
                     ORDER BY date_utc, message_id""",
                 (thread["id"],)).fetchall()
             digest = hashlib.sha256()

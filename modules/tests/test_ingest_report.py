@@ -89,9 +89,7 @@ def populate(ctx: PipelineContext) -> None:
         ((1, ctx.workspace.id, "mail", "message.eml", "1" * 64, 10,
           "email"),
          (2, ctx.workspace.id, "bank", "statement.pdf", "2" * 64, 20,
-          "pdf"),
-         (3, ctx.workspace.id, "mail", "?::attached.eml", "3" * 64, 5,
-          "email")),
+          "pdf")),
     )
     conn.executemany(
         """INSERT INTO source_blob_index(
@@ -103,35 +101,43 @@ def populate(ctx: PipelineContext) -> None:
     )
     conn.executemany(
         "INSERT INTO threads(id, stable_key, item_count) VALUES (?, ?, ?)",
-        ((1, "<root@test>", 2), (2, "<doc@test>", 1)),
+        ((1, "<root@test>", 2),),
     )
     conn.executemany(
-        """INSERT INTO items(
-             id, item_kind, message_id, thread_id, body_text_path, ingested_at)
+        """INSERT INTO emails(
+             id, sha256, message_id, thread_id, body_text_path, ingested_at)
            VALUES (?, ?, ?, ?, ?, '2026-07-18T00:00:00Z')""",
-        ((1, "email", "<root@test>", 1, "derived/email-1.txt"),
-         (2, "email", "<reply@test>", 1, "derived/email-2.txt"),
-         (3, "file", "<doc@test>", 2, "derived/pdf.txt")),
-    )
-    conn.executemany(
-        """INSERT INTO item_memberships(
-             item_id, workspace_id, collection_id, filename, sha256,
-             membership_kind, ingested_at)
-           VALUES (?, ?, ?, ?, ?, ?, '2026-07-18T00:00:00Z')""",
-        ((1, ctx.workspace.id, "mail", "message.eml", "1" * 64, "email"),
-         (3, ctx.workspace.id, "bank", "statement.pdf", "2" * 64, "file")),
+        ((1, "1" * 64, "<root@test>", 1, "derived/email-1.txt"),
+         (2, "4" * 64, "<reply@test>", 1, "derived/email-2.txt")),
     )
     conn.execute(
-        """INSERT INTO item_file_meta(
-             item_id, extraction_method, extracted_text_path)
-           VALUES (3, 'ocrmypdf-redo+pdftotext-layout', 'derived/pdf.txt')""")
+        """INSERT INTO email_sources(
+             email_id, workspace_id, collection_id, relpath, discovered_at)
+           VALUES (1, ?, 'mail', 'message.eml', '2026-07-18T00:00:00Z')""",
+        (ctx.workspace.id,))
+    conn.execute(
+        """INSERT INTO documents(
+             id, sha256, media_kind, size_bytes, extraction_method,
+             extracted_text_path, ingested_at)
+           VALUES (3, ?, 'pdf', 20, 'ocrmypdf-redo+pdftotext-layout',
+                   'derived/pdf.txt', '2026-07-18T00:00:00Z')""", ("2" * 64,))
+    conn.execute(
+        """INSERT INTO document_sources(
+             document_id, workspace_id, collection_id, relpath, discovered_at)
+           VALUES (3, ?, 'bank', 'statement.pdf', '2026-07-18T00:00:00Z')""",
+        (ctx.workspace.id,))
+    conn.execute(
+        """INSERT INTO documents(
+             id, sha256, media_kind, size_bytes, extraction_method,
+             skip_reason, ingested_at)
+           VALUES (4, ?, 'pdf', 5, 'error', 'fixture OCR failure',
+                   '2026-07-18T00:00:00Z')""", ("3" * 64,))
     conn.execute(
         """INSERT INTO attachments(
-             id, item_id, filename, content_type, sha256, extraction_method,
-             skip_reason, processed_at)
-           VALUES (1, 1, 'broken.pdf', 'application/pdf', ?, 'error',
-                   'fixture OCR failure', '2026-07-18T00:00:00Z')""",
-        ("3" * 64,),
+             id, email_id, document_id, filename, content_type, ordinal,
+             ingested_at)
+           VALUES (1, 1, 4, 'broken.pdf', 'application/pdf', 0,
+                   '2026-07-18T00:00:00Z')""",
     )
     conn.execute(
         """INSERT INTO thread_summaries(
@@ -141,12 +147,12 @@ def populate(ctx: PipelineContext) -> None:
                    '2026-07-18T00:00:00Z')""")
     conn.executemany(
         """INSERT INTO chunks(
-             id, source_type, item_id, attachment_id, chunk_index, text,
+             id, source_type, email_id, document_id, chunk_index, text,
              payload_shadow)
            VALUES (?, ?, ?, ?, 0, ?, ?)""",
         ((1, "email_body", 1, None, "email one", "From: fixture\nemail one"),
          (2, "email_body", 2, None, "email two", "From: fixture\nemail two"),
-         (3, "email_body", 3, None, "pdf evidence", "Document: x\npdf")),
+         (3, "document_text", None, 3, "pdf evidence", "Document: x\npdf")),
     )
     conn.execute(
         """INSERT INTO accounts(
@@ -154,7 +160,7 @@ def populate(ctx: PipelineContext) -> None:
            VALUES (1, 'bank', '111-222', '333444', 'daily-transactions', 'AUD')""")
     conn.execute(
         """INSERT INTO statements(
-             id, item_id, account_id, period_start, period_end, parser_id,
+             id, document_id, account_id, period_start, period_end, parser_id,
              balance_ok, parsed_at)
            VALUES (1, 3, 1, '2026-06-01', '2026-06-30', 'fixture', 1,
                    '2026-07-18T00:00:00Z')""")
@@ -286,10 +292,10 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert first.sources["pdfs"] == 1
     assert first.sources["ingested"] == 2
     assert first.evidence["pdf_readable"] == 1
-    assert first.evidence["pdf_failed_occurrences"] == 1
+    assert first.evidence["pdf_failed"] == 1
     assert first.threads["summaries_current"] == 1
     assert first.search["email_chunks"] == 2
-    assert first.search["native_pdf_chunks"] == 1
+    assert first.search["document_chunks"] == 1
     assert first.search["leaf_index_current"] is True
     assert first.search["summary_index_current"] is True
     assert first.transactions["coverage"]["single_account_unverifiable"] == 1

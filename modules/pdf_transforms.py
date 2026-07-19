@@ -1,10 +1,17 @@
-"""Workspace-local content-addressed PDF transform cache and workers.
+"""Per-document content-addressed PDF transform cache and workers.
 
 This module owns no SQLite connection and never touches collection evidence.
-Workers consume verified workspace-cache originals, write only stage-temporary
-outputs, and return typed results. The coordinating PDF stage publishes the
-canonical products, fans them out to occurrence-local artifacts, and performs
-all database/review mutation.
+Workers consume a verified document source original, write only
+stage-temporary outputs, and return typed results. The coordinating PDF
+stage publishes the canonical products directly into `documents.*` columns
+and performs all database/review mutation.
+
+`PdfTransformCache` is constructed once per PDF document, rooted at that
+document's own `documents/<sha256>/transforms/` (`Config.document_artifacts`)
+— every unique PDF already lives in its own top-level content-addressed
+folder, so there is exactly one canonical product location per document,
+referenced directly by every occurrence (native mount and/or email
+attachment). No per-occurrence fan-out copy is made or needed.
 """
 import json
 import os
@@ -185,7 +192,15 @@ def run_transform(request: TransformRequest) -> TransformResult:
 
 
 class PdfTransformCache:
-    """Verified workspace-local canonical products keyed by content+recipe."""
+    """Verified canonical products keyed by content+recipe, rooted at one
+    document's own transforms_dir.
+
+    A fresh instance is constructed per document (`root` is that document's
+    `documents/<sha256>/transforms/`), so the identity-shard prefix an
+    older, single-shared-cache-directory design needed
+    (`source_sha256[:2]/source_sha256/...`) is no longer necessary — the
+    directory itself already scopes everything under it to one document.
+    """
 
     def __init__(self, root: Path):
         self.root = root
@@ -201,9 +216,13 @@ class PdfTransformCache:
                 from exc
 
     def _ocr_dir(self, source_sha256: str, ocr_recipe: str) -> Path:
-        source_sha256 = _source_digest(source_sha256)
-        return self.root / source_sha256[:2] / source_sha256 / \
-            f"ocr-{_recipe_digest(ocr_recipe)}"
+        # This instance is already rooted at one document's transforms_dir,
+        # so source_sha256 no longer needs to appear in the path — it is
+        # still validated and carried in the manifest (see load_ocr) as a
+        # confused-deputy guard against a cache instance being reused
+        # across documents.
+        _source_digest(source_sha256)
+        return self.root / f"ocr-{_recipe_digest(ocr_recipe)}"
 
     def _text_dir(self, source_sha256: str, recipes: PdfRecipes) -> Path:
         return self._ocr_dir(source_sha256, recipes.ocr) / "text" / \

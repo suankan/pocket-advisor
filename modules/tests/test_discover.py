@@ -66,8 +66,7 @@ def main() -> int:
         assert stats.get("new_pdfs") == 1, stats       # dupe content = known
         assert stats.get("known") == 1, stats
         assert stats.get("other_skipped") == 1, stats
-        assert stats.get("blob_rows") == 3, stats      # 1 mail + 2 unique docs
-        assert stats.get("blob_dupes") == 1, stats
+        assert stats.get("blob_rows") == 4, stats      # every source occurrence
         assert stats.get("custody_alarms", ) == 0, stats
 
         pdfs = load_candidates(ctx.conn, DocumentType.PDF)
@@ -82,7 +81,7 @@ def main() -> int:
         stats2 = DiscoverStage(ctx).run()
         assert stats2.get("new_emails") == 0 and stats2.get("new_pdfs") == 0
         assert stats2.get("known") == 4, stats2        # 3 unique + 1 dupe
-        assert stats2.get("blob_rows") == 3
+        assert stats2.get("blob_rows") == 4
 
         # Rename keeps identity (same sha): known, blob index follows.
         (docs / "note.docx").rename(docs / "renamed.docx")

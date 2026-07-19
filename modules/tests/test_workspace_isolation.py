@@ -91,18 +91,18 @@ def ingest_mail(ctx: PipelineContext) -> None:
 
 
 def add_search_state(ctx: PipelineContext, token: str) -> None:
-    item = ctx.conn.execute(
-        "SELECT id, thread_id FROM items WHERE message_id='<shared@test>'"
+    email_row = ctx.conn.execute(
+        "SELECT id, thread_id FROM emails WHERE message_id='<shared@test>'"
     ).fetchone()
     ctx.conn.execute(
-        "INSERT INTO chunks (source_type, item_id, chunk_index, text,"
+        "INSERT INTO chunks (source_type, email_id, chunk_index, text,"
         " payload_shadow) VALUES ('email_body', ?, 0, ?, ?)",
-        (item["id"], token, token))
+        (email_row["id"], token, token))
     ctx.conn.execute(
         "INSERT INTO thread_summaries (thread_id, summary_text, source_digest,"
         " generator_model, prompt_version, generated_at)"
         " VALUES (?, ?, ?, 'fake-local', 1, 't')",
-        (item["thread_id"], f"summary {token}", f"digest-{token}"))
+        (email_row["thread_id"], f"summary {token}", f"digest-{token}"))
     vector = ctx.config.vectors_dir / "text" / "fake" / "vectors.npy"
     vector.parent.mkdir(parents=True, exist_ok=True)
     vector.write_bytes(token.encode())
@@ -116,16 +116,17 @@ def seed_transaction_sentinel(ctx: PipelineContext) -> None:
     account_id = ctx.conn.execute(
         "SELECT id FROM accounts WHERE config_id='sentinel-b'").fetchone()[0]
     ctx.conn.execute(
-        "INSERT INTO items(item_kind, message_id, ingested_at)"
-        " VALUES ('file', '<sentinel-b@test>', 't')")
-    item_id = ctx.conn.execute(
-        "SELECT id FROM items WHERE message_id='<sentinel-b@test>'"
+        "INSERT INTO documents(sha256, media_kind, size_bytes, ingested_at)"
+        " VALUES ('sentinel-b-doc-sha', 'pdf', 1, 't')")
+    document_id = ctx.conn.execute(
+        "SELECT id FROM documents WHERE sha256='sentinel-b-doc-sha'"
     ).fetchone()[0]
     ctx.conn.execute(
-        "INSERT INTO statements(item_id, account_id, period_start)"
-        " VALUES (?, ?, '2024-01-01')", (item_id, account_id))
+        "INSERT INTO statements(document_id, account_id, period_start)"
+        " VALUES (?, ?, '2024-01-01')", (document_id, account_id))
     statement_id = ctx.conn.execute(
-        "SELECT id FROM statements WHERE item_id=?", (item_id,)).fetchone()[0]
+        "SELECT id FROM statements WHERE document_id=?",
+        (document_id,)).fetchone()[0]
     ctx.conn.execute(
         "INSERT INTO transactions(statement_id, account_id, amount_minor,"
         " row_index) VALUES (?, ?, 123, 0)", (statement_id, account_id))
@@ -165,7 +166,8 @@ def main() -> int:
         a = build_context(base, registry, "workspace-a")
         b = build_context(base, registry, "workspace-b")
         assert a.config.db_path != b.config.db_path
-        assert a.config.cache_dir != b.config.cache_dir
+        assert a.config.emails_dir != b.config.emails_dir
+        assert a.config.documents_dir != b.config.documents_dir
         assert a.config.vectors_dir != b.config.vectors_dir
         assert a.config.transaction_manifest_path != \
             b.config.transaction_manifest_path
@@ -179,22 +181,22 @@ def main() -> int:
 
         # The same Message-ID is a separate logical row in each database.
         assert a.conn.execute(
-            "SELECT COUNT(*) FROM items WHERE message_id='<shared@test>'"
+            "SELECT COUNT(*) FROM emails WHERE message_id='<shared@test>'"
         ).fetchone()[0] == 1
         assert b.conn.execute(
-            "SELECT COUNT(*) FROM items WHERE message_id='<shared@test>'"
+            "SELECT COUNT(*) FROM emails WHERE message_id='<shared@test>'"
         ).fetchone()[0] == 1
         assert a.conn.execute(
-            "SELECT COUNT(*) FROM items WHERE message_id='<only-b@test>'"
+            "SELECT COUNT(*) FROM emails WHERE message_id='<only-b@test>'"
         ).fetchone()[0] == 0
         assert b.conn.execute(
-            "SELECT COUNT(*) FROM items WHERE message_id='<only-a@test>'"
+            "SELECT COUNT(*) FROM emails WHERE message_id='<only-a@test>'"
         ).fetchone()[0] == 0
         assert {row[0] for row in a.conn.execute(
-            "SELECT DISTINCT workspace_id FROM item_memberships"
+            "SELECT DISTINCT workspace_id FROM email_sources"
         )} == {"workspace-a"}
         assert {row[0] for row in b.conn.execute(
-            "SELECT DISTINCT workspace_id FROM item_memberships"
+            "SELECT DISTINCT workspace_id FROM email_sources"
         )} == {"workspace-b"}
 
         add_search_state(a, "alphaonly")
@@ -252,8 +254,9 @@ def main() -> int:
         assert snapshot_tree(a.config.accuracy_tests_dir) == suite_before
         assert authored_suite.read_text() == "- id: durable-test\n"
         assert not a.config.db_path.exists()
-        for derived in (a.config.cache_dir, a.config.vectors_dir,
-                        a.config.logs_dir, a.config.runtime_dir):
+        for derived in (a.config.emails_dir, a.config.documents_dir,
+                        a.config.vectors_dir, a.config.logs_dir,
+                        a.config.runtime_dir):
             assert not derived.exists(), derived
         assert b_sentinel.read_bytes() == b"workspace-b-state"
         assert snapshot_tree(b.config.state_dir) == b_state_before

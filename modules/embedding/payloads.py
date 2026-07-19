@@ -41,14 +41,10 @@ def _email_envelope(row) -> tuple[str, ...]:
 def enriched_payload(row) -> str:
     """Derive the current recipe's payload for one joined chunk row."""
     prefix: list[str] = []
-    if row["source_type"] == "attachment":
-        prefix.append(
-            f"Attachment: {_single_line(row['attachment_name'])}")
-    elif row["item_kind"] == "file":
+    if row["source_type"] == "document_text":
         prefix.append(f"Document: {_single_line(row['document_name'])}")
-    elif row["source_type"] != "email_body":
-        raise ValueError(f"unsupported chunk source_type: {row['source_type']}")
-
-    if row["item_kind"] == "email":
+    elif row["source_type"] == "email_body":
         prefix.extend(_email_envelope(row))
+    else:
+        raise ValueError(f"unsupported chunk source_type: {row['source_type']}")
     return "\n".join(prefix) + "\n\n" + row["text"]

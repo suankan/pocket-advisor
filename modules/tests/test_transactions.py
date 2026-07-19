@@ -191,7 +191,7 @@ WESTPAC_FLEXI_ACCOUNT_FIXTURE = WESTPAC_ZERO_FIXTURE.replace(
 
 def add_fixture(
         ctx: PipelineContext,
-        item_id: int,
+        document_id: int,
         collection_id: str,
         text: str,
         *,
@@ -199,83 +199,96 @@ def add_fixture(
 ) -> None:
     text_dir = ctx.config.state_dir / "fixture-text"
     text_dir.mkdir(parents=True, exist_ok=True)
-    text_path = text_dir / f"{item_id}.txt"
+    text_path = text_dir / f"{document_id}.txt"
     text_path.write_text(text, encoding="utf-8")
-    sha = f"{item_id:064x}"
+    sha = f"{document_id:064x}"
     ctx.conn.execute(
         """INSERT INTO source_blob_index(
              workspace_id, source_id, sha256, relpath_within_source,
              indexed_at)
            VALUES (?, ?, ?, ?, datetime('now'))""",
-        (ctx.workspace.id, collection_id, sha, f"{item_id}.pdf"),
+        (ctx.workspace.id, collection_id, sha, f"{document_id}.pdf"),
+    )
+    ctx.conn.execute(
+        """INSERT INTO ingestion_candidates(
+             workspace_id, collection_id, relpath, sha256, size_bytes,
+             document_type, status, discovered_at)
+           VALUES (?, ?, ?, ?, ?, 'pdf', ?, datetime('now'))""",
+        (ctx.workspace.id, collection_id, f"{document_id}.pdf", sha,
+         len(text.encode("utf-8")), "ingested" if ingested else "candidate"),
     )
     if not ingested:
+        ctx.conn.commit()
         return
     ctx.conn.execute(
-        """INSERT INTO items(id, item_kind, message_id, ingested_at)
-           VALUES (?, 'file', ?, datetime('now'))""",
-        (item_id, f"<fixture-{item_id}@test>"),
+        """INSERT INTO documents(
+                 id, sha256, media_kind, size_bytes, extraction_method,
+                 extracted_text_path, ingested_at)
+           VALUES (?, ?, 'pdf', ?, ?, ?, datetime('now'))""",
+        (document_id, sha, len(text.encode("utf-8")), fixture_extraction_method(),
+         str(text_path.relative_to(ctx.config.project_root))),
     )
     ctx.conn.execute(
-        """INSERT INTO item_memberships(
-             item_id, workspace_id, collection_id, source_folder, filename,
-             sha256, membership_kind, ingested_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'file', datetime('now'))""",
-        (item_id, ctx.workspace.id, collection_id, collection_id,
-         f"{item_id}.pdf", sha),
-    )
-    ctx.conn.execute(
-        """INSERT INTO item_file_meta(
-             item_id, extracted_text_path, extraction_method)
-           VALUES (?, ?, ?)""",
-        (item_id, str(text_path.relative_to(ctx.config.project_root)),
-         fixture_extraction_method()),
+        """INSERT INTO document_sources(
+             document_id, workspace_id, collection_id, relpath,
+             file_size_bytes, discovered_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+        (document_id, ctx.workspace.id, collection_id, f"{document_id}.pdf",
+         len(text.encode("utf-8"))),
     )
     ctx.conn.commit()
 
 
 def add_email_attachment_fixtures(
         ctx: PipelineContext,
-        item_id: int,
+        email_id: int,
         collection_id: str,
         texts: list[str],
 ) -> None:
     """Register several statement PDFs attached to one synthetic email."""
     text_dir = ctx.config.state_dir / "fixture-text"
     text_dir.mkdir(parents=True, exist_ok=True)
-    parent_sha = f"{item_id:064x}"
+    parent_sha = f"{email_id:064x}"
     ctx.conn.execute(
         """INSERT INTO source_blob_index(
              workspace_id, source_id, sha256, relpath_within_source,
              indexed_at)
            VALUES (?, ?, ?, ?, datetime('now'))""",
-        (ctx.workspace.id, collection_id, parent_sha, f"mail-{item_id}.eml"),
+        (ctx.workspace.id, collection_id, parent_sha, f"mail-{email_id}.eml"),
     )
     ctx.conn.execute(
-        """INSERT INTO items(id, item_kind, message_id, ingested_at)
-           VALUES (?, 'email', ?, datetime('now'))""",
-        (item_id, f"<attachment-parent-{item_id}@test>"),
+        """INSERT INTO emails(id, sha256, message_id, ingested_at)
+           VALUES (?, ?, ?, datetime('now'))""",
+        (email_id, parent_sha, f"<attachment-parent-{email_id}@test>"),
     )
     ctx.conn.execute(
-        """INSERT INTO item_memberships(
-             item_id, workspace_id, collection_id, source_folder, filename,
-             sha256, membership_kind, ingested_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'email', datetime('now'))""",
-        (item_id, ctx.workspace.id, collection_id, collection_id,
-         f"mail-{item_id}.eml", parent_sha),
+        """INSERT INTO email_sources(
+             email_id, workspace_id, collection_id, relpath,
+             file_size_bytes, discovered_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+        (email_id, ctx.workspace.id, collection_id, f"mail-{email_id}.eml",
+         0),
     )
     for index, text in enumerate(texts):
-        text_path = text_dir / f"{item_id}-attachment-{index}.txt"
+        document_id = email_id * 100 + index
+        text_path = text_dir / f"{email_id}-attachment-{index}.txt"
         text_path.write_text(text, encoding="utf-8")
         ctx.conn.execute(
+            """INSERT INTO documents(
+                 id, sha256, media_kind, content_type, size_bytes,
+                 extraction_method, extracted_text_path, ingested_at)
+               VALUES (?, ?, 'pdf', 'application/pdf', ?, ?, ?, datetime('now'))""",
+            (document_id, f"{document_id:064x}", len(text.encode("utf-8")),
+             fixture_extraction_method(),
+             str(text_path.relative_to(ctx.config.project_root))),
+        )
+        ctx.conn.execute(
             """INSERT INTO attachments(
-                 item_id, filename, content_type, sha256,
-                 extracted_text_path, extraction_method)
-               VALUES (?, ?, 'application/pdf', ?, ?, ?)""",
-            (item_id, f"statement-{index}.pdf",
-             f"{item_id * 100 + index:064x}",
-             str(text_path.relative_to(ctx.config.project_root)),
-             fixture_extraction_method()),
+                 email_id, document_id, filename, filename_raw, content_type,
+                 size_bytes, ordinal, ingested_at)
+               VALUES (?, ?, ?, ?, 'application/pdf', ?, ?, datetime('now'))""",
+            (email_id, document_id, f"statement-{index}.pdf",
+             f"statement-{index}.pdf", len(text.encode("utf-8")), index),
         )
     ctx.conn.commit()
 
@@ -398,14 +411,14 @@ def test_stage(ctx: PipelineContext) -> None:
     assert stats.get("links_auto") == 2, stats
 
     empty = ctx.conn.execute(
-        "SELECT id, balance_ok FROM statements WHERE item_id = 5").fetchone()
+        "SELECT id, balance_ok FROM statements WHERE document_id = 5").fetchone()
     assert empty is not None and empty["balance_ok"] == 1
     assert ctx.conn.execute(
         "SELECT count(*) FROM transactions WHERE statement_id = ?",
         (empty["id"],)).fetchone()[0] == 0
 
     statement = ctx.conn.execute(
-        "SELECT * FROM statements WHERE item_id = 1").fetchone()
+        "SELECT * FROM statements WHERE document_id = 1").fetchone()
     assert statement["balance_ok"] == 1
     assert statement["opening_balance_minor"] == 10000
     assert statement["closing_balance_minor"] == 9500
@@ -531,8 +544,8 @@ def test_convergence(ctx: PipelineContext) -> None:
 
     # Named Stage 5 never mutates the graph from stale Stage 3 text.
     ctx.conn.execute(
-        "UPDATE item_file_meta SET extraction_method='pdf-text-v0:old'"
-        " WHERE item_id=100")
+        "UPDATE documents SET extraction_method='pdf-text-v0:old'"
+        " WHERE id=100")
     ctx.conn.commit()
     rows_before = ctx.conn.execute(
         "SELECT count(*) FROM transactions").fetchone()[0]
@@ -597,33 +610,35 @@ def test_loud_failures(ctx: PipelineContext) -> None:
     assert stats.get("assertion_failures") == 1, stats
     assert stats.get("without_assertions") == 1, stats
     assert ctx.conn.execute(
-        "SELECT COUNT(*) FROM statements WHERE item_id = 12").fetchone()[0] == 0
+        "SELECT COUNT(*) FROM statements WHERE document_id = 12").fetchone()[0] == 0
     messages = [row[0] for row in ctx.conn.execute(
         "SELECT message FROM ingestion_log WHERE stage = 'transactions'")]
     assert any("UNPARSED" in message for message in messages)
     assert any("NOT INGESTED" in message for message in messages)
     assert any("ACCOUNT MISMATCH" in message for message in messages)
     failed = ctx.conn.execute(
-        "SELECT balance_ok FROM statements WHERE item_id = 13").fetchone()
+        "SELECT balance_ok FROM statements WHERE document_id = 13").fetchone()
     assert failed is not None and failed["balance_ok"] == 0
     closing = ctx.conn.execute(
         """SELECT * FROM statement_assertions a
            JOIN statements s ON s.id = a.statement_id
-           WHERE s.item_id = 13 AND a.kind = 'closing_balance'""").fetchone()
+           WHERE s.document_id = 13 AND a.kind = 'closing_balance'""").fetchone()
     assert closing["passed"] == 0
     assert closing["amount_minor"] == -900
     assert closing["observed_minor"] == -1000
     unasserted = ctx.conn.execute(
-        "SELECT balance_ok FROM statements WHERE item_id = 14").fetchone()
+        "SELECT balance_ok FROM statements WHERE document_id = 14").fetchone()
     assert unasserted is not None and unasserted["balance_ok"] is None
     attached_statements = ctx.conn.execute(
-        "SELECT COUNT(*) FROM statements WHERE item_id = 15").fetchone()[0]
+        "SELECT COUNT(*) FROM statements WHERE document_id IN (1500, 1501)").fetchone()[0]
     assert attached_statements == 2
     attached_rows = [row[0] for row in ctx.conn.execute(
         """SELECT t.row_index FROM transactions t
            JOIN statements s ON s.id = t.statement_id
-           WHERE s.item_id = 15 ORDER BY t.row_index""")]
-    assert attached_rows == [0, 1]
+           WHERE s.document_id IN (1500, 1501) ORDER BY t.row_index""")]
+    # Reconciliation keys are document-scoped, so independent attached
+    # statement documents both retain their native row zero.
+    assert attached_rows == [0, 0]
 
     # Current input findings survive a convergence hit without duplicate logs.
     log_count = ctx.conn.execute(
@@ -659,12 +674,12 @@ def test_override_and_watchlist(ctx: PipelineContext) -> None:
         """SELECT COUNT(*) FROM transfer_links l
            JOIN transactions t ON t.id = l.from_txn_id
            JOIN statements s ON s.id = t.statement_id
-           WHERE s.item_id = 20""").fetchone()[0] == 0
+           WHERE s.document_id = 20""").fetchone()[0] == 0
 
     (workspace / "reconciliation.yaml").write_text(
         "links:\n"
-        "  - from: {item_id: 20, row_index: 0}\n"
-        "    to: {item_id: 21, row_index: 1}\n",
+        "  - from: {document_id: 20, row_index: 0}\n"
+        "    to: {document_id: 21, row_index: 1}\n",
         encoding="utf-8",
     )
     stats = TransactionsStage(ctx).run()
@@ -691,8 +706,8 @@ def test_override_and_watchlist(ctx: PipelineContext) -> None:
              (SELECT COUNT(*) FROM transfer_links)""").fetchone())
     (workspace / "reconciliation.yaml").write_text(
         "links:\n"
-        "  - from: {item_id: 9999, row_index: 0}\n"
-        "    to: {item_id: 21, row_index: 1}\n",
+        "  - from: {document_id: 9999, row_index: 0}\n"
+        "    to: {document_id: 21, row_index: 1}\n",
         encoding="utf-8",
     )
     try:

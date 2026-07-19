@@ -170,20 +170,34 @@ def generate_scaffold(ctx: PipelineContext, target: Path,
             "",
         ))
         count += 1
+    # Documents have no message_id/subject of their own (that's an email
+    # concept) — anchor on the document's own content identity, its
+    # sha256, and use a representative occurrence filename (attachment
+    # filename first, else the native mount's basename) as a human hint.
     documents = ctx.conn.execute(
-        """SELECT message_id, subject FROM items
-            WHERE item_kind = 'file' ORDER BY subject""").fetchall()
+        """SELECT d.sha256,
+                  (SELECT a.filename FROM attachments a
+                    WHERE a.document_id = d.id AND a.filename IS NOT NULL
+                    ORDER BY a.id LIMIT 1) AS attached_filename,
+                  (SELECT ds.relpath FROM document_sources ds
+                    WHERE ds.document_id = d.id
+                    ORDER BY ds.id LIMIT 1) AS native_relpath
+             FROM documents d
+            WHERE d.media_kind = 'pdf'
+            ORDER BY d.sha256""").fetchall()
     for row in documents:
-        slug = hashlib.sha256(
-            row["message_id"].encode("utf-8")).hexdigest()[:8]
-        subject = " ".join((row["subject"] or "").split())
+        slug = row["sha256"][:8]
+        label = row["attached_filename"] or (
+            Path(row["native_relpath"]).name
+            if row["native_relpath"] else None) \
+            or f"document {row['sha256'][:12]}…"
         lines.extend((
             f"- id: document-{slug}",
             "  question: \"TODO — question answered by this document\"",
             "  expect_any:",
-            f"    - \"{row['message_id']}\"",
+            f"    - \"{row['sha256']}\"",
             "  flags: [document]",
-            f"  hint: \"{subject[:100]}\"",
+            f"  hint: \"{label[:100]}\"",
             "",
         ))
         count += 1
@@ -199,15 +213,28 @@ def generate_scaffold(ctx: PipelineContext, target: Path,
 # -- run ---------------------------------------------------------------------
 
 def _validate_anchors(conn, entry: dict) -> bool:
+    """An expect_any anchor may be an email Message-ID or a document
+    sha256 (scaffold() produces both, depending on what it anchored) —
+    existence in either table validates it. message_id is explicitly
+    non-unique now (collisions retained, not merged), so this is an
+    existence check, never a "the one row" lookup; the ORDER BY id LIMIT 1
+    is deterministic tie-breaking, not a uniqueness assumption."""
     if entry.get("expect_thread_key"):
-        row = conn.execute("SELECT 1 FROM threads WHERE stable_key = ?",
-                           (entry["expect_thread_key"],)).fetchone()
+        row = conn.execute(
+            "SELECT 1 FROM threads WHERE stable_key = ? ORDER BY id LIMIT 1",
+            (entry["expect_thread_key"],)).fetchone()
         return row is not None
     marks = ",".join("?" for _ in entry["expect_any"])
-    row = conn.execute(
-        f"SELECT 1 FROM items WHERE message_id IN ({marks}) LIMIT 1",
-        tuple(entry["expect_any"])).fetchone()
-    return row is not None
+    values = tuple(entry["expect_any"])
+    email_row = conn.execute(
+        f"SELECT 1 FROM emails WHERE message_id IN ({marks})"
+        " ORDER BY id LIMIT 1", values).fetchone()
+    if email_row is not None:
+        return True
+    document_row = conn.execute(
+        f"SELECT 1 FROM documents WHERE sha256 IN ({marks})"
+        " ORDER BY id LIMIT 1", values).fetchone()
+    return document_row is not None
 
 
 def _score(entry: dict, packets: list[dict]) -> tuple[str, int | None, str | None]:
@@ -220,6 +247,12 @@ def _score(entry: dict, packets: list[dict]) -> tuple[str, int | None, str | Non
     wanted = set(entry["expect_any"])
     fallback: tuple[str, int | None, str | None] = ("MISS", None, None)
     for rank, packet in enumerate(packets, 1):
+        if packet.get("kind") == "document":
+            # Document packets anchor on sha256, not message_id — parallel
+            # to the email/thread match check below.
+            if packet.get("sha256") in wanted:
+                return "STRONG", rank, packet["sha256"]
+            continue
         matched = {m["message_id"] for m in packet["matches"]} & wanted
         if matched:
             return "STRONG", rank, sorted(matched)[0]
@@ -278,8 +311,10 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
             counts["skipped"] += 1
     scored = counts["strong"] + counts["thread_only"] + counts["miss"]
     corpus = {
-        "items": ctx.conn.execute(
-            "SELECT count(*) FROM items").fetchone()[0],
+        "emails": ctx.conn.execute(
+            "SELECT count(*) FROM emails").fetchone()[0],
+        "documents": ctx.conn.execute(
+            "SELECT count(*) FROM documents").fetchone()[0],
         "chunks": ctx.conn.execute(
             "SELECT count(*) FROM chunks").fetchone()[0],
         "summaries_current": ctx.conn.execute(

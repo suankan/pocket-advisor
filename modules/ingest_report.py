@@ -121,69 +121,48 @@ def _source_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
     return values
 
 
-_PDF_SQL = """
-    lower(coalesce(content_type, '')) = 'application/pdf'
-    OR lower(coalesce(filename, '')) LIKE '%.pdf'
-"""
-
-
 def _evidence_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
-    native = conn.execute(
-        """SELECT i.id, m.extraction_method, m.extracted_text_path
-             FROM items i
-             LEFT JOIN item_file_meta m ON m.item_id = i.id
-            WHERE i.item_kind = 'file'""").fetchall()
-    attachments = conn.execute(
-        f"""SELECT id, sha256, content_type, filename, extraction_method,
-                   extracted_text_path, is_skipped
-              FROM attachments
-             WHERE {_PDF_SQL}""").fetchall()
-    native_ready = sum(
-        row["extracted_text_path"] is not None
-        and row["extraction_method"] != "error" for row in native)
-    attachment_ready = sum(
-        row["extracted_text_path"] is not None
-        and row["extraction_method"] != "error"
-        and not row["is_skipped"] for row in attachments)
-    attachment_failed = [
-        row for row in attachments
-        if not row["is_skipped"] and not (
-            row["extracted_text_path"] is not None
-            and row["extraction_method"] != "error")]
-    failed_hashes = {str(row["sha256"]) for row in attachment_failed}
-    failed_native_ids = {
-        int(row["id"]) for row in native
-        if not (row["extracted_text_path"] is not None
-                and row["extraction_method"] != "error")}
-    if failed_native_ids:
-        placeholders = ",".join("?" for _ in failed_native_ids)
-        failed_hashes.update(str(row[0]) for row in conn.execute(
-            f"SELECT DISTINCT sha256 FROM item_memberships "
-            f"WHERE item_id IN ({placeholders})",
-            tuple(sorted(failed_native_ids))))
-    image_count = _scalar(
-        conn, "SELECT count(*) FROM attachments WHERE "
-              "lower(coalesce(content_type, '')) LIKE 'image/%'")
-    other_count = _scalar(
-        conn, f"SELECT count(*) FROM attachments WHERE NOT ({_PDF_SQL}) "
-              "AND lower(coalesce(content_type, '')) NOT LIKE 'image/%'")
-    pdf_total = len(native) + len(attachments)
-    pdf_ready = native_ready + attachment_ready
+    """PDF readiness is a document-level property now (``documents``' own
+    ``extraction_method``/``is_skipped``) — there is no more native/attached
+    split for "is this PDF's text ready"; a document is a document regardless
+    of how many times (native mount, email attachment, or both) it was
+    discovered. Native-occurrence vs email-occurrence counts are still
+    reported separately (via ``document_sources`` vs ``attachments``) since
+    that split remains meaningful for provenance."""
+    pdfs = conn.execute(
+        """SELECT id, sha256, extraction_method, extracted_text_path,
+                  is_skipped
+             FROM documents WHERE media_kind = 'pdf'""").fetchall()
+
+    def _ready(row: sqlite3.Row) -> bool:
+        return (not row["is_skipped"]
+                and row["extraction_method"] is not None
+                and row["extraction_method"] != "error"
+                and row["extracted_text_path"] is not None)
+
+    pdf_total = len(pdfs)
+    pdf_ready = sum(1 for row in pdfs if _ready(row))
     return {
-        "items": _scalar(conn, "SELECT count(*) FROM items"),
-        "emails": _scalar(
-            conn, "SELECT count(*) FROM items WHERE item_kind = 'email'"),
-        "native_pdfs": len(native),
+        "emails": _scalar(conn, "SELECT count(*) FROM emails"),
         "parse_issues": _scalar(
-            conn, "SELECT count(*) FROM items WHERE has_parse_issue != 0"),
-        "attachments": _scalar(conn, "SELECT count(*) FROM attachments"),
-        "attached_pdfs": len(attachments),
-        "images_retained": image_count,
-        "other_retained": other_count,
+            conn, "SELECT count(*) FROM emails WHERE has_parse_issue != 0"),
+        "documents": _scalar(conn, "SELECT count(*) FROM documents"),
+        "images_retained": _scalar(
+            conn, "SELECT count(*) FROM documents WHERE media_kind = 'image'"),
+        "other_retained": _scalar(
+            conn, "SELECT count(*) FROM documents"
+                  " WHERE media_kind IN ('other', 'zip')"),
+        "native_pdf_occurrences": _scalar(
+            conn,
+            "SELECT count(*) FROM document_sources ds JOIN documents d"
+            " ON d.id = ds.document_id WHERE d.media_kind = 'pdf'"),
+        "attached_pdf_occurrences": _scalar(
+            conn,
+            "SELECT count(*) FROM attachments a JOIN documents d"
+            " ON d.id = a.document_id WHERE d.media_kind = 'pdf'"),
         "pdf_total": pdf_total,
         "pdf_readable": pdf_ready,
-        "pdf_failed_occurrences": pdf_total - pdf_ready,
-        "pdf_failed_unique_hashes": len(failed_hashes),
+        "pdf_failed": pdf_total - pdf_ready,
     }
 
 
@@ -193,12 +172,9 @@ def _thread_snapshot(
         generation_enabled: bool,
 ) -> dict[str, int | bool]:
     rows = conn.execute(
-        """SELECT t.id,
-                  sum(CASE WHEN i.item_kind = 'email' THEN 1 ELSE 0 END)
-                    AS email_count,
-                  ts.is_stale
+        """SELECT t.id, count(e.id) AS email_count, ts.is_stale
              FROM threads t
-             LEFT JOIN items i ON i.thread_id = t.id
+             LEFT JOIN emails e ON e.thread_id = t.id
              LEFT JOIN thread_summaries ts ON ts.thread_id = t.id
             GROUP BY t.id, ts.is_stale""").fetchall()
     eligible = [row for row in rows if int(row["email_count"] or 0) >= 2]
@@ -281,15 +257,10 @@ def _search_snapshot(
     values: dict[str, Any] = {
         "leaf_chunks": leaf_chunks,
         "email_chunks": _scalar(
-            conn, """SELECT count(*) FROM chunks c JOIN items i ON i.id=c.item_id
-                      WHERE c.attachment_id IS NULL
-                        AND i.item_kind='email'"""),
-        "native_pdf_chunks": _scalar(
-            conn, """SELECT count(*) FROM chunks c JOIN items i ON i.id=c.item_id
-                      WHERE c.attachment_id IS NULL
-                        AND i.item_kind='file'"""),
-        "attached_pdf_chunks": _scalar(
-            conn, "SELECT count(*) FROM chunks WHERE attachment_id IS NOT NULL"),
+            conn, "SELECT count(*) FROM chunks WHERE source_type = 'email_body'"),
+        "document_chunks": _scalar(
+            conn,
+            "SELECT count(*) FROM chunks WHERE source_type = 'document_text'"),
         "payloads_current": _scalar(
             conn, "SELECT count(*) FROM chunks "
                   "WHERE payload_shadow IS NOT NULL AND payload_shadow != ''"),
@@ -428,9 +399,8 @@ def snapshot_findings(
 
     add("error", "candidate_errors", snapshot.sources["errors"])
     add("warning", "candidate_pending", snapshot.sources["candidate"])
-    add("warning", "item_parse_issues", snapshot.evidence["parse_issues"])
-    add("error", "pdf_failures",
-        snapshot.evidence["pdf_failed_occurrences"])
+    add("warning", "email_parse_issues", snapshot.evidence["parse_issues"])
+    add("error", "pdf_failures", snapshot.evidence["pdf_failed"])
     if snapshot.threads["summary_generation_enabled"]:
         add("error", "summaries_stale",
             int(snapshot.threads["summaries_stale"]))
@@ -700,13 +670,16 @@ def format_report(report: IngestRunReport, record_path: Path | None) -> str:
             f"  Sources       {sources['originals']} originals — "
             f"{sources['emails']} emails, {sources['pdfs']} PDFs, "
             f"{sources['other']} other")
+        occurrences = (evidence['native_pdf_occurrences']
+                      + evidence['attached_pdf_occurrences'])
         lines.append(
             f"  PDFs          {evidence['pdf_readable']}/"
             f"{evidence['pdf_total']} readable — "
-            f"{evidence['pdf_failed_occurrences']} failed "
-            f"{_noun(evidence['pdf_failed_occurrences'], 'occurrence')}, "
-            f"{evidence['pdf_failed_unique_hashes']} unique "
-            f"{_noun(evidence['pdf_failed_unique_hashes'], 'blob')}")
+            f"{evidence['pdf_failed']} failed "
+            f"{_noun(evidence['pdf_failed'], 'document')} "
+            f"({occurrences} {_noun(occurrences, 'occurrence')}: "
+            f"{evidence['native_pdf_occurrences']} native + "
+            f"{evidence['attached_pdf_occurrences']} attached)")
         lines.append(
             f"  Threads       {threads['total']} — "
             f"{threads['summaries_current']}/"

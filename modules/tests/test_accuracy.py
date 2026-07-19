@@ -136,7 +136,7 @@ def main() -> int:
         assert aggregates["skipped"] == 1 and aggregates["invalid"] == 1
         assert aggregates["thread_or_better_rate"] == 1.0
         assert result["environment"]["embed"]["model"] == "fake/model"
-        assert result["environment"]["corpus"]["items"] == 2
+        assert result["environment"]["corpus"]["emails"] == 2
         assert result["expectations"]["count"] == 4
 
         # persistence: JSON record round-trips; ordering by filename.

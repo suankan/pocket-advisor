@@ -1,14 +1,16 @@
 """Stage 4 — chunk the plain-text artifacts and embed via Jina MLX.
 
 Inputs are exactly the Stage 2/3 text artifacts, read through the DB:
-- items.body_text_path — authored email messages AND native-PDF texts
-  (chunk source_type 'email_body', name kept for retrieval compat)
-- attachments.extracted_text_path — attachment pdf-to-text artifacts
-  (chunk source_type 'attachment')
+- emails.body_text_path — authored email messages
+  (chunk source_type 'email_body', email_id set)
+- documents.extracted_text_path — PDF-to-text artifacts, one per unique
+  document regardless of how many times it occurs
+  (chunk source_type 'document_text', document_id set)
 
 Chunks ~chunk_chars with ~chunk_overlap, splitting on paragraph
 boundaries where possible; every artifact yields >=1 chunk so every
-item is individually citable. Chunks are immutable once created.
+email/document is individually citable. Chunks are immutable once
+created.
 
 Incremental: a chunk is pending for the CURRENT model whenever its id
 has no <vecs_dir>/<id>.npy yet — the per-chunk cache is the durable
@@ -194,42 +196,42 @@ class EmbedStage(Stage):
         root = self.config.project_root
         chunk_args = (self.config.chunk_chars, self.config.chunk_overlap)
 
-        items = self.conn.execute(
-            """SELECT id, item_kind, body_text_path FROM items
+        emails = self.conn.execute(
+            """SELECT id, body_text_path FROM emails
                WHERE body_text_path IS NOT NULL AND NOT EXISTS
-                 (SELECT 1 FROM chunks c WHERE c.item_id = items.id
+                 (SELECT 1 FROM chunks c WHERE c.email_id = emails.id
                   AND c.source_type = 'email_body')""").fetchall()
-        for row in items:
+        for row in emails:
             path = root / row["body_text_path"]
-            text = message_body_text(path.read_bytes(), source=path) \
-                if row["item_kind"] == "email" else path.read_text(
-                    encoding="utf-8")
+            text = message_body_text(path.read_bytes(), source=path)
             for idx, start, end, chunk in chunk_text(text, *chunk_args):
                 self.conn.execute(
-                    "INSERT INTO chunks (source_type, item_id, chunk_index,"
+                    "INSERT INTO chunks (source_type, email_id, chunk_index,"
                     " text, char_start, char_end, translit_shadow)"
                     " VALUES ('email_body', ?, ?, ?, ?, ?, ?)",
                     (row["id"], idx, chunk, start, end,
                      proper_noun_shadow(chunk)))
                 created += 1
 
-        attachments = self.conn.execute(
-            """SELECT a.id, a.item_id, a.extracted_text_path
-               FROM attachments a
-               WHERE a.extracted_text_path IS NOT NULL AND a.is_skipped = 0
-                 AND a.extraction_method != 'error'
+        documents = self.conn.execute(
+            """SELECT d.id, d.extracted_text_path
+               FROM documents d
+               WHERE d.extracted_text_path IS NOT NULL AND d.is_skipped = 0
+                 AND d.extraction_method != 'error'
                  AND NOT EXISTS (SELECT 1 FROM chunks c
-                                 WHERE c.attachment_id = a.id)""").fetchall()
-        for row in attachments:
+                                 WHERE c.document_id = d.id
+                                   AND c.source_type = 'document_text')
+               """).fetchall()
+        for row in documents:
             text = (root / row["extracted_text_path"]).read_text(
                 encoding="utf-8")
             for idx, start, end, chunk in chunk_text(text, *chunk_args):
                 self.conn.execute(
-                    "INSERT INTO chunks (source_type, item_id,"
-                    " attachment_id, chunk_index, text, char_start,"
-                    " char_end, translit_shadow)"
-                    " VALUES ('attachment', ?, ?, ?, ?, ?, ?, ?)",
-                    (row["item_id"], row["id"], idx, chunk, start, end,
+                    "INSERT INTO chunks (source_type, document_id,"
+                    " chunk_index, text, char_start, char_end,"
+                    " translit_shadow)"
+                    " VALUES ('document_text', ?, ?, ?, ?, ?, ?)",
+                    (row["id"], idx, chunk, start, end,
                      proper_noun_shadow(chunk)))
                 created += 1
         self.conn.commit()
@@ -244,20 +246,19 @@ class EmbedStage(Stage):
         """
         rows = self.conn.execute(
             """SELECT chunks.id, chunks.text, chunks.source_type,
-                      chunks.payload_shadow, items.item_kind,
-                      items.date_utc, items.date_raw, items.from_name,
-                      items.from_addr, items.to_addrs, items.subject,
-                      attachments.filename AS attachment_name,
+                      chunks.payload_shadow,
+                      emails.date_utc, emails.date_raw, emails.from_name,
+                      emails.from_addr, emails.to_addrs, emails.subject,
                       COALESCE(
-                        (SELECT item_memberships.filename
-                           FROM item_memberships
-                          WHERE item_memberships.item_id = items.id
-                          ORDER BY item_memberships.id LIMIT 1),
-                        items.subject) AS document_name
+                        (SELECT filename FROM attachments
+                          WHERE document_id = documents.id
+                          ORDER BY id LIMIT 1),
+                        (SELECT relpath FROM document_sources
+                          WHERE document_id = documents.id
+                          ORDER BY id LIMIT 1)) AS document_name
                  FROM chunks
-                 JOIN items ON items.id = chunks.item_id
-                 LEFT JOIN attachments
-                   ON attachments.id = chunks.attachment_id
+                 LEFT JOIN emails ON emails.id = chunks.email_id
+                 LEFT JOIN documents ON documents.id = chunks.document_id
                 ORDER BY chunks.id""").fetchall()
         updated = 0
         for row in rows:

@@ -1,26 +1,36 @@
 """Stage 3 — PDFs: collect corpora-native PDFs, then OCR everything.
 
-3.1 Collect: every PDF candidate from Stage 1 becomes an items row
-    (item_kind='file', synthetic message id <doc-<sha>@pocket-lawyer>)
-    with a verified custody copy at
-    cache/<collection>/pdf-original/<basename>__<sha8>.pdf.
-    Duplicate content across collections links a new membership onto
-    the existing item instead of re-copying (shared content graph).
+3.1 Collect: every PDF candidate from Stage 1
+    (`docs/features/ingestion-design-v2.md`) resolves to a `documents` row
+    by SHA-256 — exactly the same content-addressed identity an
+    email-attached PDF gets in Stage 2 (`modules/pipeline/emails.py`'s
+    `_get_or_create_document`). A native PDF needs no `emails` row, subject,
+    or synthetic message-id: it is a `documents` row (created on first
+    sight, with the one verified source copy at
+    `documents/<sha256>/source/`) plus a `document_sources` occurrence row
+    recording where it was found. Duplicate content — the same PDF mounted
+    in another collection, or already received as an email attachment (in
+    either order) — converges on that one `documents` row and simply gains
+    another occurrence row; no re-copy, no polymorphic item table.
 
-3.2 pdf-to-text: one queue over BOTH locations —
-    - email-attachment PDFs (attachments rows left pending by Stage 2 or
-      previously failed: extraction_method IS NULL or 'error'), inside each
-      email folder's
-      attachments/pdf-original/;
-    - native PDFs (item_file_meta rows with extraction_method IS NULL or
-      'error')
-      at collection level.
-    Each gets a persistent OCR derivative in pdf-ocr/ and a text
-    artifact in pdf-to-text/. Failures are review-flagged and recorded
-    as extraction_method='error' — the pipeline continues.
+3.2 pdf-to-text: one queue over `documents` rows with media_kind='pdf' that
+    need a transform (extraction_method IS NULL, 'error', or stale versus
+    the current OCR+text recipe). Because every unique PDF is now exactly
+    one `documents` row — never a per-occurrence "attachment vs native"
+    split — there is nothing left to group by source SHA-256: the
+    `documents.id`/`documents.sha256` IS the group. Each pending document
+    gets its own `PdfTransformCache` rooted at
+    `documents/<sha256>/transforms/` (`modules/pdf_transforms.py`); the OCR
+    derivative and extracted text live there permanently and are read
+    directly by every occurrence — no per-occurrence fan-out copy exists
+    or is needed anymore. Failures are review-flagged and recorded as
+    extraction_method='error' — the pipeline continues.
 
-Native PDFs also get a document date (docdates priority chain);
-weak sources (filename/mtime) are review-flagged for verification.
+Every PDF document also gets a document date (docdates priority chain) —
+previously only corpora-native PDFs did; now that there is no more
+native-vs-attachment distinction for date derivation, an attachment-only
+PDF gets one too. Weak sources (filename/mtime) are review-flagged for
+verification.
 """
 import os
 import tempfile
@@ -30,34 +40,31 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modules.config import artifact_folder_name
-from modules.custody import (CustodyError, sha256_bytes, sha256_file,
-                             write_verified)
+from modules.custody import CustodyError, sha256_bytes, sha256_file, write_verified
 from modules.docdates import extract_document_date
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.ocr import PdfRecipes, cancel_active_commands, pdf_recipes
 from modules.pdf_transforms import (PdfTransformCache, TextProduct,
                                     TransformRequest, TransformResult,
-                                    copy_verified_atomic, run_transform)
+                                    run_transform)
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
 from modules.progress import Progress
 from modules.review import now_iso
 
-# Frozen namespace token — do not rebrand.
-_SYNTHETIC_DOMAIN = "pocket-lawyer"
 _PDF_WORKER_LIMIT = 2
 
 
 @dataclass(frozen=True, slots=True)
-class _PdfOccurrence:
-    kind: str
-    row_id: int
-    label: str
-    extracted_copy_path: str
-    source_sha256: str
+class _PendingPdf:
+    document_id: int
+    sha256: str
     extraction_method: str | None
     extracted_text_path: str | None
+
+    @property
+    def label(self) -> str:
+        return f"document {self.document_id} ({self.sha256[:12]})"
 
 
 class PdfTextStage(Stage):
@@ -102,178 +109,79 @@ class PdfTextStage(Stage):
                 "content changed between discover and collect — "
                 "chain-of-custody alarm")
 
-        mid = f"<doc-{cand.sha256}@{_SYNTHETIC_DOMAIN}>"
-        existing = self.conn.execute(
-            "SELECT id FROM items WHERE message_id = ?", (mid,)).fetchone()
-        if existing:
-            item_id = int(existing["id"])
+        document_id = self._get_or_create_document(raw, cand.filename, stats)
+
+        # One document identity may have several native paths in one mounted
+        # collection. Keep all of those occurrences even though Stage 1 has
+        # one durable candidate keyed by (collection_id, sha256).
+        rows = self.conn.execute(
+            "SELECT relpath_within_source, size_bytes FROM source_blob_index"
+            " WHERE source_id = ? AND sha256 = ?"
+            " ORDER BY relpath_within_source", (coll.id, cand.sha256)
+        ).fetchall()
+        sources = [(str(row["relpath_within_source"]), row["size_bytes"])
+                   for row in rows] or [(cand.relpath, len(raw))]
+        for relpath, size_bytes in sources:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO document_sources"
+                " (document_id, workspace_id, collection_id, relpath,"
+                "  file_size_bytes, discovered_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (document_id, self.ctx.workspace.id, coll.id, relpath,
+                 size_bytes, now_iso()))
+
+    def _get_or_create_document(self, raw: bytes, filename: str,
+                                stats: StageStats) -> int:
+        """Resolve the document these bytes identify, writing the one
+        verified source copy only the first time this sha256 is seen in
+        the workspace — mirrors emails.py's `_get_or_create_document` so a
+        PDF mounted natively and also emailed (or vice versa) resolves to
+        the same documents row regardless of which stage sees it first."""
+        sha = sha256_bytes(raw)
+        row = self.conn.execute(
+            "SELECT id FROM documents WHERE sha256 = ?", (sha,)).fetchone()
+        if row:
             stats.inc("native_linked")
-        else:
-            subject = " / ".join(Path(cand.relpath).parts)
-            from modules.emailbody import normalize_subject
-            cur = self.conn.execute(
-                """INSERT INTO items (item_kind, message_id, subject,
-                   subject_normalized, body_source, ingested_at)
-                   VALUES ('file', ?, ?, ?, 'document_extracted', ?)""",
-                (mid, subject, normalize_subject(subject), now_iso()))
-            item_id = int(cur.lastrowid)
-            stats.inc("native_new")
+            return int(row["id"])
 
-            cache = self.config.collection_cache(coll.id)
-            copy_path = cache.pdf_original_dir / \
-                f"{artifact_folder_name(cand.filename, cand.sha256)}.pdf"
-            disk_sha = write_verified(copy_path, raw)
-            self.conn.execute(
-                "INSERT OR IGNORE INTO item_file_meta (item_id) VALUES (?)",
-                (item_id,))
-            self.conn.execute(
-                "UPDATE item_file_meta SET extracted_copy_path = ?,"
-                " extracted_copy_sha256 = ? WHERE item_id = ?",
-                (str(copy_path.relative_to(self.config.project_root)),
-                 disk_sha, item_id))
-
-        self.conn.execute(
-            "INSERT OR IGNORE INTO item_memberships"
-            " (item_id, source_folder, filename, sha256, file_size_bytes,"
-            "  membership_kind, ingested_at, workspace_id, collection_id)"
-            " VALUES (?, ?, ?, ?, ?, 'file', ?, ?, ?)",
-            (item_id, coll.id, cand.filename, cand.sha256, len(raw),
-             now_iso(), cand.workspace_id, coll.id))
+        copy_path = self.config.document_artifacts(sha).source_path(filename)
+        write_verified(copy_path, raw)
+        cur = self.conn.execute(
+            "INSERT INTO documents (sha256, media_kind, content_type,"
+            " size_bytes, is_skipped, skip_reason, processed_at,"
+            " ingested_at)"
+            " VALUES (?, 'pdf', 'application/pdf', ?, 0, NULL, NULL, ?)",
+            (sha, len(raw), now_iso()))
+        stats.inc("native_new")
+        return int(cur.lastrowid)
 
     # -- 3.2 OCR + text extraction -------------------------------------------
 
-    def _ocr_pending(self, stats: StageStats) -> None:
-        recipes = pdf_recipes(langs=self.config.ocr_langs)
-        occurrences = self._occurrences()
-        cache = PdfTransformCache(self.config.pdf_transform_dir)
-        groups: dict[str, list[_PdfOccurrence]] = {}
-        for occurrence in occurrences:
-            groups.setdefault(occurrence.source_sha256, []).append(occurrence)
-
-        products = {
-            source_sha: cache.load_text(source_sha, recipes)
-            for source_sha in groups}
-        pending_by_source: dict[str, list[_PdfOccurrence]] = {}
-        for source_sha, group in groups.items():
-            product = products[source_sha]
-            for occurrence in group:
-                if self._occurrence_current(
-                        occurrence, product, recipes.combined):
-                    continue
-                pending_by_source.setdefault(source_sha, []).append(occurrence)
-                if occurrence.extraction_method not in (
-                        None, "error", recipes.combined):
-                    stats.inc("recipe_stale")
-
-        pending = sum(len(group) for group in pending_by_source.values())
-        perf = self.ctx.telemetry.pdfs
-        perf.occurrences_considered = len(occurrences)
-        perf.pending_occurrences = pending
-        progress = Progress("pdf to text", total=pending)
-        if not pending:
-            progress.done()
-            return
-
-        transform_started = time.monotonic()
-        self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-                prefix="pdf-stage-", dir=self.config.runtime_dir) as raw_work:
-            work_root = Path(raw_work)
-            requests: dict[str, TransformRequest] = {}
-            errors: dict[str, str] = {}
-            for index, source_sha in enumerate(sorted(pending_by_source)):
-                if products[source_sha] is not None:
-                    continue
-                group = groups[source_sha]
-                source_path = self._verified_group_source(group)
-                if source_path is None:
-                    errors[source_sha] = (
-                        "CustodyError: no occurrence-local original matches"
-                        " the recorded source SHA-256")
-                    continue
-                requests[source_sha] = TransformRequest(
-                    source_sha256=source_sha, source_path=source_path,
-                    recipes=recipes,
-                    cached_ocr=cache.load_ocr(source_sha, recipes.ocr),
-                    work_dir=work_root / f"job-{index:06d}-{source_sha[:12]}",
-                    langs=self.config.ocr_langs, ocrmypdf_jobs=1)
-
-            needed_sources = sum(
-                1 for source_sha in pending_by_source
-                if products[source_sha] is None)
-            perf.unique_transforms = needed_sources
-            perf.failed_transforms += needed_sources - len(requests)
-            perf.duplicate_reuses = max(0, pending - needed_sources)
-            results = self._run_transforms(requests, progress)
-            self._publish_transform_results(
-                results, requests, recipes, cache, products, errors)
-
-            for source_sha in sorted(pending_by_source):
-                product = products.get(source_sha)
-                error = errors.get(source_sha)
-                for occurrence in sorted(
-                        pending_by_source[source_sha],
-                        key=lambda value: (value.kind, value.row_id)):
-                    progress.start(note=occurrence.label)
-                    if product is None:
-                        self._record_occurrence_error(
-                            occurrence, error or "PDF transform failed", stats)
-                    else:
-                        try:
-                            self._publish_occurrence(
-                                occurrence, product, recipes.combined, stats)
-                        except (CustodyError, OSError, ValueError) as exc:
-                            self._record_occurrence_error(
-                                occurrence,
-                                f"{type(exc).__name__}: {exc}", stats)
-                    progress.step(note=occurrence.label)
-
-        progress.done()
-        perf.timings_seconds.transform_wall += \
-            time.monotonic() - transform_started
-
-    def _occurrences(self) -> list[_PdfOccurrence]:
-        attachment_rows = self.conn.execute(
-            "SELECT id, filename, extracted_copy_path,"
-            " COALESCE(extracted_copy_sha256, sha256) AS source_sha256,"
-            " extraction_method, extracted_text_path FROM attachments"
-            " WHERE extracted_copy_path IS NOT NULL"
-            " AND (content_type = 'application/pdf'"
-            " OR lower(coalesce(filename, '')) LIKE '%.pdf') ORDER BY id"
-        ).fetchall()
-        native_rows = self.conn.execute(
-            "SELECT m.item_id, i.subject, m.extracted_copy_path,"
-            " m.extracted_copy_sha256 AS source_sha256,"
-            " m.extraction_method, m.extracted_text_path"
-            " FROM item_file_meta m JOIN items i ON i.id = m.item_id"
-            " WHERE m.extracted_copy_path IS NOT NULL ORDER BY m.item_id"
-        ).fetchall()
-        result = [_PdfOccurrence(
-            kind="attachment", row_id=int(row["id"]),
-            label=row["filename"] or f"attachment {row['id']}",
-            extracted_copy_path=row["extracted_copy_path"],
-            source_sha256=row["source_sha256"],
+    def _pdf_documents(self) -> list[_PendingPdf]:
+        rows = self.conn.execute(
+            "SELECT id, sha256, extraction_method, extracted_text_path"
+            " FROM documents WHERE media_kind = 'pdf' AND is_skipped = 0"
+            " ORDER BY id").fetchall()
+        return [_PendingPdf(
+            document_id=int(row["id"]), sha256=row["sha256"],
             extraction_method=row["extraction_method"],
             extracted_text_path=row["extracted_text_path"])
-            for row in attachment_rows]
-        result.extend(_PdfOccurrence(
-            kind="native", row_id=int(row["item_id"]),
-            label=row["subject"] or f"item {row['item_id']}",
-            extracted_copy_path=row["extracted_copy_path"],
-            source_sha256=row["source_sha256"],
-            extraction_method=row["extraction_method"],
-            extracted_text_path=row["extracted_text_path"])
-            for row in native_rows)
-        return result
+            for row in rows]
 
-    def _artifact_paths(self, occurrence: _PdfOccurrence) \
-            -> tuple[Path, Path, Path]:
-        copy_path = self.config.project_root / occurrence.extracted_copy_path
-        derivative = copy_path.parent.with_name("pdf-ocr") / \
-            f"{copy_path.stem}-ocrmypdf.pdf"
-        text_path = copy_path.parent.with_name("pdf-to-text") / \
-            f"{copy_path.stem}.txt"
-        return copy_path, derivative, text_path
+    def _document_current(self, doc: _PendingPdf,
+                          product: TextProduct | None,
+                          extraction_method: str) -> bool:
+        """A document needs no transform when its recorded extraction
+        method matches the current recipe AND its extracted_text_path
+        already points at the (already hash-verified by
+        PdfTransformCache.load_text) canonical product location. There is
+        no separate per-occurrence copy to re-verify anymore — the
+        documents row references the cache's own file directly."""
+        if product is None or doc.extraction_method != extraction_method:
+            return False
+        expected_rel = str(
+            product.text_path.relative_to(self.config.project_root))
+        return doc.extracted_text_path == expected_rel
 
     def _safe_state_path(self, path: Path, *, must_exist: bool) -> Path:
         if path.is_symlink():
@@ -286,40 +194,121 @@ class PdfTextStage(Stage):
                 f"workspace artifact escapes selected state: {path}") from exc
         return path
 
-    def _occurrence_current(self, occurrence: _PdfOccurrence,
-                            product: TextProduct | None,
-                            extraction_method: str) -> bool:
-        if product is None \
-                or occurrence.extraction_method != extraction_method:
-            return False
+    def _verified_document_source(self, doc: _PendingPdf) -> Path | None:
+        """The one canonical verified source copy for this document — no
+        more per-occurrence copies to search across; every occurrence
+        (native or attached) shares this single source/ file."""
+        source_dir = self.config.document_artifacts(doc.sha256).source_dir
         try:
-            _, derivative, text_path = self._artifact_paths(occurrence)
-            self._safe_state_path(text_path, must_exist=True)
-            expected_rel = str(text_path.relative_to(self.config.project_root))
-            if occurrence.extracted_text_path != expected_rel \
-                    or sha256_file(text_path) != product.text_sha256:
-                return False
-            if product.ocr.derivative_sha256 is None:
-                if derivative.is_symlink():
-                    return False
-                return not derivative.exists()
-            self._safe_state_path(derivative, must_exist=True)
-            return sha256_file(derivative) == product.ocr.derivative_sha256
-        except (CustodyError, OSError, ValueError):
-            return False
-
-    def _verified_group_source(
-            self, group: list[_PdfOccurrence]) -> Path | None:
-        for occurrence in sorted(group, key=lambda value: (
-                value.kind, value.row_id)):
-            copy_path, _, _ = self._artifact_paths(occurrence)
+            candidates = sorted(source_dir.glob("original*"))
+        except OSError:
+            return None
+        for copy_path in candidates:
             try:
                 self._safe_state_path(copy_path, must_exist=True)
-                if sha256_file(copy_path) == occurrence.source_sha256:
+                if sha256_file(copy_path) == doc.sha256:
                     return copy_path
             except (CustodyError, OSError):
                 continue
         return None
+
+    def _ocr_pending(self, stats: StageStats) -> None:
+        recipes = pdf_recipes(langs=self.config.ocr_langs)
+        all_docs = self._pdf_documents()
+        perf = self.ctx.telemetry.pdfs
+        # Previously counted occurrence rows (attachment + native could
+        # both point at one source SHA-256); now every unique PDF is
+        # exactly one documents row, so this is simply the number of PDF
+        # documents in the workspace.
+        perf.occurrences_considered = len(all_docs)
+        # perf.fan_out.copies (and .copy_on_write_clones) stay permanently
+        # 0 now: the per-occurrence copy-back-into-email/collection-folder
+        # fan-out they counted no longer exists — every occurrence reads
+        # the one canonical transforms_dir product directly. The field is
+        # kept (not renamed) because modules/telemetry.py's schema is a
+        # shared contract with ingest_report.py, which is being rewritten
+        # against it in parallel.
+
+        caches = {doc.sha256: PdfTransformCache(
+            self.config.document_artifacts(doc.sha256).transforms_dir)
+            for doc in all_docs}
+        products: dict[str, TextProduct | None] = {
+            doc.sha256: caches[doc.sha256].load_text(doc.sha256, recipes)
+            for doc in all_docs}
+
+        pending: list[_PendingPdf] = []
+        for doc in all_docs:
+            if self._document_current(doc, products[doc.sha256],
+                                      recipes.combined):
+                continue
+            pending.append(doc)
+            if doc.extraction_method not in (
+                    None, "error", recipes.combined):
+                stats.inc("recipe_stale")
+
+        perf.pending_occurrences = len(pending)
+        progress = Progress("pdf to text", total=len(pending))
+        if not pending:
+            progress.done()
+            return
+
+        transform_started = time.monotonic()
+        self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+                prefix="pdf-stage-", dir=self.config.runtime_dir) as raw_work:
+            work_root = Path(raw_work)
+            requests: dict[str, TransformRequest] = {}
+            errors: dict[str, str] = {}
+            for index, doc in enumerate(pending):
+                if products[doc.sha256] is not None:
+                    continue
+                source_path = self._verified_document_source(doc)
+                if source_path is None:
+                    errors[doc.sha256] = (
+                        "CustodyError: document source copy no longer"
+                        " matches its recorded SHA-256")
+                    continue
+                requests[doc.sha256] = TransformRequest(
+                    source_sha256=doc.sha256, source_path=source_path,
+                    recipes=recipes,
+                    cached_ocr=caches[doc.sha256].load_ocr(
+                        doc.sha256, recipes.ocr),
+                    work_dir=work_root / f"job-{index:06d}-{doc.sha256[:12]}",
+                    langs=self.config.ocr_langs, ocrmypdf_jobs=1)
+
+            needed = sum(
+                1 for doc in pending if products[doc.sha256] is None)
+            perf.unique_transforms = needed
+            perf.failed_transforms += needed - len(requests)
+            # Every unique PDF is already its own documents row, so the
+            # old "same content, multiple occurrences" duplicate concept
+            # is gone; this now counts pending documents whose product was
+            # already fully cached (e.g. a resumed/idempotent re-run) and
+            # so needed no fresh transform.
+            perf.duplicate_reuses = max(0, len(pending) - needed)
+            results = self._run_transforms(requests, progress)
+            self._publish_transform_results(
+                results, requests, recipes, caches, products, errors)
+
+            for doc in pending:
+                product = products.get(doc.sha256)
+                error = errors.get(doc.sha256)
+                progress.start(note=doc.label)
+                if product is None:
+                    self._record_document_error(
+                        doc, error or "PDF transform failed", stats)
+                else:
+                    try:
+                        self._publish_document(
+                            doc, product, recipes.combined, stats)
+                    except (CustodyError, OSError, ValueError) as exc:
+                        self._record_document_error(
+                            doc, f"{type(exc).__name__}: {exc}", stats)
+                progress.step(note=doc.label)
+
+        progress.done()
+        perf.timings_seconds.transform_wall += \
+            time.monotonic() - transform_started
 
     @staticmethod
     def _topology(unique_transforms: int) -> tuple[int, int, int]:
@@ -381,12 +370,13 @@ class PdfTextStage(Stage):
     def _publish_transform_results(
             self, results: dict[str, TransformResult],
             requests: dict[str, TransformRequest], recipes: PdfRecipes,
-            cache: PdfTransformCache,
+            caches: dict[str, PdfTransformCache],
             products: dict[str, TextProduct | None],
             errors: dict[str, str]) -> None:
         perf = self.ctx.telemetry.pdfs
         for source_sha in sorted(requests):
             result = results[source_sha]
+            cache = caches[source_sha]
             perf.timings_seconds.ocr_process_total += result.ocr_seconds
             perf.timings_seconds.text_process_total += result.text_seconds
             if result.direct_original_fallback:
@@ -416,112 +406,80 @@ class PdfTextStage(Stage):
             else:
                 perf.successful_transforms += 1
 
-    def _publish_occurrence(self, occurrence: _PdfOccurrence,
-                            product: TextProduct,
-                            extraction_method: str,
-                            stats: StageStats) -> None:
-        perf = self.ctx.telemetry.pdfs
-        copy_path, derivative, text_path = self._artifact_paths(occurrence)
-        self._safe_state_path(copy_path, must_exist=True)
-        self._safe_state_path(derivative.parent, must_exist=False)
-        self._safe_state_path(text_path.parent, must_exist=False)
-        if sha256_file(copy_path) != occurrence.source_sha256:
-            raise CustodyError(
-                "occurrence-local original no longer matches recorded SHA-256")
-        started = time.monotonic()
-        try:
-            if product.ocr.derivative_path is None:
-                if derivative.is_symlink():
-                    raise CustodyError(
-                        f"refusing stale symlink derivative: {derivative}")
-                derivative.unlink(missing_ok=True)
-            elif copy_verified_atomic(
-                    product.ocr.derivative_path, derivative,
-                    product.ocr.derivative_sha256):
-                perf.fan_out.copies += 1
-            if copy_verified_atomic(
-                    product.text_path, text_path, product.text_sha256):
-                perf.fan_out.copies += 1
-        finally:
-            perf.timings_seconds.fan_out_publication += \
-                time.monotonic() - started
-
-        self._record_ocr_warning(
-            occurrence.extracted_copy_path,
-            (f"attachment {occurrence.row_id}" if
-             occurrence.kind == "attachment" else
-             f"item {occurrence.row_id}"), product.ocr.warning, stats)
-        if occurrence.kind == "attachment":
-            self.conn.execute(
-                "UPDATE attachments SET extraction_method = ?,"
-                " extracted_text_path = ?, skip_reason = NULL, processed_at = ?"
-                " WHERE id = ?",
-                (extraction_method,
-                 str(text_path.relative_to(self.config.project_root)),
-                 now_iso(), occurrence.row_id))
-        else:
-            self._publish_native_metadata(
-                occurrence, text_path, extraction_method, stats)
-        self.conn.commit()
-        stats.inc("ocr_ok")
-
-    def _record_ocr_warning(self, path: str, label: str,
-                            warning: str | None,
+    def _record_ocr_warning(self, doc: _PendingPdf, warning: str | None,
                             stats: StageStats) -> None:
         if warning is None:
             return
         self.review.flag(
-            path, self.name, "warning",
-            f"{label}: {warning}; pdftotext -layout succeeded")
+            doc.label, self.name, "warning",
+            f"{doc.label}: {warning}; pdftotext -layout succeeded")
         stats.inc("ocr_warnings")
 
-    def _publish_native_metadata(
-            self, occurrence: _PdfOccurrence, text_path: Path,
-            extraction_method: str, stats: StageStats) -> None:
-        copy_path, _, _ = self._artifact_paths(occurrence)
-        text = text_path.read_text(encoding="utf-8", errors="replace")
-        mtime_iso = datetime.fromtimestamp(
-            copy_path.stat().st_mtime, tz=timezone.utc).date().isoformat()
-        filename = copy_path.name
+    def _publish_document(self, doc: _PendingPdf, product: TextProduct,
+                          extraction_method: str, stats: StageStats) -> None:
+        perf = self.ctx.telemetry.pdfs
+        started = time.monotonic()
+        text = product.text_path.read_text(
+            encoding="utf-8", errors="replace")
+
+        # extraction_method/extracted_text_path/ocr_confidence: note that
+        # ocrmypdf/pdftotext (modules/ocr.py) never produce a confidence
+        # score in this pipeline generation, so documents.ocr_confidence
+        # and ocr_flagged_low_conf are deliberately left at their column
+        # defaults (NULL / 0) here rather than fabricated — no real signal
+        # to derive them from exists yet.
+        source_path = self._verified_document_source(doc)
+        if source_path is not None:
+            mtime_iso = datetime.fromtimestamp(
+                source_path.stat().st_mtime,
+                tz=timezone.utc).date().isoformat()
+            filename = source_path.name
+        else:
+            mtime_iso = datetime.now(timezone.utc).date().isoformat()
+            filename = ""
         doc_date = extract_document_date(
             text, filename, mtime_iso,
             header_window_chars=self.config.doc_date_header_window_chars)
-        txt_rel = str(text_path.relative_to(self.config.project_root))
+        text_rel = str(
+            product.text_path.relative_to(self.config.project_root))
+
+        self._record_ocr_warning(doc, product.ocr.warning, stats)
+
         self.conn.execute(
-            "UPDATE item_file_meta SET extraction_method = ?,"
-            " extracted_text_path = ?, doc_date = ?, doc_date_source = ?,"
-            " doc_date_detail = ?, doc_date_raw = ?, skip_reason = NULL,"
-            " processed_at = ?"
-            " WHERE item_id = ?",
-            (extraction_method, txt_rel, doc_date.date_iso, doc_date.source,
-             doc_date.detail, doc_date.raw, now_iso(), occurrence.row_id))
-        self.conn.execute(
-            "UPDATE items SET date_utc = ?, date_raw = ?,"
-            " body_text_path = ? WHERE id = ?",
-            (f"{doc_date.date_iso}T00:00:00+00:00",
-             doc_date.raw or doc_date.date_iso, txt_rel, occurrence.row_id))
+            "UPDATE documents SET extraction_method = ?,"
+            " extracted_text_path = ?, skip_reason = NULL, doc_date = ?,"
+            " doc_date_source = ?, doc_date_detail = ?, doc_date_raw = ?,"
+            " processed_at = ? WHERE id = ?",
+            (extraction_method, text_rel, doc_date.date_iso,
+             doc_date.source, doc_date.detail, doc_date.raw, now_iso(),
+             doc.document_id))
         if doc_date.is_weak:
             self.review.flag(
-                filename, self.name, "warning",
-                f"item {occurrence.row_id}: date derived from {doc_date.source}"
+                doc.label, self.name, "warning",
+                f"{doc.label}: date derived from {doc_date.source}"
                 f" ({doc_date.detail or 'filesystem timestamp'}), not found"
                 " in extracted text — verify")
             stats.inc("weak_dates")
 
-    def _record_occurrence_error(self, occurrence: _PdfOccurrence,
-                                 error: str, stats: StageStats) -> None:
-        label = (f"attachment {occurrence.row_id}" if
-                 occurrence.kind == "attachment" else
-                 f"item {occurrence.row_id}")
-        self.review.flag(
-            occurrence.extracted_copy_path, self.name, "error",
-            f"{label}: {error}")
-        table = "attachments" if occurrence.kind == "attachment" \
-            else "item_file_meta"
-        key = "id" if occurrence.kind == "attachment" else "item_id"
+        # fan_out_publication previously timed the per-occurrence
+        # copy-back-into-email/collection-folder fan-out step, which no
+        # longer exists (one canonical product location per document,
+        # referenced directly by every occurrence). Repurposed to time
+        # this per-document metadata publish step (date extraction +
+        # the documents UPDATE) so the field keeps measuring real work
+        # instead of going permanently to zero.
+        perf.timings_seconds.fan_out_publication += \
+            time.monotonic() - started
+        self.conn.commit()
+        stats.inc("ocr_ok")
+
+    def _record_document_error(self, doc: _PendingPdf, error: str,
+                               stats: StageStats) -> None:
+        self.review.flag(doc.label, self.name, "error",
+                         f"{doc.label}: {error}")
         self.conn.execute(
-            f"UPDATE {table} SET extraction_method = 'error',"
-            f" skip_reason = ?, processed_at = ? WHERE {key} = ?",
-            (error[:500], now_iso(), occurrence.row_id))
+            "UPDATE documents SET extraction_method = 'error',"
+            " skip_reason = ?, processed_at = ? WHERE id = ?",
+            (error[:500], now_iso(), doc.document_id))
         self.conn.commit()
         stats.inc("ocr_errors")

@@ -1,4 +1,13 @@
-"""Hybrid leaf/thread retrieval followed by relational evidence expansion."""
+"""Hybrid leaf/thread retrieval followed by relational evidence expansion.
+
+Post-cutover shape (`docs/features/ingestion-design-v2.md`): a search hit's
+identity is either an email (correspondence, grouped by thread) or a
+document (a unique binary — pdf/image/zip/other — which may be attached to
+zero, one, or many emails across different threads, or mounted natively).
+Email hits expand into the existing thread/message packet. Document hits
+have no single owning thread, so they get their own lightweight packet
+shape, parallel to (not nested inside) thread packets.
+"""
 import json
 import re
 from dataclasses import dataclass
@@ -107,60 +116,119 @@ def _load_temp_ids(conn, table: str, ids: set[int]) -> None:
                      ((value,) for value in ids))
 
 
+def _mount_ids(ctx: PipelineContext, options: SearchOptions) -> set[str]:
+    return {collection.id for collection in
+            ctx.workspace.collections_for_purpose(options.purpose)}
+
+
+def visible_email_ids(ctx: PipelineContext,
+                      options: SearchOptions) -> set[int]:
+    """Emails permitted in relational expansion: has an `email_sources`
+    occurrence in a mounted collection. Collection mounts are the hard
+    visibility boundary for every neighbor pulled during expansion —
+    entry-point filters (date/thread) are applied separately in
+    `allowed_chunk_ids`."""
+    mounts = _mount_ids(ctx, options)
+    if not mounts:
+        return set()
+    marks = ",".join("?" for _ in mounts)
+    rows = ctx.conn.execute(
+        "SELECT DISTINCT email_sources.email_id AS id FROM email_sources"
+        f" WHERE email_sources.collection_id IN ({marks})",
+        tuple(sorted(mounts))).fetchall()
+    return {int(row["id"]) for row in rows}
+
+
+def visible_document_ids(ctx: PipelineContext,
+                         options: SearchOptions) -> set[int]:
+    """Documents permitted in relational expansion: either mounted
+    natively (`document_sources` in a mounted collection) or attached to
+    an email that is itself visible (`attachments.document_id` carried by
+    an email with an `email_sources` row in a mounted collection)."""
+    mounts = _mount_ids(ctx, options)
+    if not mounts:
+        return set()
+    marks = ",".join("?" for _ in mounts)
+    native_rows = ctx.conn.execute(
+        "SELECT DISTINCT document_sources.document_id AS id"
+        " FROM document_sources"
+        f" WHERE document_sources.collection_id IN ({marks})",
+        tuple(sorted(mounts))).fetchall()
+    ids = {int(row["id"]) for row in native_rows}
+    attached_rows = ctx.conn.execute(
+        "SELECT DISTINCT attachments.document_id AS id"
+        " FROM attachments"
+        " JOIN email_sources"
+        " ON email_sources.email_id = attachments.email_id"
+        " WHERE attachments.document_id IS NOT NULL"
+        f" AND email_sources.collection_id IN ({marks})",
+        tuple(sorted(mounts))).fetchall()
+    ids |= {int(row["id"]) for row in attached_rows}
+    return ids
+
+
 def allowed_chunk_ids(ctx: PipelineContext,
                       options: SearchOptions) -> set[int]:
     """Chunk ids satisfying the mount and date/thread filters.
 
     Always a concrete set — the mount filter is always active, so there
     is no unfiltered fast path; empty means nothing is searchable.
+
+    Email chunks and document chunks are different identity spaces (a
+    document has no thread, and may be attached to many emails across
+    many threads), so each is resolved with its own query and unioned:
+    date/thread filters apply against `emails.date_utc`/`emails.thread_id`
+    for email chunks; a `thread_id` filter excludes document chunks
+    entirely (no single owning thread to match against), and date filters
+    for document chunks fall back to `documents.doc_date`.
     """
-    conds, params = [], []
-    if options.after:
-        conds.append("items.date_utc >= ?")
-        params.append(options.after)
-    if options.before:
-        conds.append("items.date_utc <= ?")
-        params.append(options.before)
-    if options.thread_id:
-        conds.append("items.thread_id = ?")
-        params.append(options.thread_id)
-
-    mounts = {collection.id for collection in
-              ctx.workspace.collections_for_purpose(options.purpose)}
-    if not mounts:
+    conn = ctx.conn
+    visible_emails = visible_email_ids(ctx, options)
+    visible_documents = visible_document_ids(ctx, options)
+    if not visible_emails and not visible_documents:
         return set()
-    marks = ",".join("?" for _ in mounts)
-    conds.append(
-        "EXISTS (SELECT 1 FROM item_memberships"
-        " WHERE item_memberships.item_id = items.id"
-        f" AND item_memberships.collection_id IN ({marks}))")
-    params.extend(sorted(mounts))
 
-    rows = ctx.conn.execute(
-        "SELECT chunks.id FROM chunks JOIN items ON items.id=chunks.item_id"
-        " WHERE " + " AND ".join(conds), params).fetchall()
-    return {int(row["id"]) for row in rows}
+    ids: set[int] = set()
 
+    if visible_emails:
+        _load_temp_ids(conn, "_visible_emails_ac", visible_emails)
+        conds = ["chunks.email_id IN (SELECT id FROM _visible_emails_ac)"]
+        params: list[Any] = []
+        if options.after:
+            conds.append("emails.date_utc >= ?")
+            params.append(options.after)
+        if options.before:
+            conds.append("emails.date_utc <= ?")
+            params.append(options.before)
+        if options.thread_id:
+            conds.append("emails.thread_id = ?")
+            params.append(options.thread_id)
+        rows = conn.execute(
+            "SELECT chunks.id AS id FROM chunks"
+            " JOIN emails ON emails.id = chunks.email_id"
+            " WHERE " + " AND ".join(conds), params).fetchall()
+        ids |= {int(row["id"]) for row in rows}
 
-def visible_item_ids(ctx: PipelineContext,
-                     options: SearchOptions) -> set[int]:
-    """Items permitted in relational expansion.
+    # A thread_id filter is an email/thread-scoped entry point; documents
+    # have no owning thread, so they are excluded rather than guessed at.
+    if visible_documents and not options.thread_id:
+        _load_temp_ids(conn, "_visible_documents_ac", visible_documents)
+        conds = [
+            "chunks.document_id IN (SELECT id FROM _visible_documents_ac)"]
+        params = []
+        if options.after:
+            conds.append("documents.doc_date >= ?")
+            params.append(options.after)
+        if options.before:
+            conds.append("documents.doc_date <= ?")
+            params.append(options.before)
+        rows = conn.execute(
+            "SELECT chunks.id AS id FROM chunks"
+            " JOIN documents ON documents.id = chunks.document_id"
+            " WHERE " + " AND ".join(conds), params).fetchall()
+        ids |= {int(row["id"]) for row in rows}
 
-    Candidate date/thread filters choose entry points; collection mounts
-    remain the hard visibility boundary for every neighbor pulled
-    afterward.
-    """
-    mounts = {collection.id for collection in
-              ctx.workspace.collections_for_purpose(options.purpose)}
-    if not mounts:
-        return set()
-    marks = ",".join("?" for _ in mounts)
-    rows = ctx.conn.execute(
-        "SELECT DISTINCT items.id FROM items JOIN item_memberships"
-        " ON item_memberships.item_id=items.id"
-        f" WHERE item_memberships.collection_id IN ({marks})",
-        tuple(sorted(mounts))).fetchall()
-    return {int(row["id"]) for row in rows}
+    return ids
 
 
 def leaf_fts_search(conn, question: str, limit: int) -> list[int]:
@@ -246,76 +314,161 @@ def _rerank(ctx: PipelineContext, question: str,
     return ranked + [key for key in keys if key not in ranked]
 
 
-def _chunk_match(conn, chunk_id: int) -> dict | None:
+def document_occurrences(conn, document_id: int) -> dict:
+    """Every native and email-attachment occurrence of one document, for
+    full-provenance citation display: each carrying email (with its own
+    filename for this occurrence) and each native collection mount. A
+    document can be referenced by many `attachments` rows — this lists
+    all of them, not just the one that happened to win the search hit."""
+    attachment_rows = conn.execute(
+        """SELECT attachments.id AS attachment_id, attachments.filename,
+                  attachments.email_id, emails.subject, emails.message_id,
+                  emails.date_utc
+             FROM attachments
+             JOIN emails ON emails.id = attachments.email_id
+            WHERE attachments.document_id = ?
+            ORDER BY attachments.id""", (document_id,)).fetchall()
+    attached = []
+    for row in attachment_rows:
+        collection_rows = conn.execute(
+            "SELECT collection_id FROM email_sources WHERE email_id = ?"
+            " ORDER BY id", (int(row["email_id"]),)).fetchall()
+        attached.append({
+            "attachment_id": int(row["attachment_id"]),
+            "email_id": int(row["email_id"]),
+            "message_id": row["message_id"],
+            "subject": row["subject"],
+            "date": row["date_utc"],
+            "filename": row["filename"],
+            "collections": [c["collection_id"] for c in collection_rows],
+        })
+    native_rows = conn.execute(
+        """SELECT collection_id, relpath FROM document_sources
+            WHERE document_id = ? ORDER BY id""", (document_id,)).fetchall()
+    native = [{"collection_id": row["collection_id"],
+               "relpath": row["relpath"]} for row in native_rows]
+    return {"attachments": attached, "native": native}
+
+
+def _representative_occurrence(
+        occurrences: dict) -> tuple[str | None, str | None]:
+    """Pick one filename + collection for display when a document has
+    many occurrences — first attachment occurrence by id, else the
+    basename of the first native mount relpath."""
+    if occurrences["attachments"]:
+        first = occurrences["attachments"][0]
+        collection = first["collections"][0] if first["collections"] \
+            else None
+        return first["filename"], collection
+    if occurrences["native"]:
+        first = occurrences["native"][0]
+        return Path(first["relpath"]).name, first["collection_id"]
+    return None, None
+
+
+def _email_chunk_match(conn, chunk_row) -> dict:
+    email_id = int(chunk_row["email_id"])
     row = conn.execute(
-        """SELECT chunks.id AS chunk_id, chunks.text,
-                  chunks.source_type, chunks.item_id,
-                  chunks.attachment_id, items.thread_id,
-                  items.message_id, items.subject, items.date_utc,
-                  items.from_name, items.from_addr, items.item_kind,
-                  attachments.filename AS attachment_name
-             FROM chunks JOIN items ON items.id=chunks.item_id
-             LEFT JOIN attachments ON attachments.id=chunks.attachment_id
-            WHERE chunks.id=?""", (chunk_id,)).fetchone()
-    if not row:
-        return None
+        """SELECT thread_id, message_id, subject, date_utc, from_name,
+                  from_addr
+             FROM emails WHERE id = ?""", (email_id,)).fetchone()
+    collection_row = conn.execute(
+        "SELECT collection_id FROM email_sources WHERE email_id = ?"
+        " ORDER BY id LIMIT 1", (email_id,)).fetchone()
     return {
         "kind": "chunk",
-        "chunk_id": chunk_id,
-        "item_id": row["item_id"],
-        "thread_id": row["thread_id"],
-        "message_id": row["message_id"],
-        "subject": row["subject"],
-        "date": row["date_utc"],
-        "from": row["from_name"] or row["from_addr"],
-        "item_kind": row["item_kind"],
-        "source_type": row["source_type"],
-        "attachment_id": row["attachment_id"],
-        "attachment_name": row["attachment_name"],
-        "snippet": row["text"][:600],
+        "chunk_id": chunk_row["chunk_id"],
+        "source_type": chunk_row["source_type"],
+        "email_id": email_id,
+        "document_id": None,
+        "thread_id": row["thread_id"] if row else None,
+        "message_id": row["message_id"] if row else None,
+        "subject": row["subject"] if row else None,
+        "date": row["date_utc"] if row else None,
+        "from": (row["from_name"] or row["from_addr"]) if row else None,
+        "attachment_name": None,
+        "collection": collection_row["collection_id"]
+        if collection_row else None,
+        "snippet": chunk_row["text"][:600],
     }
 
 
-def _message_rows(conn, thread_id: int, visible_items: set[int]):
-    if not visible_items:
+def _document_chunk_match(conn, chunk_row) -> dict:
+    document_id = int(chunk_row["document_id"])
+    doc = conn.execute(
+        "SELECT doc_date FROM documents WHERE id = ?",
+        (document_id,)).fetchone()
+    occurrences = document_occurrences(conn, document_id)
+    filename, collection = _representative_occurrence(occurrences)
+    return {
+        "kind": "chunk",
+        "chunk_id": chunk_row["chunk_id"],
+        "source_type": chunk_row["source_type"],
+        "email_id": None,
+        "document_id": document_id,
+        "thread_id": None,
+        "message_id": None,
+        "subject": None,
+        "date": doc["doc_date"] if doc else None,
+        "from": None,
+        "attachment_name": filename,
+        "collection": collection,
+        "snippet": chunk_row["text"][:600],
+    }
+
+
+def _chunk_match(conn, chunk_id: int) -> dict | None:
+    row = conn.execute(
+        """SELECT chunks.id AS chunk_id, chunks.text, chunks.source_type,
+                  chunks.email_id, chunks.document_id
+             FROM chunks WHERE chunks.id=?""", (chunk_id,)).fetchone()
+    if not row:
+        return None
+    if row["email_id"] is not None:
+        return _email_chunk_match(conn, row)
+    return _document_chunk_match(conn, row)
+
+
+def _message_rows(conn, thread_id: int, visible_emails: set[int]):
+    if not visible_emails:
         return []
     rows = conn.execute(
         """SELECT id, message_id, date_utc, from_name, from_addr, to_addrs,
-                  cc_addrs, subject, reply_parent_item_id, body_text_path
-             FROM items
-            WHERE thread_id=? AND item_kind='email'
+                  cc_addrs, subject, reply_parent_email_id, body_text_path
+             FROM emails
+            WHERE thread_id=?
             ORDER BY date_utc, message_id""", (thread_id,)).fetchall()
-    return [row for row in rows if int(row["id"]) in visible_items]
+    return [row for row in rows if int(row["id"]) in visible_emails]
 
 
 def _expand_messages(ctx: PipelineContext, thread_id: int,
-                     matched_item_ids: set[int],
-                     visible_items: set[int], remaining: int,
+                     matched_email_ids: set[int],
+                     visible_emails: set[int], remaining: int,
                      include_context: bool) -> tuple[list[dict], int]:
     """Build the packet's message list, consuming the single per-answer
     `thread_context_chars` budget. Matched messages are always included
     in full and draw the budget down first; non-matched context is
     added in priority order only while it still fits."""
-    rows = _message_rows(ctx.conn, thread_id, visible_items)
+    rows = _message_rows(ctx.conn, thread_id, visible_emails)
     by_id = {int(row["id"]): row for row in rows}
     children: dict[int, list[int]] = {}
     for row in rows:
-        if row["reply_parent_item_id"] is not None:
-            children.setdefault(int(row["reply_parent_item_id"]), []).append(
-                int(row["id"]))
+        if row["reply_parent_email_id"] is not None:
+            children.setdefault(
+                int(row["reply_parent_email_id"]), []).append(int(row["id"]))
 
     priority: list[int] = []
-    for item_id in matched_item_ids:
-        if item_id in by_id:
-            priority.append(item_id)
-            parent = by_id[item_id]["reply_parent_item_id"]
+    for email_id in matched_email_ids:
+        if email_id in by_id:
+            priority.append(email_id)
+            parent = by_id[email_id]["reply_parent_email_id"]
             if parent in by_id:
                 priority.append(int(parent))
-            priority.extend(children.get(item_id, ()))
+            priority.extend(children.get(email_id, ()))
     chronological = [int(row["id"]) for row in rows]
-    for item_id in tuple(priority):
-        if item_id in chronological:
-            index = chronological.index(item_id)
+    for email_id in tuple(priority):
+        if email_id in chronological:
+            index = chronological.index(email_id)
             priority.extend(chronological[max(0, index - 1):index + 2])
     priority.extend(chronological)
     ordered_priority = list(dict.fromkeys(priority))
@@ -323,21 +476,23 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
     paths: dict[int, str] = {}
     content: dict[int, str] = {}
     root = ctx.config.project_root
-    for item_id in ordered_priority:
-        if not include_context and item_id not in matched_item_ids:
+    for email_id in ordered_priority:
+        if not include_context and email_id not in matched_email_ids:
             continue
-        row = by_id[item_id]
+        row = by_id[email_id]
+        if not row["body_text_path"]:
+            continue
         path = root / row["body_text_path"]
         if not path.is_file():
             continue
-        paths[item_id] = str(path.relative_to(root))
+        paths[email_id] = str(path.relative_to(root))
         text = path.read_text(encoding="utf-8")
-        if item_id in matched_item_ids or len(text) <= remaining:
-            content[item_id] = text
+        if email_id in matched_email_ids or len(text) <= remaining:
+            content[email_id] = text
             remaining = max(0, remaining - len(text))
 
     messages = [{
-        "item_id": int(row["id"]),
+        "email_id": int(row["id"]),
         "message_id": row["message_id"],
         "date": row["date_utc"],
         "from": row["from_name"] or row["from_addr"],
@@ -345,20 +500,20 @@ def _expand_messages(ctx: PipelineContext, thread_id: int,
         "to": json.loads(row["to_addrs"] or "[]"),
         "cc": json.loads(row["cc_addrs"] or "[]"),
         "subject": row["subject"],
-        "reply_parent_item_id": row["reply_parent_item_id"],
-        "direct_child_item_ids": children.get(int(row["id"]), []),
-        "matched": int(row["id"]) in matched_item_ids,
+        "reply_parent_email_id": row["reply_parent_email_id"],
+        "direct_child_email_ids": children.get(int(row["id"]), []),
+        "matched": int(row["id"]) in matched_email_ids,
         "email_message_path": paths.get(int(row["id"])),
         "email_message": content.get(int(row["id"])),
     } for row in rows
-        if include_context or int(row["id"]) in matched_item_ids]
+        if include_context or int(row["id"]) in matched_email_ids]
     return messages, remaining
 
 
 def _thread_packet(ctx: PipelineContext, thread_id: int,
                    matches: list[dict], summary_hit: bool,
                    expand_context: bool,
-                   visible_items: set[int],
+                   visible_emails: set[int],
                    include_summary: bool,
                    remaining: int) -> tuple[dict, int]:
     thread = ctx.conn.execute(
@@ -367,9 +522,9 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
         "SELECT summary_text, generator_model, prompt_version"
         " FROM thread_summaries WHERE thread_id=? AND is_stale=0",
         (thread_id,)).fetchone() if include_summary else None
-    matched_items = {int(match["item_id"]) for match in matches}
+    matched_emails = {int(match["email_id"]) for match in matches}
     messages, remaining = _expand_messages(
-        ctx, thread_id, matched_items, visible_items, remaining,
+        ctx, thread_id, matched_emails, visible_emails, remaining,
         include_context=expand_context)
     return {
         "kind": "thread",
@@ -382,11 +537,49 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
         "summary_hit": summary_hit,
         "generated_summary": summary["summary_text"] if summary else None,
         "summary_model": summary["generator_model"] if summary else None,
-        "summary_prompt_version": summary["prompt_version"] if summary else None,
+        "summary_prompt_version":
+            summary["prompt_version"] if summary else None,
         "message_id": matches[0]["message_id"] if matches else None,
         "matches": matches,
         "messages": messages,
     }, remaining
+
+
+def _document_packet(ctx: PipelineContext, document_id: int,
+                     matches: list[dict]) -> dict:
+    """A document hit's packet, parallel to (not nested inside) a thread
+    packet. A document has no single owning thread — it may be attached
+    to zero, one, or many emails across different threads — so rather
+    than forcing it into the thread/message abstraction, it gets its own
+    lightweight shape: the winning chunk match(es) plus the full
+    occurrence list (every carrying email + filename, every native mount)
+    for citation completeness. No "whole document" text expansion is
+    attempted here; the matched chunk snippet(s) are the evidentiary
+    quote, same as an attachment match was under the old schema."""
+    doc = ctx.conn.execute(
+        """SELECT sha256, media_kind, content_type, doc_date,
+                  extraction_method, is_skipped
+             FROM documents WHERE id=?""", (document_id,)).fetchone()
+    occurrences = document_occurrences(ctx.conn, document_id)
+    filename, collection = _representative_occurrence(occurrences)
+    return {
+        "kind": "document",
+        "document_id": document_id,
+        "sha256": doc["sha256"] if doc else None,
+        "media_kind": doc["media_kind"] if doc else None,
+        "doc_date": doc["doc_date"] if doc else None,
+        "filename": filename,
+        "collection": collection,
+        "matches": matches,
+        "occurrences": occurrences,
+        # Defensive parity fields so code iterating packets generically
+        # (expecting the thread-packet shape) degrades rather than KeyErrors.
+        "thread_id": None,
+        "thread_key": None,
+        "summary_hit": False,
+        "generated_summary": None,
+        "messages": [],
+    }
 
 
 def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
@@ -400,8 +593,8 @@ def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
     if pending:
         warnings.append(
             f"{pending} chunks not yet embedded under the current model —"
-            " run ./pocket-advisor.py --workspace <id> ingest embed; semantic results may"
-            " be incomplete")
+            " run ./pocket-advisor.py --workspace <id> ingest embed;"
+            " semantic results may be incomplete")
     if paths.meta_json.is_file():
         built = meta_fingerprint(json.loads(paths.meta_json.read_text()))
         if chunking_fields_changed(built, fingerprint):
@@ -420,29 +613,30 @@ def run_search(ctx: PipelineContext, question: str,
                resources: SearchResources | None = None) -> dict:
     conn = ctx.conn
     allowed_chunks = allowed_chunk_ids(ctx, options)
-    visible_items = visible_item_ids(ctx, options)
+    visible_emails = visible_email_ids(ctx, options)
     _load_temp_ids(conn, "_allowed_chunks", allowed_chunks)
     if allowed_chunks:
         allowed_threads = {int(row["thread_id"]) for row in conn.execute(
-            "SELECT DISTINCT items.thread_id FROM chunks"
-            " JOIN items ON items.id=chunks.item_id"
+            "SELECT DISTINCT emails.thread_id FROM chunks"
+            " JOIN emails ON emails.id=chunks.email_id"
             " WHERE chunks.id IN (SELECT id FROM _allowed_chunks)"
-            " AND items.thread_id IS NOT NULL").fetchall()}
+            " AND emails.thread_id IS NOT NULL").fetchall()}
     else:
         allowed_threads = set()
 
-    # Summaries are searchable only for threads whose EVERY item is
-    # visible through the selected workspace's mounts (whole-thread visibility).
+    # Summaries are searchable only for threads whose EVERY email is
+    # visible through the selected workspace's mounts (whole-thread
+    # visibility).
     current_summary_threads = {int(row["thread_id"]) for row in conn.execute(
         "SELECT thread_id FROM thread_summaries WHERE is_stale=0").fetchall()}
-    _load_temp_ids(conn, "_visible_items", visible_items)
+    _load_temp_ids(conn, "_visible_emails", visible_emails)
     _load_temp_ids(conn, "_summary_candidates",
                    allowed_threads & current_summary_threads)
     safe_summary_threads = {int(row["thread_id"]) for row in conn.execute(
-        """SELECT items.thread_id FROM items
-            WHERE items.thread_id IN (SELECT id FROM _summary_candidates)
-            GROUP BY items.thread_id
-            HAVING SUM(CASE WHEN items.id IN (SELECT id FROM _visible_items)
+        """SELECT emails.thread_id FROM emails
+            WHERE emails.thread_id IN (SELECT id FROM _summary_candidates)
+            GROUP BY emails.thread_id
+            HAVING SUM(CASE WHEN emails.id IN (SELECT id FROM _visible_emails)
                             THEN 0 ELSE 1 END) = 0""").fetchall()}
 
     store = resources.store if resources is not None \
@@ -496,38 +690,58 @@ def run_search(ctx: PipelineContext, question: str,
         reranker = MlxReranker(store, ctx.config.mlx_model_rerank)
     keys = _rerank(ctx, question, keys[:cap], reranker) + keys[cap:]
 
-    selected: list[int] = []
+    # Selection keeps thread hits and document hits in one ranked list of
+    # (kind, id) entries — opaque beyond that, same as the "c:"/"t:" keys.
+    selected: list[tuple[str, int]] = []
     matches_by_thread: dict[int, list[dict]] = {}
+    matches_by_document: dict[int, list[dict]] = {}
     summary_hits: set[int] = set()
-    selected_set: set[int] = set()
-    matched_items: set[int] = set()
+    selected_set: set[tuple[str, int]] = set()
+    matched_emails: set[int] = set()
+    matched_documents: set[int] = set()
     for key in keys:
         kind, raw_id = key.split(":", 1)
         if kind == "t":
-            thread_id = int(raw_id)
-            summary_hits.add(thread_id)
+            entry = ("thread", int(raw_id))
+            summary_hits.add(entry[1])
         else:
             match = _chunk_match(ctx.conn, int(raw_id))
-            if not match or match["thread_id"] is None:
+            if not match:
                 continue
-            thread_id = int(match["thread_id"])
-            # One match per item: the best-ranked chunk wins.
-            if int(match["item_id"]) not in matched_items and (
-                    thread_id in selected_set
-                    or len(selected) < options.top_k):
-                matched_items.add(int(match["item_id"]))
-                matches_by_thread.setdefault(thread_id, []).append(match)
-        if thread_id not in selected_set and len(selected) < options.top_k:
-            selected.append(thread_id)
-            selected_set.add(thread_id)
+            if match["email_id"] is not None:
+                if match["thread_id"] is None:
+                    continue
+                entry = ("thread", int(match["thread_id"]))
+                # One match per email: the best-ranked chunk wins.
+                if int(match["email_id"]) not in matched_emails and (
+                        entry in selected_set
+                        or len(selected) < options.top_k):
+                    matched_emails.add(int(match["email_id"]))
+                    matches_by_thread.setdefault(entry[1], []).append(match)
+            else:
+                entry = ("document", int(match["document_id"]))
+                # One match per document: the best-ranked chunk wins.
+                if int(match["document_id"]) not in matched_documents and (
+                        entry in selected_set
+                        or len(selected) < options.top_k):
+                    matched_documents.add(int(match["document_id"]))
+                    matches_by_document.setdefault(
+                        entry[1], []).append(match)
+        if entry not in selected_set and len(selected) < options.top_k:
+            selected.append(entry)
+            selected_set.add(entry)
 
     packets = []
     remaining = ctx.config.thread_context_chars
-    for thread_id in selected:
-        packet, remaining = _thread_packet(
-            ctx, thread_id, matches_by_thread.get(thread_id, []),
-            thread_id in summary_hits, options.expand_thread_context,
-            visible_items, thread_id in safe_summary_threads, remaining)
+    for entry_kind, entry_id in selected:
+        if entry_kind == "thread":
+            packet, remaining = _thread_packet(
+                ctx, entry_id, matches_by_thread.get(entry_id, []),
+                entry_id in summary_hits, options.expand_thread_context,
+                visible_emails, entry_id in safe_summary_threads, remaining)
+        else:
+            packet = _document_packet(
+                ctx, entry_id, matches_by_document.get(entry_id, []))
         packets.append(packet)
     return {
         "question": question,
@@ -542,6 +756,56 @@ def run_search(ctx: PipelineContext, question: str,
     }
 
 
+def _format_thread_packet(index: int, packet: dict) -> None:
+    print(f"\n=== [{index}] Thread {packet['thread_id']}:"
+          f" {packet['subject']} ===")
+    if packet["generated_summary"]:
+        print("\n[GENERATED NAVIGATION SUMMARY — NOT EVIDENCE]")
+        print(packet["generated_summary"])
+    for match in packet["matches"]:
+        # Every thread-packet match is an email_body chunk; the full
+        # message (with a MATCH marker) already carries its text below,
+        # so the standalone snippet only needs printing when, for
+        # whatever reason, the message itself did not make it in.
+        if packet["messages"]:
+            continue
+        label = match["subject"] or match["message_id"]
+        print(f"\n[MATCHED EMAIL_BODY: {label}]")
+        if match["collection"]:
+            print(f"(collection: {match['collection']})")
+        print(match["snippet"])
+    for message in packet["messages"]:
+        if not message["email_message"]:
+            if message["email_message_path"]:
+                print(f"\n--- {message['message_id']} (context omitted;"
+                      f" {message['email_message_path']}) ---")
+            continue
+        relation = " MATCH" if message["matched"] else ""
+        print(f"\n--- {message['message_id']}{relation} ---")
+        print(message["email_message"])
+
+
+def _format_document_packet(index: int, packet: dict) -> None:
+    label = packet["filename"] or f"document {packet['document_id']}"
+    print(f"\n=== [{index}] Document {packet['document_id']}: {label} ===")
+    for match in packet["matches"]:
+        match_label = match["attachment_name"] or label
+        print(f"\n[MATCHED DOCUMENT_TEXT: {match_label}]")
+        if match["collection"]:
+            print(f"(collection: {match['collection']})")
+        print(match["snippet"])
+    occurrences = packet["occurrences"]
+    if occurrences["attachments"] or occurrences["native"]:
+        print("\n[OCCURRENCES]")
+        for att in occurrences["attachments"]:
+            collections = ", ".join(att["collections"]) or "?"
+            print(f"  - attached as {att['filename']!r} in email"
+                  f" {att['message_id']} ({collections})")
+        for native in occurrences["native"]:
+            print(f"  - native in {native['collection_id']}:"
+                  f" {native['relpath']}")
+
+
 def format_results(result: dict, *, as_json: bool = False) -> None:
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -550,24 +814,7 @@ def format_results(result: dict, *, as_json: bool = False) -> None:
         print("No results.")
         return
     for index, packet in enumerate(result["results"], 1):
-        print(f"\n=== [{index}] Thread {packet['thread_id']}:"
-              f" {packet['subject']} ===")
-        if packet["generated_summary"]:
-            print("\n[GENERATED NAVIGATION SUMMARY — NOT EVIDENCE]")
-            print(packet["generated_summary"])
-        for match in packet["matches"]:
-            if match["source_type"] != "attachment" and packet["messages"]:
-                continue
-            label = match["attachment_name"] or match["subject"] \
-                or match["message_id"]
-            print(f"\n[MATCHED {match['source_type'].upper()}: {label}]")
-            print(match["snippet"])
-        for message in packet["messages"]:
-            if not message["email_message"]:
-                if message["email_message_path"]:
-                    print(f"\n--- {message['message_id']} (context omitted;"
-                          f" {message['email_message_path']}) ---")
-                continue
-            relation = " MATCH" if message["matched"] else ""
-            print(f"\n--- {message['message_id']}{relation} ---")
-            print(message["email_message"])
+        if packet["kind"] == "document":
+            _format_document_packet(index, packet)
+        else:
+            _format_thread_packet(index, packet)

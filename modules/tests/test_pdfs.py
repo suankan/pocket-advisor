@@ -2,6 +2,12 @@
 
 Mocks the ocrmypdf/pdftotext subprocess seam (modules.ocr.run_command)
 so the test is fast and deterministic; command-line shape is asserted.
+
+Every unique PDF (native mount or email attachment, in any collection,
+in any order) is now exactly one `documents` row — the mocked tool
+inspects file CONTENT (not filename) to decide pass/fail/warn, because
+every document's verified source copy on disk is literally named
+`original.pdf` regardless of the name it first arrived under.
 """
 import os
 import subprocess
@@ -19,6 +25,7 @@ import modules.ocr as ocr  # noqa: E402
 import modules.pipeline.pdfs as pdfs_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
+from modules.custody import sha256_bytes  # noqa: E402
 from modules.domain import CandidateStatus, DocumentType  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
@@ -45,10 +52,22 @@ workspaces:
 STATEMENT_TEXT = ("ACME BANK\nStatement period 01/02/2026 - 28/02/2026\n"
                   "Date  Description  Debit  Credit\n")
 
+# Content markers. The mocked tool decides pass/fail/warn by inspecting the
+# SOURCE FILE'S BYTES, never its filename or path: every document's verified
+# source copy is content-addressed and literally named `original.pdf`
+# (`Config.document_artifacts(sha).source_path`), so the original attachment
+# filename is not observable at the point the transform runs.
+ATTACHED_OK = b"%PDF-attached-ok"
+BROKEN = b"%PDF-attached-BROKEN"
+WARNED = b"%PDF-attached-WARNED"
+FALLBACK = b"%PDF-attached-FALLBACK"
+NATIVE_ACME = b"%PDF-native-acme"
+HYBRID = b"%PDF-hybrid-content"
 
-def fake_run_factory(calls: list[list[str]], fail_for: set[str],
-                     warn_for: set[str] | None = None,
-                     ocr_only_fail_for: set[str] | None = None):
+
+def fake_run_factory(calls: list[list[str]], fail_for: set[bytes],
+                     warn_for: set[bytes] | None = None,
+                     ocr_only_fail_for: set[bytes] | None = None):
     warn_for = warn_for or set()
     ocr_only_fail_for = ocr_only_fail_for or set()
 
@@ -59,17 +78,18 @@ def fake_run_factory(calls: list[list[str]], fail_for: set[str],
             return subprocess.CompletedProcess(
                 args, 0, b"fixture-tool 1.0\n", b"")
         source, target = Path(args[-2]), Path(args[-1])
+        source_bytes = source.read_bytes() if source.is_file() else b""
         if program == "ocrmypdf" and any(
-                marker in source.name for marker in ocr_only_fail_for):
+                marker in source_bytes for marker in ocr_only_fail_for):
             return subprocess.CompletedProcess(
                 args, 2, b"", b"OCR refused signed or structured PDF")
-        if any(marker in source.name for marker in fail_for):
+        if any(marker in source_bytes for marker in fail_for):
             return subprocess.CompletedProcess(
                 args, 2, b"", b"simulated tool failure")
         target.parent.mkdir(parents=True, exist_ok=True)
         if program == "ocrmypdf":
-            target.write_bytes(b"%PDF-derived " + source.read_bytes())
-            if any(marker in source.name for marker in warn_for):
+            target.write_bytes(b"%PDF-derived " + source_bytes)
+            if any(marker in source_bytes for marker in warn_for):
                 return subprocess.CompletedProcess(
                     args, 4, b"", b"generated PDF has structural warnings")
         else:
@@ -92,22 +112,37 @@ def build_fixtures(ws_dir: Path) -> None:
     msg["Subject"] = "Statements attached"
     msg["Date"] = "Mon, 01 Jan 2024 10:00:00 +0000"
     msg.set_content("Attached as discussed.")
-    msg.add_attachment(b"%PDF-attached-ok", maintype="application",
+    msg.add_attachment(ATTACHED_OK, maintype="application",
                        subtype="pdf", filename="attached.pdf")
-    msg.add_attachment(b"%PDF-attached-ok", maintype="application",
+    msg.add_attachment(ATTACHED_OK, maintype="application",
                        subtype="pdf", filename="attached-copy.pdf")
-    msg.add_attachment(b"%PDF-attached-BROKEN", maintype="application",
+    msg.add_attachment(BROKEN, maintype="application",
                        subtype="pdf", filename="broken.pdf")
-    msg.add_attachment(b"%PDF-attached-WARNED", maintype="application",
+    msg.add_attachment(WARNED, maintype="application",
                        subtype="pdf", filename="warned.pdf")
-    msg.add_attachment(b"%PDF-attached-FALLBACK", maintype="application",
+    msg.add_attachment(FALLBACK, maintype="application",
                        subtype="pdf", filename="fallback.pdf")
     (mail / "with-pdfs.eml").write_bytes(msg.as_bytes())
 
-    (statements / "acme-feb.pdf").write_bytes(b"%PDF-native-acme")
-    # same bytes in mail collection too -> membership link, no re-copy
-    (ws_dir / "corpora" / "mail" / "dup-acme.pdf").write_bytes(
-        b"%PDF-native-acme")
+    # Same bytes mounted natively (in `statements`) AND received as an
+    # email attachment (in `mail`, under a different filename): must
+    # converge on ONE documents row with both a document_sources row
+    # (native) and an attachments row (email-carried), transformed once.
+    hybrid_msg = EmailMessage()
+    hybrid_msg["Message-ID"] = "<hybrid@x>"
+    hybrid_msg["From"] = "Alice <alice@x.com>"
+    hybrid_msg["To"] = "Bob <bob@y.com>"
+    hybrid_msg["Subject"] = "Also emailed"
+    hybrid_msg["Date"] = "Mon, 01 Jan 2024 10:00:00 +0000"
+    hybrid_msg.set_content("Same content, also attached here.")
+    hybrid_msg.add_attachment(HYBRID, maintype="application",
+                              subtype="pdf", filename="hybrid-attachment.pdf")
+    (mail / "with-hybrid.eml").write_bytes(hybrid_msg.as_bytes())
+
+    (statements / "acme-feb.pdf").write_bytes(NATIVE_ACME)
+    # same bytes in mail collection too -> document_sources link, no re-copy
+    (mail / "dup-acme.pdf").write_bytes(NATIVE_ACME)
+    (statements / "hybrid.pdf").write_bytes(HYBRID)
 
 
 def main() -> int:
@@ -132,97 +167,150 @@ def main() -> int:
 
         calls: list[list[str]] = []
         fake_run = fake_run_factory(
-            calls, fail_for={"broken"}, warn_for={"warned"},
-            ocr_only_fail_for={"fallback"})
+            calls, fail_for={BROKEN}, warn_for={WARNED},
+            ocr_only_fail_for={FALLBACK})
         with patch.object(ocr, "run_command", side_effect=fake_run):
             stats = PdfTextStage(ctx).run()
 
-        # 3.1: one native item; duplicate content linked, not recopied.
+        # 3.1: native PDFs resolve to documents rows; duplicate content
+        # (whether native-native or native-after-emailed) links, no re-copy.
+        # dup-acme.pdf (mail) sorts before acme-feb.pdf (statements), so the
+        # first native sighting of that content is "new"; acme-feb.pdf and
+        # hybrid.pdf (already created by EmailStage from the attachment)
+        # both link to an existing documents row.
         assert stats.get("native_new") == 1, stats
-        assert stats.get("native_linked") == 1, stats
-        native = conn.execute(
-            "SELECT * FROM items WHERE item_kind = 'file'").fetchone()
-        memberships = conn.execute(
-            "SELECT collection_id FROM item_memberships WHERE item_id = ?"
-            " ORDER BY collection_id", (native["id"],)).fetchall()
-        assert [m["collection_id"] for m in memberships] == \
+        assert stats.get("native_linked") == 2, stats
+
+        native_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(NATIVE_ACME),)).fetchone()
+        sources = conn.execute(
+            "SELECT collection_id FROM document_sources WHERE document_id = ?"
+            " ORDER BY collection_id", (native_doc["id"],)).fetchall()
+        assert [s["collection_id"] for s in sources] == \
             ["mail", "statements"]
-        copy_rel = conn.execute(
-            "SELECT extracted_copy_path p FROM item_file_meta"
-            " WHERE item_id = ?", (native["id"],)).fetchone()["p"]
-        assert copy_rel.endswith(".pdf") and "pdf-original" in copy_rel
-        assert (tmp / copy_rel).read_bytes() == b"%PDF-native-acme"
+        native_source_files = list(
+            cfg.document_artifacts(native_doc["sha256"]).source_dir
+            .glob("original*"))
+        assert len(native_source_files) == 1, native_source_files
+        assert native_source_files[0].read_bytes() == NATIVE_ACME
+
+        # Duplicate ATTACHMENT pdf (same bytes, two filenames, two
+        # attachments occurrence rows) -> ONE documents row.
+        n_attached_ok_docs = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE sha256 = ?",
+            (sha256_bytes(ATTACHED_OK),)).fetchone()[0]
+        assert n_attached_ok_docs == 1, n_attached_ok_docs
+        attached_ok_doc = conn.execute(
+            "SELECT id FROM documents WHERE sha256 = ?",
+            (sha256_bytes(ATTACHED_OK),)).fetchone()
+        attached_ok_names = conn.execute(
+            "SELECT filename FROM attachments WHERE document_id = ?"
+            " ORDER BY filename", (attached_ok_doc["id"],)).fetchall()
+        assert [a["filename"] for a in attached_ok_names] == \
+            ["attached-copy.pdf", "attached.pdf"]
+
+        # The core acceptance scenario: content mounted natively AND
+        # received as an email attachment converges on ONE documents row
+        # with BOTH a document_sources (native) row and an attachments
+        # (email-carried) row.
+        hybrid_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(HYBRID),)).fetchone()
+        n_hybrid_docs = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE sha256 = ?",
+            (sha256_bytes(HYBRID),)).fetchone()[0]
+        assert n_hybrid_docs == 1, n_hybrid_docs
+        hybrid_sources = conn.execute(
+            "SELECT collection_id FROM document_sources"
+            " WHERE document_id = ?", (hybrid_doc["id"],)).fetchall()
+        assert [s["collection_id"] for s in hybrid_sources] == ["statements"]
+        hybrid_atts = conn.execute(
+            "SELECT filename FROM attachments WHERE document_id = ?",
+            (hybrid_doc["id"],)).fetchall()
+        assert [a["filename"] for a in hybrid_atts] == \
+            ["hybrid-attachment.pdf"]
+        # And the OCR/text transform ran EXACTLY ONCE for it, despite the
+        # two occurrences (native + emailed).
+        hybrid_ocr_calls = [
+            c for c in calls if c[0] == "ocrmypdf"
+            and Path(c[-2]).is_file() and HYBRID in Path(c[-2]).read_bytes()]
+        assert len(hybrid_ocr_calls) == 1, hybrid_ocr_calls
 
         # 3.2: OCR warning is tolerated only because pdftotext succeeds;
-        # attached duplicates + warned + original-fallback + native readable;
-        # broken.pdf fails both OCR and direct text extraction.
+        # attached duplicates + warned + original-fallback + native + hybrid
+        # all succeed; broken.pdf fails both OCR and direct text extraction.
+        # Every unique PDF is now exactly one documents row, so there is
+        # nothing left to "fan out" across occurrences: 6 unique documents
+        # (attached_ok, broken, warned, fallback, native_acme, hybrid).
         assert stats.get("ocr_ok") == 5, stats
+        # Both a non-zero OCRmyPDF validation result and a successful
+        # verified-original fallback remain reviewable warnings; the latter
+        # is additionally counted in direct_original_fallbacks telemetry.
         assert stats.get("ocr_warnings") == 2, stats
         assert stats.get("ocr_errors") == 1, stats
         perf = ctx.telemetry.pdfs
+        assert perf.occurrences_considered == 6
         assert perf.pending_occurrences == 6
-        assert perf.unique_transforms == 5
-        assert perf.successful_transforms == 4
+        assert perf.unique_transforms == 6
+        assert perf.successful_transforms == 5
         assert perf.failed_transforms == 1
-        assert perf.duplicate_reuses == 1
+        # No per-occurrence fan-out/duplicate-reuse concept remains at this
+        # first-ever run: every document is brand new, so nothing is
+        # reused from an already-cached product.
+        assert perf.duplicate_reuses == 0
         expected_budget = os.process_cpu_count() or 1
         assert perf.resources.configured_worker_count == min(2, expected_budget)
         assert perf.resources.configured_per_child_jobs == \
             expected_budget // min(2, expected_budget)
         assert 1 <= perf.resources.observed_peak_workers <= 2
-        assert perf.fan_out.copies == 9
-        ok_att = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'attached.pdf'"
-        ).fetchone()
-        method = ok_att["extraction_method"]
+        # fan_out.copies is permanently 0 now: there is no more
+        # per-occurrence copy-back-into-email/collection-folder fan-out —
+        # every occurrence reads the one canonical transforms_dir product.
+        assert perf.fan_out.copies == 0
+
+        ok_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(ATTACHED_OK),)).fetchone()
+        method = ok_doc["extraction_method"]
         assert method.startswith(f"{ocr.EXTRACTION_METHOD}:")
-        txt_path = tmp / ok_att["extracted_text_path"]
-        assert "pdf-to-text" in str(txt_path) and txt_path.is_file()
-        derivative = (txt_path.parent.with_name("pdf-ocr") /
-                      f"{txt_path.stem}-ocrmypdf.pdf")
-        assert derivative.is_file()   # persistent OCR artifact
-        duplicate = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'attached-copy.pdf'"
-        ).fetchone()
-        duplicate_text = tmp / duplicate["extracted_text_path"]
-        duplicate_derivative = duplicate_text.parent.with_name("pdf-ocr") / \
-            f"{duplicate_text.stem}-ocrmypdf.pdf"
-        assert duplicate_text.is_file() and duplicate_derivative.is_file()
-        assert derivative.stat().st_ino != duplicate_derivative.stat().st_ino
-        assert txt_path.stat().st_ino != duplicate_text.stat().st_ino
-        warned = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'warned.pdf'"
-        ).fetchone()
-        assert warned["extraction_method"] == method
-        assert (tmp / warned["extracted_text_path"]).is_file()
+        txt_path = tmp / ok_doc["extracted_text_path"]
+        assert "transforms" in str(txt_path) and txt_path.is_file()
+
+        warned_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(WARNED),)).fetchone()
+        assert warned_doc["extraction_method"] == method
+        assert (tmp / warned_doc["extracted_text_path"]).is_file()
         warning = conn.execute(
             "SELECT severity, message FROM ingestion_log"
             " WHERE stage = 'pdfs' AND severity = 'warning'"
-            " AND message LIKE 'attachment %ocrmypdf exited 4%'"
+            " AND message LIKE 'document %ocrmypdf exited 4%'"
         ).fetchone()
         assert warning is not None, "non-zero OCR exit was not review-flagged"
         assert "pdftotext -layout succeeded" in warning["message"]
-        fallback = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'fallback.pdf'"
-        ).fetchone()
-        assert fallback["extraction_method"] == method
-        fallback_text = tmp / fallback["extracted_text_path"]
+
+        fallback_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(FALLBACK),)).fetchone()
+        assert fallback_doc["extraction_method"] == method
+        fallback_text = tmp / fallback_doc["extracted_text_path"]
         assert fallback_text.is_file()
-        fallback_derivative = fallback_text.parent.with_name("pdf-ocr") / \
-            f"{fallback_text.stem}-ocrmypdf.pdf"
-        assert not fallback_derivative.exists()
         fallback_warning = conn.execute(
             "SELECT message FROM ingestion_log WHERE stage='pdfs'"
-            " AND severity='warning' AND message LIKE 'attachment %verified original%'"
+            " AND severity='warning' AND message LIKE 'document %verified original%'"
         ).fetchone()
         assert fallback_warning is not None
-        broken = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
-        ).fetchone()
-        assert broken["extraction_method"] == "error"
-        assert "simulated tool failure" in broken["skip_reason"]
 
-        # ocrmypdf flag shape: --redo-ocr --clean, never --deskew.
+        broken_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(BROKEN),)).fetchone()
+        assert broken_doc["extraction_method"] == "error"
+        assert "simulated tool failure" in broken_doc["skip_reason"]
+
+        # ocrmypdf flag shape: --redo-ocr --clean, never --deskew. All 6
+        # unique documents attempt OCR on this first-ever run (including
+        # the one that ultimately fails).
         ocr_calls = [c for c in calls if c[0] == "ocrmypdf"
                      and "--redo-ocr" in c]
         assert all(c[1:3] == ["--redo-ocr", "--clean"] for c in ocr_calls)
@@ -231,20 +319,16 @@ def main() -> int:
         assert all(c[c.index("--jobs") + 1] ==
                    str(expected_budget // min(2, expected_budget))
                    for c in ocr_calls)
-        assert len(ocr_calls) == 5, ocr_calls
+        assert len(ocr_calls) == 6, ocr_calls
 
-        # Native doc date: range-aware -> period END (28 Feb 2026).
-        meta = conn.execute(
-            "SELECT * FROM item_file_meta WHERE item_id = ?",
-            (native["id"],)).fetchone()
-        assert meta["doc_date"] == "2026-02-28", meta["doc_date"]
-        assert meta["doc_date_source"] == "extracted_text"
-        assert meta["doc_date_detail"] == "keyword:statement period"
-        native_after = conn.execute(
-            "SELECT * FROM items WHERE id = ?", (native["id"],)).fetchone()
-        assert native_after["date_utc"] == "2026-02-28T00:00:00+00:00"
-        assert native_after["body_text_path"].endswith(".txt")
+        # Every PDF document gets a document date now (not just
+        # corpora-native ones): range-aware -> period END (28 Feb 2026).
+        assert native_doc["doc_date"] == "2026-02-28", native_doc["doc_date"]
+        assert native_doc["doc_date_source"] == "extracted_text"
+        assert native_doc["doc_date_detail"] == "keyword:statement period"
         assert stats.get("weak_dates", ) == 0, stats
+        # An attachment-only PDF (never natively mounted) also gets a date.
+        assert ok_doc["doc_date"] == "2026-02-28", ok_doc["doc_date"]
 
         # PDF candidates consumed.
         pending = conn.execute(
@@ -253,8 +337,8 @@ def main() -> int:
             (DocumentType.PDF, CandidateStatus.CANDIDATE)).fetchone()[0]
         assert pending == 0
 
-        # A failed artifact remains retryable.  The successful retry clears
-        # the old error while already-readable PDFs remain idempotent.
+        # A failed document remains retryable. The successful retry clears
+        # the old error while already-current documents remain idempotent.
         ctx.telemetry = PerformanceTelemetry()
         calls2: list[list[str]] = []
         with patch.object(ocr, "run_command",
@@ -262,14 +346,17 @@ def main() -> int:
             stats2 = PdfTextStage(ctx).run()
         assert stats2.get("ocr_ok", ) == 1, stats2
         assert stats2.get("native_new", ) == 0, stats2
-        assert [call[0] for call in calls2] == [
-            "ocrmypdf", "pdftotext", "ocrmypdf", "pdftotext"]
-        broken = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'broken.pdf'"
-        ).fetchone()
-        assert broken["extraction_method"] == method
-        assert broken["skip_reason"] is None
-        assert (tmp / broken["extracted_text_path"]).is_file()
+        retry_transforms = [call[0] for call in calls2
+                            if call[0] in {"ocrmypdf", "pdftotext"}
+                            and "--version" not in call
+                            and "-v" not in call]
+        assert retry_transforms == ["ocrmypdf", "pdftotext"]
+        broken_doc = conn.execute(
+            "SELECT * FROM documents WHERE sha256 = ?",
+            (sha256_bytes(BROKEN),)).fetchone()
+        assert broken_doc["extraction_method"] == method
+        assert broken_doc["skip_reason"] is None
+        assert (tmp / broken_doc["extracted_text_path"]).is_file()
         assert ctx.telemetry.pdfs.unique_transforms == 1
         assert ctx.telemetry.pdfs.resources.configured_worker_count == 1
         assert ctx.telemetry.pdfs.resources.configured_per_child_jobs == \
@@ -294,7 +381,9 @@ def main() -> int:
             base_recipes = ocr.pdf_recipes(langs=cfg.ocr_langs)
 
         # A text-only recipe change reuses each verified OCR derivative and
-        # runs pdftotext once per unique source, never OCRmyPDF.
+        # runs pdftotext once per unique document, never OCRmyPDF — because
+        # the text-recipe digest changed, no prior text output is cached
+        # under it, so all 6 documents need a fresh (OCR-free) text pass.
         text_only = ocr.PdfRecipes(
             ocr=base_recipes.ocr, text="pdftotext-v1:" + "1" * 20,
             combined="pdf-text-v3:" + "2" * 20)
@@ -308,13 +397,13 @@ def main() -> int:
         assert not [call for call in text_calls
                     if call[0] == "ocrmypdf" and "--redo-ocr" in call]
         assert len([call for call in text_calls
-                    if call[0] == "pdftotext" and "-layout" in call]) == 5
-        assert ctx.telemetry.pdfs.unique_transforms == 5
-        assert ctx.telemetry.pdfs.duplicate_reuses == 1
+                    if call[0] == "pdftotext" and "-layout" in call]) == 6
+        assert ctx.telemetry.pdfs.unique_transforms == 6
+        assert ctx.telemetry.pdfs.duplicate_reuses == 0
 
-        # An OCR-only recipe change invalidates both products. Concurrent
-        # workers remain within the global CPU budget and execute once per
-        # unique source.
+        # An OCR-only recipe change invalidates both products for all 6
+        # unique documents. Concurrent workers remain within the global CPU
+        # budget and execute once per unique document.
         ocr_only = ocr.PdfRecipes(
             ocr="pdf-ocr-v1:" + "3" * 20, text=base_recipes.text,
             combined="pdf-text-v3:" + "4" * 20)
@@ -327,12 +416,16 @@ def main() -> int:
             ocr_change_stats = PdfTextStage(ctx).run()
         assert ocr_change_stats.get("ocr_ok") == 6, ocr_change_stats
         assert len([call for call in ocr_change_calls
-                    if call[0] == "ocrmypdf" and "--redo-ocr" in call]) == 5
+                    if call[0] == "ocrmypdf" and "--redo-ocr" in call]) == 6
         assert len([call for call in ocr_change_calls
-                    if call[0] == "pdftotext" and "-layout" in call]) == 5
+                    if call[0] == "pdftotext" and "-layout" in call]) == 6
 
-        # Returning to an already-cached recipe performs deterministic fan-out
-        # only. No transform process runs, including for the prior fallback.
+        # Returning to a previously cached recipe reuses every fully cached
+        # product with zero fresh transform work: all 6 documents mismatch
+        # their currently recorded (ocr-only-change) extraction_method, but
+        # every one already has a verified product cached from the very
+        # first run — the repurposed meaning of duplicate_reuses. No
+        # transform process runs at all.
         ctx.telemetry = PerformanceTelemetry()
         restore_calls: list[list[str]] = []
         with patch.object(
@@ -341,33 +434,17 @@ def main() -> int:
             restore_stats = PdfTextStage(ctx).run()
         assert restore_stats.get("ocr_ok") == 6, restore_stats
         assert ctx.telemetry.pdfs.unique_transforms == 0
+        assert ctx.telemetry.pdfs.duplicate_reuses == 6
         assert not [call for call in restore_calls
                     if "--redo-ocr" in call or "-layout" in call]
 
-        # A missing occurrence-local text artifact is repaired from canonical
-        # state without OCR or text extraction and remains independently copied.
-        warned = conn.execute(
-            "SELECT * FROM attachments WHERE filename = 'warned.pdf'"
-        ).fetchone()
-        (tmp / warned["extracted_text_path"]).unlink()
-        ctx.telemetry = PerformanceTelemetry()
-        repair_calls: list[list[str]] = []
-        with patch.object(
-                ocr, "run_command",
-                side_effect=fake_run_factory(repair_calls, set())):
-            repair_stats = PdfTextStage(ctx).run()
-        assert repair_stats.get("ocr_ok") == 1, repair_stats
-        assert ctx.telemetry.pdfs.unique_transforms == 0
-        assert ctx.telemetry.pdfs.fan_out.copies == 1
-        assert not [call for call in repair_calls
-                    if "--redo-ocr" in call or "-layout" in call]
-
-        # A successful artifact from an unknown older extraction recipe is
-        # stale, but the current verified content-addressed products mean only
-        # occurrence fan-out/metadata convergence is required.
+        # A successful document recorded under an unknown/older extraction
+        # recipe is stale, but its current verified content-addressed
+        # product (published under the now-restored base recipe) is still
+        # cached, so only metadata convergence is required — no transform.
         conn.execute(
-            "UPDATE attachments SET extraction_method='pdf-text-v0:old'"
-            " WHERE filename='warned.pdf'")
+            "UPDATE documents SET extraction_method='pdf-text-v0:old'"
+            " WHERE sha256 = ?", (sha256_bytes(WARNED),))
         conn.commit()
         ctx.telemetry = PerformanceTelemetry()
         calls3: list[list[str]] = []
@@ -376,16 +453,20 @@ def main() -> int:
             stats3 = PdfTextStage(ctx).run()
         assert stats3.get("recipe_stale") == 1, stats3
         assert stats3.get("ocr_ok") == 1, stats3
-        assert [call[0] for call in calls3] == ["ocrmypdf", "pdftotext"]
+        assert not [call for call in calls3
+                    if "--redo-ocr" in call or "-layout" in call], calls3
         assert ctx.telemetry.pdfs.unique_transforms == 0
+        assert ctx.telemetry.pdfs.duplicate_reuses == 1
 
+        # Idempotent: a further run with nothing changed does no work at all.
         ctx.telemetry = PerformanceTelemetry()
         calls4: list[list[str]] = []
         with patch.object(ocr, "run_command",
                           side_effect=fake_run_factory(calls4, set())):
             stats4 = PdfTextStage(ctx).run()
         assert stats4.get("ocr_ok") == 0, stats4
-        assert [call[0] for call in calls4] == ["ocrmypdf", "pdftotext"]
+        assert not [call for call in calls4
+                    if "--redo-ocr" in call or "-layout" in call], calls4
 
         conn.close()
     print("test_pdfs: all ok")

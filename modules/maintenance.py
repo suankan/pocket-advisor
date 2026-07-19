@@ -88,7 +88,7 @@ def lookup_blob(
     collection = _collection(ctx, source_id)
     row = ctx.conn.execute(
         "SELECT relpath_within_source, size_bytes FROM source_blob_index "
-        "WHERE source_id=? AND sha256=?",
+        "WHERE source_id=? AND sha256=? ORDER BY relpath_within_source LIMIT 1",
         (source_id, digest),
     ).fetchone()
     if row is None:
@@ -168,21 +168,29 @@ def _verify_sqlite(ctx: PipelineContext, report: VerificationReport) -> None:
 
 
 def _verify_originals(ctx: PipelineContext, report: VerificationReport) -> None:
+    """Verify custody and graph lineage without relying on cache paths.
+
+    Top-level source occurrences are `email_sources`/`document_sources` rows;
+    attached-email lineage is `attachments.child_email_id`. A deduplicated
+    raw email can have several carrying parents, so no scalar parent pointer
+    is authoritative.
+    """
     collections = {collection.id: collection
                    for collection in ctx.workspace.collections}
-    indexed: set[tuple[str, str]] = set()
+    indexed: set[tuple[str, str, str]] = set()
     checked = 0
     for row in ctx.conn.execute(
             "SELECT source_id, sha256, relpath_within_source, size_bytes "
             "FROM source_blob_index ORDER BY source_id, sha256"):
         source_id, digest = str(row["source_id"]), str(row["sha256"])
-        indexed.add((source_id, digest))
+        relpath = str(row["relpath_within_source"])
+        indexed.add((source_id, digest, relpath))
         collection = collections.get(source_id)
         if collection is None:
             _problem(report, f"blob index contains unmounted collection {source_id!r}")
             continue
         try:
-            path = _source_path(collection, str(row["relpath_within_source"]))
+            path = _source_path(collection, relpath)
         except MaintenanceError as exc:
             _problem(report, str(exc))
             continue
@@ -207,100 +215,112 @@ def _verify_originals(ctx: PipelineContext, report: VerificationReport) -> None:
         for row in ctx.conn.execute(
             "SELECT collection_id, sha256 FROM ingestion_candidates")
     }
-    item_rows = ctx.conn.execute(
-        "SELECT id, item_kind, parent_item_id FROM items").fetchall()
-    item_kinds = {int(row["id"]): str(row["item_kind"])
-                  for row in item_rows}
-    parents = {
-        int(row["id"]): (
-            int(row["parent_item_id"])
-            if row["parent_item_id"] is not None else None)
-        for row in item_rows
-    }
-    membership_rows = ctx.conn.execute(
-        "SELECT collection_id, sha256, item_id FROM item_memberships"
-    ).fetchall()
-    memberships_by_item: dict[int, set[tuple[str, str]]] = {}
-    items_by_membership: dict[tuple[str, str], set[int]] = {}
-    for row in membership_rows:
-        item_id = int(row["item_id"])
+
+    # -- Pass 1: email top-level provenance and attachment lineage ----------
+    email_rows = ctx.conn.execute("SELECT id, sha256 FROM emails").fetchall()
+    email_ids = {int(row["id"]) for row in email_rows}
+    direct_roots: set[int] = set()
+    email_sources_checked = 0
+    for row in ctx.conn.execute(
+            "SELECT es.email_id, es.collection_id, es.relpath, e.sha256"
+            " FROM email_sources es JOIN emails e ON e.id = es.email_id"):
+        key = (str(row["collection_id"]), str(row["sha256"]),
+               str(row["relpath"]))
+        if key not in indexed:
+            _problem(
+                report,
+                f"email source occurrence {key[0]}:{key[2]} has no "
+                "matching blob-indexed original")
+            continue
+        direct_roots.add(int(row["email_id"]))
+        email_sources_checked += 1
+
+    child_links: dict[int, list[tuple[int, int]]] = {}
+    child_rows = ctx.conn.execute(
+        "SELECT id, email_id, child_email_id FROM attachments"
+        " WHERE child_email_id IS NOT NULL").fetchall()
+    for row in child_rows:
+        parent_id, child_id = int(row["email_id"]), int(row["child_email_id"])
+        if parent_id not in email_ids or child_id not in email_ids:
+            _problem(report, f"attached-email occurrence {row['id']} has a missing email")
+            continue
+        child_links.setdefault(child_id, []).append((int(row["id"]), parent_id))
+
+    root_ok: dict[int, bool] = {}
+    resolving: set[int] = set()
+
+    def _has_root(email_id: int) -> bool:
+        if email_id in root_ok:
+            return root_ok[email_id]
+        if email_id in resolving:
+            _problem(report, f"attached-email lineage cycle at email {email_id}")
+            root_ok[email_id] = False
+            return False
+        resolving.add(email_id)
+        try:
+            ok = email_id in direct_roots or any(
+                _has_root(parent_id)
+                for _, parent_id in child_links.get(email_id, ()))
+            root_ok[email_id] = ok
+            return ok
+        finally:
+            resolving.discard(email_id)
+
+    for email_id in email_ids:
+        if not _has_root(email_id):
+            _problem(report, f"email {email_id} has no verified source or attachment lineage")
+    attached_verified = sum(
+        1 for row in child_rows
+        if _has_root(int(row["child_email_id"])))
+
+    # -- Pass 2: document occurrence coverage -------------------------------
+    # Every document occurrence — native (document_sources) or email-attached
+    # (attachments) — should trace back to a real discovered candidate/source.
+    doc_occurrences_checked = 0
+    doc_source_keys: set[tuple[str, str]] = set()
+    for row in ctx.conn.execute(
+            "SELECT ds.collection_id, ds.relpath, d.sha256"
+            " FROM document_sources ds JOIN documents d"
+            " ON d.id = ds.document_id"):
         key = (str(row["collection_id"]), str(row["sha256"]))
-        memberships_by_item.setdefault(item_id, set()).add(key)
-        items_by_membership.setdefault(key, set()).add(item_id)
-
-    lineage_ok: dict[int, bool] = {}
-    attached_verified = 0
-    for item_id, parent_item_id in parents.items():
-        if parent_item_id is None:
-            continue
-        if item_kinds[item_id] != "email":
+        doc_source_keys.add(key)
+        occurrence_key = (key[0], key[1], str(row["relpath"]))
+        if key not in candidate_keys or occurrence_key not in indexed:
             _problem(
                 report,
-                f"item {item_id} has physical parent {parent_item_id} but "
-                f"is not an email")
-            lineage_ok[item_id] = False
+                f"document occurrence {key[0]}:{row['relpath']} has no "
+                "matching candidate/blob-indexed original")
             continue
-        if not memberships_by_item.get(item_id):
-            _problem(
-                report,
-                f"attached email item {item_id} has no custody membership")
-            lineage_ok[item_id] = False
-            continue
-
-        visited = {item_id}
-        current_id = item_id
-        failure: str | None = None
-        while (parent_id := parents.get(current_id)) is not None:
-            if parent_id in visited:
-                failure = (
-                    f"attached email item {item_id} has cyclic parent "
-                    f"lineage at item {parent_id}")
-                break
-            if parent_id not in parents:
-                failure = (
-                    f"attached email item {item_id} has missing parent "
-                    f"item {parent_id}")
-                break
-            visited.add(parent_id)
-            current_id = parent_id
-        if failure is None and not any(
-                key in indexed and key[0] in collections
-                for key in memberships_by_item.get(
-                    current_id, set())):
-            failure = (
-                f"attached email item {item_id} has no blob-indexed "
-                f"carrying original")
-        if failure is not None:
-            _problem(report, failure)
-            lineage_ok[item_id] = False
-        else:
-            lineage_ok[item_id] = True
-            attached_verified += 1
-
-    attached_candidate_keys = {
-        key for key in candidate_keys - indexed
-        if any(parents.get(item_id) is not None and lineage_ok.get(item_id)
-               for item_id in items_by_membership.get(key, set()))
-    }
-    for source_id, digest in candidate_keys - indexed:
-        if (source_id, digest) in attached_candidate_keys:
-            continue
-        _problem(
-            report,
-            f"discovered original has no blob-index row: "
-            f"{source_id}:{digest[:12]}…")
-
-    for row in membership_rows:
+        doc_occurrences_checked += 1
+    for row in ctx.conn.execute(
+            "SELECT collection_id, sha256, document_type FROM"
+            " ingestion_candidates WHERE document_type IN ('pdf', 'other')"
+            " AND status = 'ingested'"):
         key = (str(row["collection_id"]), str(row["sha256"]))
-        if key in candidate_keys and key not in indexed \
-                and key not in attached_candidate_keys:
+        if key not in doc_source_keys:
             _problem(
                 report,
-                f"membership item {row['item_id']} has no blob-index row: "
-                f"{key[0]}:{key[1][:12]}…")
+                f"ingested {row['document_type']} candidate "
+                f"{key[0]}:{key[1][:12]}… has no document_sources row")
+
+    for row in ctx.conn.execute(
+            "SELECT a.id, a.email_id, d.sha256"
+            " FROM attachments a JOIN documents d ON d.id = a.document_id"):
+        email_id = int(row["email_id"])
+        if not root_ok.get(email_id, False):
+            _problem(
+                report,
+                f"document attachment occurrence {row['id']} (document "
+                f"{str(row['sha256'])[:12]}…) carrying email {email_id} has "
+                "no verified custody lineage")
+            continue
+        doc_occurrences_checked += 1
+
     report.checks["indexed_originals_verified"] = checked
-    report.checks["memberships_checked"] = len(membership_rows)
+    report.checks["email_source_occurrences_verified"] = email_sources_checked
+    report.checks["email_lineages_checked"] = len(email_ids)
     report.checks["attached_email_lineages_verified"] = attached_verified
+    report.checks["document_occurrences_verified"] = doc_occurrences_checked
 
 
 def _derived_path(ctx: PipelineContext, raw: str) -> Path:
@@ -342,52 +362,64 @@ def _verify_artifact(
 
 
 def _verify_artifacts(ctx: PipelineContext, report: VerificationReport) -> None:
+    """Confirm every emails/documents artifact path actually exists on disk,
+    hashing content-addressed copies against their owning sha256 where the
+    content identity IS the expected hash."""
     checked = 0
     for row in ctx.conn.execute(
-            "SELECT id, item_kind, body_text_path, body_full_text_path FROM items"):
-        required = [("text", row["body_text_path"])]
-        if row["item_kind"] == "email":
-            required.append(("full text", row["body_full_text_path"]))
-        for kind, raw in required:
+            "SELECT id, body_text_path, body_full_text_path FROM emails"):
+        for kind, raw in (("body text", row["body_text_path"]),
+                          ("full body text", row["body_full_text_path"])):
             if not raw:
-                _problem(report, f"item {row['id']}: missing {kind} path")
+                _problem(report, f"email {row['id']}: missing {kind} path")
                 continue
             if _verify_artifact(
-                    ctx, report, label=f"item {row['id']}", raw_path=raw):
+                    ctx, report, label=f"email {row['id']} {kind}",
+                    raw_path=raw):
                 checked += 1
+
     for row in ctx.conn.execute(
-            "SELECT item_id, extracted_copy_path, extracted_copy_sha256, "
-            "extracted_text_path, is_skipped FROM item_file_meta"):
-        if row["extracted_copy_path"] and _verify_artifact(
-                ctx, report, label=f"item file {row['item_id']} copy",
-                raw_path=row["extracted_copy_path"],
-                expected_sha=row["extracted_copy_sha256"]):
-            checked += 1
-        if not row["is_skipped"]:
-            if not row["extracted_text_path"]:
+            "SELECT id, sha256, extraction_method, extracted_text_path"
+            " FROM documents"):
+        source_dir = ctx.config.document_artifacts(str(row["sha256"])).source_dir
+        source_files = (
+            sorted(p for p in source_dir.glob("original*") if p.is_file())
+            if source_dir.is_dir() else [])
+        if not source_files:
+            _problem(
+                report,
+                f"document {row['id']}: missing source copy under "
+                f"{source_dir}")
+        else:
+            if len(source_files) > 1:
                 _problem(
                     report,
-                    f"item file {row['item_id']}: missing extracted text path")
-            elif _verify_artifact(
-                    ctx, report, label=f"item file {row['item_id']} text",
-                    raw_path=row["extracted_text_path"]):
-                checked += 1
-    for row in ctx.conn.execute(
-            "SELECT id, extracted_copy_path, extracted_copy_sha256, "
-            "extracted_text_path, is_skipped FROM attachments"):
-        if row["extracted_copy_path"] and _verify_artifact(
-                ctx, report, label=f"attachment {row['id']} copy",
-                raw_path=row["extracted_copy_path"],
-                expected_sha=row["extracted_copy_sha256"]):
-            checked += 1
-        if not row["is_skipped"]:
-            if not row["extracted_text_path"]:
+                    f"document {row['id']}: multiple source copies under "
+                    f"{source_dir}")
+            source_path = source_files[0]
+            try:
+                if sha256_file(source_path) != row["sha256"]:
+                    _problem(
+                        report,
+                        f"document {row['id']}: source copy hash mismatch "
+                        f"{source_path}")
+                else:
+                    checked += 1
+            except OSError as exc:
                 _problem(
                     report,
-                    f"attachment {row['id']}: missing extracted text path")
+                    f"document {row['id']}: cannot hash {source_path}: {exc}")
+
+        method = row["extraction_method"]
+        if method and method != "error":
+            text_path = row["extracted_text_path"]
+            if not text_path:
+                _problem(
+                    report,
+                    f"document {row['id']}: missing extracted text path")
             elif _verify_artifact(
-                    ctx, report, label=f"attachment {row['id']} text",
-                    raw_path=row["extracted_text_path"]):
+                    ctx, report, label=f"document {row['id']} text",
+                    raw_path=text_path):
                 checked += 1
     report.checks["derived_artifacts_verified"] = checked
 

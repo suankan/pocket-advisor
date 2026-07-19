@@ -1,14 +1,16 @@
-"""SQLite schema and connections — fresh Schema B, NO migration chain.
+"""SQLite schema and connections — fresh Schema C, NO migration chain.
 
-The clean-break refactor (`docs/design.md`) ships with a
-wipe + full re-ingest, so this module carries no legacy migrations.
-A database created by the retired engine is detected and refused
+Ingestion design v2 (`docs/features/ingestion-design-v2.md`) replaces the
+`item_kind`-conflated `items` table and the email-owned attachment cache
+with a normalized content-addressed evidence graph: unique `emails`, unique
+`documents`, and explicit source/attachment occurrence tables. This ships
+as a wipe + full re-ingest, so this module carries no legacy migrations.
+A database created by an earlier engine generation is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.
 
-Schema continuity: items / chunks / chunks_fts / threads and the transactions
-family keep their established names and columns; new in this schema are
-`ingestion_candidates` (the Stage 1 working set) and
-`items.parent_item_id` (attached-email lineage).
+Schema continuity: threads / chunks / chunks_fts and the transactions
+family keep their established names; `chunks`/`statements` now reference
+`email_id`/`document_id` instead of `item_id`.
 """
 import sqlite3
 from pathlib import Path
@@ -35,60 +37,68 @@ CREATE TABLE IF NOT EXISTS ingestion_candidates (
     UNIQUE (collection_id, sha256)
 );
 
-CREATE TABLE IF NOT EXISTS items (
-    id                  INTEGER PRIMARY KEY,
-    item_kind           TEXT NOT NULL DEFAULT 'email',
-    message_id          TEXT UNIQUE NOT NULL,
-    parent_item_id      INTEGER REFERENCES items(id),  -- attached-email lineage
-    reply_parent_item_id INTEGER REFERENCES items(id), -- conversation edge
-    date_utc            TEXT,
-    date_raw            TEXT,
-    from_name           TEXT,
-    from_addr           TEXT,
-    to_addrs            TEXT,
-    cc_addrs            TEXT,
-    subject             TEXT,
-    subject_normalized  TEXT,
-    in_reply_to         TEXT,
-    references_raw      TEXT,
-    thread_id           INTEGER REFERENCES threads(id),
-    thread_link_method  TEXT,
-    -- For emails these point to email_message.txt (authored/searchable)
-    -- and email_message_full.txt (lossless). Native PDFs continue to use
-    -- body_text_path for their extracted text artifact.
-    body_text_path      TEXT,
-    body_full_text_path TEXT,
-    body_quote_start    INTEGER,
+-- One row per unique raw email byte stream (top-level or attached).
+-- Identity is the raw-email sha256, never Message-ID (not globally unique).
+CREATE TABLE IF NOT EXISTS emails (
+    id                    INTEGER PRIMARY KEY,
+    sha256                TEXT NOT NULL UNIQUE,
+    message_id            TEXT,       -- native header, NOT unique: retained
+                                       -- and reviewable on collision
+    reply_parent_email_id INTEGER REFERENCES emails(id),  -- conversation edge
+    date_utc              TEXT,
+    date_raw              TEXT,
+    from_name             TEXT,
+    from_addr             TEXT,
+    to_addrs              TEXT,
+    cc_addrs              TEXT,
+    subject               TEXT,
+    subject_normalized    TEXT,
+    in_reply_to           TEXT,
+    references_raw        TEXT,
+    thread_id             INTEGER REFERENCES threads(id),
+    thread_link_method    TEXT,
+    -- email_message.txt (authored/searchable) and email_message_full.txt
+    -- (lossless), both under emails/<sha256>/.
+    body_text_path        TEXT,
+    body_full_text_path   TEXT,
+    body_quote_start      INTEGER,
     body_quote_boundary_method TEXT,
     body_compaction_method TEXT,
-    body_compaction_parent_item_id INTEGER REFERENCES items(id),
+    body_compaction_parent_email_id INTEGER REFERENCES emails(id),
     body_compaction_removed_chars INTEGER NOT NULL DEFAULT 0,
     body_compaction_version INTEGER,
-    body_source         TEXT,
-    charset_detected    TEXT,
-    has_parse_issue     INTEGER NOT NULL DEFAULT 0,
-    ingested_at         TEXT NOT NULL
+    body_source           TEXT,
+    charset_detected      TEXT,
+    has_parse_issue       INTEGER NOT NULL DEFAULT 0,
+    ingested_at           TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS item_memberships (
+-- Every top-level or recursively observed source occurrence that supplies
+-- an email byte stream (separates email identity from carrying paths).
+CREATE TABLE IF NOT EXISTS email_sources (
     id              INTEGER PRIMARY KEY,
-    item_id         INTEGER NOT NULL REFERENCES items(id),
+    email_id        INTEGER NOT NULL REFERENCES emails(id),
     workspace_id    TEXT,
-    collection_id   TEXT,
-    source_folder   TEXT NOT NULL DEFAULT '',
-    filename        TEXT NOT NULL DEFAULT '',
-    sha256          TEXT NOT NULL,
+    collection_id   TEXT NOT NULL,
+    relpath         TEXT NOT NULL,
     file_size_bytes INTEGER,
-    membership_kind TEXT NOT NULL DEFAULT 'email',
-    ingested_at     TEXT NOT NULL,
-    UNIQUE (collection_id, sha256)
+    discovered_at   TEXT NOT NULL,
+    UNIQUE (collection_id, relpath, email_id)
 );
 
--- Native-PDF extraction metadata (doc dates, OCR provenance).
-CREATE TABLE IF NOT EXISTS item_file_meta (
-    item_id               INTEGER PRIMARY KEY REFERENCES items(id),
-    extracted_copy_path   TEXT,
-    extracted_copy_sha256 TEXT,
+-- One row per unique retained binary object (SHA-256 within workspace).
+-- PDFs, images, zip archives, and other non-email attachments; a bank
+-- statement mounted directly in a collection is a document too. Absorbs
+-- the former item_file_meta extraction/OCR state, now 1:1 with content
+-- identity rather than per-occurrence.
+CREATE TABLE IF NOT EXISTS documents (
+    id                    INTEGER PRIMARY KEY,
+    sha256                TEXT NOT NULL UNIQUE,
+    media_kind            TEXT NOT NULL
+                          CHECK (media_kind IN
+                              ('pdf', 'image', 'zip', 'other')),
+    content_type          TEXT,
+    size_bytes            INTEGER NOT NULL,
     extraction_method     TEXT,
     extracted_text_path   TEXT,
     ocr_confidence        REAL,
@@ -100,27 +110,42 @@ CREATE TABLE IF NOT EXISTS item_file_meta (
     doc_date_detail       TEXT,
     doc_date_raw          TEXT,
     has_parse_issue       INTEGER NOT NULL DEFAULT 0,
-    processed_at          TEXT
+    processed_at          TEXT,
+    ingested_at           TEXT NOT NULL
 );
 
+-- Every native collection occurrence of a document (parallel to
+-- email_sources).
+CREATE TABLE IF NOT EXISTS document_sources (
+    id              INTEGER PRIMARY KEY,
+    document_id     INTEGER NOT NULL REFERENCES documents(id),
+    workspace_id    TEXT,
+    collection_id   TEXT NOT NULL,
+    relpath         TEXT NOT NULL,
+    file_size_bytes INTEGER,
+    discovered_at   TEXT NOT NULL,
+    UNIQUE (collection_id, relpath, document_id)
+);
+
+-- Pure occurrence/join row: one email-to-payload relationship. The
+-- payload is either a document (document_id) or a child message/rfc822
+-- email (child_email_id) — exactly one, never both, never neither.
+-- ZIP members are attachment rows linked through the carrying ZIP
+-- occurrence via parent_attachment_id (nesting/order preserved without
+-- copying into an email-owned folder).
 CREATE TABLE IF NOT EXISTS attachments (
-    id                    INTEGER PRIMARY KEY,
-    item_id               INTEGER NOT NULL REFERENCES items(id),
-    parent_attachment_id  INTEGER REFERENCES attachments(id),
-    filename              TEXT,
-    filename_raw          TEXT,
-    content_type          TEXT,
-    size_bytes            INTEGER,
-    sha256                TEXT NOT NULL,
-    extracted_copy_path   TEXT,
-    extracted_copy_sha256 TEXT,
-    extraction_method     TEXT,
-    extracted_text_path   TEXT,
-    ocr_confidence        REAL,
-    ocr_flagged_low_conf  INTEGER NOT NULL DEFAULT 0,
-    is_skipped            INTEGER NOT NULL DEFAULT 0,
-    skip_reason           TEXT,
-    processed_at          TEXT
+    id                   INTEGER PRIMARY KEY,
+    email_id             INTEGER NOT NULL REFERENCES emails(id),
+    document_id          INTEGER REFERENCES documents(id),
+    child_email_id       INTEGER REFERENCES emails(id),
+    parent_attachment_id INTEGER REFERENCES attachments(id),
+    filename             TEXT,
+    filename_raw         TEXT,
+    content_type         TEXT,
+    size_bytes           INTEGER,
+    ordinal              INTEGER NOT NULL DEFAULT 0,
+    ingested_at          TEXT NOT NULL,
+    CHECK ((document_id IS NOT NULL) + (child_email_id IS NOT NULL) = 1)
 );
 
 CREATE TABLE IF NOT EXISTS threads (
@@ -143,18 +168,21 @@ CREATE TABLE IF NOT EXISTS thread_summaries (
     generated_at    TEXT NOT NULL
 );
 
+-- source_type distinguishes email-body chunks from document-text chunks;
+-- exactly one of email_id/document_id is set.
 CREATE TABLE IF NOT EXISTS chunks (
     id               INTEGER PRIMARY KEY,
     source_type      TEXT NOT NULL,
-    item_id          INTEGER NOT NULL REFERENCES items(id),
-    attachment_id    INTEGER REFERENCES attachments(id),
+    email_id         INTEGER REFERENCES emails(id),
+    document_id      INTEGER REFERENCES documents(id),
     chunk_index      INTEGER NOT NULL,
     text             TEXT NOT NULL,
     char_start       INTEGER,
     char_end         INTEGER,
     embedded_at      TEXT,
     translit_shadow  TEXT,
-    payload_shadow   TEXT
+    payload_shadow   TEXT,
+    CHECK ((email_id IS NOT NULL) + (document_id IS NOT NULL) = 1)
 );
 
 -- R-04b structured transactions
@@ -185,7 +213,7 @@ CREATE TABLE IF NOT EXISTS account_owners (
 
 CREATE TABLE IF NOT EXISTS statements (
     id                    INTEGER PRIMARY KEY,
-    item_id               INTEGER NOT NULL REFERENCES items(id),
+    document_id           INTEGER NOT NULL REFERENCES documents(id),
     account_id            INTEGER REFERENCES accounts(id),
     period_start          TEXT,
     period_end            TEXT,
@@ -198,7 +226,7 @@ CREATE TABLE IF NOT EXISTS statements (
     pdf_modified          TEXT,
     parsed_at             TEXT,
     excluded              INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (item_id, account_id, period_start)
+    UNIQUE (document_id, account_id, period_start)
 );
 
 CREATE TABLE IF NOT EXISTS statement_assertions (
@@ -267,25 +295,39 @@ CREATE TABLE IF NOT EXISTS source_blob_index (
     size_bytes            INTEGER,
     mtime_ns              INTEGER,
     indexed_at            TEXT NOT NULL,
-    PRIMARY KEY (source_id, sha256)
+    PRIMARY KEY (source_id, sha256, relpath_within_source)
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_status
     ON ingestion_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_candidates_type
     ON ingestion_candidates(document_type);
-CREATE INDEX IF NOT EXISTS idx_items_date ON items(date_utc);
-CREATE INDEX IF NOT EXISTS idx_items_thread ON items(thread_id);
-CREATE INDEX IF NOT EXISTS idx_items_kind ON items(item_kind);
-CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_item_id);
-CREATE INDEX IF NOT EXISTS idx_items_reply_parent
-    ON items(reply_parent_item_id);
-CREATE INDEX IF NOT EXISTS idx_memberships_item ON item_memberships(item_id);
-CREATE INDEX IF NOT EXISTS idx_memberships_collection
-    ON item_memberships(collection_id);
-CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments(item_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);
+CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date_utc);
+CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
+CREATE INDEX IF NOT EXISTS idx_emails_reply_parent
+    ON emails(reply_parent_email_id);
+CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
+CREATE INDEX IF NOT EXISTS idx_email_sources_email ON email_sources(email_id);
+CREATE INDEX IF NOT EXISTS idx_email_sources_collection
+    ON email_sources(collection_id);
+CREATE INDEX IF NOT EXISTS idx_documents_media_kind
+    ON documents(media_kind);
+CREATE INDEX IF NOT EXISTS idx_document_sources_document
+    ON document_sources(document_id);
+CREATE INDEX IF NOT EXISTS idx_document_sources_collection
+    ON document_sources(collection_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_document
+    ON attachments(document_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_child_email
+    ON attachments(child_email_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_parent
+    ON attachments(parent_attachment_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_email ON chunks(email_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_statements_account ON statements(account_id);
+CREATE INDEX IF NOT EXISTS idx_statements_document
+    ON statements(document_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_stmt
     ON transactions(statement_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_acct_date
@@ -357,10 +399,21 @@ AFTER UPDATE ON thread_summaries BEGIN
 END;
 """
 
-# Tables/columns that only the retired pipeline created. Their
+# Tables/columns that only an earlier pipeline generation created. Their
 # presence means the DB predates this schema and must be wiped, not
 # patched — this module deliberately has no migration chain.
-_LEGACY_TABLES = ("emails", "email_files", "documents", "page_images")
+#
+# NOTE: `emails` and `documents` are THIS schema's own table names (an
+# even earlier, pre-`items` engine generation used those same names with
+# an incompatible shape — `email_files`/`page_images` were its other
+# markers). We cannot use table-name presence alone to detect the
+# schema generation this cutover retires, because `attachments` is
+# reused across both generations with a different column set. So legacy
+# detection here checks: (a) the retired `items`/`item_memberships`/
+# `item_file_meta` table names, and (b) an `attachments` table that
+# lacks the current `document_id` column (the pre-cutover shape).
+_LEGACY_TABLES = ("items", "item_memberships", "item_file_meta",
+                  "email_files", "page_images")
 
 
 class LegacyDatabaseError(SystemExit):
@@ -437,15 +490,29 @@ class Database:
             raise LegacyDatabaseError(
                 self.path, self.workspace_id,
                 "workspace binding metadata missing")
-        if "items" in tables:
+        if "attachments" in tables:
             columns = {row["name"] for row in
-                       conn.execute("PRAGMA table_info(items)")}
-            required = {"parent_item_id", "reply_parent_item_id"}
+                       conn.execute("PRAGMA table_info(attachments)")}
+            if "document_id" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, self.workspace_id,
+                    "attachments predates the content-addressed evidence"
+                    " graph (missing document_id)")
+        if "emails" in tables:
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(emails)")}
+            required = {"sha256"}
             missing = required - columns
             if missing:
                 raise LegacyDatabaseError(
                     self.path, self.workspace_id,
-                    "items missing " + ", ".join(sorted(missing)))
+                    "emails missing " + ", ".join(sorted(missing)))
+        if "documents" in tables:
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(documents)")}
+            if "sha256" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, self.workspace_id, "documents missing sha256")
         if "threads" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(threads)")}
@@ -458,10 +525,12 @@ class Database:
         if "chunks" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(chunks)")}
-            if "payload_shadow" not in columns:
+            required = {"payload_shadow", "email_id", "document_id"}
+            missing = required - columns
+            if missing:
                 raise LegacyDatabaseError(
                     self.path, self.workspace_id,
-                    "chunks missing payload_shadow")
+                    "chunks missing " + ", ".join(sorted(missing)))
         if "chunks_fts" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(chunks_fts)")}
@@ -486,8 +555,8 @@ class Database:
 
     def _verify_workspace_rows(
             self, conn: sqlite3.Connection, tables: set[str]) -> None:
-        for table in ("ingestion_candidates", "item_memberships",
-                      "source_blob_index"):
+        for table in ("ingestion_candidates", "email_sources",
+                      "document_sources", "source_blob_index"):
             if table not in tables:
                 continue
             row = conn.execute(

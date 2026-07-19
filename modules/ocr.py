@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,21 @@ class PdfRecipes:
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: set[subprocess.Popen[bytes]] = set()
 
+# Set on Ctrl+C / SIGTERM so in-flight workers stop pulling new work and
+# long subprocess waits return promptly.  One-shot per process lifetime;
+# the pipeline does not resume a cancelled run.
+_INTERRUPTED = threading.Event()
+
+
+def request_interrupt() -> None:
+    """Signal the pipeline that an interrupt arrived; idempotent."""
+    _INTERRUPTED.set()
+
+
+def is_interrupted() -> bool:
+    """True once an interrupt has been requested."""
+    return _INTERRUPTED.is_set()
+
 
 class OcrError(RuntimeError):
     """ocrmypdf or pdftotext failed for one file."""
@@ -57,7 +73,7 @@ def run_command(args: list[str],
         _ACTIVE_PROCESSES.add(process)
     try:
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = _communicate_until_done(process, timeout)
         except subprocess.TimeoutExpired:
             _terminate_process(process)
             stdout, stderr = process.communicate()
@@ -67,6 +83,29 @@ def run_command(args: list[str],
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROCESSES.discard(process)
+
+
+def _communicate_until_done(
+        process: subprocess.Popen[bytes], timeout: int,
+) -> tuple[bytes, bytes]:
+    """communicate() that also bails early when an interrupt is requested.
+
+    A plain communicate(timeout=) blocks until the child exits or the timeout
+    elapses; on Ctrl+C we want to stop waiting promptly so the worker can
+    unwind instead of finishing a long OCR job we no longer need.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        if is_interrupted():
+            _terminate_process(process)
+            return process.communicate()
+        try:
+            return process.communicate(timeout=min(remaining, 0.25))
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:
@@ -90,6 +129,7 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
 
 def cancel_active_commands() -> None:
     """Terminate Stage 3 child process groups after an interrupt."""
+    _INTERRUPTED.set()
     with _ACTIVE_LOCK:
         active = tuple(_ACTIVE_PROCESSES)
     for process in active:
@@ -132,8 +172,11 @@ def pdf_recipes(*, langs: str) -> PdfRecipes:
         "recipe_version": OCR_RECIPE_VERSION,
         "ocrmypdf": {
             "version": _tool_version(["ocrmypdf", "--version"]),
+            # Nested OCR process pools are forbidden: each Stage 3 worker
+            # runs exactly one ocrmypdf child with --jobs 1
+            # (docs/features/pdf-to-text-pipeline-design.md).
             "args": ["--redo-ocr", "--clean", "--output-type", "pdf",
-                     "--optimize", "0", "--language", langs],
+                      "--optimize", "0", "--language", langs, "--jobs", "1"],
         },
         "accept_nonzero_output_for_text_gate": True,
         "fallback_to_verified_original_when_derivative_missing": True,

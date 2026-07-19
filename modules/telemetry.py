@@ -143,6 +143,7 @@ class PdfsTimings:
     ocr_process_total: float = 0.0
     text_process_total: float = 0.0
     fan_out_publication: float = 0.0
+    queue_wait_total: float = 0.0
 
 
 @dataclass(slots=True)
@@ -150,11 +151,15 @@ class PdfsTelemetry:
     state: str = NOT_RUN
     occurrences_considered: int = 0
     pending_occurrences: int = 0
+    pending_admission_bytes: int = 0
     unique_transforms: int = 0
     successful_transforms: int = 0
     failed_transforms: int = 0
     duplicate_reuses: int = 0
+    text_only_rebuilds: int = 0
+    unchanged_documents: int = 0
     direct_original_fallbacks: int = 0
+    ocr_warning_documents: int = 0
     fan_out: PdfFanOut = field(default_factory=PdfFanOut)
     resources: PdfResources = field(default_factory=PdfResources)
     timings_seconds: PdfsTimings = field(default_factory=PdfsTimings)
@@ -351,9 +356,11 @@ def _validate_embed(obj: EmbedTelemetry) -> None:
 
 
 _PDF_COUNTS = (
-    "occurrences_considered", "pending_occurrences", "unique_transforms",
+    "occurrences_considered", "pending_occurrences", "pending_admission_bytes",
+    "unique_transforms",
     "successful_transforms", "failed_transforms", "duplicate_reuses",
-    "direct_original_fallbacks",
+    "text_only_rebuilds", "unchanged_documents",
+    "direct_original_fallbacks", "ocr_warning_documents",
 )
 
 
@@ -371,6 +378,11 @@ def _validate_pdfs(obj: PdfsTelemetry) -> None:
     if resources.process_tree_peak_rss_bytes is not None:
         _check_count(resources.process_tree_peak_rss_bytes,
                      f"{where}.resources.process_tree_peak_rss_bytes")
+    if resources.configured_per_child_jobs != 1 \
+            and resources.configured_worker_count > 0:
+        raise TelemetryError(
+            f"{where}: PDF workers must use ocrmypdf --jobs 1"
+            f" (got {resources.configured_per_child_jobs})")
     if resources.configured_worker_count \
             * resources.configured_per_child_jobs \
             > resources.configured_global_cpu_budget:
@@ -395,6 +407,9 @@ def _validate_pdfs(obj: PdfsTelemetry) -> None:
         raise TelemetryError(
             f"{where}: pending occurrences must equal unique transforms plus"
             " duplicate reuses")
+    if obj.state == MEASURED and obj.text_only_rebuilds > obj.successful_transforms:
+        raise TelemetryError(
+            f"{where}: text-only rebuilds cannot exceed successful transforms")
     if obj.state == PARTIAL and outcomes > obj.unique_transforms:
         raise TelemetryError(
             f"{where}: a partial record may not claim more transform"

@@ -219,16 +219,27 @@ def test_orchestration() -> None:
         ("embed", "skipped"), ("transactions", "skipped")]
     assert context.conn.closed
 
-    for stage in ("embed", "summaries", "transactions"):
+    for stage, expected in (
+            ("discover", ["discover"]),
+            ("emails", ["discover", "emails"]),
+            ("pdfs", ["discover", "emails", "pdfs"]),
+            ("summaries",
+             ["discover", "emails", "pdfs", "thread", "summaries"]),
+            ("embed",
+             ["discover", "emails", "pdfs", "thread", "summaries", "embed"]),
+            ("transactions",
+             ["discover", "emails", "pdfs", "thread", "summaries",
+              "embed", "transactions"]),
+    ):
         executed.clear()
         selection = fake_selection(embed=False, bank=False)
         context = fake_context(embed=False, bank=False)
         with patch.object(cli, "_open_context", return_value=context), \
                 patch.object(cli, "_execute_stage",
-                             side_effect=lambda _, name:
+                             side_effect=lambda _, name, **kwargs:
                              record_stage(executed, name)):
             cli.run_ingest(stage, selection)
-        assert executed == [stage]
+        assert executed == expected, (stage, executed)
 
 
 def test_ingest_reporting_failures_and_timings() -> None:
@@ -392,7 +403,7 @@ def test_ingest_report_display(tmp: Path) -> None:
 
     config = SimpleNamespace(project_root=tmp, logs_dir=tmp / "logs")
     report = IngestRunReport(
-        schema_version=2,
+        schema_version=3,
         workspace_id="matter-x",
         started_at="2026-07-18T00:00:00+00:00",
         ended_at="2026-07-18T00:00:05+00:00",

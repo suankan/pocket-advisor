@@ -102,19 +102,27 @@ class TextProduct:
     ocr: OcrProduct
 
 
+# Each worker process always runs OCR with a single child thread
+# (pdf-to-text-pipeline-design.md). Nested --jobs pools are forbidden.
+OCR_CHILD_JOBS = 1
+
+
 @dataclass(frozen=True, slots=True)
 class TransformRequest:
+    document_id: int
     source_sha256: str
     source_path: Path
     recipes: PdfRecipes
     cached_ocr: OcrProduct | None
     work_dir: Path
     langs: str
-    ocrmypdf_jobs: int
+    source_bytes: int
+    queued_at: float
 
 
 @dataclass(frozen=True, slots=True)
 class TransformResult:
+    document_id: int
     source_sha256: str
     derivative_temp: Path | None
     text_temp: Path | None
@@ -123,14 +131,20 @@ class TransformResult:
     used_cached_ocr: bool
     ocr_seconds: float
     text_seconds: float
+    queue_wait_seconds: float
     started_at: float
     finished_at: float
     error: str | None
 
 
 def run_transform(request: TransformRequest) -> TransformResult:
-    """Worker entrypoint: OCR if needed, then run the authoritative text gate."""
+    """Worker entrypoint: OCR if needed, then run the authoritative text gate.
+
+    Opens no database and never publishes final paths. Always invokes
+    ``ocrmypdf --jobs 1`` when OCR is required.
+    """
     started = time.monotonic()
+    queue_wait = max(0.0, started - request.queued_at)
     ocr_seconds = text_seconds = 0.0
     derivative: Path | None = None
     warning: str | None = None
@@ -153,7 +167,7 @@ def run_transform(request: TransformRequest) -> TransformResult:
             try:
                 warning = ocr_to_derivative(
                     request.source_path, candidate, langs=request.langs,
-                    jobs=request.ocrmypdf_jobs)
+                    jobs=OCR_CHILD_JOBS)
             finally:
                 ocr_seconds = time.monotonic() - ocr_started
             derivative = candidate if candidate.is_file() else None
@@ -169,25 +183,27 @@ def run_transform(request: TransformRequest) -> TransformResult:
         finally:
             text_seconds = time.monotonic() - text_started
         return TransformResult(
+            document_id=request.document_id,
             source_sha256=request.source_sha256,
             derivative_temp=derivative if not used_cached else None,
             text_temp=text_path, warning=warning,
             direct_original_fallback=direct_fallback,
             used_cached_ocr=used_cached, ocr_seconds=ocr_seconds,
-            text_seconds=text_seconds, started_at=started,
-            finished_at=time.monotonic(), error=None)
+            text_seconds=text_seconds, queue_wait_seconds=queue_wait,
+            started_at=started, finished_at=time.monotonic(), error=None)
     except (CustodyError, OcrError, OSError, ValueError) as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if warning:
             detail = f"{warning}; {detail}"
         return TransformResult(
+            document_id=request.document_id,
             source_sha256=request.source_sha256,
             derivative_temp=derivative if not used_cached else None,
             text_temp=None, warning=warning,
             direct_original_fallback=direct_fallback,
             used_cached_ocr=used_cached, ocr_seconds=ocr_seconds,
-            text_seconds=text_seconds, started_at=started,
-            finished_at=time.monotonic(),
+            text_seconds=text_seconds, queue_wait_seconds=queue_wait,
+            started_at=started, finished_at=time.monotonic(),
             error=detail)
 
 

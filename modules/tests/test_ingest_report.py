@@ -246,13 +246,17 @@ def fill_measured_telemetry(ctx: PipelineContext) -> None:
     pdfs.state = "measured"
     pdfs.occurrences_considered = 2
     pdfs.pending_occurrences = 2
+    pdfs.pending_admission_bytes = 4096
     pdfs.unique_transforms = 2
     pdfs.successful_transforms = 1
     pdfs.failed_transforms = 1
     pdfs.duplicate_reuses = 0
+    pdfs.text_only_rebuilds = 0
+    pdfs.unchanged_documents = 0
     pdfs.direct_original_fallbacks = 1
+    pdfs.ocr_warning_documents = 0
     pdfs.resources.configured_worker_count = 1
-    pdfs.resources.configured_per_child_jobs = 10
+    pdfs.resources.configured_per_child_jobs = 1
     pdfs.resources.configured_global_cpu_budget = 10
     pdfs.resources.observed_peak_workers = 1
     pdfs.timings_seconds.transform_wall = 2.5
@@ -263,13 +267,25 @@ def fill_measured_telemetry(ctx: PipelineContext) -> None:
 def test_pdf_telemetry_reconciliation(ctx: PipelineContext) -> None:
     fill_measured_telemetry(ctx)
     pdfs = ctx.telemetry.pdfs
-    pdfs.resources.configured_worker_count = 2
+    pdfs.resources.configured_per_child_jobs = 2
+    try:
+        ctx.telemetry.validate()
+    except TelemetryError as exc:
+        assert "ocrmypdf --jobs 1" in str(exc)
+    else:
+        raise AssertionError("nested OCR child jobs were accepted")
+
+    fill_measured_telemetry(ctx)
+    pdfs = ctx.telemetry.pdfs
+    pdfs.resources.configured_worker_count = 4
+    pdfs.resources.configured_per_child_jobs = 1
+    pdfs.resources.configured_global_cpu_budget = 2
     try:
         ctx.telemetry.validate()
     except TelemetryError as exc:
         assert "exceeds global CPU budget" in str(exc)
     else:
-        raise AssertionError("nested OCR oversubscription was accepted")
+        raise AssertionError("worker oversubscription was accepted")
 
     fill_measured_telemetry(ctx)
     ctx.telemetry.pdfs.duplicate_reuses = 1
@@ -334,7 +350,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     raw = path.read_text(encoding="utf-8")
     assert SECRET not in raw
     payload = json.loads(raw)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["workspace_id"] == "report-test"
     assert payload["snapshot"]["search"]["leaf_vectors"] == 3
     assert payload["record_path"].endswith(".json")
@@ -347,6 +363,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert performance["embed"]["queues"]["leaf"]["input_tokens"] == 900
     assert performance["pdfs"]["resources"][
         "process_tree_peak_rss_bytes"] is None
+    assert performance["pdfs"]["pending_admission_bytes"] == 4096
     assert performance["pdfs"]["timings_seconds"]["transform_wall"] == 2.5
     # The persisted record round-trips the complete typed telemetry.
     loaded = load_report(path)
@@ -357,8 +374,8 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
         in rendered
     assert "embed         measured — 3 leaf + 1 summary pending, 4 published" \
         in rendered
-    assert "pdfs          measured — 2 occurrences / 2 unique, workers=1" \
-        " jobs=10" in rendered
+    assert "pdfs          measured — 2 docs / 2 unique, 4096B, workers=1" \
+        "×jobs=1" in rendered
     assert format_report(loaded, path) == rendered
     assert "3 leaf + 1 navigation vectors" in rendered
     assert "single_account_unverifiable=1" in rendered
@@ -545,7 +562,8 @@ workspaces:
     assert performance["pdfs"]["state"] == "measured"
     assert performance["pdfs"]["pending_occurrences"] == 0
     assert "summaries     not_applicable" in rendered
-    assert "pdfs          measured — 0 occurrences / 0 unique" in rendered
+    assert "pdfs          measured — 0 docs / 0 unique, 0B, workers=0" \
+        "×jobs=1" in rendered
 
 
 def main() -> int:

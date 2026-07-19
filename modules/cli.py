@@ -12,14 +12,16 @@ from typing import Any
 from modules.config import Config
 from modules.database import Database
 from modules.domain import StageStats
+from modules.ocr import request_interrupt
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import ReviewLog
 from modules.workspace import Registry, Workspace
 
 
 ROOT = Path(__file__).resolve().parent.parent
-INGEST_STAGES = (
-    "all",
+# Ordered pipeline stages (CLI orchestration only). A named stage runs this
+# prefix through itself so prerequisites are always satisfied.
+PIPELINE_STAGES = (
     "discover",
     "emails",
     "pdfs",
@@ -28,6 +30,7 @@ INGEST_STAGES = (
     "embed",
     "transactions",
 )
+INGEST_STAGES = ("all",) + PIPELINE_STAGES
 @dataclass(frozen=True, slots=True)
 class RuntimeSelection:
     """Validated workspace selection, resolved before any command effects."""
@@ -127,6 +130,15 @@ def _stage_class(name: str) -> type[Stage]:
             raise ValueError(f"unknown pipeline stage: {name}")
 
 
+def _stage_prefix(stage: str) -> tuple[str, ...]:
+    """Return discover..stage inclusive. Named ingest runs this full prefix."""
+    try:
+        index = PIPELINE_STAGES.index(stage)
+    except ValueError as exc:
+        raise ValueError(f"unknown pipeline stage: {stage}") from exc
+    return PIPELINE_STAGES[: index + 1]
+
+
 def _execute_stage(
         ctx: PipelineContext, name: str, *, force_transactions: bool = False,
 ) -> StageStats:
@@ -213,10 +225,14 @@ def run_ingest(
         raise
     try:
         if stage != "all":
-            if force_transactions:
-                _execute_stage(ctx, stage, force_transactions=True)
-            else:
-                _execute_stage(ctx, stage)
+            # Named stage: run every prerequisite through the target
+            # (discover … stage). Gates for embed/transactions apply only to
+            # `ingest all`; an explicit named stage always executes its chain.
+            for name in _stage_prefix(stage):
+                _execute_stage(
+                    ctx, name,
+                    force_transactions=force_transactions
+                    and name == "transactions")
             return 0
 
         from modules.ingest_report import STAGE_ORDER, StageRun
@@ -233,6 +249,7 @@ def run_ingest(
             try:
                 stats = _execute_stage(ctx, name)
             except BaseException as exc:
+                request_interrupt()
                 stages.append(StageRun(
                     name=name,
                     outcome="failed",
@@ -679,8 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
         "ingest",
         help=_HELP["ingest"],
         description=(
-            "Run all pipeline stages or exactly one named stage. A named "
-            "stage assumes earlier artifacts already exist. 'ingest report' "
+            "Run all pipeline stages or one named stage together with every "
+            "prerequisite stage in order (e.g. 'ingest pdfs' runs discover, "
+            "emails, then pdfs). Stages are idempotent. 'ingest report' "
             "re-renders a saved full-ingest run record instead of running "
             "anything (default: the workspace's latest record)."),
     )
@@ -817,4 +835,10 @@ def main(argv: list[str] | None = None) -> int:
             f"{label}: --workspace is not accepted for this "
             "workspace-free action")
     handler: Callable[[argparse.Namespace], Any] = args.handler
-    return int(handler(args) or 0)
+    try:
+        return int(handler(args) or 0)
+    except KeyboardInterrupt:
+        # Ctrl+C already unwinds the pipeline cleanly via the interrupt flag;
+        # suppress the traceback and exit with the conventional SIGINT code.
+        print("\nKeyboardInterrupt — interrupted", file=sys.stderr)
+        return 130

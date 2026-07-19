@@ -33,9 +33,11 @@ PDF gets one too. Weak sources (filename/mtime) are review-flagged for
 verification.
 """
 import os
+import queue
 import tempfile
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,16 +45,20 @@ from pathlib import Path
 from modules.custody import CustodyError, sha256_bytes, sha256_file, write_verified
 from modules.docdates import extract_document_date
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
-from modules.ocr import PdfRecipes, cancel_active_commands, pdf_recipes
-from modules.pdf_transforms import (PdfTransformCache, TextProduct,
-                                    TransformRequest, TransformResult,
-                                    run_transform)
+from modules.ocr import (
+    PdfRecipes,
+    cancel_active_commands,
+    is_interrupted,
+    pdf_recipes,
+    request_interrupt,
+)
+from modules.pdf_transforms import (OCR_CHILD_JOBS, PdfTransformCache,
+                                    TextProduct, TransformRequest,
+                                    TransformResult, run_transform)
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
-from modules.progress import Progress
+from modules.progress import Progress, WorkerPoolProgress
 from modules.review import now_iso
-
-_PDF_WORKER_LIMIT = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,7 @@ class _PendingPdf:
     sha256: str
     extraction_method: str | None
     extracted_text_path: str | None
+    size_bytes: int
 
     @property
     def label(self) -> str:
@@ -159,13 +166,15 @@ class PdfTextStage(Stage):
 
     def _pdf_documents(self) -> list[_PendingPdf]:
         rows = self.conn.execute(
-            "SELECT id, sha256, extraction_method, extracted_text_path"
+            "SELECT id, sha256, extraction_method, extracted_text_path,"
+            " size_bytes"
             " FROM documents WHERE media_kind = 'pdf' AND is_skipped = 0"
             " ORDER BY id").fetchall()
         return [_PendingPdf(
             document_id=int(row["id"]), sha256=row["sha256"],
             extraction_method=row["extraction_method"],
-            extracted_text_path=row["extracted_text_path"])
+            extracted_text_path=row["extracted_text_path"],
+            size_bytes=int(row["size_bytes"] or 0))
             for row in rows]
 
     def _document_current(self, doc: _PendingPdf,
@@ -216,18 +225,8 @@ class PdfTextStage(Stage):
         recipes = pdf_recipes(langs=self.config.ocr_langs)
         all_docs = self._pdf_documents()
         perf = self.ctx.telemetry.pdfs
-        # Previously counted occurrence rows (attachment + native could
-        # both point at one source SHA-256); now every unique PDF is
-        # exactly one documents row, so this is simply the number of PDF
-        # documents in the workspace.
+        # Every unique PDF is exactly one documents row.
         perf.occurrences_considered = len(all_docs)
-        # perf.fan_out.copies (and .copy_on_write_clones) stay permanently
-        # 0 now: the per-occurrence copy-back-into-email/collection-folder
-        # fan-out they counted no longer exists — every occurrence reads
-        # the one canonical transforms_dir product directly. The field is
-        # kept (not renamed) because modules/telemetry.py's schema is a
-        # shared contract with ingest_report.py, which is being rewritten
-        # against it in parallel.
 
         caches = {doc.sha256: PdfTransformCache(
             self.config.document_artifacts(doc.sha256).transforms_dir)
@@ -237,9 +236,11 @@ class PdfTextStage(Stage):
             for doc in all_docs}
 
         pending: list[_PendingPdf] = []
+        unchanged = 0
         for doc in all_docs:
             if self._document_current(doc, products[doc.sha256],
                                       recipes.combined):
+                unchanged += 1
                 continue
             pending.append(doc)
             if doc.extraction_method not in (
@@ -247,9 +248,14 @@ class PdfTextStage(Stage):
                 stats.inc("recipe_stale")
 
         perf.pending_occurrences = len(pending)
-        progress = Progress("pdf to text", total=len(pending))
+        perf.unchanged_documents = unchanged
+        perf.pending_admission_bytes = sum(doc.size_bytes for doc in pending)
         if not pending:
-            progress.done()
+            # Empty convergence still records the locked worker contract.
+            _, budget = self._worker_topology(0)
+            perf.resources.configured_worker_count = 0
+            perf.resources.configured_per_child_jobs = OCR_CHILD_JOBS
+            perf.resources.configured_global_cpu_budget = budget
             return
 
         transform_started = time.monotonic()
@@ -257,10 +263,16 @@ class PdfTextStage(Stage):
         with tempfile.TemporaryDirectory(
                 prefix="pdf-stage-", dir=self.config.runtime_dir) as raw_work:
             work_root = Path(raw_work)
+            # Largest first for better dynamic balance across workers.
+            pending_work = sorted(
+                pending, key=lambda doc: (-doc.size_bytes, doc.document_id))
             requests: dict[str, TransformRequest] = {}
             errors: dict[str, str] = {}
-            for index, doc in enumerate(pending):
+            queued_at = time.monotonic()
+            for index, doc in enumerate(pending_work):
                 if products[doc.sha256] is not None:
+                    # Product exists under identity but path/method drifted —
+                    # still a publication without a fresh external transform.
                     continue
                 source_path = self._verified_document_source(doc)
                 if source_path is None:
@@ -269,31 +281,35 @@ class PdfTextStage(Stage):
                         " matches its recorded SHA-256")
                     continue
                 requests[doc.sha256] = TransformRequest(
+                    document_id=doc.document_id,
                     source_sha256=doc.sha256, source_path=source_path,
                     recipes=recipes,
                     cached_ocr=caches[doc.sha256].load_ocr(
                         doc.sha256, recipes.ocr),
                     work_dir=work_root / f"job-{index:06d}-{doc.sha256[:12]}",
-                    langs=self.config.ocr_langs, ocrmypdf_jobs=1)
+                    langs=self.config.ocr_langs,
+                    source_bytes=doc.size_bytes,
+                    queued_at=queued_at)
 
             needed = sum(
                 1 for doc in pending if products[doc.sha256] is None)
             perf.unique_transforms = needed
             perf.failed_transforms += needed - len(requests)
-            # Every unique PDF is already its own documents row, so the
-            # old "same content, multiple occurrences" duplicate concept
-            # is gone; this now counts pending documents whose product was
-            # already fully cached (e.g. a resumed/idempotent re-run) and
-            # so needed no fresh transform.
+            # Resumed/idempotent path: product already on disk under current
+            # recipes but documents row not yet pointed at it.
             perf.duplicate_reuses = max(0, len(pending) - needed)
-            results = self._run_transforms(requests, progress)
+            results = self._run_transforms(requests)
             self._publish_transform_results(
                 results, requests, recipes, caches, products, errors)
 
-            for doc in pending:
+            # Coordinator publication is deterministic by document_id.
+            publish_total = sum(
+                1 for doc in pending if doc.sha256 not in requests)
+            publish = Progress("pdf publish", total=publish_total) \
+                if publish_total else None
+            for doc in sorted(pending, key=lambda item: item.document_id):
                 product = products.get(doc.sha256)
                 error = errors.get(doc.sha256)
-                progress.start(note=doc.label)
                 if product is None:
                     self._record_document_error(
                         doc, error or "PDF transform failed", stats)
@@ -304,67 +320,105 @@ class PdfTextStage(Stage):
                     except (CustodyError, OSError, ValueError) as exc:
                         self._record_document_error(
                             doc, f"{type(exc).__name__}: {exc}", stats)
-                progress.step(note=doc.label)
+                if publish is not None and doc.sha256 not in requests:
+                    publish.step(note=doc.label)
+            if publish is not None:
+                publish.done()
 
-        progress.done()
         perf.timings_seconds.transform_wall += \
             time.monotonic() - transform_started
 
-    @staticmethod
-    def _topology(unique_transforms: int) -> tuple[int, int, int]:
+    def _worker_topology(self, unique_transforms: int) -> tuple[int, int]:
+        """Return (worker_count, cpu_budget).
+
+        Worker count is a political decision: spawn up to the full CPU core
+        count so every available core does OCR work (each ocrmypdf child runs
+        --jobs 1, so the pool itself is the sole parallelism axis). No
+        operator knob — measured scaling is linear and there was no memory
+        pressure even on hundreds of PDFs.
+        """
         budget = max(1, os.process_cpu_count() or 1)
         if unique_transforms <= 0:
-            return 0, 0, budget
-        workers = min(_PDF_WORKER_LIMIT, budget, unique_transforms)
-        return workers, max(1, budget // workers), budget
+            return 0, budget
+        workers = min(budget, unique_transforms)
+        return workers, budget
 
-    def _run_transforms(self, requests: dict[str, TransformRequest],
-                        progress: Progress) -> dict[str, TransformResult]:
+    def _run_transforms(
+            self, requests: dict[str, TransformRequest],
+    ) -> dict[str, TransformResult]:
+        """Byte-ordered work-stealing pool; workers never touch SQLite."""
         perf = self.ctx.telemetry.pdfs
-        workers, child_jobs, budget = self._topology(len(requests))
+        workers, budget = self._worker_topology(len(requests))
         perf.resources.configured_worker_count = workers
-        perf.resources.configured_per_child_jobs = child_jobs
+        perf.resources.configured_per_child_jobs = OCR_CHILD_JOBS
         perf.resources.configured_global_cpu_budget = budget
         if not requests:
             return {}
-        adjusted = {
-            source_sha: TransformRequest(
-                source_sha256=request.source_sha256,
-                source_path=request.source_path, recipes=request.recipes,
-                cached_ocr=request.cached_ocr, work_dir=request.work_dir,
-                langs=request.langs, ocrmypdf_jobs=child_jobs)
-            for source_sha, request in requests.items()}
+
+        work: queue.Queue[TransformRequest | None] = queue.Queue()
+        for request in requests.values():
+            work.put(request)
+        for _ in range(workers):
+            work.put(None)
+
         results: dict[str, TransformResult] = {}
+        results_lock = threading.Lock()
+        peak_lock = threading.Lock()
+        active = peak = 0
+        progress = WorkerPoolProgress(
+            "pdf to text", worker_count=workers, total=len(requests))
+
+        def _worker(worker_id: int) -> None:
+            nonlocal active, peak
+            while True:
+                if is_interrupted():
+                    # Stop pulling new work; drain sentinels so the pool
+                    # can shut down without waiting on queued PDFs.
+                    while True:
+                        item = work.get()
+                        if item is None:
+                            return
+                request = work.get()
+                if request is None:
+                    return
+                with peak_lock:
+                    active += 1
+                    peak = max(peak, active)
+                note = f"transform {request.source_sha256[:12]}"
+                progress.begin(worker_id, note)
+                try:
+                    result = run_transform(request)
+                finally:
+                    with peak_lock:
+                        active -= 1
+                with results_lock:
+                    results[request.source_sha256] = result
+                progress.finish(worker_id, note)
+
         executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pdf-transform")
-        futures = {executor.submit(run_transform, request): source_sha
-                   for source_sha, request in adjusted.items()}
+        futures = [
+            executor.submit(_worker, worker_id)
+            for worker_id in range(workers)]
         try:
-            for future in as_completed(futures):
-                source_sha = futures[future]
-                progress.start(note=f"transform {source_sha[:12]}")
-                results[source_sha] = future.result()
-        except BaseException:
-            cancel_active_commands()
             for future in futures:
-                future.cancel()
+                future.result()
+        except BaseException:
+            request_interrupt()
+            cancel_active_commands()
+            # cancel_futures drops queued (not-yet-started) transforms so we
+            # do not keep processing PDFs after Ctrl+C; workers unwind once
+            # their in-flight child processes are terminated above.
             executor.shutdown(wait=True, cancel_futures=True)
             raise
         else:
             executor.shutdown(wait=True)
-        events = [
-            event
-            for result in results.values()
-            for event in ((result.started_at, 1),
-                          (result.finished_at, -1))
-        ]
-        active = peak = 0
-        # A zero-duration synthetic/test result starts before it finishes.
-        for _, delta in sorted(events, key=lambda event: (
-                event[0], -event[1])):
-            active += delta
-            peak = max(peak, active)
+        finally:
+            progress.done()
+
         perf.resources.observed_peak_workers = peak
+        for result in results.values():
+            perf.timings_seconds.queue_wait_total += result.queue_wait_seconds
         return results
 
     def _publish_transform_results(
@@ -374,14 +428,24 @@ class PdfTextStage(Stage):
             products: dict[str, TextProduct | None],
             errors: dict[str, str]) -> None:
         perf = self.ctx.telemetry.pdfs
-        for source_sha in sorted(requests):
-            result = results[source_sha]
+        # Deterministic coordinator order by document id, not death race.
+        ordered = sorted(
+            requests.values(), key=lambda request: request.document_id)
+        for request in ordered:
+            source_sha = request.source_sha256
+            result = results.get(source_sha)
+            if result is None:
+                perf.failed_transforms += 1
+                errors[source_sha] = "RuntimeError: worker returned no result"
+                continue
             cache = caches[source_sha]
             perf.timings_seconds.ocr_process_total += result.ocr_seconds
             perf.timings_seconds.text_process_total += result.text_seconds
             if result.direct_original_fallback:
                 perf.direct_original_fallbacks += 1
-            cached_ocr = requests[source_sha].cached_ocr
+            if result.used_cached_ocr and result.error is None:
+                perf.text_only_rebuilds += 1
+            cached_ocr = request.cached_ocr
             try:
                 if cached_ocr is not None:
                     ocr_product = cached_ocr
@@ -414,6 +478,7 @@ class PdfTextStage(Stage):
             doc.label, self.name, "warning",
             f"{doc.label}: {warning}; pdftotext -layout succeeded")
         stats.inc("ocr_warnings")
+        self.ctx.telemetry.pdfs.ocr_warning_documents += 1
 
     def _publish_document(self, doc: _PendingPdf, product: TextProduct,
                           extraction_method: str, stats: StageStats) -> None:

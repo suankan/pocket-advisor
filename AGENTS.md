@@ -153,8 +153,10 @@ exist anywhere in the engine.
 7. `transactions` — parse and link marked bank-statement collections.
 
 Stages receive a shared `PipelineContext`, do not call one another, and
-return `StageStats`. A named stage assumes prerequisite artifacts already
-exist; only CLI orchestration owns ordering.
+return `StageStats`. CLI orchestration owns ordering: `ingest all` runs the
+full gated pipeline; a named stage runs the ordered prefix through itself so
+prerequisites always exist.
+
 
 ### Cache layout invariants
 

@@ -260,10 +260,14 @@ def main() -> int:
         # reused from an already-cached product.
         assert perf.duplicate_reuses == 0
         expected_budget = os.process_cpu_count() or 1
-        assert perf.resources.configured_worker_count == min(2, expected_budget)
-        assert perf.resources.configured_per_child_jobs == \
-            expected_budget // min(2, expected_budget)
-        assert 1 <= perf.resources.observed_peak_workers <= 2
+        expected_workers = min(expected_budget, 6)
+        assert perf.resources.configured_worker_count == expected_workers
+        assert perf.resources.configured_per_child_jobs == 1
+        assert perf.resources.configured_global_cpu_budget == expected_budget
+        assert 1 <= perf.resources.observed_peak_workers <= expected_workers
+        assert perf.pending_admission_bytes > 0
+        assert perf.unchanged_documents == 0
+        assert perf.ocr_warning_documents == 2
         # fan_out.copies is permanently 0 now: there is no more
         # per-occurrence copy-back-into-email/collection-folder fan-out —
         # every occurrence reads the one canonical transforms_dir product.
@@ -316,9 +320,7 @@ def main() -> int:
         assert all(c[1:3] == ["--redo-ocr", "--clean"] for c in ocr_calls)
         assert all("--deskew" not in c and "--clean-final" not in c
                    for c in ocr_calls)
-        assert all(c[c.index("--jobs") + 1] ==
-                   str(expected_budget // min(2, expected_budget))
-                   for c in ocr_calls)
+        assert all(c[c.index("--jobs") + 1] == "1" for c in ocr_calls)
         assert len(ocr_calls) == 6, ocr_calls
 
         # Every PDF document gets a document date now (not just
@@ -359,8 +361,7 @@ def main() -> int:
         assert (tmp / broken_doc["extracted_text_path"]).is_file()
         assert ctx.telemetry.pdfs.unique_transforms == 1
         assert ctx.telemetry.pdfs.resources.configured_worker_count == 1
-        assert ctx.telemetry.pdfs.resources.configured_per_child_jobs == \
-            (os.process_cpu_count() or 1)
+        assert ctx.telemetry.pdfs.resources.configured_per_child_jobs == 1
 
         # A zero pdftotext exit without an output file is not success.
         missing_txt = tmp / "missing-output.txt"

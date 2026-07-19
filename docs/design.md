@@ -141,8 +141,9 @@ order:
 
 Stages implement the common `Stage` interface, receive one explicit
 `PipelineContext`, never parse CLI arguments, never call one another, and
-return `StageStats`. A named stage assumes its prerequisites already exist;
-only CLI orchestration owns ordering and gates.
+return `StageStats`. CLI orchestration owns ordering: `ingest all` runs the
+full gated pipeline, and a named stage such as `ingest pdfs` runs the ordered
+prefix through that stage so prerequisites are always satisfied.
 
 Stages are idempotent and resumable. A failure is loud and reviewable while
 independent work continues where custody permits. Summary-staleness maintenance

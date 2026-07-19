@@ -1,9 +1,8 @@
 # PDF-to-Text Pipeline Design
 
-Status: **proposed**. This design is roadmap item 1 and depends on the shipped
-document identity and state ownership in `docs/features/ingestion-design-v2.md`.
-It replaces only the current Stage 3 worker topology; the graph-owned product
-layout is already implemented.
+Status: **shipped 2026-07-19** (implementation pending commit). Replaces the
+nested OCR worker topology on top of the shipped graph-owned product layout in
+`docs/features/ingestion-design-v2.md`.
 
 ## Purpose
 
@@ -67,10 +66,12 @@ not need an occurrence-local PDF/text copy.
 
 ### Configuration and admission
 
-`n_workers` is configurable from one through `(logical CPU cores - 1)`, subject
-to a measured memory/thermal-safe cap. The legal upper bound is not an
-automatic default: profiling selects a conservative effective limit for the
-host and representative corpus.
+`n_workers` is fixed at `min(logical CPU cores, pending PDF count)` — a
+deliberate political decision, not an operator-tunable knob. Benchmarking on
+the 10-core support host showed linear wall-time scaling with worker count and
+no memory pressure even on hundreds of PDFs, so every core is committed to OCR
+work. Each worker runs a single ocrmypdf child with `--jobs 1`; the pool itself
+is the sole parallelism axis.
 
 The coordinator measures pending PDF byte sizes and forms byte-bounded jobs.
 Bytes are an admission-control approximation, not a prediction of OCR cost;

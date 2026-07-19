@@ -28,7 +28,8 @@ from modules.transaction_state import (TransactionStateError,
                                        load_transaction_state)
 
 
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
+
 STAGE_ORDER = (
     "discover", "emails", "pdfs", "thread", "summaries", "embed",
     "transactions",
@@ -628,10 +629,11 @@ def _performance_lines(performance: PerformanceTelemetry) -> list[str]:
         detail = ""
     lines.append(f"  embed         {embed.state}{detail}")
     if pdfs.state in (MEASURED, PARTIAL):
-        detail = (f" — {pdfs.pending_occurrences} occurrences /"
+        detail = (f" — {pdfs.pending_occurrences} docs /"
                   f" {pdfs.unique_transforms} unique,"
+                  f" {pdfs.pending_admission_bytes}B,"
                   f" workers={pdfs.resources.configured_worker_count}"
-                  f" jobs={pdfs.resources.configured_per_child_jobs}")
+                  f"×jobs={pdfs.resources.configured_per_child_jobs}")
     else:
         detail = ""
     lines.append(f"  pdfs          {pdfs.state}{detail}")

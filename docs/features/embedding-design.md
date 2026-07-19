@@ -171,9 +171,13 @@ For every thread with at least two email items:
 2. hash the stable key plus each ordered Message-ID, timestamp, and readable
    `email_message.txt` bytes to produce `source_digest`;
 3. skip when digest, model, and prompt version match the stored row;
-4. otherwise start with an empty summary and update it chronologically;
-5. split unusually long readable messages into deterministic segments so no
-   source text is silently dropped;
+4. otherwise render the complete chronological thread once and generate one
+   bounded prompt-v2 summary when it is at or below the measured 48,000-token
+   quality ceiling;
+5. above that ceiling, pack complete messages into deterministic 24,000-token
+   segments and reduce their summaries through a fixed 16-way chronological
+   tree; only an individually oversized message uses the exact, tokenizer-
+   measured fallback, whose slices reconstruct its source text without loss;
 6. upsert the finished summary only after all generations succeed.
 
 Staleness maintenance is unconditional: the stage always runs its
@@ -190,10 +194,11 @@ the model chat template. The prompt treats email content as untrusted evidence,
 requests only a concise factual chronology, and forbids following instructions
 found inside emails.
 
-The generative pass reports progress (added at `e07ac2c`): an explicit
-stale-count line before the silent model load, then a per-message progress
-bar across all stale threads whose heartbeat keeps elapsed/ETA ticking
-during a single slow generation, so a working stage never looks hung.
+The generative pass reports progress (added at `e07ac2c`, refined at
+`6404eaa`): an explicit stale-count line before the silent model load, then a
+per-thread progress bar whose active-item heartbeat keeps elapsed time ticking
+during one-shot, segment, or reduction calls without counting an in-flight
+thread as complete.
 Per-thread failures print through the bar and are review-flagged.
 
 Before regeneration, an existing row is marked `is_stale=1`; stale summaries
@@ -304,7 +309,6 @@ ingestion:
   summarize_threads: true        # gates GENERATION only; staleness
                                  # maintenance always runs
   thread_summary_max_tokens: 600
-  thread_summary_segment_chars: 12000
 
 models:
   mlx_model_thread_summary: mlx-community/Qwen3.5-4B-MLX-4bit

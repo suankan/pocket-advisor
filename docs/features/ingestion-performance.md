@@ -1,8 +1,8 @@
 # Ingestion Performance
 
-Status: **ingest-report telemetry schema v2 implemented at `eb8771e`
-(sequencing step 1); Workstreams A–C remain proposed, and their
-benchmark-dependent tuning decisions remain open**.
+Status: **ingest-report telemetry schema v2 implemented at `eb8771e`;
+Workstream A implemented at `6404eaa`; Workstreams B–C remain proposed and
+their benchmark-dependent tuning decisions remain open**.
 
 This feature records the measured full-ingest bottlenecks and the candidate
 redesigns to reduce clean-build and recipe-invalidation time. It is a working
@@ -79,48 +79,66 @@ Every currently measured thread fits in one request with ample room for the
 prompt and bounded answer. Repeated rolling generation therefore pays the
 decode and prompt overhead many times and repeatedly recompresses early facts.
 
-### Proposed direction
+### Threshold benchmark
+
+A same-hardware, local-only synthetic sweep planted two distinct facts at each
+of the beginning, middle, and end of complete threads. The initial prompt
+retained at least one fact from every position at every tested length; semantic
+fact retention was 5/6 at approximately 3k, 6k, and 16k tokens and 6/6 at 10k,
+24k, 32k, and 48k. The omissions did not increase with context length, so the
+observed error was selection/output compression rather than a demonstrated
+middle-position collapse.
+
+Prompt version 2 was then confirmed at the upper boundary:
+
+| rendered input | messages | generation wall | semantic probes retained |
+|---:|---:|---:|---:|
+| 48,177 tokens | 201 | 76.1s | 6/6 (2 early, 2 middle, 2 late) |
+
+The exact-string harness initially displayed 1/2 for the middle and late date
+probes because the output normalized `14 April`/`28 June` to `April 14`/`June
+28`; manual semantic inspection confirmed both dates and their associated
+events. The implementation therefore locks 48,000 rendered-input tokens as
+the quality-tested one-shot ceiling, not as a claim about the model's maximum
+context. A synthetic native fixture additionally retrieves dedicated early,
+middle, and late navigation terms as `THREAD(sum)` through the real
+retrieval-expectation scorer.
+
+### Implemented direction
 
 1. Render one explicitly delimited, chronological input per eligible thread.
-2. Select the one-shot threshold from measured navigation quality, not the
-   model's advertised context capacity. A thread that technically fits but
-   crosses the quality threshold uses the hierarchical path; context-window
-   headroom alone is not evidence that early, middle, and late facts remain
-   equally retrievable.
-3. Generate one bounded navigation summary for each thread below that
+2. The one-shot threshold is 48,000 real model-tokenizer tokens, selected from
+   the positional-quality benchmark above. A thread that technically fits but
+   crosses it uses the hierarchical path.
+3. Generate one bounded navigation summary for each thread at or below that
    threshold. The prompt uses explicit chronological sections and asks for
    early, middle, and late turning points, decisions, and unresolved matters
    rather than allowing the final messages to dominate.
-4. For a longer thread, segment only at complete chronological message
-   boundaries and reduce the segment summaries deterministically. A single
-   message that exceeds the segment budget uses a separately specified
-   token-aware fallback; no path silently truncates evidence. The boundaries
-   are structural and deterministic, not inferred by another semantic model.
+4. A longer thread packs complete chronological messages into 24,000-token
+   source segments and reduces their bounded summaries through a fixed 16-way
+   chronological tree. A single message that exceeds the segment budget uses
+   deterministic binary-search character slices measured by the real
+   tokenizer; nearby whitespace is preferred and concatenating the slices
+   reconstructs the exact source text. No path silently truncates evidence.
 5. Keep one session-warm model per stage run and commit each completed thread
    independently so interruption remains resumable.
-6. Bump `SUMMARY_PROMPT_VERSION`; old summaries and their vectors must become
-   stale through the existing digest/version mechanism.
+6. `SUMMARY_PROMPT_VERSION=2`; old summaries and their vectors become stale
+   through the existing digest/version mechanism.
 7. Compare the new summaries through the retrieval-expectation suite. Long-
    thread expectations must deliberately anchor facts from the beginning,
    middle, and end so a faster one-shot prompt cannot hide attention dilution.
 
-For the measured large profile, at least the 117 threads at or below 8,192
-tokens are strong one-shot candidates. The remaining nine threads are assigned
-by the measured quality threshold even though all technically fit the model's
-maximum context. The earlier 126-call / 82% reduction is therefore an upper-
-bound planning case, not a locked implementation promise. The planning
-estimate remains 15–25 minutes rather than 85 minutes, subject to positional
-quality checks and an implementation benchmark.
+For the measured large profile, every thread up to 48,000 tokens now takes one
+generation call; only threads above that tested boundary enter the reduction
+path even though all currently fit the model's advertised context. Output
+remains at the existing fixed 600-token ceiling. Generated-token/prefill
+internals remain deliberately uninstrumented because the stable aggregate
+model-execution wall timer answers the operational question without coupling
+the engine to private MLX runtime details.
 
-### Open decisions
-
-- exact chronological envelope and prompt version;
-- quality-driven one-shot threshold and token safety margin;
-- segment size and reduce shape for long but technically in-context threads;
-- the deterministic last-resort split for one oversized message;
-- whether output-token allowance should scale within a fixed hard ceiling;
-- whether generated token/prefill timing can be obtained reliably from the
-  local runtime without coupling the engine to unstable internals.
+The retired `thread_summary_segment_chars` character knob is rejected. The
+quality threshold, structural segment budget, and reducer fan-in are
+repository-owned benchmark decisions rather than operator tuning knobs.
 
 ## Workstream B — shape-stable embedding microbatches
 

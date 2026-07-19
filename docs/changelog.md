@@ -4,10 +4,46 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — One-shot and hierarchical thread summaries
+
+Implementation commit: `6404eaa` (Workstream A in
+`docs/features/ingestion-performance.md`).
+
+- Replaced sequential per-message rolling recompression with one prompt-v2
+  generation over an explicitly delimited complete chronological thread at or
+  below a measured 48,000-token one-shot quality ceiling. The prompt gives
+  beginning, middle, and end facts equal weight and remains bounded, greedy,
+  local, non-evidentiary, and independently durable per completed thread.
+- Added the deterministic long-thread path: complete messages pack into
+  24,000-token structural segments, segment summaries reduce chronologically
+  through a fixed 16-way tree, and every reducer input stays below the measured
+  quality ceiling. Only a single structurally oversized message may use the
+  explicit tokenizer-aware fallback; its exact text is reconstructable from
+  the slices, so no evidence is silently truncated.
+- Bumped `SUMMARY_PROMPT_VERSION` to 2 so existing summaries and their vectors
+  converge through the existing stale-summary mechanism. Retired the obsolete
+  character-count `thread_summary_segment_chars` setting and made that key a
+  configuration error.
+- Made telemetry distinguish one-shot/hierarchical assignments, source
+  segments, generation calls, reduction calls, input tokens, and the new
+  8k/48k/unbounded length tiers. Progress now heartbeats an active first thread
+  without falsely counting it complete.
+
+Verification: a local synthetic MLX benchmark at 48,177 input tokens completed
+in 76.1 seconds and retained all six semantic probes spanning the beginning,
+middle, and end. The native fixture proves the three-segment plus one-reduction
+path, exact deterministic oversized-message reconstruction, prompt-version
+publication, and three `THREAD(sum)` positional retrieval expectations. All 14
+native tests and `./pocket-advisor.py test` pass; `git diff --check` clean. No
+live evidence or workspace state was read or mutated by tests or benchmarks.
+
+Deferred: none from Workstream A. Shape-stable embedding microbatches are the
+new roadmap head.
+
 ## 2026-07-19 — Ingest performance telemetry and benchmark baseline
 
-Implementation commit: `eb8771e` (roadmap item 1; locked contract in
-`docs/features/ingestion-performance.md` and
+Implementation commit: `eb8771e` (ingest-performance telemetry item; locked
+contract in `docs/features/ingestion-performance.md` and
 `docs/features/ingest-all-reporting.md`).
 
 - Added `modules/telemetry.py`: one typed PerformanceTelemetry run recorder

@@ -38,8 +38,9 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `a9c9d96` | **Multiple-ingestion regression fixes**: verified-original fallback when OCRmyPDF produces no derivative; correct multi-value assertion binding and zero diagnostics; valid zero-activity statements; accurate top-level source/PDF finding reporting; bounded structural failure reasons; PDF/transaction recipe convergence; native suite 13/13 |
 | `5fd5bdd` | **Post-ingest integrity and reporting fixes**: `westpac-v2` compact account-line identity recognition; exact transaction finding/run-flag deduplication; proven attached-email custody-chain verification; live read-only verify pass and native suite 13/13 |
 | `eb8771e` | **Ingest performance telemetry**: typed four-state hot-stage run recorder injected through the pipeline context; subphase-instrumented summaries/embed/PDF stages with real tokenizer counts; schema-2 records with strict nested performance validation, compact terminal lines, and identical re-rendering; live convergence + unchanged-run verification |
+| `6404eaa` | **One-shot and hierarchical summaries**: prompt-v2 complete-thread generation through a measured 48k-token quality ceiling; deterministic 24k structural segments and 16-way reduction beyond it; lossless oversized-message fallback; positional navigation expectations; native suite 14/14 |
 
-Current self-tests: all 13 `modules/tests/test_*.py` pass, including daemon,
+Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
 fixtures (`./pocket-advisor.py test`). The retired `scripts/` tree no longer
 exists.
@@ -182,6 +183,16 @@ failure rolls the whole Stage 5 rebuild back.
   reconciliation-checked; version-1 records are deliberately not loadable.
   The test workspace holds a measured 27-occurrence PDF convergence record
   and a 0.6s measured-zero unchanged record as the live baseline pair.
+- **One-shot/hierarchical summaries implemented (`6404eaa`):** prompt version
+  2 renders the complete chronological thread once when its real tokenizer
+  input is at or below the locally measured 48,000-token quality ceiling.
+  Larger threads pack complete messages into deterministic 24,000-token
+  segments and combine their bounded summaries through a chronological
+  16-way reduction tree. Only a single oversized message may use the explicit
+  token-aware fallback, whose slices reconstruct its text exactly. Each
+  completed thread remains independently durable and resumable; beginning,
+  middle, and end navigation is covered by native retrieval expectations.
+  The retired `thread_summary_segment_chars` key is now rejected.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns the flat
@@ -227,7 +238,7 @@ failure rolls the whole Stage 5 rebuild back.
   and tests are native.
 - `ingest [all|discover|emails|pdfs|thread|summaries|embed|transactions]`,
   `ingest report [--last | PATH]`, `transactions report`, `db init`, and the
-  13-test module runner are wired to the native engine. Removed stage spellings
+  14-test module runner are wired to the native engine. Removed stage spellings
   and `blob-index rebuild` are rejected, not aliased.
 - Real `query` dispatches to the native relational retriever cold or through
   the warm daemon; `wipe state/index/list`, `verify`, blob lookup, and the
@@ -250,11 +261,10 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. One-shot and hierarchical thread summaries**
-(Workstream A in `docs/features/ingestion-performance.md`), followed by the
-embedding-microbatch and PDF-transform optimization items. Transaction parser
-coverage is now item 4 and remains independent; the local answering pass is
-item 5 (`docs/roadmap.md`).
+The roadmap head is **1. Shape-stable embedding microbatches** (Workstream B
+in `docs/features/ingestion-performance.md`), followed by the content-addressed
+PDF-transform/concurrency item. Transaction parser coverage is now item 3 and
+remains independent; the local answering pass is item 4 (`docs/roadmap.md`).
 
 ## Watch-outs
 

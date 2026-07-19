@@ -55,7 +55,7 @@ from modules.emailbody import (compact_authored_bodies, decode_maybe_encoded,
                                normalize_subject, render_message,
                                sanitize_filename)
 from modules.embedding.chunks import sync_email_chunks, sync_payloads
-from modules.embedding.dispatch import EmbedDispatcher
+from modules.embedding.dispatch import shared_dispatcher
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
 from modules.progress import Progress
@@ -181,18 +181,17 @@ class EmailStage(Stage):
     def _dispatch_embeddings(self, stats: StageStats) -> None:
         """Readiness dispatch (embedding-design-v2 decision 5): authored
         bodies are final once compaction has run, so their leaf chunks are
-        cut and sent to the inference endpoint right here. Best-effort —
-        an unreachable endpoint leaves entities pending for
-        `ingest embed`, never failing this stage."""
+        cut and handed to the run-wide dispatcher right here — and the
+        stage moves on. Nothing waits: the embed stage (or end-of-run)
+        drains, and an unreachable endpoint just leaves entities pending
+        for `ingest embed`."""
         stats.inc("chunks_created",
                   sync_email_chunks(self.conn, self.config))
         sync_payloads(self.conn)
         self.conn.commit()
-        dispatcher = EmbedDispatcher(self.ctx)
-        dispatcher.submit_pending_leaves(
-            self.conn, source_type="email_body", at_readiness=True)
-        dispatcher.drain_into_stats(stats)
-        dispatcher.close()
+        stats.inc("embeds_dispatched", shared_dispatcher(
+            self.ctx).submit_pending_leaves(
+                self.conn, source_type="email_body", at_readiness=True))
 
     def _write_readable_messages(self,
                                  authored_bodies: dict[int, str]) -> None:

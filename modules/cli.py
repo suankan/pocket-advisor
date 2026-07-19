@@ -227,11 +227,21 @@ def run_ingest(
             # Named stage: run every prerequisite through the target
             # (discover … stage). Gates for embed/transactions apply only to
             # `ingest all`; an explicit named stage always executes its chain.
-            for name in _stage_prefix(stage):
-                _execute_stage(
-                    ctx, name,
-                    force_transactions=force_transactions
-                    and name == "transactions")
+            from modules.embedding.dispatch import cancel_all, drain_leftover
+            try:
+                for name in _stage_prefix(stage):
+                    _execute_stage(
+                        ctx, name,
+                        force_transactions=force_transactions
+                        and name == "transactions")
+            except BaseException:
+                # Queued readiness embeds become durable pending gaps;
+                # exit stays prompt.
+                cancel_all()
+                raise
+            # A prefix ending before `embed` settles its in-flight
+            # readiness dispatches so their vectors become durable.
+            drain_leftover(ctx)
             return 0
 
         from modules.ingest_report import STAGE_ORDER, StageRun
@@ -249,6 +259,8 @@ def run_ingest(
                 stats = _execute_stage(ctx, name)
             except BaseException as exc:
                 request_interrupt()
+                from modules.embedding.dispatch import cancel_all
+                cancel_all()
                 stages.append(StageRun(
                     name=name,
                     outcome="failed",
@@ -813,5 +825,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         # Ctrl+C already unwinds the pipeline cleanly via the interrupt flag;
         # suppress the traceback and exit with the conventional SIGINT code.
+        # Queued readiness embeds are abandoned as durable pending gaps so
+        # exit is prompt — the next `ingest embed` fills them.
+        try:
+            from modules.embedding.dispatch import cancel_all
+            cancel_all()
+        except Exception:
+            pass
         print("\nKeyboardInterrupt — interrupted", file=sys.stderr)
         return 130

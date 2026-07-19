@@ -4,6 +4,55 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-20 — Inference-server (oMLX) cutover
+
+Design lock: `e870d46`; implementation commit: `b2d06a4` (design
+`docs/features/embedding-design-v2.md`; user-directed platform change, not a
+numbered roadmap item).
+
+- All inference — embedding, summarization, reranking, and accuracy question
+  generation — now calls the external localhost oMLX server (OpenAI-compatible
+  `/v1/embeddings`, `/v1/rerank`, `/v1/chat/completions`) through one thin
+  synchronous client (`modules/inference.py`). The engine loads no models,
+  imports no `mlx`, and `requirements.txt` carries no MLX stack; `httpx` is
+  the only new dependency. The client refuses non-loopback endpoints
+  (mechanical enforcement of the privacy rule) and fail-fasts with a clear
+  "is oMLX running?" error including a `GET /v1/models` model-id check.
+- Models switched to symmetric Qwen3 served ids: `Qwen3-Embedding-0.6B-8bit`
+  (dim 1024), `Qwen3-Reranker-0.6B-4bit`, `Qwen3.5-4B-MLX-4bit`. Config keys
+  renamed to `models.inference_endpoint` / `model_embed_text` / `model_rerank`
+  / `model_thread_summary` / `embed_dim`; the retired `mlx_model_*` keys and
+  the `fetch-model` action are rejected, not aliased. Jina v5 is retired; its
+  vector caches remain inert on disk.
+- Producers dispatch embeddings at artifact readiness (`modules/embedding/
+  dispatch.py`): the emails stage chunks and dispatches authored bodies after
+  compaction, the PDF stage dispatches each document the moment its text
+  product publishes, and the summaries stage dispatches each regenerated
+  summary vector on upsert — bounded ≤8 in flight, best-effort (an
+  unreachable endpoint prints one warning and leaves pending gaps). The embed
+  stage is the loud convergence pass: sweep, backfill, review-flag failures,
+  rebuild matrices. Chunk creation moved to `modules/embedding/chunks.py`,
+  shared by producers and the convergence sweep.
+- Vector identity: fingerprint `backend: omlx`, model-agnostic
+  `execution_recipe: omlx-v1`; dim comes from `models.embed_dim` and is
+  asserted against every embedding response. The local
+  `bucket32-batch8-v1` tokenize/bucket/batch/bisect machinery and the Jina
+  MLX loader (`modules/embedding/loader.py`, `ModelStore`) are deleted.
+- Summarization/question prompts, versions, digests, and staleness semantics
+  are unchanged; the generator-model id change itself regenerates all
+  summaries and generated questions through the existing comparison. Token
+  budgeting uses the deterministic `ceil(chars/3)` estimate; exact telemetry
+  tokens come from service `usage` fields. Ingest-report schema bumped to v4
+  (embed queue counters: pending/input_tokens/dispatched_at_readiness/
+  successful/failed).
+- Verification: native suite 14/14 with hermetic stubs (producer fixtures
+  disable dispatch; embed/retrieval tests patch the backend seam); all three
+  live oMLX endpoints verified by hand, including `chat_template_kwargs.
+  enable_thinking=false` suppression and rerank ordering. Deferred: the full
+  test-workspace re-embed plus `accuracy run` thread-or-better baseline under
+  symmetric Qwen3 (in progress at the time of this entry) — record the new
+  baseline before relying on retrieval quality comparisons.
+
 ## 2026-07-19 — PDF-to-text pipeline, interrupt-safe shutdown, core-count workers
 
 Implementation commit: `bf62292` (roadmap item: 1. PDF-to-text pipeline; design

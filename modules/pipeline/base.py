@@ -8,7 +8,7 @@ sequencing lives in cli.py alone.
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from modules.config import Config
 from modules.domain import StageStats
@@ -30,6 +30,10 @@ class PipelineContext:
     # instrumentation is unconditional; only `ingest all` persists it.
     telemetry: PerformanceTelemetry = field(
         default_factory=PerformanceTelemetry)
+    # One shared readiness-dispatch pool for the whole run: producers
+    # submit and move on, never blocking the pipeline; the embed stage
+    # (or end-of-run) drains it (embedding-design-v2 decision 5).
+    embed_dispatcher: Any = None
 
 
 class Stage(ABC):

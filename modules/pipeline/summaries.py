@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modules.domain import StageStats
-from modules.embedding.dispatch import EmbedDispatcher
+from modules.embedding.dispatch import shared_dispatcher
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.review import now_iso
@@ -210,8 +210,9 @@ class ThreadSummaryStage(Stage):
               f" {self.config.inference_endpoint}")
         generator = get_summary_generator(self.config)
         # Each finished summary's vector is dispatched at readiness
-        # (design decision 5); embed_text=false disables all embedding.
-        dispatcher = EmbedDispatcher(self.ctx) \
+        # (design decision 5) without waiting — the embed stage drains;
+        # embed_text=false disables all embedding.
+        dispatcher = shared_dispatcher(self.ctx) \
             if self.config.embed_text else None
         progress = Progress(
             "generate thread summaries",
@@ -276,9 +277,6 @@ class ThreadSummaryStage(Stage):
             tier.generation_calls += metrics.calls
             progress.step(note=f"thread {job.thread_id} complete")
         progress.done()
-        if dispatcher is not None:
-            dispatcher.drain_into_stats(stats)
-            dispatcher.close()
         return stats
 
     def _load_work(self) -> tuple[list[_ThreadWork], list[_BrokenThread]]:

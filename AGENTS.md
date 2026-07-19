@@ -20,19 +20,23 @@ For every platform task, load these files in order:
 7. `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
    worker/publishing design; it follows ingestion design v2;
 8. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
-   design (review-refined);
-9. `docs/features/ingest-all-reporting.md` — locked default full-ingest
+   design (review-refined); its local-MLX *execution* concern is superseded
+   by the next item;
+9. `docs/features/embedding-design-v2.md` — locked inference-server (oMLX)
+   design: all inference is HTTP to one loopback endpoint, producers
+   dispatch embeddings at readiness, `embed` converges;
+10. `docs/features/ingest-all-reporting.md` — locked default full-ingest
    timing, statistics, and finding-summary design;
-10. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
+11. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
    freshness plus Stage 5 convergence, findings, and force-rebuild design;
-11. `docs/features/ingestion-performance.md` — proposed measured optimization
+12. `docs/features/ingestion-performance.md` — proposed measured optimization
    work for summaries, embedding, and PDF transforms; implementation choices
    remain benchmark-driven;
-12. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
+13. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
    and accuracy-measurement design;
-13. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
+14. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
    service design;
-14. `docs/roadmap.md` — ordered future work only.
+15. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
@@ -145,8 +149,8 @@ exist anywhere in the engine.
    `pdftotext -layout`; structurally refused signed/tagged/form PDFs may use
    the verified original as the text source with a review warning;
 4. `thread` — full thread reconstruction;
-5. `summaries` — local-LLM navigation summaries for complete multi-email
-   threads; staleness maintenance always runs, and
+5. `summaries` — navigation summaries for complete multi-email threads
+   via the oMLX inference server; staleness maintenance always runs, and
    `ingestion.summarize_threads` gates only the generative pass;
 6. `embed` — authored email bodies/PDF text plus the separate thread-summary
    index, using the per-model vector cache;
@@ -196,8 +200,9 @@ Always confirm this against `docs/status.md` and
   workspace-local warm daemon; workspace-scoped wipe state/index maintenance,
   full verification, blob lookup, and the retrieval-expectation `accuracy`
   suite are native;
-- command-scoped selection shipped at `c6df0a3`: shared `fetch-model`, fixture
-  `test`, and help are workspace-free; every `accuracy` action is
+- command-scoped selection shipped at `c6df0a3` (the shared `fetch-model`
+  it introduced was retired at `b2d06a4`): fixture
+  `test` and help are workspace-free; every `accuracy` action is
   workspace-bound (native compare is `--last N`, not file-addressed);
 - flat workspace state shipped at `b6b0391`: each workspace owns
   `.state/workspace-<id>/<id>.db`; preserved expectations and results live in

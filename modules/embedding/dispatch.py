@@ -18,6 +18,7 @@ fills.
 """
 import threading
 import time
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,48 @@ from modules.embedding.backends import (atomic_publish_array,
 from modules.inference import (INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable,
                                estimate_tokens)
 from modules.telemetry import NOT_RUN, PARTIAL
+
+
+# Live dispatchers, so an interrupted or failed run can abandon queued
+# work instead of blocking process exit on thousands of pending requests.
+_LIVE: "weakref.WeakSet[EmbedDispatcher]" = weakref.WeakSet()
+
+
+def shared_dispatcher(ctx) -> "EmbedDispatcher":
+    """The run-wide dispatcher producers submit to without waiting."""
+    if ctx.embed_dispatcher is None:
+        ctx.embed_dispatcher = EmbedDispatcher(ctx)
+    return ctx.embed_dispatcher
+
+
+def cancel_all() -> None:
+    """Abandon every live dispatcher's queued work (interrupt/failure
+    path): in-flight requests finish, queued ones are dropped as durable
+    pending gaps for the next `ingest embed`."""
+    for dispatcher in list(_LIVE):
+        dispatcher.abandon()
+
+
+def drain_leftover(ctx) -> None:
+    """End-of-run settlement for a pipeline that never reached the embed
+    stage (named-prefix runs): wait for in-flight readiness dispatches so
+    their vectors become durable, then report plainly."""
+    dispatcher = getattr(ctx, "embed_dispatcher", None)
+    if dispatcher is None:
+        return
+    pending = dispatcher.pending_count
+    if pending:
+        print(f"embedding: waiting for {pending} in-flight readiness"
+              " dispatches…")
+    done, failed, skipped, _ = dispatcher.drain()
+    if done or failed or skipped:
+        print(f"embedding: {done} published, {failed} failed,"
+              f" {skipped} left pending (readiness dispatch)")
+    if dispatcher.unavailable is not None and (failed or skipped):
+        print(f"embedding: {failed + skipped} entities left un-embedded —"
+              " run 'ingest embed' after starting oMLX")
+    dispatcher.close()
+    ctx.embed_dispatcher = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +102,11 @@ class EmbedDispatcher:
         self._lock = threading.Lock()
         self._pool: ThreadPoolExecutor | None = None
         self._futures: list[Future] = []
+        _LIVE.add(self)
+
+    @property
+    def pending_count(self) -> int:
+        return sum(1 for future in self._futures if not future.done())
 
     # -- submission --------------------------------------------------------
 
@@ -209,19 +257,13 @@ class EmbedDispatcher:
             raise
         return done, failed, skipped, outcomes
 
-    def drain_into_stats(self, stats) -> None:
-        """Producer-stage drain: counts into StageStats plus the locked
-        pending warning; failures stay pending gaps for `ingest embed`."""
-        done, failed, skipped, _ = self.drain()
-        if done:
-            stats.inc("embeds_published", done)
-        if failed:
-            stats.inc("embeds_failed", failed)
-        if skipped:
-            stats.inc("embeds_pending", skipped)
-        if self.unavailable is not None and (skipped or failed):
-            print(f"embed dispatch: {skipped + failed} entities left"
-                  " un-embedded — run 'ingest embed' after starting oMLX")
+    def abandon(self) -> None:
+        """Drop queued dispatches without waiting; in-flight requests
+        finish and publish. Everything dropped is a durable pending gap."""
+        self._futures = []
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
 
     def close(self) -> None:
         if self._pool is not None:

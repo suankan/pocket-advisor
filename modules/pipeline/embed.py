@@ -61,6 +61,7 @@ class EmbedStage(Stage):
         stats.inc("new_chunks", created)
         stats.inc("payloads_updated", sync_payloads(self.conn))
         self.conn.commit()
+        self._settle_readiness_dispatch()
 
         fingerprint = current_fingerprint(self.config)
         paths = self._resolve_index(fingerprint)
@@ -112,6 +113,21 @@ class EmbedStage(Stage):
         return stats
 
     # -- convergence backfill ------------------------------------------------
+
+    def _settle_readiness_dispatch(self) -> None:
+        """Drain the run-wide readiness dispatcher first so the per-entity
+        cache reflects every in-flight publication; whatever failed or was
+        skipped simply remains a gap that the loud backfill below owns."""
+        dispatcher = self.ctx.embed_dispatcher
+        if dispatcher is None:
+            return
+        pending = dispatcher.pending_count
+        if pending:
+            print(f"embed: waiting for {pending} in-flight readiness"
+                  " dispatches…")
+        dispatcher.drain()
+        dispatcher.close()
+        self.ctx.embed_dispatcher = None
 
     def _converge_pending(self, stats: StageStats, fingerprint: dict,
                           thread_pending) -> None:

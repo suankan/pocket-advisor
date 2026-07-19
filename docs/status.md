@@ -1,7 +1,7 @@
 # Pocket Advisor — Status
 
 The single status-tracking document for the platform (formerly
-`workspace-parsing-design-status.md`). Last updated: 2026-07-19.
+`workspace-parsing-design-status.md`). Last updated: 2026-07-20.
 Locked architecture: `docs/design.md` and feature decisions under
 `docs/features/`.
 Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
@@ -45,6 +45,8 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `ff5ddfd` | **Content-generated accuracy design locked**: local-MLX questions from authored bodies/PDF text; retrieval-only `run`; `generated.yaml` contract |
 | `a6557fe` | **Content-generated accuracy questions**: `accuracy generate` synthesizes scorable expectations via local MLX; `run` scores retrieval anchors with generator env identity; live test workspace 25/25 / 100% thread-or-better; native suite 14/14 |
 | `bf62292` | **PDF-to-text pipeline + interrupt-safe shutdown + core-count workers**: shared work-stealing queue with largest-first admission and coordinator-only deterministic publication; per-worker progress; Ctrl+C exits cleanly (code 130, no traceback); `pdf_workers` knob removed, workers = min(cores, pending); ingest-report telemetry v3; native suite 14/14 |
+| `e870d46` | **Inference-server (oMLX) design locked**: one loopback endpoint serving embedding/summarization/reranking as HTTP services; zero engine model code; readiness dispatch + embed convergence (`docs/features/embedding-design-v2.md`) |
+| `b2d06a4` | **Inference-server cutover**: `modules/inference.py` client (loopback-only, fail-fast model check); symmetric Qwen3 served models; producers dispatch embeddings at readiness (≤8 in flight, best-effort), embed stage converges loudly; `omlx-v1` fingerprint; MLX loader/`fetch-model`/`mlx_model_*` keys/MLX dependency stack deleted; report schema v4; native suite 14/14 |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -66,6 +68,23 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Current operating state
 
+- **Inference-server cutover (`b2d06a4`, design locked at `e870d46`):**
+  `docs/features/embedding-design-v2.md` is the locked execution design. All
+  inference — embedding, reranking, thread summaries, and accuracy question
+  generation — calls the external oMLX localhost server at
+  `models.inference_endpoint` through `modules/inference.py`; the engine
+  contains no model code and no MLX dependency. Producer stages dispatch
+  embedding payloads the moment an artifact publishes (emails after
+  compaction, PDFs per published text product, summaries per upsert),
+  best-effort with one warning and pending gaps when the server is down;
+  `ingest embed` is the loud convergence pass that backfills and rebuilds
+  matrices. The active fingerprint is `backend: omlx` /
+  `Qwen3-Embedding-0.6B-8bit` / `omlx-v1`; prior Jina caches are inert on
+  disk (guarded `wipe index` when unwanted). oMLX must be running before
+  ingest/summaries/query; `db init` is the whole workspace setup
+  (`fetch-model` is retired). Pending live validation: the full test-workspace
+  re-embed and a fresh `accuracy run` thread-or-better baseline under
+  symmetric Qwen3 (prior 25/25 baseline predates the model swap).
 - **Privilege concept removed (`4a593ef`):** per the locked
   decision in `docs/design.md`, all privilege handling
   was dropped from `modules/`, `config.yaml`, the user registry, tests,
@@ -77,8 +96,9 @@ failure rolls the whole Stage 5 rebuild back.
 - **Embedding/thread implementation (`0fb9f6f`, refined at `9b9e052`):**
   `docs/features/embedding-design.md` is the locked design. Thread IDs now
   use stable root Message-ID keys and store real `reply_parent_email_id` edges.
-  A local `summaries` stage generates digest/versioned navigation summaries
-  for multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
+  A `summaries` stage generates digest/versioned navigation summaries
+  for multi-email threads (since `b2d06a4` through the oMLX-served
+  `Qwen3.5-4B-MLX-4bit`); `embed`
   maintains separate leaf and summary vector matrices; and native `query`
   runs four retrieval legs, fuses/deduplicates threads, then returns
   DB-addressed readable email evidence either cold or through the
@@ -222,7 +242,8 @@ failure rolls the whole Stage 5 rebuild back.
   PDF-transform work is the current Stage 3 product/freshness mechanism; its
   worker-topology was replaced by the shared work-stealing queue at `bf62292`.
 - **Content-generated accuracy questions (`a6557fe`, design `ff5ddfd`):**
-  `accuracy generate` loads the local thread-summary MLX model and writes
+  `accuracy generate` calls the summary model (oMLX-served since
+  `b2d06a4`) and writes
   scorable `expectations/generated.yaml` from authored email bodies and PDF
   text only (never subjects, filenames, or thread summaries). Anchors remain
   durable Message-IDs / thread stable keys / document SHAs; `origin: generated`
@@ -258,8 +279,9 @@ failure rolls the whole Stage 5 rebuild back.
   registry key is rejected. Workspace-state wipe is native, confirmed,
   exact-path, protected against overlap/symlink redirection, and preserves the
   complete accuracy suite while deleting regenerable children.
-  Shared `fetch-model`, fixture `test`, and help are workspace-free,
-  reject a meaningless selector, and do not resolve the registry. (The
+  Fixture `test` and help are workspace-free, reject a meaningless
+  selector, and do not resolve the registry (the formerly workspace-free
+  `fetch-model` was retired at `b2d06a4`). (The
   formerly workspace-free file-addressed `accuracy compare` was replaced
   by the workspace-bound native `accuracy compare --last N`.)
 
@@ -316,9 +338,12 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is now **1. Transaction parser coverage** (NAB, CBA, MEBank,
-AMP, Qantas cards, Revolut). The prior head, the PDF-to-text pipeline, shipped
-at `bf62292`. Any real workspace cutover to the new fresh schema is an
+Re-establish the retrieval baseline under the inference-server cutover: a
+full re-embed of the isolated test workspace plus `accuracy run`
+(thread-or-better on the generated set) records the first symmetric-Qwen3
+result to compare against. The roadmap head remains **1. Transaction parser
+coverage** (NAB, CBA, MEBank, AMP, Qantas cards, Revolut). The prior head,
+the PDF-to-text pipeline, shipped at `bf62292`. Any real workspace cutover to the new fresh schema is an
 operator-owned `wipe state` plus complete re-ingest, requiring explicit
 confirmation immediately before deletion; it is not a platform roadmap gate.
 
@@ -336,10 +361,16 @@ confirmation immediately before deletion; it is not a platform roadmap gate.
   behavior changes require a new parser ID, while shared Stage 5 detection,
   assertion, canonicalization, or linking changes require a transaction
   recipe bump. These fingerprints are what make unchanged skips safe.
-- `bucket32-batch8-v1` changes vector identity and therefore selects a fresh
-  cache directory on each workspace's next embed. The prior cache is left
-  inactive and untouched; use the guarded `wipe index` workflow later if its
-  duplication is no longer wanted.
+- The `omlx-v1` cutover changed vector identity (backend/model/recipe) and
+  selects a fresh cache directory on each workspace's next embed. Prior Jina
+  caches are left inactive and untouched; use the guarded `wipe index`
+  workflow later if their duplication is no longer wanted. The execution
+  recipe is deliberately model-agnostic — a 0.6B↔4B swap changes only the
+  fingerprint's `model` field.
+- oMLX availability is an operational prerequisite: producer-stage embedding
+  dispatch degrades to pending with one warning, but `ingest embed`,
+  summaries generation, `accuracy generate/run`, and `query` fail loudly
+  when the endpoint is unreachable or a configured model id is not served.
 - `pdf-text-v3` products now live in each graph-owned document namespace.
   Each workspace's first fresh-schema rebuild produces current products; no
   migration shim adopts retired state. Later text-only recipe changes reuse

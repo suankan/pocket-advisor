@@ -7,8 +7,8 @@ There is no active/default workspace registry setting:
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
-Shared model download, fixture tests, and parser help are workspace-free and
-reject an unnecessary selector. Every ingest-report and accuracy action is
+Fixture tests and parser help are workspace-free and reject an
+unnecessary selector. Every ingest-report and accuracy action is
 workspace-bound.
 
 ## Setup
@@ -17,12 +17,17 @@ workspace-bound.
 python3.14 -m venv venv
 venv/bin/pip install -r requirements.txt
 ./pocket-advisor.py --workspace <workspace_id> db init
-./pocket-advisor.py fetch-model
 ```
 
+All inference (embedding, summarization, reranking) is served by the external
+oMLX localhost server at `models.inference_endpoint`
+(`docs/features/embedding-design-v2.md`). Start oMLX with the three
+configured model ids loaded before ingest, summaries, accuracy, or query;
+the engine downloads and loads no models itself.
+
 Workspace and collection mounts are declared in
-`workspaces/workspace-config.yaml`. The selected ID must exist there. Model
-weights are shared under `models/`; all corpus-derived state is isolated at:
+`workspaces/workspace-config.yaml`. The selected ID must exist there. All
+corpus-derived state is isolated at:
 
 ```text
 workspaces/.state/workspace-<workspace_id>/
@@ -104,8 +109,9 @@ cold retrieval otherwise:
 ./pocket-advisor.py --workspace <workspace_id> query "question" --require-daemon
 ```
 
-`daemon serve` runs in the foreground and keeps models plus the current leaf
-and thread matrices loaded. Restart it after embedding or changing retrieval
+`daemon serve` runs in the foreground and keeps the current leaf and
+thread matrices plus a warm inference client loaded (model warmth is the
+oMLX server's concern). Restart it after embedding or changing retrieval
 model/index configuration. Its mode-`0600` Unix socket and PID record live
 only below the selected workspace's `runtime/` directory.
 
@@ -129,7 +135,7 @@ not derived state.
 `wipe state` displays and deletes the regenerable children of exactly one
 selected workspace state root. It preserves that workspace's
 `search-accuracy-tests/` directory and leaves evidence, workspace user data,
-model weights, and every other workspace untouched:
+and every other workspace untouched:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> wipe state

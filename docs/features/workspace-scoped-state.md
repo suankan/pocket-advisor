@@ -65,6 +65,8 @@ workspaces/.state/
     ├── <workspace_id>.db
     ├── cache/
     │   └── <collection_id>/
+    ├── pdf-transforms/
+    │   └── <sha-prefix>/<source-sha>/...  # canonical OCR/text products
     ├── vectors/
     │   └── text/<fingerprint>/
     ├── logs/

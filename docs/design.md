@@ -112,13 +112,14 @@ order:
    bodies after the run's message graph is available;
 3. **pdfs** — collect verified PDF copies, request OCR derivatives using
    `ocrmypdf --redo-ocr --clean`, then extract layout-preserving text with
-   `pdftotext -layout`. If OCRmyPDF structurally refuses a signed, tagged, or
-   fillable PDF without producing a derivative, `pdftotext` gets one guarded
-   attempt against the verified original and the refusal remains a warning.
-   Successful artifacts carry a versioned extraction recipe covering wrappers,
-   options, languages, configuration, and local tool versions; a recipe
-   mismatch requeues the PDF so downstream stages never mistake old text for
-   current text;
+   `pdftotext -layout`. Exact source duplicates share one workspace-local
+   canonical transform, but every occurrence retains independently verified
+   local artifacts. OCR and text recipes are fingerprinted separately so a
+   text-only change can reuse a current derivative. If OCRmyPDF structurally
+   refuses a signed, tagged, or fillable PDF without producing a derivative,
+   `pdftotext` gets one guarded attempt against the verified original and the
+   refusal remains a warning. Recipe mismatch requeues only the required
+   product layer so downstream stages never mistake old text for current text;
 4. **thread** — reconstruct complete threads and direct reply relationships;
 5. **summaries** — maintain staleness and generate local-LLM navigation
    summaries for complete multi-message threads;
@@ -165,7 +166,11 @@ derives its stable envelope prefix from database fields.
 PDFs retain verified `pdf-original/` and `pdf-to-text/` artifacts plus a
 persistent `pdf-ocr/` derivative whenever OCRmyPDF can produce one. Attached
 PDF artifacts remain under their carrying email folder; corpus-native PDF
-artifacts live at collection-cache level.
+artifacts live at collection-cache level. A workspace-local
+`pdf-transforms/` cache stores strict source/recipe-addressed canonical OCR and
+text products solely to avoid duplicate work. Canonical objects never replace
+occurrence artifacts or database provenance: coordinator fan-out uses
+independently hashed atomic plain copies, and hardlinks are prohibited.
 OCRmyPDF may write a usable derivative and then return non-zero during its
 final structural validation. When a fresh derivative exists, Stage 3 still
 runs `pdftotext -layout`: a zero exit, present output file, and readable text
@@ -175,6 +180,12 @@ tries the verified original; the same successful-output gate applies and the
 OCR refusal remains reviewable. A failed or missing `pdftotext` output keeps
 the occurrence in the error queue for retry; stale derivatives and text
 outputs are never reused.
+
+Unique transforms use a bounded worker pool while SQLite mutation, review
+logging, and final publication remain on the coordinator thread. The explicit
+worker count multiplied by each OCRmyPDF child's `--jobs` value never exceeds
+the local CPU budget. Interrupts and timeouts terminate complete external-tool
+process groups; completed canonical products remain independently resumable.
 
 Quoted-reply compaction is conservative: only exact normalized content from
 the resolved direct parent can authorize a cut. The first 16 parent tokens are

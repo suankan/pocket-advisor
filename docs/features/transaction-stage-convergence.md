@@ -88,16 +88,18 @@ or evidence changes must remain impossible to miss.
    `parser_id`; changes to detection, assertion discovery/validation, account
    matching, row canonicalization, transfer matching, or build semantics must
    bump the shared recipe version.
-9. **Stage 3 owns PDF-text freshness.** The PDF stage records a versioned
-   `PDF_TEXT_RECIPE` fingerprint on every successful PDF occurrence. It covers
-   the OCRmyPDF and `pdftotext` wrapper recipe, command options, OCR languages,
-   relevant configuration, and normalized local `ocrmypdf`/`pdftotext` tool
-   versions, including the guarded verified-original fallback when OCRmyPDF
-   produces no derivative. A successful row whose recorded fingerprint differs
-   from the current fingerprint is stale and must be reprocessed by `ingest
-   pdfs`; it is not permanently terminal merely because text already exists.
-   The existing extraction-method field carries this versioned recipe, so no
-   schema change is required.
+9. **Stage 3 owns PDF-text freshness.** The PDF stage independently
+   fingerprints the OCR-derivative recipe and the text-extraction recipe,
+   including wrapper versions, command options, OCR languages, relevant
+   configuration, normalized local tool versions, and the guarded
+   verified-original fallback. The extraction-method field records their
+   versioned combined identity on every successful occurrence. A combined
+   mismatch is stale, but the workspace-local canonical cache invalidates only
+   the required layer: an OCR change rebuilds derivative plus text, while a
+   text-only change reuses the current verified derivative. A stale occurrence
+   must be converged by `ingest pdfs`; it is not terminal merely because text
+   already exists. Strict sidecar manifests carry the independent recipe and
+   product hashes, so no database schema change is required.
 10. **Regenerated text determines transaction invalidation.** `ingest all`
     already runs `pdfs` before `transactions`, so Stage 5 fingerprints the
     freshly converged `.txt` artifact. If an OCR/`pdftotext` recipe or tool

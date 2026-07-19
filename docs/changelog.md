@@ -4,6 +4,51 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Content-addressed PDF transforms and bounded concurrency
+
+Implementation commit: `ce6c27f` (Workstream C in
+`docs/features/ingestion-performance.md`).
+
+- Added a workspace-local canonical transform cache keyed independently by
+  source SHA-256, OCR recipe, and text-extraction recipe. Exact duplicates now
+  transform once; a text-only recipe change reuses the verified OCR product,
+  while an OCR change rebuilds both layers. Strict sidecar manifests and
+  product hashes reject missing, corrupt, mismatched, or unknown state.
+- Preserved occurrence-level custody and citations: canonical products fan out
+  as independently hashed, atomically published plain copies to every existing
+  `pdf-ocr/` and `pdf-to-text/` location. No hardlinks or pointer-only
+  occurrence artifacts are used; missing local artifacts repair from verified
+  canonical state without rerunning external tools.
+- Added deterministic bounded scheduling. Workers receive only verified
+  workspace-cache originals, write temporary outputs, and return typed
+  results; SQLite, review logging, warnings, and fan-out remain coordinator
+  owned. The configured worker/jobs product cannot exceed the local CPU
+  budget. Timeout and interrupt handling terminates complete OCR process groups
+  and leaves successful canonical products independently resumable.
+- Strengthened schema-2 PDF telemetry reconciliation for unique outcomes,
+  duplicate reuse, configured/observed workers, and nested CPU allocation.
+  Streaming custody copies avoid materializing large derivative PDFs in
+  memory, and fallback to the verified original still requires a successful,
+  present, readable `pdftotext` result.
+
+Verification: the same four unique workspace-local PDFs were read without
+modification and all benchmark output was written to temporary state. On the
+10-core supported host, 1 worker × 10 OCR jobs took 27.029s, 4×1 took 44.128s,
+and the selected 2×5 topology took 22.493s (1.20x faster than the sequential
+baseline). Synthetic fixtures cover exact duplicates, independent inodes,
+OCR-only/text-only invalidation, fallback and failure retry, canonical repair,
+bounded scheduling, and strict telemetry. The complete native module loop,
+full synthetic `verify` invariants, and `./pocket-advisor.py test` pass 14/14;
+`git diff --check` is clean. No collection evidence or live workspace state
+was mutated.
+
+Deferred: cross-stage CPU/GPU overlap remains an explicit non-goal because the
+new per-stage mechanisms remove redundant work without complicating stage
+ordering, SQLite ownership, or failure reporting. The next normal PDF run in
+each workspace performs one `pdf-text-v3` recipe convergence rather than
+migrating older per-occurrence derivatives; this is normal derived-state work,
+not a roadmap gate.
+
 ## 2026-07-19 — Shape-stable embedding microbatches
 
 Implementation commit: `857d98e` (Workstream B in

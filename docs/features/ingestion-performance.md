@@ -1,14 +1,13 @@
 # Ingestion Performance
 
-Status: **ingest-report telemetry schema v2 implemented at `eb8771e`;
-Workstream A implemented at `6404eaa`; Workstreams B–C remain proposed and
-their benchmark-dependent tuning decisions remain open**.
+Status: **implemented** — ingest-report telemetry schema v2 at `eb8771e`,
+Workstream A at `6404eaa`, Workstream B at `857d98e`, and Workstream C at
+`ce6c27f`.
 
 This feature records the measured full-ingest bottlenecks and the candidate
-redesigns to reduce clean-build and recipe-invalidation time. It is a working
-design: custody, convergence, and retrieval quality are locked constraints,
-while batch sizes, worker counts, cache representation, and summary prompting
-must be benchmarked before they are locked.
+redesigns used to reduce clean-build and recipe-invalidation time. The
+implemented benchmark decisions below are now locked alongside the custody,
+convergence, and retrieval-quality constraints.
 
 `docs/design.md` remains authoritative for system-wide invariants. The
 existing contracts in `embedding-design.md`, `ingest-all-reporting.md`, and
@@ -227,9 +226,9 @@ vectors prune only after their replacement matrix is durable.
 
 ### Finding
 
-PDF extraction is sequential by occurrence. Each OCRmyPDF child receives the
-complete reported CPU count, even when the corpus contains many independent
-short documents.
+Before `ce6c27f`, PDF extraction was sequential by occurrence. Each OCRmyPDF
+child received the complete reported CPU count even when the corpus contained
+many independent short documents.
 
 Within the measured large workspace, 545 PDF occurrences reduce to 458 unique
 input hashes: 87 occurrences, or 16%, repeat an identical transformation. The
@@ -237,12 +236,12 @@ small profile has 27 occurrences but only 18 unique hashes, a 33% repeat rate.
 Workspace isolation intentionally prevents reuse across workspaces, but it
 does not require repeating an identical transform inside one workspace.
 
-The current single Stage 3 fingerprint also couples two different products:
-the OCR derivative and the extracted text. A `pdftotext` wrapper-only change
-therefore re-runs expensive OCR even when the verified derivative's producing
-recipe is unchanged.
+The prior single Stage 3 fingerprint also coupled two different products: the
+OCR derivative and the extracted text. A `pdftotext` wrapper-only change
+therefore reran expensive OCR even when the verified derivative's producing
+recipe was unchanged.
 
-### Proposed direction
+### Implemented direction
 
 1. Define workspace-local transform identity as source SHA-256 plus the
    relevant producing recipe.
@@ -274,23 +273,42 @@ recipe is unchanged.
    derivative. A successful, present, readable `pdftotext` artifact remains
    the final acceptance gate.
 
-Exact-hash reuse alone removes 16% of the measured large occurrence work.
-Bounded file-level concurrency may provide a larger gain, but worker count and
-per-child OCR jobs must be benchmarked because CPU, Ghostscript, memory, and
-thermal contention can reverse an over-aggressive setting. The planning target
-is a 10–18 minute PDF stage rather than 26 minutes.
+Exact-hash reuse removes 16% of the measured large occurrence work before
+concurrency. The selected same-hardware topology adds a measured 1.20x speedup
+over sequential OCR on the four-document benchmark. A new large-workspace
+full-build timing is deliberately left to the next operator-owned normal
+ingest; the implementation did not mutate live workspace state merely to
+claim the earlier 10–18 minute planning target.
 
-### Open decisions
+### Implemented decisions
 
-- internal canonical-transform representation and how occurrence artifacts
-  are copied or safely cloned without weakening independent write verification;
-- whether OCR derivatives are byte-deterministic enough to compare directly
-  or only through their source/recipe provenance;
-- global CPU budget plus benchmarked worker/per-child `--jobs` allocation on
-  the supported hardware;
-- failure fan-out and retry presentation when several occurrences share one
-  failed unique transform;
-- schema columns versus verified sidecar metadata for the two recipe layers.
+- Canonical products live under workspace-local
+  `pdf-transforms/<sha-prefix>/<source-sha>/`. An OCR-recipe directory contains
+  a strict manifest plus the actual derivative when one exists; each nested
+  text-recipe directory contains its strict manifest and extracted text.
+  Source, recipe, source-product, and output hashes are verified on every
+  reuse. No database columns or migration are required.
+- OCR derivatives are not assumed byte-deterministic. The cache records and
+  verifies the actual derivative SHA-256; a changed derivative automatically
+  invalidates a text manifest whose recorded source-product hash differs.
+- Plain, independently verified atomic copies are the only implemented fan-out
+  mechanism. Copy-on-write clones remain counted by telemetry but unused;
+  hardlinks and pointer-only occurrence artifacts remain prohibited.
+- The global budget is the reported process CPU count. Up to two file workers
+  run concurrently and each receives `floor(cpu_budget/workers)` explicit
+  OCRmyPDF jobs, so nested allocation cannot exceed the budget. On the
+  supported 10-core host, 1×10 took 27.029s, 4×1 took 44.128s, and the selected
+  2×5 topology took 22.493s over the same four unique PDFs. The worker cap
+  adapts down for a one-core host or a single pending transform.
+- One failed unique transform records one transform failure and fans the same
+  bounded structural reason to each affected occurrence; successful unique
+  products remain durable and retries remain source/recipe-local. Missing
+  occurrence artifacts can be repaired from a verified canonical product
+  without running OCR or text extraction.
+- Workers own no SQLite connection and never write evidence or final cache
+  paths. Coordinator publication is sorted and deterministic. Interrupts and
+  timeouts terminate complete external-tool process groups, escalating from
+  TERM to KILL after a short grace period.
 
 ## Instrumentation before optimization
 
@@ -438,8 +456,11 @@ Measured cardinalities reconcile internally: pending summary threads equal
 one-shot plus hierarchical assignments and completed plus failed outcomes;
 each embed queue's pending entities equal successful plus failed entities;
 verified cache publications equal successful entities across both queues; and
-unique PDF transforms equal successful plus failed transforms. A partial
-record may contain lower captured totals but may never claim impossible
+unique PDF transforms equal successful plus failed transforms. Pending PDF
+occurrences equal unique transforms plus canonical/duplicate reuses, observed
+workers cannot exceed configured workers, and configured workers multiplied
+by per-child OCR jobs cannot exceed the global CPU budget. A partial record
+may contain lower captured totals but may never claim impossible
 greater-than-input relationships.
 
 Leaf and summary queue fields have identical schemas and remain separate even
@@ -469,17 +490,19 @@ per-entity profiling still belongs only in an explicit local benchmark mode.
    one-shot/hierarchical paths, and positional quality checks.
 3. Shipped at `857d98e`: benchmarked numerical equivalence and separate
    leaf/summary shape-stable embedding microbatches.
-4. Implement unique-hash PDF transformation and occurrence fan-out.
-5. Benchmark one-worker/multi-job against multi-worker/one-job OCR, then add
-   bounded concurrency under one global CPU budget.
-6. Split OCR-derivative and text-extraction recipe provenance.
-7. Reassess cross-stage overlap only after the three stages are individually
-   efficient.
+4. Shipped at `ce6c27f`: unique-hash PDF transformation and independently
+   verified occurrence fan-out.
+5. Shipped at `ce6c27f`: benchmarked bounded concurrency under one global CPU
+   budget; the supported host uses two workers and five jobs per child.
+6. Shipped at `ce6c27f`: split OCR-derivative and text-extraction recipe
+   provenance.
+7. Reassessed after all three stages: cross-stage overlap remains deferred.
 
 CPU OCR could eventually overlap GPU summary work, but that would complicate
 the locked stage ordering, resource control, SQLite ownership, and failure
-reporting. It is deliberately deferred until measurements show material
-remaining headroom.
+reporting. The implemented per-stage gains do not justify that complexity;
+overlap remains deliberately outside the performance program unless later
+measurements show material remaining headroom.
 
 ## Acceptance criteria
 

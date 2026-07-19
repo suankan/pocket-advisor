@@ -164,7 +164,10 @@ exist; only CLI orchestration owns ordering.
   embedded envelope prefix derives from DB fields.
 - Attached-email lineage is stored in `items.parent_item_id`.
 - PDFs retain `pdf-original/` and `pdf-to-text/` artifacts plus a persistent
-  `pdf-ocr/` derivative whenever OCRmyPDF can produce one.
+  `pdf-ocr/` derivative whenever OCRmyPDF can produce one. Workspace-local
+  `pdf-transforms/` canonical source/recipe products may avoid duplicate work,
+  but occurrence artifacts remain independently verified plain copies;
+  hardlinks are prohibited.
 - Only authored email body regions and PDF text artifacts are leaf-chunked.
   Generated thread summaries have a separate vector namespace and are always
   labeled as navigation, never evidence.
@@ -172,7 +175,7 @@ exist; only CLI orchestration owns ordering.
 ## Current implementation state
 
 Always confirm this against `docs/status.md` and
-`git status` before editing. At the 2026-07-18 handoff:
+`git status` before editing. At the 2026-07-19 handoff:
 
 - foundations, Stages 1–5, stable thread relationships, thread summaries,
   dual indexes, and cold relational query are implemented under `modules/`;
@@ -197,6 +200,9 @@ Always confirm this against `docs/status.md` and
 - generic end-to-end validation is available through an isolated workspace
   rebuild, saved ingest reporting, and the native retrieval-expectation suite;
   no particular live-workspace ingestion is a platform roadmap dependency;
+- the ingestion-performance program is implemented: typed schema-2 telemetry,
+  one-shot/hierarchical summaries, shape-stable embedding microbatches, and
+  workspace-local content-addressed PDF transforms with bounded concurrency;
 - retired shared-layout state was manually removed by the operator on
   2026-07-18; workspace-scoped commands never opened or migrated it.
 

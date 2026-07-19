@@ -15,20 +15,25 @@ For every platform task, load these files in order:
    invariants;
 5. `docs/features/workspace-scoped-state.md` — locked per-workspace
    database/cache and command-scoped CLI workspace-selection design;
-6. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
+6. `docs/features/ingestion-design-v2.md` — proposed fresh-schema
+   evidence-graph redesign; the shipped cache rules remain current until it is
+   implemented;
+7. `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
+   worker/publishing design; it follows ingestion design v2;
+8. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
    design (review-refined);
-7. `docs/features/ingest-all-reporting.md` — locked default full-ingest
+9. `docs/features/ingest-all-reporting.md` — locked default full-ingest
    timing, statistics, and finding-summary design;
-8. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
+10. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
    freshness plus Stage 5 convergence, findings, and force-rebuild design;
-9. `docs/features/ingestion-performance.md` — proposed measured optimization
+11. `docs/features/ingestion-performance.md` — proposed measured optimization
    work for summaries, embedding, and PDF transforms; implementation choices
    remain benchmark-driven;
-10. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
+12. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
    and accuracy-measurement design;
-11. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
+13. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
    service design;
-12. `docs/roadmap.md` — ordered future work only.
+14. `docs/roadmap.md` — ordered future work only.
 
 `docs_old/` is an archive of the superseded engine design, specs, learnings,
 roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical

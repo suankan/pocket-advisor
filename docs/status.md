@@ -286,10 +286,14 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Transaction parser coverage**. It remains independent
-of generic platform validation; the local answering pass is item 2
-(`docs/roadmap.md`). The three-workstream ingestion-performance program is
-complete.
+The roadmap head is **1. Ingestion design v2: content-addressed evidence
+graph** (`docs/features/ingestion-design-v2.md`). It is a fresh-schema,
+operator-confirmed rebuild cutover that supersedes the current email-owned
+attachment-cache only after it ships. **2. PDF-to-text pipeline**
+(`docs/features/pdf-to-text-pipeline-design.md`) then supplies the graph-owned
+worker/publishing cutover. The three-workstream ingestion-performance program
+remains complete under the current architecture; transaction parser coverage is
+now item 3.
 
 ## Watch-outs
 

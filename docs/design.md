@@ -14,6 +14,11 @@ Feature-level designs refine this document:
 - `docs/features/workspace-scoped-state.md` — one database and derived-state
   tree per workspace, command-scoped CLI workspace selection, and wipe
   isolation.
+- `docs/features/ingestion-design-v2.md` — proposed fresh-schema replacement
+  for the current email-owned attachment cache; it is future work and does not
+  alter the shipped state contract.
+- `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
+  transform worker/publishing pipeline, scheduled after ingestion design v2.
 - `docs/features/embedding-design.md` — thread reconstruction, navigation
   summaries, dual indexes, hybrid retrieval, evidence expansion, and the
   future answering boundary.

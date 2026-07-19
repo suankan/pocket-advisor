@@ -1,6 +1,7 @@
 """Self-test: native blob lookup, verification, and vector-index wipe."""
 import json
 import sys
+from unittest.mock import patch
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,6 @@ from modules.database import Database  # noqa: E402
 from modules.embedding import (current_fingerprint, index_paths,  # noqa: E402
                                thread_index_paths,
                                thread_vector_filename)
-from modules.embedding.loader import ModelStore  # noqa: E402
 from modules.maintenance import (MaintenanceError, format_sources,  # noqa: E402
                                  lookup_blob, verify_workspace)
 from modules.pipeline.base import PipelineContext  # noqa: E402
@@ -76,8 +76,7 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
     )
     ctx.conn.commit()
 
-    fingerprint = current_fingerprint(
-        ctx.config, ModelStore(ctx.config.models_dir))
+    fingerprint = current_fingerprint(ctx.config)
     leaf = index_paths(ctx.config, fingerprint)
     leaf.vecs_dir.mkdir(parents=True)
     np.save(leaf.vecs_dir / "1.npy", np.array([1, 0, 0, 0], dtype=np.float32))
@@ -297,7 +296,7 @@ def main() -> int:
 
         base = Config(
             project_root=root, workspaces_dir=workspaces,
-            mlx_model_embed_text="fake/model", embed_dim=4)
+            model_embed_text="fake/model", embed_dim=4)
         registry = Registry.load(base)
         workspace = registry.require_workspace("test")
         config = base.for_workspace(workspace.id)
@@ -306,7 +305,12 @@ def main() -> int:
             config=config, registry=registry, workspace=workspace, conn=conn,
             review=ReviewLog(conn, config.review_queue_csv))
         DiscoverStage(ctx).run()
-        EmailStage(ctx).run()
+        # Readiness dispatch is stubbed: this fixture writes its index by
+        # hand and must never talk to a live inference endpoint.
+        import modules.pipeline.emails as emails_mod
+        with patch.object(emails_mod.EmailStage, "_dispatch_embeddings",
+                          lambda self, stats: None):
+            EmailStage(ctx).run()
         ThreadStage(ctx).run()
         active_slug, active_dir = _write_index(ctx)
 

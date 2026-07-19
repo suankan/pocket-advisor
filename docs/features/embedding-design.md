@@ -278,9 +278,10 @@ Run four candidate legs:
 Map leaf hits to `(email_id|document_id, thread_id)` and summary hits to `thread_id`, then
 fuse with Reciprocal Rank Fusion. The reranker may score both chunk text and
 summary text, but a summary hit is always labeled as generated navigation.
-Rerank input is capped at `fts_candidates + vec_candidates` fused keys
-(the tail keeps its RRF order), and the search entry point accepts a
-prebuilt reranker so a future warm daemon holds the model loaded.
+Rerank input is capped at `rerank_candidates` fused keys (default 24, a
+small window because the listwise reranker concatenates every candidate into
+one prompt; the tail keeps its RRF order), and the search entry point accepts
+a prebuilt reranker so a future warm daemon holds the model loaded.
 
 Deduplicate selected threads and perform a relational pull, keeping one
 match per item — the best-ranked chunk wins. Each evidence

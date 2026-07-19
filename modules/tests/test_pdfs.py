@@ -153,7 +153,8 @@ def main() -> int:
         (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
         build_fixtures(ws_dir)
 
-        base = Config(project_root=tmp, workspaces_dir=ws_dir)
+        base = Config(project_root=tmp, workspaces_dir=ws_dir,
+                      embed_text=False)
         registry = Registry.load(base)
         workspace = registry.require_workspace("matter-x")
         cfg = base.for_workspace(workspace.id)

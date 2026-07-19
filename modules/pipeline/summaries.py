@@ -1,11 +1,11 @@
-"""Stage 4a — deterministic, local-LLM summaries of complete threads."""
+"""Stage 4a — deterministic thread summaries via the inference server."""
 import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from modules.domain import StageStats
-from modules.embedding.loader import ModelStore
+from modules.embedding.dispatch import EmbedDispatcher
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.review import now_iso
@@ -205,10 +205,14 @@ class ThreadSummaryStage(Stage):
         perf.new_tiers()
 
         print(f"summaries: {len(stale)} stale"
-              f" {'thread' if len(stale) == 1 else 'threads'} — loading"
-              f" {self.config.mlx_model_thread_summary}")
-        generator = get_summary_generator(
-            self.config, ModelStore(self.config.models_dir))
+              f" {'thread' if len(stale) == 1 else 'threads'} — using"
+              f" {self.config.model_thread_summary} via"
+              f" {self.config.inference_endpoint}")
+        generator = get_summary_generator(self.config)
+        # Each finished summary's vector is dispatched at readiness
+        # (design decision 5); embed_text=false disables all embedding.
+        dispatcher = EmbedDispatcher(self.ctx) \
+            if self.config.embed_text else None
         progress = Progress(
             "generate thread summaries",
             total=len(stale))
@@ -232,11 +236,14 @@ class ThreadSummaryStage(Stage):
                          is_stale=0,
                          generated_at=excluded.generated_at""",
                     (job.thread_id, summary, job.source_digest,
-                     self.config.mlx_model_thread_summary,
+                     self.config.model_thread_summary,
                      SUMMARY_PROMPT_VERSION, now_iso()))
                 self.conn.commit()
                 perf.timings_seconds.publication += \
                     time.monotonic() - publish_started
+                if dispatcher is not None:
+                    dispatcher.submit_summary(
+                        job.thread_id, summary, at_readiness=True)
                 stats.inc("generated")
                 perf.completed_threads += 1
             except Exception as exc:
@@ -269,6 +276,9 @@ class ThreadSummaryStage(Stage):
             tier.generation_calls += metrics.calls
             progress.step(note=f"thread {job.thread_id} complete")
         progress.done()
+        if dispatcher is not None:
+            dispatcher.drain_into_stats(stats)
+            dispatcher.close()
         return stats
 
     def _load_work(self) -> tuple[list[_ThreadWork], list[_BrokenThread]]:
@@ -318,8 +328,7 @@ class ThreadSummaryStage(Stage):
     def _is_current(self, row, job: _ThreadWork) -> bool:
         return bool(row) and not row["is_stale"] \
             and row["source_digest"] == job.source_digest \
-            and row["generator_model"] == \
-            self.config.mlx_model_thread_summary \
+            and row["generator_model"] == self.config.model_thread_summary \
             and row["prompt_version"] == SUMMARY_PROMPT_VERSION
 
     def _generate(self, job: _ThreadWork, generator: SummaryGenerator,
@@ -372,13 +381,17 @@ class ThreadSummaryStage(Stage):
                         metrics: _GenerationMetrics, note: str,
                         timings) -> str:
         progress.start(note=note)
-        metrics.input_tokens += generator.count_tokens(evidence)
         metrics.calls += 1
         model_started = time.monotonic()
         try:
             result = generator.generate(evidence, mode)
         finally:
             timings.model_execution += time.monotonic() - model_started
+        # Exact prompt tokens come from the service's usage field when the
+        # generator exposes them; the deterministic estimate is the fallback.
+        metrics.input_tokens += \
+            getattr(generator, "last_prompt_tokens", 0) \
+            or generator.count_tokens(evidence)
         if not result.strip():
             raise RuntimeError("thread summarizer returned empty text")
         return result.strip()

@@ -16,11 +16,19 @@ from typing import Any
 
 import numpy as np
 
-from modules.embedding import (ModelStore, chunking_fields_changed,
-                               current_fingerprint, get_backend, index_paths,
-                               meta_fingerprint, thread_index_paths)
-from modules.embedding.loader import MlxReranker
+from modules.embedding import (chunking_fields_changed, current_fingerprint,
+                               get_backend, index_paths, meta_fingerprint,
+                               thread_index_paths)
+from modules.inference import InferenceClient
 from modules.pipeline.base import PipelineContext
+
+
+def _make_reranker(config) -> Any | None:
+    """Reranker for the current config: the inference client itself
+    (its ``rerank(question, text_by_id)`` is the listwise interface)."""
+    if not config.rerank_enabled:
+        return None
+    return InferenceClient(config)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,21 +43,19 @@ class SearchOptions:
 
 @dataclass(slots=True)
 class SearchResources:
-    """Models and matrices reusable across independent searches."""
+    """Warm client and matrices reusable across independent searches."""
 
-    store: ModelStore
     fingerprint: dict
     leaf_matrix: Any
     leaf_ids: Any
     thread_matrix: Any
     thread_ids: Any
     embedder: Any
-    reranker: MlxReranker | None
+    reranker: Any | None
 
     @classmethod
     def load(cls, ctx: PipelineContext) -> "SearchResources":
-        store = ModelStore(ctx.config.models_dir)
-        fingerprint = current_fingerprint(ctx.config, store)
+        fingerprint = current_fingerprint(ctx.config)
         leaf_matrix, leaf_ids = _load_matrix(
             index_paths(ctx.config, fingerprint))
         thread_matrix, thread_ids = _load_matrix(
@@ -60,12 +66,9 @@ class SearchResources:
             thread_matrix is not None and thread_ids is not None
             and len(thread_ids)
         )
-        embedder = get_backend(ctx.config, store) if needs_vector else None
-        reranker = MlxReranker(
-            store, ctx.config.mlx_model_rerank
-        ) if ctx.config.rerank_enabled else None
+        embedder = get_backend(ctx.config) if needs_vector else None
+        reranker = _make_reranker(ctx.config)
         return cls(
-            store=store,
             fingerprint=fingerprint,
             leaf_matrix=leaf_matrix,
             leaf_ids=leaf_ids,
@@ -96,7 +99,7 @@ class SearchResources:
             "workspace_id": ctx.workspace.id,
             "embed": self.fingerprint,
             "rerank_enabled": self.reranker is not None,
-            "rerank_model": ctx.config.mlx_model_rerank
+            "rerank_model": ctx.config.model_rerank
             if self.reranker is not None else None,
             "leaf_index": namespace(leaf, self.leaf_matrix),
             "thread_index": namespace(thread, self.thread_matrix),
@@ -292,7 +295,7 @@ def _rrf(lists: list[list[str]], k: int) -> list[str]:
 
 
 def _rerank(ctx: PipelineContext, question: str,
-            keys: list[str], reranker: MlxReranker | None) -> list[str]:
+            keys: list[str], reranker: Any | None) -> list[str]:
     if not keys or reranker is None:
         return keys
     text_by_key: dict[str, str] = {}
@@ -609,7 +612,7 @@ def _index_warnings(ctx: PipelineContext, fingerprint: dict) -> list[str]:
 
 def run_search(ctx: PipelineContext, question: str,
                options: SearchOptions, *,
-               reranker: MlxReranker | None = None,
+               reranker: Any | None = None,
                resources: SearchResources | None = None) -> dict:
     conn = ctx.conn
     allowed_chunks = allowed_chunk_ids(ctx, options)
@@ -639,10 +642,8 @@ def run_search(ctx: PipelineContext, question: str,
             HAVING SUM(CASE WHEN emails.id IN (SELECT id FROM _visible_emails)
                             THEN 0 ELSE 1 END) = 0""").fetchall()}
 
-    store = resources.store if resources is not None \
-        else ModelStore(ctx.config.models_dir)
     fingerprint = resources.fingerprint if resources is not None \
-        else current_fingerprint(ctx.config, store)
+        else current_fingerprint(ctx.config)
     warnings = _index_warnings(ctx, fingerprint)
 
     leaf_fts = leaf_fts_search(
@@ -664,7 +665,7 @@ def run_search(ctx: PipelineContext, question: str,
         (thread_matrix is not None and len(thread_ids))
     if needs_vector:
         embedder = resources.embedder if resources is not None \
-            else get_backend(ctx.config, store)
+            else get_backend(ctx.config)
         query_vec = embedder.embed_one(question, is_query=True)
         leaf_dense = _dense_search(
             leaf_matrix, leaf_ids, query_vec,
@@ -681,13 +682,14 @@ def run_search(ctx: PipelineContext, question: str,
         [f"t:{value}" for value in thread_fts],
         [f"t:{value}" for value in thread_dense],
     ], ctx.config.rrf_k)
-    # Rerank only up to the configured fused-candidate ceiling; the tail keeps
-    # its RRF order.
-    cap = ctx.config.fts_candidates + ctx.config.vec_candidates
+    # Rerank only up to the configured rerank window; the tail keeps its RRF
+    # order. The window is intentionally small (not fts+vec) because the
+    # listwise reranker concatenates every candidate into one prompt.
+    cap = ctx.config.rerank_candidates
     if reranker is None and resources is not None:
         reranker = resources.reranker
     if keys and ctx.config.rerank_enabled and reranker is None:
-        reranker = MlxReranker(store, ctx.config.mlx_model_rerank)
+        reranker = _make_reranker(ctx.config)
     keys = _rerank(ctx, question, keys[:cap], reranker) + keys[cap:]
 
     # Selection keeps thread hits and document hits in one ranked list of

@@ -17,7 +17,7 @@ import numpy as np
 
 from modules.config import Config
 from modules.custody import sha256_file, write_verified
-from modules.embedding import (ModelStore, current_fingerprint, index_paths,
+from modules.embedding import (current_fingerprint, index_paths,
                                meta_fingerprint, thread_index_paths,
                                thread_vector_filename)
 from modules.pipeline.base import PipelineContext
@@ -28,7 +28,7 @@ from modules.transaction_state import (TransactionStateError,
                                        load_transaction_state)
 
 
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 
 STAGE_ORDER = (
     "discover", "emails", "pdfs", "thread", "summaries", "embed",
@@ -289,8 +289,7 @@ def _search_snapshot(
         values["index_issues"] = issues
         return values
 
-    fingerprint = current_fingerprint(
-        ctx.config, ModelStore(ctx.config.models_dir))
+    fingerprint = current_fingerprint(ctx.config)
     values["fingerprint"] = fingerprint
     leaf_paths = index_paths(ctx.config, fingerprint)
     thread_paths = thread_index_paths(ctx.config, fingerprint)

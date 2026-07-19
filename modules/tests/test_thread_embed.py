@@ -285,8 +285,6 @@ def main() -> int:
             estats3.get("embedded") == 1 and \
             estats3.get("index_size") == 7, estats3
         queue = ctx.telemetry.embed.queues.leaf
-        assert queue.bisection_fallbacks >= 1, queue
-        assert queue.individual_fallbacks >= 1, queue
         assert queue.successful_entities == 1 and \
             queue.failed_entities == 1, queue
         assert ctx.telemetry.embed.verified_cache_publications == 1

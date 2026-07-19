@@ -35,7 +35,6 @@ import yaml
 
 from modules.custody import write_verified
 from modules.emailbody import body_text as message_body_text
-from modules.embedding import ModelStore
 from modules.pipeline.base import PipelineContext
 from modules.progress import Progress
 from modules.question_generation import (QUESTION_MAX_INPUT_TOKENS,
@@ -271,11 +270,10 @@ def generate_expectations(
     if limit is not None:
         candidates = candidates[:limit]
 
-    model_id = ctx.config.mlx_model_thread_summary
+    model_id = ctx.config.model_thread_summary
     if generator is None:
         print(f"accuracy: loading question model {model_id}…", flush=True)
-        generator = get_question_generator(
-            ctx.config, ModelStore(ctx.config.models_dir))
+        generator = get_question_generator(ctx.config)
         model_id = getattr(generator, "model_id", model_id)
 
     entries: list[dict] = []
@@ -414,29 +412,47 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
 
     questions = []
     elapsed_all: list[float] = []
-    for entry in entries:
-        if _is_todo(entry):
-            questions.append({"id": entry["id"], "verdict": "SKIPPED",
-                              "rank": None, "matched": None,
-                              "flags": entry.get("flags", []),
-                              "elapsed_seconds": None})
-            continue
-        if not _validate_anchors(ctx.conn, entry):
-            questions.append({"id": entry["id"], "verdict": "INVALID",
-                              "rank": None, "matched": None,
-                              "flags": entry.get("flags", []),
-                              "elapsed_seconds": None})
-            continue
-        t0 = time.monotonic()
-        result = run_search(ctx, entry["question"],
-                            SearchOptions(top_k=top_k), resources=resources)
-        elapsed = round(time.monotonic() - t0, 3)
-        elapsed_all.append(elapsed)
-        verdict, rank, matched = _score(entry, result["results"])
-        questions.append({"id": entry["id"], "verdict": verdict,
-                          "rank": rank, "matched": matched,
-                          "flags": entry.get("flags", []),
-                          "elapsed_seconds": elapsed})
+    progress = Progress("accuracy run", total=len(entries))
+    try:
+        for entry in entries:
+            is_scored = not _is_todo(entry) and _validate_anchors(ctx.conn, entry)
+            if _is_todo(entry):
+                questions.append({"id": entry["id"], "verdict": "SKIPPED",
+                                  "rank": None, "matched": None,
+                                  "flags": entry.get("flags", []),
+                                  "elapsed_seconds": None})
+                progress.println(_fmt_question_line({
+                    "id": entry["id"], "verdict": "SKIPPED", "rank": None,
+                    "matched": None, "flags": entry.get("flags", []),
+                    "elapsed_seconds": None}))
+                progress.step(note=entry["id"])
+                continue
+            if not _validate_anchors(ctx.conn, entry):
+                questions.append({"id": entry["id"], "verdict": "INVALID",
+                                  "rank": None, "matched": None,
+                                  "flags": entry.get("flags", []),
+                                  "elapsed_seconds": None})
+                progress.println(_fmt_question_line({
+                    "id": entry["id"], "verdict": "INVALID", "rank": None,
+                    "matched": None, "flags": entry.get("flags", []),
+                    "elapsed_seconds": None}))
+                progress.step(note=entry["id"])
+                continue
+            t0 = time.monotonic()
+            result = run_search(ctx, entry["question"],
+                                SearchOptions(top_k=top_k), resources=resources)
+            elapsed = round(time.monotonic() - t0, 3)
+            elapsed_all.append(elapsed)
+            verdict, rank, matched = _score(entry, result["results"])
+            question = {"id": entry["id"], "verdict": verdict,
+                        "rank": rank, "matched": matched,
+                        "flags": entry.get("flags", []),
+                        "elapsed_seconds": elapsed}
+            questions.append(question)
+            progress.println(_fmt_question_line(question))
+            progress.step(note=entry["id"])
+    finally:
+        progress.done()
 
     counts = {name: 0 for name in
               ("strong", "thread_only", "miss", "invalid", "skipped")}
@@ -481,13 +497,13 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
         "environment": {
             "embed": fingerprint,
             "rerank_enabled": bool(ctx.config.rerank_enabled),
-            "rerank_model": ctx.config.mlx_model_rerank
+            "rerank_model": ctx.config.model_rerank
             if ctx.config.rerank_enabled else None,
             "top_k": top_k,
             "corpus": corpus,
             **({
                 "question_generator": {
-                    "model": ctx.config.mlx_model_thread_summary,
+                    "model": ctx.config.model_thread_summary,
                     "prompt_version": QUESTION_PROMPT_VERSION,
                 },
             } if any(entry.get("origin") == "generated"
@@ -545,6 +561,16 @@ def result_files(paths: SuitePaths) -> list[Path]:
 
 
 # -- rendering ---------------------------------------------------------------
+
+def _fmt_question_line(question: dict) -> str:
+    """One live result line, matching the format_run layout."""
+    rank = f"rank {question['rank']}" if question["rank"] else "-"
+    flags = ",".join(question.get("flags", [])) or "-"
+    timing = f"{question['elapsed_seconds']:.1f}s" \
+        if question.get("elapsed_seconds") is not None else "-"
+    return (f"  {question['id']:20} {question['verdict']:12} "
+            f"{rank:9} [{flags}] {timing}")
+
 
 def format_run(result: dict, record_path: Path | None) -> str:
     lines = [""]

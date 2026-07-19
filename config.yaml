@@ -47,6 +47,11 @@ query:
   # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
   # 300 chars) — latency/thoroughness dial; see docs_old/specs/reranker.md.
   rerank_text_chars: 600
+  # Listwise rerank window: how many fused candidates the reranker reads and
+  # re-orders in one prompt. The reranker concatenates every candidate into a
+  # single sequence, so keep this small — the tail keeps its RRF order and
+  # only the top-k is displayed. 24 covers the default top_k=15 with margin.
+  rerank_candidates: 24
   # Query uses the selected workspace's local warm daemon when available;
   # --no-daemon forces cold retrieval and --require-daemon fails closed.
   daemon_auto: true
@@ -85,19 +90,18 @@ ingestion:
   thread_summary_max_tokens: 600
 
 models:
-  # Apple-Silicon MLX only — no GGUF / llama.cpp.
-  # INDEX-INVALIDATING: changing the text repo resolves to a different
-  # per-model cache on next `ingest embed`
-  # — never deletes another model's cache
-  # (`docs_old/specs/multi-model-vector-cache.md`).
-  # Reranker is not index-invalidating.
-  # Requires: pip install -r requirements.txt (includes MLX).
-  # Fetch configured snapshots: ./pocket-advisor.py fetch-model
-  #
-  # Nano (smaller/faster) — code defaults in modules/config.py:
-  # mlx_model_embed_text: jinaai/jina-embeddings-v5-text-nano-mlx
-  # Small (higher quality, larger):
-  mlx_model_embed_text: jinaai/jina-embeddings-v5-text-small-mlx
-  mlx_model_rerank: jinaai/jina-reranker-v3-mlx
-  # Text-only through mlx-lm; no vision path is loaded.
-  mlx_model_thread_summary: mlx-community/Qwen3.5-4B-MLX-4bit
+  # All inference (embedding, summarization, reranking) is served by the
+  # oMLX localhost server (OpenAI-compatible); the engine loads no models.
+  # See docs/features/embedding-design-v2.md. Start oMLX before ingest/query.
+  # Loopback-only: non-local endpoints are refused.
+  inference_endpoint: "http://127.0.0.1:8000/v1"
+  # Server model ids — must match what GET /v1/models advertises.
+  # INDEX-INVALIDATING: changing model_embed_text resolves to a different
+  # per-model vector cache on next `ingest embed` — never deletes another
+  # model's cache. Reranker/summarizer are not index-invalidating (a
+  # summarizer change regenerates summaries via generator_model).
+  model_embed_text: Qwen3-Embedding-0.6B-8bit
+  model_rerank: Qwen3-Reranker-0.6B-4bit
+  model_thread_summary: Qwen3.5-4B-MLX-4bit
+  # Asserted against every embedding response; a mismatch is a hard error.
+  embed_dim: 1024

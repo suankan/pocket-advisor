@@ -1,12 +1,15 @@
-"""Local MLX thread-summary generation.
+"""Thread-summary generation through the oMLX Inference Server.
 
-Corpus text never leaves the machine. The model snapshot must already live
-under ``models/`` (``pocket-advisor.py fetch-model`` owns inbound downloads).
+Corpus text goes only to the loopback inference endpoint
+(`docs/features/embedding-design-v2.md`); the engine loads no models.
+Pre-call token budgeting uses the deterministic conservative character
+estimate (`modules/inference.py`) — thresholds stay token-denominated and
+an overestimate only segments earlier than strictly necessary.
 """
 from typing import Literal, Protocol
 
 from modules.config import Config
-from modules.embedding.loader import ModelStore
+from modules.inference import InferenceClient, estimate_tokens
 
 
 SUMMARY_PROMPT_VERSION = 2
@@ -60,33 +63,24 @@ class SummaryGenerator(Protocol):
     def count_tokens(self, text: str) -> int: ...
 
 
-class MlxSummaryGenerator:
-    """One session-warm, greedy local ``mlx-lm`` text summarizer.
+class ServiceSummaryGenerator:
+    """Greedy, bounded chat-completion summarizer over the inference
+    endpoint. Qwen thinking output stays disabled via the request's
+    chat-template options (verified against the running oMLX server)."""
 
-    Qwen 3.5 has a multimodal upstream configuration.  Current ``mlx-lm``
-    understands its nested ``text_config`` and discards vision weights; this
-    code never accepts an image input.
-    """
-
-    def __init__(self, config: Config, store: ModelStore):
-        try:
-            repo_dir = store.snapshot_dir(
-                config.mlx_model_thread_summary, local_files_only=True)
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                f"thread summary model is not local:"
-                f" {config.mlx_model_thread_summary}. Run"
-                " './pocket-advisor.py fetch-model' first.") from exc
-
-        from mlx_lm import generate, load
-        self._generate = generate
-        self._model, self._tokenizer = load(str(repo_dir))
+    def __init__(self, config: Config, client: InferenceClient | None = None):
+        self._client = client if client is not None \
+            else InferenceClient(config)
+        # Hard fail-fast: the summaries stage explicitly asked for
+        # generation, so an unreachable endpoint is a loud error.
+        self._client.check_ready(config.model_thread_summary)
         self._max_tokens = config.thread_summary_max_tokens
+        self.last_prompt_tokens = 0
 
     def count_tokens(self, text: str) -> int:
-        """Real model-tokenizer token count of one input text
-        (aggregate telemetry only — the text itself is never recorded)."""
-        return len(self._tokenizer.encode(text))
+        """Conservative pre-call estimate; exact telemetry counts come
+        from the service's usage fields after each call."""
+        return estimate_tokens(text)
 
     def generate(self, evidence: str, mode: SummaryMode) -> str:
         if mode not in _MODE_INSTRUCTIONS:
@@ -100,27 +94,13 @@ class MlxSummaryGenerator:
 
 Output only the resulting navigation summary.
 """
-        prompt = self._tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-            ],
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        result = self._generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=self._max_tokens,
-            verbose=False,
-        ).strip()
+        result = self._client.generate(
+            _SYSTEM_PROMPT, user, max_tokens=self._max_tokens).strip()
+        self.last_prompt_tokens = self._client.last_prompt_tokens
         if not result:
             raise RuntimeError("thread summarizer returned empty text")
         return result
 
 
-def get_summary_generator(config: Config,
-                          store: ModelStore) -> SummaryGenerator:
-    return MlxSummaryGenerator(config, store)
+def get_summary_generator(config: Config) -> SummaryGenerator:
+    return ServiceSummaryGenerator(config)

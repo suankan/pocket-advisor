@@ -15,9 +15,13 @@ exactly three models:
 
 | Concern | Model (server id) | API |
 |---|---|---|
-| Embedding | `mlx-community/Qwen3-Embedding-0.6B-8bit` | `POST /v1/embeddings` |
-| Summarization | `mlx-community/Qwen3.5-4B-MLX-4bit` | `POST /v1/chat/completions` |
-| Reranking | `mlx-community/Qwen3-Reranker-0.6B-4bit` | `POST /v1/rerank` |
+| Embedding | `Qwen3-Embedding-0.6B-8bit` | `POST /v1/embeddings` |
+| Summarization | `Qwen3.5-4B-MLX-4bit` | `POST /v1/chat/completions` |
+| Reranking | `Qwen3-Reranker-0.6B-4bit` | `POST /v1/rerank` |
+
+(The ids are what the running server advertises through `GET /v1/models`;
+the underlying weights are the `mlx-community/*` HuggingFace snapshots,
+fetched and owned by oMLX, never by the engine.)
 
 To the engine these are **HTTP services**, nothing more. Every job that needs
 inference calls the configured `inference_endpoint` directly through one thin
@@ -257,9 +261,9 @@ models:
   # per-model vector cache on next `ingest embed` — never deletes another
   # model's cache. Reranker and summarizer are not index-invalidating
   # (a summarizer change regenerates summaries via generator_model).
-  model_embed_text:      mlx-community/Qwen3-Embedding-0.6B-8bit
-  model_rerank:          mlx-community/Qwen3-Reranker-0.6B-4bit
-  model_thread_summary:  mlx-community/Qwen3.5-4B-MLX-4bit
+  model_embed_text:      Qwen3-Embedding-0.6B-8bit
+  model_rerank:          Qwen3-Reranker-0.6B-4bit
+  model_thread_summary:  Qwen3.5-4B-MLX-4bit
   embed_dim: 1024        # asserted against every response; mismatch is fatal
 
 query:

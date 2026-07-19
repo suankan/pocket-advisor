@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from modules.config import Config  # noqa: E402
 from modules.cli import RuntimeSelection, run_ingest  # noqa: E402
 from modules.database import Database  # noqa: E402
-from modules.embedding import (ModelStore, current_fingerprint, index_paths,
+from modules.embedding import (current_fingerprint, index_paths,
                                thread_index_paths,
                                thread_vector_filename)  # noqa: E402
 from modules.ingest_report import (Finding, StageRun, build_report,
@@ -61,7 +61,7 @@ def build_context(tmp: Path) -> PipelineContext:
     base = Config(
         project_root=tmp,
         workspaces_dir=workspaces,
-        mlx_model_embed_text="fixture/missing-model",
+        model_embed_text="fixture/missing-model",
         embed_dim=3,
     )
     registry = Registry.load(base)
@@ -192,8 +192,7 @@ def populate(ctx: PipelineContext) -> None:
 
 
 def build_indexes(ctx: PipelineContext) -> None:
-    fingerprint = current_fingerprint(
-        ctx.config, ModelStore(ctx.config.models_dir))
+    fingerprint = current_fingerprint(ctx.config)
     leaf = index_paths(ctx.config, fingerprint)
     thread = thread_index_paths(ctx.config, fingerprint)
     leaf.vecs_dir.mkdir(parents=True)
@@ -350,7 +349,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     raw = path.read_text(encoding="utf-8")
     assert SECRET not in raw
     payload = json.loads(raw)
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["workspace_id"] == "report-test"
     assert payload["snapshot"]["search"]["leaf_vectors"] == 3
     assert payload["record_path"].endswith(".json")
@@ -501,8 +500,7 @@ def test_transaction_run_flag_dedup(ctx: PipelineContext) -> None:
 
 
 def test_index_drift(ctx: PipelineContext) -> None:
-    fingerprint = current_fingerprint(
-        ctx.config, ModelStore(ctx.config.models_dir))
+    fingerprint = current_fingerprint(ctx.config)
     leaf = index_paths(ctx.config, fingerprint)
     np.save(leaf.vectors_ids_npy, np.asarray([1, 2], dtype=np.int64))
     snapshot = build_snapshot(ctx, start_log_id=1)

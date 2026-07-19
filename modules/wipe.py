@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modules.config import Config, STATE_DIRNAME
-from modules.embedding import ModelStore, current_fingerprint, fingerprint_slug
+from modules.embedding import current_fingerprint, fingerprint_slug
 from modules.workspace import Registry, Workspace
 
 PRESERVED_STATE_NAMES = frozenset({"search-accuracy-tests"})
@@ -43,8 +43,7 @@ class IndexRecord:
 
 
 def active_index_slug(config: Config) -> str:
-    fingerprint = current_fingerprint(
-        config, ModelStore(config.models_dir))
+    fingerprint = current_fingerprint(config)
     return fingerprint_slug(fingerprint)
 
 

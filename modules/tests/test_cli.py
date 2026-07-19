@@ -118,7 +118,6 @@ def test_grammar() -> None:
         assert parser.parse_args([*WS, *action]).workspace_required is True
 
     free_actions = (
-        ("fetch-model",),
         ("test",),
     )
     for action in free_actions:
@@ -129,7 +128,6 @@ def test_grammar() -> None:
     parse_must_fail(["ingest", "--workspace", "matter-x"])
 
     # Workspace-free actions reject a meaningless selector.
-    main_must_fail([*WS, "fetch-model"], "not accepted")
     main_must_fail([*WS, "test"], "not accepted")
 
     # Native accuracy compare takes --last, never result-file positionals.
@@ -374,25 +372,9 @@ def test_workspace_free_dispatch() -> None:
         assert cli.main(["test"]) == 0
         test_handler.assert_called_once()
 
-    config = SimpleNamespace(
-        models_dir=ROOT / "models",
-        mlx_model_embed_text="fake/embed",
-        mlx_model_rerank="fake/rerank",
-        mlx_model_thread_summary="fake/summary",
-        rerank_enabled=False,
-        summarize_threads=False,
-    )
-    store = SimpleNamespace(
-        snapshot_dir=lambda repo: ROOT / "models" / repo,
-        embed_dim_for_repo=lambda _repo: 4,
-    )
-    with patch.object(cli.Config, "load", return_value=config), \
-            patch.object(
-                cli, "_resolve_selection",
-                side_effect=AssertionError("workspace resolution must not run")), \
-            patch("modules.embedding.loader.ModelStore", return_value=store), \
-            contextlib.redirect_stdout(io.StringIO()):
-        assert cli.main(["fetch-model"]) == 0
+    # The retired fetch-model action is rejected, not aliased: the
+    # inference server owns its model weights now.
+    parse_must_fail(["fetch-model"])
 
 
 def test_ingest_report_display(tmp: Path) -> None:
@@ -403,7 +385,7 @@ def test_ingest_report_display(tmp: Path) -> None:
 
     config = SimpleNamespace(project_root=tmp, logs_dir=tmp / "logs")
     report = IngestRunReport(
-        schema_version=3,
+        schema_version=4,
         workspace_id="matter-x",
         started_at="2026-07-18T00:00:00+00:00",
         ended_at="2026-07-18T00:00:05+00:00",
@@ -489,7 +471,7 @@ def test_entrypoint_bootstrap() -> None:
     assert result.returncode == 0, result.stderr
     assert "--workspace" in result.stdout
     assert "all | discover | emails | pdfs" in result.stdout
-    assert "Workspace-free:  pocket-advisor.py fetch-model | test" in result.stdout
+    assert "Workspace-free:  pocket-advisor.py test" in result.stdout
     assert "accuracy compare A B" not in result.stdout
 
     for action in (("test",), ("ingest",), ("wipe", "state"),

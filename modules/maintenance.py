@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from modules.custody import sha256_file
-from modules.embedding import (ModelStore, current_fingerprint, index_paths,
+from modules.embedding import (current_fingerprint, index_paths,
                                meta_fingerprint, thread_index_paths,
                                thread_vector_filename)
 from modules.pipeline.base import PipelineContext
@@ -503,8 +503,7 @@ def _verify_vectors(ctx: PipelineContext, report: VerificationReport) -> None:
         report.warnings.append(
             "vector verification skipped (ingestion.embed_text=false)")
         return
-    store = ModelStore(ctx.config.models_dir)
-    fingerprint = current_fingerprint(ctx.config, store)
+    fingerprint = current_fingerprint(ctx.config)
     chunks = {int(row[0]) for row in ctx.conn.execute("SELECT id FROM chunks")}
     summaries = {
         int(row["thread_id"]): str(row["summary_text"])

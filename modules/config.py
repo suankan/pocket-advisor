@@ -113,12 +113,16 @@ class Config:
     summarize_threads: bool = True
     thread_summary_max_tokens: int = 600
 
-    # -- MLX model stack ---------------------------------------------------
-    mlx_model_embed_text: str = "jinaai/jina-embeddings-v5-text-nano-mlx"
-    mlx_model_rerank: str = "jinaai/jina-reranker-v3-mlx"
-    mlx_model_thread_summary: str = \
-        "mlx-community/Qwen3.5-4B-MLX-4bit"
-    embed_dim: int = 768
+    # -- inference server --------------------------------------------------
+    # All inference (embedding, summarization, reranking) is served by the
+    # external oMLX localhost server (OpenAI-compatible); the engine loads
+    # no models (docs/features/embedding-design-v2.md). Model ids are the
+    # server's advertised ids (GET /v1/models). Loopback-only by design.
+    inference_endpoint: str = "http://127.0.0.1:8000/v1"
+    model_embed_text: str = "Qwen3-Embedding-0.6B-8bit"
+    model_rerank: str = "Qwen3-Reranker-0.6B-4bit"
+    model_thread_summary: str = "Qwen3.5-4B-MLX-4bit"
+    embed_dim: int = 1024
 
     # -- retrieval knobs (used by the retrieval port; accepted now so one
     #    Config serves the whole engine) -----------------------------------
@@ -128,13 +132,18 @@ class Config:
     default_top_k: int = 15
     rerank_enabled: bool = True
     rerank_text_chars: int = 600
+    # Listwise rerank window: how many fused candidates the reranker reads and
+    # re-orders in one prompt. Kept small (not the fts+vec sum) because the
+    # reranker concatenates every candidate into a single sequence.
+    rerank_candidates: int = 24
     daemon_auto: bool = True
     daemon_idle_sec: int = 1800
     thread_context_chars: int = 120_000
 
     # -- derived paths ----------------------------------------------------
-    # Model weights are shared; every corpus-derived path requires an
-    # explicit workspace selection and lives below that workspace's root.
+    # Every corpus-derived path requires an explicit workspace selection
+    # and lives below that workspace's root. Model weights live with the
+    # inference server, not the engine.
     @property
     def state_root(self) -> Path:
         return self.workspaces_dir / STATE_DIRNAME
@@ -193,10 +202,6 @@ class Config:
         return self.state_dir / "search-accuracy-tests"
 
     @property
-    def models_dir(self) -> Path:
-        return self.project_root / "models"
-
-    @property
     def registry_path(self) -> Path:
         return self.workspaces_dir / "workspace-config.yaml"
 
@@ -241,17 +246,20 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
         ("summarize_threads", lambda _, v: bool(v)),
     "ingestion.thread_summary_max_tokens":
         ("thread_summary_max_tokens", lambda _, v: int(v)),
-    "models.mlx_model_embed_text":
-        ("mlx_model_embed_text", lambda _, v: str(v)),
-    "models.mlx_model_rerank": ("mlx_model_rerank", lambda _, v: str(v)),
-    "models.mlx_model_thread_summary":
-        ("mlx_model_thread_summary", lambda _, v: str(v)),
+    "models.inference_endpoint":
+        ("inference_endpoint", lambda _, v: str(v)),
+    "models.model_embed_text": ("model_embed_text", lambda _, v: str(v)),
+    "models.model_rerank": ("model_rerank", lambda _, v: str(v)),
+    "models.model_thread_summary":
+        ("model_thread_summary", lambda _, v: str(v)),
+    "models.embed_dim": ("embed_dim", lambda _, v: int(v)),
     "query.fts_candidates": ("fts_candidates", lambda _, v: int(v)),
     "query.vec_candidates": ("vec_candidates", lambda _, v: int(v)),
     "query.rrf_k": ("rrf_k", lambda _, v: int(v)),
     "query.default_top_k": ("default_top_k", lambda _, v: int(v)),
     "query.rerank_enabled": ("rerank_enabled", lambda _, v: bool(v)),
     "query.rerank_text_chars": ("rerank_text_chars", lambda _, v: int(v)),
+    "query.rerank_candidates": ("rerank_candidates", lambda _, v: int(v)),
     "query.daemon_auto": ("daemon_auto", lambda _, v: bool(v)),
     "query.daemon_idle_sec": ("daemon_idle_sec", lambda _, v: int(v)),
     "query.thread_context_chars":

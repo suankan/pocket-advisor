@@ -89,15 +89,17 @@ class SummariesTelemetry:
 
 @dataclass(slots=True)
 class EmbedQueueTelemetry:
+    """Service-execution counters: batching moved server-side, so the
+    local bucket/microbatch/bisection counters are retired.
+    ``input_tokens`` comes from the service's usage responses;
+    ``dispatched_at_readiness`` counts producer-stage dispatches
+    (design decision 5) versus convergence backfill."""
+
     pending_entities: int = 0
     input_tokens: int = 0
-    bucket_count: int = 0
-    microbatch_count: int = 0
-    padding_tokens: int = 0
+    dispatched_at_readiness: int = 0
     successful_entities: int = 0
     failed_entities: int = 0
-    individual_fallbacks: int = 0
-    bisection_fallbacks: int = 0
 
 
 @dataclass(slots=True)
@@ -311,9 +313,8 @@ def _validate_summaries(obj: SummariesTelemetry) -> None:
 
 
 _QUEUE_COUNTS = (
-    "pending_entities", "input_tokens", "bucket_count", "microbatch_count",
-    "padding_tokens", "successful_entities", "failed_entities",
-    "individual_fallbacks", "bisection_fallbacks",
+    "pending_entities", "input_tokens", "dispatched_at_readiness",
+    "successful_entities", "failed_entities",
 )
 
 

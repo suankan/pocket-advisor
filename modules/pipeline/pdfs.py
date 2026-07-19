@@ -52,6 +52,8 @@ from modules.ocr import (
     pdf_recipes,
     request_interrupt,
 )
+from modules.embedding.chunks import sync_document_chunks, sync_payloads
+from modules.embedding.dispatch import EmbedDispatcher
 from modules.pdf_transforms import (OCR_CHILD_JOBS, PdfTransformCache,
                                     TextProduct, TransformRequest,
                                     TransformResult, run_transform)
@@ -79,10 +81,34 @@ class PdfTextStage(Stage):
 
     def run(self) -> StageStats:
         stats = StageStats()
+        self._dispatcher: EmbedDispatcher | None = None
         self._collect_native(stats)
         self._ocr_pending(stats)
+        if self._dispatcher is not None:
+            self._dispatcher.drain_into_stats(stats)
+            self._dispatcher.close()
         self.conn.commit()
         return stats
+
+    def _dispatch_document(self, document_id: int) -> None:
+        """Readiness dispatch (embedding-design-v2 decision 5): the moment
+        a document's text product is published its leaf chunks are cut and
+        sent to the inference endpoint. Best-effort — any failure here
+        leaves pending gaps for `ingest embed` and never fails this
+        stage's publication."""
+        if not self.config.embed_text:
+            return
+        try:
+            sync_document_chunks(self.conn, self.config, document_id)
+            sync_payloads(self.conn, document_id=document_id)
+            self.conn.commit()
+            if self._dispatcher is None:
+                self._dispatcher = EmbedDispatcher(self.ctx)
+            self._dispatcher.submit_pending_leaves(
+                self.conn, document_id=document_id, at_readiness=True)
+        except Exception as exc:
+            print(f"pdfs: readiness dispatch skipped for document"
+                  f" {document_id}: {type(exc).__name__}: {exc}")
 
     # -- 3.1 collect corpora-native PDFs ------------------------------------
 
@@ -320,6 +346,8 @@ class PdfTextStage(Stage):
                     except (CustodyError, OSError, ValueError) as exc:
                         self._record_document_error(
                             doc, f"{type(exc).__name__}: {exc}", stats)
+                    else:
+                        self._dispatch_document(doc.document_id)
                 if publish is not None and doc.sha256 not in requests:
                     publish.step(note=doc.label)
             if publish is not None:

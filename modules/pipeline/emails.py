@@ -54,6 +54,8 @@ from modules.emailbody import (compact_authored_bodies, decode_maybe_encoded,
                                extract_body, normalize_message_id,
                                normalize_subject, render_message,
                                sanitize_filename)
+from modules.embedding.chunks import sync_email_chunks, sync_payloads
+from modules.embedding.dispatch import EmbedDispatcher
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
 from modules.progress import Progress
@@ -172,7 +174,25 @@ class EmailStage(Stage):
             stats.inc(key, value)
         self._write_readable_messages(compaction.authored_bodies)
         self.conn.commit()
+        if self.config.embed_text:
+            self._dispatch_embeddings(stats)
         return stats
+
+    def _dispatch_embeddings(self, stats: StageStats) -> None:
+        """Readiness dispatch (embedding-design-v2 decision 5): authored
+        bodies are final once compaction has run, so their leaf chunks are
+        cut and sent to the inference endpoint right here. Best-effort —
+        an unreachable endpoint leaves entities pending for
+        `ingest embed`, never failing this stage."""
+        stats.inc("chunks_created",
+                  sync_email_chunks(self.conn, self.config))
+        sync_payloads(self.conn)
+        self.conn.commit()
+        dispatcher = EmbedDispatcher(self.ctx)
+        dispatcher.submit_pending_leaves(
+            self.conn, source_type="email_body", at_readiness=True)
+        dispatcher.drain_into_stats(stats)
+        dispatcher.close()
 
     def _write_readable_messages(self,
                                  authored_bodies: dict[int, str]) -> None:

@@ -61,7 +61,7 @@ def main() -> int:
         workspaces.mkdir()
         (workspaces / "workspace-config.yaml").write_text(REGISTRY_YAML)
         base = Config(project_root=root, workspaces_dir=workspaces,
-                      rerank_enabled=False)
+                      rerank_enabled=False, embed_text=False)
         registry = Registry.load(base)
         workspace = registry.require_workspace("matter-x")
         cfg = base.for_workspace(workspace.id)

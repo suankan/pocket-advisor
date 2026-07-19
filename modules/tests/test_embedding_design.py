@@ -1,5 +1,4 @@
 """Self-test: stable thread anchors, summaries, and dual vector indexes."""
-import importlib
 import json
 import sys
 import tempfile
@@ -126,13 +125,10 @@ def main() -> int:
         workspaces.mkdir()
         (workspaces / "workspace-config.yaml").write_text(REGISTRY_YAML)
         base = Config(project_root=root, workspaces_dir=workspaces,
-                      rerank_enabled=False)
+                      rerank_enabled=False, embed_text=False)
         registry = Registry.load(base)
         workspace = registry.require_workspace("matter-x")
         cfg = base.for_workspace(workspace.id)
-        assert cfg.mlx_model_thread_summary == \
-            "mlx-community/Qwen3.5-4B-MLX-4bit"
-        importlib.import_module("mlx_lm.models.qwen3_5")
         conn = Database(cfg.db_path, workspace.id).open()
         ctx = PipelineContext(
             config=cfg, registry=registry, workspace=workspace, conn=conn,

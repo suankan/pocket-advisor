@@ -42,7 +42,6 @@ class RuntimeSelection:
 
 _HELP = {
     "db": "init — create the fresh SQLite schema",
-    "fetch-model": "download configured MLX model repos (workspace-free)",
     "ingest": ("all | discover | emails | pdfs | thread | summaries | embed"
                " | transactions | report [--last | PATH]"),
     "transactions": "report — statement integrity and reconciliation report",
@@ -56,7 +55,7 @@ _HELP = {
     "test": "run every modules/tests/test_*.py self-test (workspace-free)",
 }
 _GROUPS = (
-    ("setup", ("db", "fetch-model")),
+    ("setup", ("db",)),
     ("pipeline", ("ingest", "transactions")),
     ("retrieval", ("query", "daemon")),
     ("maintenance", ("wipe", "blob-index", "verify")),
@@ -73,7 +72,7 @@ def _epilog() -> str:
     lines.extend((
         "",
         "Workspace-bound: pocket-advisor.py --workspace <id> <command> ...",
-        "Workspace-free:  pocket-advisor.py fetch-model | test",
+        "Workspace-free:  pocket-advisor.py test",
         "Help:            pocket-advisor.py <command> --help",
     ))
     return "\n".join(lines)
@@ -372,29 +371,6 @@ def _handle_db(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_fetch_model(args: argparse.Namespace) -> int:
-    from modules.embedding.loader import ModelStore
-
-    _ = args
-    config = Config.load()
-    store = ModelStore(config.models_dir)
-    embed = store.snapshot_dir(config.mlx_model_embed_text)
-    print(f"Text embed model ready: {embed}")
-    print(f"  embed dim: {store.embed_dim_for_repo(config.mlx_model_embed_text)}")
-    if config.rerank_enabled:
-        rerank = store.snapshot_dir(config.mlx_model_rerank)
-        print(f"Rerank model ready: {rerank}")
-    else:
-        print("Rerank model: skipped (query.rerank_enabled=false)")
-    if config.summarize_threads:
-        summary = store.snapshot_dir(config.mlx_model_thread_summary)
-        print(f"Thread summary model ready: {summary}")
-    else:
-        print("Thread summary model: skipped"
-              " (ingestion.summarize_threads=false)")
-    return 0
-
-
 def _handle_ingest(args: argparse.Namespace) -> int:
     if args.force and args.stage != "transactions":
         raise SystemExit(
@@ -688,9 +664,6 @@ def build_parser() -> argparse.ArgumentParser:
     command = commands.add_parser("db", help=_HELP["db"])
     command.add_argument("action", choices=("init",))
     command.set_defaults(handler=_handle_db, workspace_required=True)
-
-    command = commands.add_parser("fetch-model", help=_HELP["fetch-model"])
-    command.set_defaults(handler=_handle_fetch_model, workspace_required=False)
 
     command = commands.add_parser(
         "ingest",

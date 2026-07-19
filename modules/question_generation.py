@@ -1,14 +1,15 @@
-"""Local MLX question synthesis for retrieval-expectation suites.
+"""Question synthesis for retrieval-expectation suites via the oMLX
+Inference Server.
 
-Corpus text never leaves the machine. The model snapshot must already live
-under ``models/`` (``pocket-advisor.py fetch-model`` owns inbound downloads).
-Questions are generated only from authored email bodies and PDF text — never
-from subjects, filenames, envelope fields, or thread summaries.
+Corpus text goes only to the loopback inference endpoint. Questions are
+generated only from authored email bodies and PDF text — never from
+subjects, filenames, envelope fields, or thread summaries.
 """
 from typing import Protocol
 
 from modules.config import Config
-from modules.embedding.loader import ModelStore
+from modules.inference import (InferenceClient, estimate_tokens,
+                               truncate_by_estimate)
 
 QUESTION_PROMPT_VERSION = 1
 QUESTION_MAX_INPUT_TOKENS = 6_000
@@ -34,35 +35,22 @@ class QuestionGenerator(Protocol):
     def truncate(self, text: str, max_tokens: int) -> str: ...
 
 
-class MlxQuestionGenerator:
-    """One session-warm, greedy local ``mlx-lm`` question writer."""
+class ServiceQuestionGenerator:
+    """Greedy, bounded chat-completion question writer over the
+    inference endpoint."""
 
-    def __init__(self, config: Config, store: ModelStore):
-        try:
-            repo_dir = store.snapshot_dir(
-                config.mlx_model_thread_summary, local_files_only=True)
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                f"question generator model is not local:"
-                f" {config.mlx_model_thread_summary}. Run"
-                " './pocket-advisor.py fetch-model' first.") from exc
-
-        from mlx_lm import generate, load
-        self._generate = generate
-        self._model, self._tokenizer = load(str(repo_dir))
+    def __init__(self, config: Config, client: InferenceClient | None = None):
+        self._client = client if client is not None \
+            else InferenceClient(config)
+        self._client.check_ready(config.model_thread_summary)
         self._max_tokens = QUESTION_MAX_OUTPUT_TOKENS
-        self.model_id = config.mlx_model_thread_summary
+        self.model_id = config.model_thread_summary
 
     def count_tokens(self, text: str) -> int:
-        return len(self._tokenizer.encode(text))
+        return estimate_tokens(text)
 
     def truncate(self, text: str, max_tokens: int) -> str:
-        if max_tokens <= 0:
-            return ""
-        token_ids = self._tokenizer.encode(text)
-        if len(token_ids) <= max_tokens:
-            return text
-        return self._tokenizer.decode(token_ids[:max_tokens])
+        return truncate_by_estimate(text, max_tokens)
 
     def generate(self, evidence: str) -> str:
         user = f"""\
@@ -74,31 +62,16 @@ Write one standalone retrieval question answerable only from this evidence.
 
 Output only the question.
 """
-        prompt = self._tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-            ],
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        result = self._generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=self._max_tokens,
-            verbose=False,
-        ).strip()
+        result = self._client.generate(
+            _SYSTEM_PROMPT, user, max_tokens=self._max_tokens).strip()
         if not result:
             raise RuntimeError("question generator returned empty text")
         # Keep a single logical question line for YAML/scorer simplicity.
         return " ".join(result.split())
 
 
-def get_question_generator(config: Config,
-                           store: ModelStore) -> QuestionGenerator:
-    return MlxQuestionGenerator(config, store)
+def get_question_generator(config: Config) -> QuestionGenerator:
+    return ServiceQuestionGenerator(config)
 
 
 def accept_question(text: str) -> str | None:

@@ -4,6 +4,35 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-20 — Thread-summary generation concurrency
+
+Design lock: `17be322`; implementation commit: `b884ed1` (design
+`docs/features/summary-generation-concurrency.md`; user-directed platform
+change, not a numbered roadmap item).
+
+- The summaries stage no longer generates thread summaries one at a time. A
+  new `EmailThreadsSummaryDispatcher` (`modules/pipeline/summary_dispatch.py`)
+  fans the stale-thread generation loop out across a bounded pool
+  (`max_in_flight` defaults to `INFERENCE_MAX_IN_FLIGHT = 8`), so up to eight
+  long-context 4B decodes run concurrently against oMLX's continuous batching
+  instead of strictly back-to-back.
+- Generation logic (`_generate`/`_call_generator`/`_reduce`/`_structural_segments`
+  and the render/split helpers) moved to `modules/pipeline/summaries_core.py`
+  as worker-safe, progress-free, telemetry-free functions; the stage's `run`
+  loop now submits all stale threads, `drain()`s, then settles each outcome on
+  the main thread (DB upsert + commit + `submit_summary` for its embedding +
+  telemetry merge + failure flag). Only `generator.generate()` runs off-thread;
+  the sqlite connection, `Progress` bar, and `ReviewLog` are never touched from
+  a worker.
+- The dispatcher shares the embed dispatcher's weakref registry
+  (`modules/embedding/dispatch.py`'s `LiveDispatcher` protocol), so the existing
+  `cancel_all()` interrupt hook abandons in-flight generation with no `cli.py`
+  change. Unreachable oMLX (`InferenceUnavailable`) degrades to `skipped`
+  (durable pending gap), not `failed`, matching embedding dispatch.
+- `test_summary_performance.py` adds concurrency, unavailable-skip, and
+  per-thread-failure-isolation tests; full suite (14/14) and `./pocket-advisor.py
+  test` pass.
+
 ## 2026-07-20 — Inference-server (oMLX) cutover
 
 Design lock: `e870d46`; implementation commit: `b2d06a4` (design

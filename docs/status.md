@@ -47,6 +47,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `bf62292` | **PDF-to-text pipeline + interrupt-safe shutdown + core-count workers**: shared work-stealing queue with largest-first admission and coordinator-only deterministic publication; per-worker progress; Ctrl+C exits cleanly (code 130, no traceback); `pdf_workers` knob removed, workers = min(cores, pending); ingest-report telemetry v3; native suite 14/14 |
 | `e870d46` | **Inference-server (oMLX) design locked**: one loopback endpoint serving embedding/summarization/reranking as HTTP services; zero engine model code; readiness dispatch + embed convergence (`docs/features/embedding-design-v2.md`) |
 | `b2d06a4` | **Inference-server cutover**: `modules/inference.py` client (loopback-only, fail-fast model check); symmetric Qwen3 served models; producers dispatch embeddings at readiness (≤8 in flight, best-effort), embed stage converges loudly; `omlx-v1` fingerprint; MLX loader/`fetch-model`/`mlx_model_*` keys/MLX dependency stack deleted; report schema v4; native suite 14/14 |
+| `b884ed1` | **Thread-summary generation concurrency**: `EmailThreadsSummaryDispatcher` fans the stale-thread generation loop across a bounded pool (≤8 in flight) so 4B decodes run concurrently; generation logic moved to `summaries_core.py`, settlement stays on the main thread; shares the embed dispatcher's interrupt-abandon registry; `InferenceUnavailable` degrades to skipped (design `docs/features/summary-generation-concurrency.md`) |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -84,7 +85,20 @@ failure rolls the whole Stage 5 rebuild back.
   ingest/summaries/query; `db init` is the whole workspace setup
   (`fetch-model` is retired). Pending live validation: the full test-workspace
   re-embed and a fresh `accuracy run` thread-or-better baseline under
-  symmetric Qwen3 (prior 25/25 baseline predates the model swap).
+   symmetric Qwen3 (prior 25/25 baseline predates the model swap).
+- **Thread-summary generation concurrency (`b884ed1`, design locked at
+  `17be322`):** `docs/features/summary-generation-concurrency.md` is the
+  locked design. The `summaries` stage no longer generates one thread at a
+  time: `EmailThreadsSummaryDispatcher` (`modules/pipeline/summary_dispatch.py`)
+  fans stale-thread generation across a bounded pool (`INFERENCE_MAX_IN_FLIGHT
+  = 8` by default), so up to eight `Qwen3.5-4B-MLX-4bit` decodes run
+  concurrently against oMLX's continuous batching. Generation logic lives in
+  `modules/pipeline/summaries_core.py` as worker-safe functions; only
+  `generate()` runs off-thread — DB upsert, commit, summary-embed dispatch,
+  telemetry merge, and failure flags all happen on the main thread after
+  `drain()`. The dispatcher shares the embed dispatcher's weakref registry, so
+  the existing `cancel_all()` interrupt hook abandons in-flight generation; an
+  unreachable oMLX degrades to `skipped` (durable pending gap), not `failed`.
 - **Privilege concept removed (`4a593ef`):** per the locked
   decision in `docs/design.md`, all privilege handling
   was dropped from `modules/`, `config.yaml`, the user registry, tests,

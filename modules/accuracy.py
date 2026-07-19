@@ -10,15 +10,18 @@ Layout (workspace-owned, preserved across ``wipe state``):
         results/<utc>__<label>.json   one measurement record per run
 
 Expectation entries anchor on durable identities only — Message-IDs
-(``expect_any``) and thread stable keys (``expect_thread_key``) — never
-integer row ids, which do not survive a re-ingest. Verdicts:
+(``expect_any``), thread stable keys (``expect_thread_key``), and document
+SHA-256 values — never integer row ids. Verdicts:
 
-    STRONG       expected Message-ID directly matched in a top-k packet
+    STRONG       expected Message-ID/document SHA directly matched
     THREAD(sum)  expect_thread_key packet selected via the summary channel
     THREAD       only the expected message's thread packet was selected
     MISS         no expected anchor in the top-k packets
     INVALID      anchor not present in this workspace's corpus
-    SKIPPED      placeholder question (TODO) not yet authored
+    SKIPPED      empty or TODO placeholder (legacy hand scaffolds only)
+
+``accuracy generate`` synthesizes scorable questions from authored email
+bodies and PDF text via a local MLX model (never subjects/filenames/summaries).
 """
 import hashlib
 import json
@@ -30,16 +33,22 @@ from pathlib import Path
 
 import yaml
 
-from modules.config import Config
 from modules.custody import write_verified
+from modules.emailbody import body_text as message_body_text
+from modules.embedding import ModelStore
 from modules.pipeline.base import PipelineContext
+from modules.progress import Progress
+from modules.question_generation import (QUESTION_MAX_INPUT_TOKENS,
+                                         QUESTION_PROMPT_VERSION,
+                                         QuestionGenerator, accept_question,
+                                         get_question_generator)
 from modules.retrieval import SearchOptions, SearchResources, run_search
 
 RESULT_SCHEMA_VERSION = 1
 _ENTRY_KEYS = frozenset({"id", "question", "expect_any",
-                         "expect_thread_key", "flags", "notes", "hint"})
-_SCORED = ("STRONG", "THREAD(sum)", "THREAD", "MISS")
-
+                         "expect_thread_key", "flags", "notes", "hint",
+                         "origin"})
+GENERATED_EXPECTATIONS_NAME = "generated.yaml"
 
 class ExpectationError(SystemExit):
     pass
@@ -115,7 +124,7 @@ def expectation_files(paths: SuitePaths,
     if not files:
         raise ExpectationError(
             f"accuracy: no expectation sets under {paths.expectations_dir};"
-            " author one or scaffold with 'accuracy generate'")
+            " run 'accuracy generate' or add a hand-authored *.yaml")
     return files
 
 
@@ -126,88 +135,222 @@ def _is_todo(entry: dict) -> bool:
 
 # -- generate ----------------------------------------------------------------
 
-def generate_scaffold(ctx: PipelineContext, target: Path,
-                      force: bool) -> tuple[Path, int]:
-    """Write an anchor-verified scaffold for the selected workspace.
+@dataclass(frozen=True, slots=True)
+class GenerateStats:
+    generated: int
+    skipped_empty: int
+    rejected: int
+    considered: int
+    model: str
+    prompt_version: int
 
-    Anchors come from the live DB (multi-email threads with current
-    summaries; standalone documents); questions are TODO placeholders the
-    human replaces — auto-phrased questions would only measure envelope
-    echo, not retrieval quality.
-    """
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    kind: str  # "thread" | "document"
+    entry_id: str
+    evidence: str
+    anchors: dict
+    flags: list[str]
+    hint: str
+
+
+def _thread_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
+    """Multi-email threads with a loadable authored body as evidence."""
+    root = ctx.config.project_root
+    rows = ctx.conn.execute(
+        """SELECT id, stable_key, first_date, last_date, item_count
+             FROM threads
+            WHERE item_count >= 2
+            ORDER BY item_count DESC, stable_key ASC""").fetchall()
+    candidates: list[_Candidate] = []
+    skipped_empty = 0
+    for row in rows:
+        members = ctx.conn.execute(
+            """SELECT message_id, body_text_path
+                 FROM emails
+                WHERE thread_id = ? AND body_text_path IS NOT NULL
+                ORDER BY message_id ASC""",
+            (row["id"],)).fetchall()
+        best_body = ""
+        best_mid: str | None = None
+        for member in members:
+            path = root / member["body_text_path"]
+            if not path.is_file():
+                continue
+            try:
+                body = message_body_text(
+                    path.read_bytes(), source=path).strip()
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            if len(body) > len(best_body) or (
+                    len(body) == len(best_body) and body
+                    and (best_mid is None
+                         or (member["message_id"] or "") < best_mid)):
+                best_body = body
+                best_mid = member["message_id"]
+        if not best_body:
+            skipped_empty += 1
+            continue
+        slug = hashlib.sha256(
+            row["stable_key"].encode("utf-8")).hexdigest()[:8]
+        anchors: dict = {"expect_thread_key": row["stable_key"]}
+        if best_mid:
+            anchors["expect_any"] = [best_mid]
+        candidates.append(_Candidate(
+            kind="thread",
+            entry_id=f"thread-{slug}",
+            evidence=best_body,
+            anchors=anchors,
+            flags=["thread-level", "generated"],
+            hint=(f"{row['item_count']} emails, "
+                  f"{row['first_date']} .. {row['last_date']}"),
+        ))
+    return candidates, skipped_empty
+
+
+def _document_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
+    """PDFs with a readable extracted-text product as evidence."""
+    root = ctx.config.project_root
+    rows = ctx.conn.execute(
+        """SELECT sha256, extracted_text_path
+             FROM documents
+            WHERE media_kind = 'pdf'
+              AND is_skipped = 0
+              AND extracted_text_path IS NOT NULL
+            ORDER BY sha256 ASC""").fetchall()
+    candidates: list[_Candidate] = []
+    skipped_empty = 0
+    for row in rows:
+        path = root / row["extracted_text_path"]
+        if not path.is_file():
+            skipped_empty += 1
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            skipped_empty += 1
+            continue
+        if not text:
+            skipped_empty += 1
+            continue
+        slug = row["sha256"][:8]
+        candidates.append(_Candidate(
+            kind="document",
+            entry_id=f"document-{slug}",
+            evidence=text,
+            anchors={"expect_any": [row["sha256"]]},
+            flags=["document", "generated"],
+            hint="pdf",
+        ))
+    return candidates, skipped_empty
+
+
+def generate_expectations(
+        ctx: PipelineContext, target: Path, force: bool, *,
+        limit: int | None = None,
+        generator: QuestionGenerator | None = None,
+) -> tuple[Path, GenerateStats]:
+    """Synthesize a complete expectation set from body/PDF evidence."""
     if target.exists() and not force:
         raise ExpectationError(
             f"accuracy: {target} already exists (pass --force to replace)")
-    lines = [
-        "# Retrieval expectation scaffold — generated "
-        f"{datetime.now(timezone.utc).date()} from workspace "
-        f"'{ctx.workspace.id}'.",
-        "# Replace each TODO question with a natural question whose answer",
-        "# lives in the hinted thread/document, then delete this header.",
-        "# Anchors are durable (Message-IDs / thread stable keys) and were",
-        "# verified against the live database at generation time.",
-        "",
-    ]
-    count = 0
-    threads = ctx.conn.execute(
-        """SELECT t.id, t.stable_key, t.representative_subject,
-                  t.first_date, t.last_date, t.item_count
-             FROM threads t JOIN thread_summaries s ON s.thread_id = t.id
-            WHERE s.is_stale = 0 ORDER BY t.item_count DESC""").fetchall()
-    for row in threads:
-        slug = hashlib.sha256(
-            row["stable_key"].encode("utf-8")).hexdigest()[:8]
-        subject = " ".join((row["representative_subject"] or "").split())
-        lines.extend((
-            f"- id: thread-{slug}",
-            "  question: \"TODO — thread-level question answered by this"
-            " conversation\"",
-            f"  expect_thread_key: \"{row['stable_key']}\"",
-            "  flags: [thread-level]",
-            f"  hint: \"{row['item_count']} items, "
-            f"{row['first_date']} .. {row['last_date']}, subject: "
-            f"{subject[:80]}\"",
-            "",
-        ))
-        count += 1
-    # Documents have no message_id/subject of their own (that's an email
-    # concept) — anchor on the document's own content identity, its
-    # sha256, and use a representative occurrence filename (attachment
-    # filename first, else the native mount's basename) as a human hint.
-    documents = ctx.conn.execute(
-        """SELECT d.sha256,
-                  (SELECT a.filename FROM attachments a
-                    WHERE a.document_id = d.id AND a.filename IS NOT NULL
-                    ORDER BY a.id LIMIT 1) AS attached_filename,
-                  (SELECT ds.relpath FROM document_sources ds
-                    WHERE ds.document_id = d.id
-                    ORDER BY ds.id LIMIT 1) AS native_relpath
-             FROM documents d
-            WHERE d.media_kind = 'pdf'
-            ORDER BY d.sha256""").fetchall()
-    for row in documents:
-        slug = row["sha256"][:8]
-        label = row["attached_filename"] or (
-            Path(row["native_relpath"]).name
-            if row["native_relpath"] else None) \
-            or f"document {row['sha256'][:12]}…"
-        lines.extend((
-            f"- id: document-{slug}",
-            "  question: \"TODO — question answered by this document\"",
-            "  expect_any:",
-            f"    - \"{row['sha256']}\"",
-            "  flags: [document]",
-            f"  hint: \"{label[:100]}\"",
-            "",
-        ))
-        count += 1
-    if not count:
+    if limit is not None and limit <= 0:
+        raise ExpectationError("accuracy generate: --limit must be positive")
+
+    threads, thread_empty = _thread_candidates(ctx)
+    documents, document_empty = _document_candidates(ctx)
+    candidates = [*threads, *documents]
+    skipped_empty = thread_empty + document_empty
+    if not candidates:
         raise ExpectationError(
-            "accuracy: nothing to scaffold — no summarized threads or "
-            "documents in this workspace")
+            "accuracy: nothing to generate — no multi-email threads with "
+            "authored bodies or PDFs with extracted text in this workspace")
+
+    considered = len(candidates)
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    model_id = ctx.config.mlx_model_thread_summary
+    if generator is None:
+        print(f"accuracy: loading question model {model_id}…", flush=True)
+        generator = get_question_generator(
+            ctx.config, ModelStore(ctx.config.models_dir))
+        model_id = getattr(generator, "model_id", model_id)
+
+    entries: list[dict] = []
+    rejected = 0
+    progress = Progress("generate questions", total=len(candidates))
+    try:
+        for candidate in candidates:
+            progress.start(note=candidate.entry_id)
+            evidence = generator.truncate(
+                candidate.evidence, QUESTION_MAX_INPUT_TOKENS)
+            if not evidence.strip():
+                rejected += 1
+                progress.step(note=candidate.entry_id)
+                continue
+            try:
+                raw = generator.generate(evidence)
+            except Exception as exc:  # noqa: BLE001 — isolate one failure
+                progress.println(
+                    f"accuracy: {candidate.entry_id}: generation failed: {exc}")
+                rejected += 1
+                progress.step(note=candidate.entry_id)
+                continue
+            question = accept_question(raw)
+            if question is None:
+                rejected += 1
+                progress.step(note=candidate.entry_id)
+                continue
+            entry = {
+                "id": candidate.entry_id,
+                "question": question,
+                **candidate.anchors,
+                "flags": list(candidate.flags),
+                "hint": candidate.hint,
+                "notes": (f"generated v{QUESTION_PROMPT_VERSION} "
+                          f"{model_id}"),
+                "origin": "generated",
+            }
+            entries.append(entry)
+            progress.step(note=candidate.entry_id)
+    finally:
+        progress.done()
+
+    if not entries:
+        raise ExpectationError(
+            "accuracy: generation produced no usable questions "
+            f"(considered={considered}, skipped_empty={skipped_empty}, "
+            f"rejected={rejected})")
+
+    header = (
+        f"# Retrieval expectations — generated "
+        f"{datetime.now(timezone.utc).date()} from workspace "
+        f"'{ctx.workspace.id}'.\n"
+        f"# model: {model_id}\n"
+        f"# question_prompt_version: {QUESTION_PROMPT_VERSION}\n"
+        "# Questions were synthesized from authored email bodies and PDF "
+        "text only\n"
+        "# (no subjects, filenames, or thread summaries).\n"
+        "\n"
+    )
+    body = yaml.safe_dump(
+        entries, allow_unicode=True, default_flow_style=False,
+        sort_keys=False)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
-    return target, count
+    if force and target.exists():
+        target.unlink()
+    target.write_text(header + body, encoding="utf-8")
+    stats = GenerateStats(
+        generated=len(entries),
+        skipped_empty=skipped_empty,
+        rejected=rejected,
+        considered=considered,
+        model=model_id,
+        prompt_version=QUESTION_PROMPT_VERSION,
+    )
+    return target, stats
 
 
 # -- run ---------------------------------------------------------------------
@@ -342,6 +485,13 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
             if ctx.config.rerank_enabled else None,
             "top_k": top_k,
             "corpus": corpus,
+            **({
+                "question_generator": {
+                    "model": ctx.config.mlx_model_thread_summary,
+                    "prompt_version": QUESTION_PROMPT_VERSION,
+                },
+            } if any(entry.get("origin") == "generated"
+                     for entry in entries) else {}),
         },
         "questions": questions,
         "aggregates": {

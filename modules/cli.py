@@ -551,12 +551,18 @@ def _handle_accuracy(args: argparse.Namespace) -> int:
     ctx = _open_context(selection)
     try:
         if args.action == "generate":
-            target = paths.expectations_dir / "scaffold.yaml"
-            target, count = accuracy.generate_scaffold(
-                ctx, target, args.force)
-            print(f"accuracy: scaffolded {count} anchor-verified entries "
-                  f"-> {target}\nReplace the TODO questions, then run "
-                  "'accuracy run'.")
+            target = paths.expectations_dir / accuracy.GENERATED_EXPECTATIONS_NAME
+            limit = getattr(args, "limit", None)
+            target, stats = accuracy.generate_expectations(
+                ctx, target, args.force, limit=limit)
+            print(
+                f"accuracy: generated {stats.generated} questions "
+                f"(considered={stats.considered}, "
+                f"skipped_empty={stats.skipped_empty}, "
+                f"rejected={stats.rejected}) "
+                f"via {stats.model} prompt-v{stats.prompt_version}\n"
+                f"  -> {target}\n"
+                "Run 'accuracy run' to score retrieval against them.")
             return 0
         files = accuracy.expectation_files(paths, args.expectations)
         entries = accuracy.load_expectations(files)
@@ -770,8 +776,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="action", metavar="action", required=True)
     generate = actions.add_parser(
         "generate",
-        help="scaffold an anchor-verified expectation set from the DB")
+        help="synthesize expectation questions from body/PDF text (local MLX)")
     generate.add_argument("--force", action="store_true")
+    generate.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="generate at most N candidates after deterministic ordering")
     run = actions.add_parser(
         "run", help="run the expectation set(s); write a JSON result record")
     run.add_argument("--expectations", type=Path, default=None,

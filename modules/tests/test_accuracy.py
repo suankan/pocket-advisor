@@ -5,8 +5,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import modules.accuracy as accuracy_mod  # noqa: E402
@@ -15,7 +13,7 @@ import modules.pipeline.summaries as summaries_mod  # noqa: E402
 import modules.retrieval as retrieval_mod  # noqa: E402
 from modules.accuracy import (ExpectationError, expectation_files,  # noqa: E402
                               format_compare, format_list, format_run,
-                              generate_scaffold, load_expectations,
+                              generate_expectations, load_expectations,
                               load_result, persist_result, result_files,
                               run_expectations, suite_paths)
 from modules.config import Config  # noqa: E402
@@ -25,6 +23,7 @@ from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
 from modules.pipeline.summaries import ThreadSummaryStage  # noqa: E402
 from modules.pipeline.thread import ThreadStage  # noqa: E402
+from modules.question_generation import accept_question  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
@@ -56,7 +55,28 @@ EXPECTATIONS_YAML = """\
 """
 
 
+class FakeQuestionGenerator:
+    model_id = "fake/question-model"
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text.split()))
+
+    def truncate(self, text: str, max_tokens: int) -> str:
+        words = text.split()
+        if len(words) <= max_tokens:
+            return text
+        return " ".join(words[:max_tokens])
+
+    def generate(self, evidence: str) -> str:
+        snippet = " ".join(evidence.split()[:6]) or "evidence"
+        return f"What does the evidence say about {snippet}?"
+
+
 def main() -> int:
+    assert accept_question("TODO x") is None
+    assert accept_question("") is None
+    assert accept_question("  Why was X unpaid?  ") == "Why was X unpaid?"
+
     with tempfile.TemporaryDirectory(prefix="pa_accuracy_") as td:
         root = Path(td)
         workspaces = root / "workspaces"
@@ -95,19 +115,27 @@ def main() -> int:
             cfg.state_dir / "search-accuracy-tests" / "results"
         assert not (ctx.workspace.root / "search-accuracy-test").exists()
 
-        # generate: anchor-verified scaffold, TODO questions, no overwrite.
-        target = paths.expectations_dir / "scaffold.yaml"
-        written, count = generate_scaffold(ctx, target, force=False)
-        assert written == target and count == 1, (written, count)
-        scaffold = load_expectations([target])
-        assert scaffold[0]["expect_thread_key"] == "<a@x>"
-        assert scaffold[0]["question"].startswith("TODO")
+        # generate: body-based questions, durable anchors, --force gate.
+        target = paths.expectations_dir / accuracy_mod.GENERATED_EXPECTATIONS_NAME
+        fake = FakeQuestionGenerator()
+        written, stats = generate_expectations(
+            ctx, target, force=False, generator=fake)
+        assert written == target and stats.generated == 1, stats
+        generated = load_expectations([target])
+        assert generated[0]["expect_thread_key"] == "<a@x>"
+        assert generated[0]["origin"] == "generated"
+        assert "generated" in generated[0]["flags"]
+        assert not generated[0]["question"].upper().startswith("TODO")
+        assert "Opening" in generated[0]["question"] \
+            or "Direct" in generated[0]["question"] \
+            or "evidence" in generated[0]["question"]
+        assert "subject" not in generated[0].get("hint", "").lower()
         try:
-            generate_scaffold(ctx, target, force=False)
-            raise AssertionError("scaffold overwrite must require --force")
+            generate_expectations(ctx, target, force=False, generator=fake)
+            raise AssertionError("generated overwrite must require --force")
         except ExpectationError as exc:
             assert "--force" in str(exc)
-        generate_scaffold(ctx, target, force=True)
+        generate_expectations(ctx, target, force=True, limit=1, generator=fake)
 
         # authored set: strong / thread-level / TODO-skip / invalid anchor.
         authored = paths.expectations_dir / "authored.yaml"
@@ -138,6 +166,20 @@ def main() -> int:
         assert result["environment"]["embed"]["model"] == "fake/model"
         assert result["environment"]["corpus"]["emails"] == 2
         assert result["expectations"]["count"] == 4
+        assert "question_generator" not in result["environment"]
+
+        # Generated suite records question_generator identity on run.
+        gen_files = expectation_files(paths, target)
+        gen_entries = load_expectations(gen_files)
+        with patch.object(retrieval_mod, "current_fingerprint",
+                          return_value=dict(FINGERPRINT)), \
+             patch.object(retrieval_mod, "get_backend",
+                          return_value=FakeEmbedder()):
+            gen_result = run_expectations(
+                ctx, gen_entries, gen_files, top_k=5, label="generated")
+        assert gen_result["environment"]["question_generator"][
+            "prompt_version"] == 1
+        assert gen_result["aggregates"]["skipped"] == 0
 
         # persistence: JSON record round-trips; ordering by filename.
         first = persist_result(result, paths)

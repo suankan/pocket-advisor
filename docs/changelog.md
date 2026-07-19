@@ -4,6 +4,37 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Content-generated accuracy questions
+
+Implementation commit: `a6557fe` (design `ff5ddfd`; roadmap item:
+Content-generated accuracy questions; design
+`docs/features/accuracy-testing.md`).
+
+- Replaced scaffold-only `accuracy generate` (TODO placeholders) with local-MLX
+  synthesis of complete natural-language questions from graph-owned authored
+  email bodies and PDF text products. Subjects, filenames, and thread summaries
+  are never supplied as generator input. The default artifact is
+  `expectations/generated.yaml` with durable anchors, `origin: generated`, and
+  scorable questions; overwrite requires `--force`; optional `--limit N` trims
+  a deterministic candidate list.
+- Added `modules/question_generation.py` (reuses the local
+  thread-summary model, `QUESTION_PROMPT_VERSION = 1`, greedy decode) and
+  wired generate progress reporting. `accuracy run` remains warm
+  retrieval-anchor scoring only and records `question_generator` identity in
+  the result environment when the suite is machine-generated.
+- Fixture coverage uses a fake generator for the full generate → run →
+  compare → list cycle. Live isolated test-workspace smoke: generate 25/25 in
+  ~1m07s, then `accuracy run` 25/25 scored, 0 miss, 100% thread-or-better.
+
+Verification: full native module suite and `./pocket-advisor.py test` pass
+14/14; `git diff --check` is clean. No collection evidence was modified.
+Generated expectations and result records live under the preserved test
+workspace suite path only.
+
+Deferred: optional hardness experiments (stricter anti-envelope prompt filters
+or a small human-curated harder suite) remain on the roadmap watchlist; they
+do not block the shipped regression harness.
+
 ## 2026-07-19 — Content-addressed evidence graph
 
 Implementation commit: `88fc235` (roadmap item: Ingestion design v2;

@@ -42,6 +42,8 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `857d98e` | **Shape-stable embedding microbatches**: separate leaf/summary queues; tokenize-once 32-token buckets and batches of eight; recipe-fingerprinted numerical contract; recursive bad-entity isolation; independently verified atomic vector/matrix publication; measured 2.40x representative speedup; native suite 14/14 |
 | `ce6c27f` | **Content-addressed PDF transforms**: workspace-local source/recipe canonical products; independently verified plain-copy occurrence fan-out; split OCR/text recipes; benchmark-selected bounded 2-worker scheduling; deterministic coordinator publication and interruptible process trees; native suite 14/14 |
 | `88fc235` | **Content-addressed evidence graph**: fresh-schema `emails`/`documents` identities with source and attachment occurrences; graph-owned artifacts, PDFs, chunks, retrieval, verification, reporting, accuracy, and transactions; multi-parent attached-email/ZIP lineage; native suite 14/14 |
+| `ff5ddfd` | **Content-generated accuracy design locked**: local-MLX questions from authored bodies/PDF text; retrieval-only `run`; `generated.yaml` contract |
+| `a6557fe` | **Content-generated accuracy questions**: `accuracy generate` synthesizes scorable expectations via local MLX; `run` scores retrieval anchors with generator env identity; live test workspace 25/25 / 100% thread-or-better; native suite 14/14 |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -217,7 +219,17 @@ failure rolls the whole Stage 5 rebuild back.
   reporting, accuracy, verification, and transactions use graph identities
   directly. Retired databases are refused rather than migrated. The preceding
   PDF-transform work remains the current Stage 3 product/freshness mechanism;
-  its worker-topology replacement is the new roadmap head.
+  its worker-topology replacement remains the roadmap head.
+- **Content-generated accuracy questions (`a6557fe`, design `ff5ddfd`):**
+  `accuracy generate` loads the local thread-summary MLX model and writes
+  scorable `expectations/generated.yaml` from authored email bodies and PDF
+  text only (never subjects, filenames, or thread summaries). Anchors remain
+  durable Message-IDs / thread stable keys / document SHAs; `origin: generated`
+  and `--force` / `--limit` match the locked contract. `accuracy run` still
+  scores warm retrieval only and records `question_generator` identity when
+  the suite is machine-generated. Live isolated test workspace: 25 generated
+  in ~1m07s, then 25/25 scored with 0 miss and 100% thread-or-better. TODO
+  placeholders remain only for leftover hand scaffolds.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns the flat
@@ -286,14 +298,13 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Content-generated accuracy questions**
-(`docs/features/accuracy-testing.md`, redesign locked 2026-07-19): replace
-scaffold TODO `accuracy generate` with local-MLX questions from authored email
-bodies and PDF text, then score them with retrieval-only `accuracy run`.
-PDF-to-text pipeline is item 2; transaction parser coverage is item 3. Any real
-workspace cutover to the new fresh schema is an operator-owned `wipe state`
-plus complete re-ingest, requiring explicit confirmation immediately before
-deletion; it is not a platform roadmap gate.
+The roadmap head is **1. PDF-to-text pipeline**
+(`docs/features/pdf-to-text-pipeline-design.md`): replace the inherited nested
+OCR topology with byte-bounded `--jobs 1` document workers and
+coordinator-only publication over the shipped graph. Transaction parser
+coverage is item 2. Any real workspace cutover to the new fresh schema is an
+operator-owned `wipe state` plus complete re-ingest, requiring explicit
+confirmation immediately before deletion; it is not a platform roadmap gate.
 
 ## Watch-outs
 

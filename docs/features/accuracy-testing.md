@@ -1,9 +1,10 @@
 # Retrieval-Expectation Accuracy Testing
 
-Status: **redesign locked 2026-07-19** (implementation pending). The native
-suite remains in `modules/accuracy.py` with flat state-owned paths from
-`b6b0391`. This document supersedes the prior scaffold-only generate contract
-(human TODO questions). The "golden set" naming stays retired.
+Status: **shipped 2026-07-19** in implementation commit `a6557fe` (design
+`ff5ddfd`). The native suite lives in `modules/accuracy.py` and
+`modules/question_generation.py` with flat state-owned paths from `b6b0391`.
+This document supersedes the prior scaffolding generate contract (human TODO
+questions). The "golden set" naming stays retired.
 
 Measures retrieval quality of the native leaf/thread retriever against a
 workspace expectation set, produces a machine-readable result record per run,

@@ -21,6 +21,8 @@ import math
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any
 
+from modules.summarization import SUMMARY_LENGTH_TIER_BOUNDS
+
 
 MEASURED = "measured"
 NOT_APPLICABLE = "not_applicable"
@@ -29,11 +31,6 @@ NOT_RUN = "not_run"
 STATES = frozenset((MEASURED, NOT_APPLICABLE, PARTIAL, NOT_RUN))
 
 HOT_STAGE_NAMES = ("summaries", "embed", "pdfs")
-
-# Fixed summary-input length tiers (token upper bounds; the final tier is
-# unbounded). Benchmark results, not an operator knob.
-SUMMARY_LENGTH_TIER_BOUNDS: tuple[int, ...] = (8192,)
-
 
 class TelemetryError(ValueError):
     """A performance record violates the locked schema-v2 contract."""

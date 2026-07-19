@@ -156,7 +156,6 @@ class Config:
     embed_text: bool = True
     summarize_threads: bool = True
     thread_summary_max_tokens: int = 600
-    thread_summary_segment_chars: int = 12_000
 
     # -- MLX model stack ---------------------------------------------------
     mlx_model_embed_text: str = "jinaai/jina-embeddings-v5-text-nano-mlx"
@@ -279,8 +278,6 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
         ("summarize_threads", lambda _, v: bool(v)),
     "ingestion.thread_summary_max_tokens":
         ("thread_summary_max_tokens", lambda _, v: int(v)),
-    "ingestion.thread_summary_segment_chars":
-        ("thread_summary_segment_chars", lambda _, v: int(v)),
     "models.mlx_model_embed_text":
         ("mlx_model_embed_text", lambda _, v: str(v)),
     "models.mlx_model_rerank": ("mlx_model_rerank", lambda _, v: str(v)),

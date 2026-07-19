@@ -55,14 +55,17 @@ class FakeSummarizer:
     def __init__(self, fail_on: str | None = None):
         self.fail_on = fail_on
         self.calls = 0
+        self.modes: list[str] = []
 
-    def update(self, current_summary: str, message_segment: str,
-               segment_label: str) -> str:
+    def count_tokens(self, text: str) -> int:
+        return len(text)
+
+    def generate(self, evidence: str, mode: str) -> str:
         self.calls += 1
-        if self.fail_on and self.fail_on in message_segment:
+        self.modes.append(mode)
+        if self.fail_on and self.fail_on in evidence:
             raise RuntimeError("simulated summary failure")
-        line = message_segment.split("\n\n", 1)[-1].strip()
-        return " | ".join(part for part in (current_summary, line) if part)
+        return evidence
 
 
 def insert_email(conn, root: Path, mid: str, subject: str, body: str,
@@ -142,13 +145,16 @@ def main() -> int:
         with patch.object(summaries_mod, "get_summary_generator",
                           return_value=summarizer):
             stats = ThreadSummaryStage(ctx).run()
-        assert stats.get("generated") == 1 and summarizer.calls == 3, stats
+        assert stats.get("generated") == 1 and summarizer.calls == 1, stats
+        assert stats.get("one_shot") == 1 and \
+            summarizer.modes == ["thread"], (stats, summarizer.modes)
         summary = conn.execute(
             "SELECT * FROM thread_summaries WHERE thread_id=?",
             (thread_id,)).fetchone()
         assert not summary["is_stale"]
         assert "Opening note" in summary["summary_text"]
         assert "Headerless follow-up" in summary["summary_text"]
+        assert summary["prompt_version"] == 2
 
         # Stable rerun: same thread id and no summary model load.
         ThreadStage(ctx).run()

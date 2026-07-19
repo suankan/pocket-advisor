@@ -83,7 +83,6 @@ ingestion:
   # still runs on every full ingest.
   summarize_threads: true
   thread_summary_max_tokens: 600
-  thread_summary_segment_chars: 12000
 
 models:
   # Apple-Silicon MLX only — no GGUF / llama.cpp.

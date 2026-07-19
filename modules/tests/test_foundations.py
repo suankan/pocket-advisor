@@ -89,6 +89,13 @@ def test_config(tmp: Path) -> None:
         raise AssertionError("retired image-OCR key must abort")
     except SystemExit as e:
         assert "small_image_bytes" in str(e)
+    yml.write_text(
+        "ingestion:\n  thread_summary_segment_chars: 12000\n")
+    try:
+        Config.load(project_root=tmp, yaml_path=yml)
+        raise AssertionError("retired character summary segment key must abort")
+    except SystemExit as e:
+        assert "thread_summary_segment_chars" in str(e)
     yml.write_text("query:\n  no_such_knob: 1\n")
     try:
         Config.load(project_root=tmp, yaml_path=yml)

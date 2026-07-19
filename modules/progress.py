@@ -52,6 +52,7 @@ class Progress:
         self._last_emit = 0.0
         self._last_len = 0
         self._last_note = ""
+        self._active = False
         self._finished = False
         self._lock = threading.Lock()
         if self.tty:
@@ -60,6 +61,7 @@ class Progress:
     def step(self, note: str = "", inc: int = 1) -> None:
         now = time.monotonic()
         with self._lock:
+            self._active = True
             self.n += inc
             self._last_note = note
             self._window.append((now, self.n))
@@ -67,6 +69,19 @@ class Progress:
                     and self.n != self.total:
                 return
             self._emit(note)
+
+    def start(self, note: str = "") -> None:
+        """Mark an item active without claiming it is complete.
+
+        The heartbeat can now show liveness for the first slow item while the
+        completion count and percentage remain truthful.
+        """
+        now = time.monotonic()
+        with self._lock:
+            self._active = True
+            self._last_note = note
+            if (now - self._last_emit) >= self.interval:
+                self._emit(note)
 
     def println(self, msg: str) -> None:
         """A real (newline-terminated) log line while the bar is active."""
@@ -97,7 +112,7 @@ class Progress:
             with self._lock:
                 if self._finished:
                     return
-                if self.n:
+                if self._active:
                     self._emit(self._last_note)
 
     def _rate(self, now: float) -> float:

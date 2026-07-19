@@ -22,6 +22,7 @@ import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from modules.embedding.backends import (atomic_publish_array,
                                         current_fingerprint, get_backend,
@@ -33,9 +34,18 @@ from modules.inference import (INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable,
 from modules.telemetry import NOT_RUN, PARTIAL
 
 
+class LiveDispatcher(Protocol):
+    """Any dispatcher that holds in-flight inference work and can abandon
+    its queued items on interrupt. Both ``EmbedDispatcher`` and
+    ``EmailThreadsSummaryDispatcher`` register here so ``cancel_all()``
+    covers every inference fan-out through one hook."""
+
+    def abandon(self) -> None: ...
+
+
 # Live dispatchers, so an interrupted or failed run can abandon queued
 # work instead of blocking process exit on thousands of pending requests.
-_LIVE: "weakref.WeakSet[EmbedDispatcher]" = weakref.WeakSet()
+_LIVE: "weakref.WeakSet[LiveDispatcher]" = weakref.WeakSet()
 
 
 def shared_dispatcher(ctx) -> "EmbedDispatcher":

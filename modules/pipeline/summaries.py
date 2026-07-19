@@ -1,36 +1,18 @@
 """Stage 4a — deterministic thread summaries via the inference server."""
 import hashlib
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from modules.domain import StageStats
 from modules.embedding.dispatch import shared_dispatcher
 from modules.pipeline.base import Stage
+from modules.pipeline.summary_dispatch import (
+    EmailThreadsSummaryDispatcher, SummaryOutcome)
+from modules.pipeline.summaries_core import _GenerationMetrics, _ThreadWork
 from modules.progress import Progress
 from modules.review import now_iso
 from modules.summarization import (SUMMARY_PROMPT_VERSION,
-                                   SUMMARY_ONE_SHOT_TOKENS,
-                                   SUMMARY_REDUCE_FAN_IN,
-                                   SUMMARY_SEGMENT_TOKENS,
-                                   SummaryMode,
-                                   SummaryGenerator,
-                                   get_summary_generator)
-
-
-@dataclass(frozen=True, slots=True)
-class _MessageSource:
-    message_id: str
-    date_utc: str
-    path: Path
-
-
-@dataclass(frozen=True, slots=True)
-class _ThreadWork:
-    thread_id: int
-    stable_key: str
-    source_digest: str
-    messages: tuple[_MessageSource, ...]
+                                    get_summary_generator)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,106 +23,6 @@ class _BrokenThread:
     thread_id: int
     stable_key: str
     missing_path: Path
-
-
-@dataclass(slots=True)
-class _GenerationMetrics:
-    """Aggregate telemetry for one thread's generation pass."""
-    source_tokens: int = 0
-    input_tokens: int = 0
-    segments: int = 0
-    calls: int = 0
-    reductions: int = 0
-    strategy: str = ""
-
-
-def _render_message(message: _MessageSource, text: str, position: int,
-                    total: int, part: int | None = None,
-                    parts: int | None = None) -> str:
-    part_label = "" if part is None else f", excerpt {part}/{parts}"
-    return (
-        f"[message {position} of {total}{part_label}]\n"
-        f"Message-ID: {message.message_id}\n"
-        f"Date: {message.date_utc}\n"
-        "<email>\n"
-        f"{text}\n"
-        "</email>"
-    )
-
-
-def _render_thread(blocks: list[str]) -> str:
-    return "\n\n".join((
-        f"COMPLETE THREAD — {len(blocks)} chronological messages",
-        *blocks,
-    ))
-
-
-def _render_segment(blocks: list[str], position: int, total: int) -> str:
-    return "\n\n".join((
-        f"THREAD SEGMENT {position} OF {total} — chronological evidence",
-        *blocks,
-    ))
-
-
-def _render_reduction(summaries: list[str], round_number: int,
-                      group_number: int) -> str:
-    blocks = []
-    for position, summary in enumerate(summaries, 1):
-        blocks.append(
-            f"[segment summary {position} of {len(summaries)}]\n"
-            f"<summary>\n{summary}\n</summary>")
-    return "\n\n".join((
-        f"SUMMARY REDUCTION ROUND {round_number}, GROUP {group_number}",
-        *blocks,
-    ))
-
-
-def _split_text_token_aware(text: str, token_budget: int,
-                            count_tokens) -> tuple[str, ...]:
-    """Deterministically split one oversized message without dropping text.
-
-    Normal segmentation is message-boundary-only.  This is the explicit
-    last-resort fallback for a single message that exceeds the structural
-    segment budget.  Binary search finds the largest exact character slice
-    within the tokenizer budget, then prefers a nearby whitespace boundary;
-    concatenating the returned slices always reconstructs the input exactly.
-    """
-    if token_budget <= 0:
-        raise ValueError("summary token budget must be positive")
-    if not text:
-        return ("",)
-    pieces: list[str] = []
-    start = 0
-    while start < len(text):
-        low, high = start + 1, len(text)
-        best = start
-        while low <= high:
-            middle = (low + high) // 2
-            if count_tokens(text[start:middle]) <= token_budget:
-                best = middle
-                low = middle + 1
-            else:
-                high = middle - 1
-        if best == start:
-            raise RuntimeError(
-                "summary tokenizer cannot fit one source character in the"
-                " oversized-message budget")
-        if best < len(text):
-            floor = start + max(1, int((best - start) * 0.8))
-            boundary = max(
-                text.rfind("\n\n", floor, best),
-                text.rfind("\n", floor, best),
-                text.rfind(" ", floor, best),
-            )
-            if boundary >= floor:
-                # Retain the boundary byte/character at the end of this slice;
-                # the next slice begins immediately after it.
-                best = boundary + 1
-        pieces.append(text[start:best])
-        start = best
-    if "".join(pieces) != text:
-        raise AssertionError("oversized summary split lost source text")
-    return tuple(pieces)
 
 
 class ThreadSummaryStage(Stage):
@@ -174,8 +56,8 @@ class ThreadSummaryStage(Stage):
 
         existing_stale = [job.thread_id for job in stale
                           if job.thread_id in current] + \
-                         [job.thread_id for job in broken
-                          if job.thread_id in current]
+            [job.thread_id for job in broken
+             if job.thread_id in current]
         if existing_stale:
             marks = ",".join("?" for _ in existing_stale)
             self.conn.execute(
@@ -212,74 +94,91 @@ class ThreadSummaryStage(Stage):
         # Each finished summary's vector is dispatched at readiness
         # (design decision 5) without waiting — the embed stage drains;
         # embed_text=false disables all embedding.
-        dispatcher = shared_dispatcher(self.ctx) \
+        embed_dispatcher = shared_dispatcher(self.ctx) \
             if self.config.embed_text else None
         progress = Progress(
-            "generate thread summaries",
-            total=len(stale))
+            "generate thread summaries", total=len(stale))
+
+        dispatcher = EmailThreadsSummaryDispatcher(self.ctx, generator)
         for job in stale:
-            metrics = _GenerationMetrics()
-            progress.start(note=f"thread {job.thread_id} · planning")
-            try:
-                summary = self._generate(job, generator, progress, metrics)
-                publish_started = time.monotonic()
-                self.conn.execute(
-                    """INSERT INTO thread_summaries
-                       (thread_id, summary_text, source_digest,
-                        generator_model, prompt_version, is_stale,
-                        generated_at)
-                       VALUES (?, ?, ?, ?, ?, 0, ?)
-                       ON CONFLICT(thread_id) DO UPDATE SET
-                         summary_text=excluded.summary_text,
-                         source_digest=excluded.source_digest,
-                         generator_model=excluded.generator_model,
-                         prompt_version=excluded.prompt_version,
-                         is_stale=0,
-                         generated_at=excluded.generated_at""",
-                    (job.thread_id, summary, job.source_digest,
-                     self.config.model_thread_summary,
-                     SUMMARY_PROMPT_VERSION, now_iso()))
-                self.conn.commit()
-                perf.timings_seconds.publication += \
-                    time.monotonic() - publish_started
-                if dispatcher is not None:
-                    dispatcher.submit_summary(
-                        job.thread_id, summary, at_readiness=True)
-                stats.inc("generated")
-                perf.completed_threads += 1
-            except Exception as exc:
-                self.conn.rollback()
-                progress.println(
-                    f"  summary FAIL thread {job.stable_key}:"
-                    f" {type(exc).__name__}: {exc}")
-                self.review.flag(
-                    f"thread:{job.stable_key}", self.name, "error",
-                    f"{type(exc).__name__}: {exc}")
-                self.conn.commit()
-                stats.inc("failed")
-                perf.failed_threads += 1
-            if metrics.strategy == "thread":
-                perf.one_shot_threads += 1
-                stats.inc("one_shot")
-            else:
-                # A tokenizer/planning failure before strategy selection is
-                # conservatively classified in the failure-capable
-                # hierarchical path so measured cardinalities stay honest.
-                perf.hierarchical_threads += 1
-                stats.inc("hierarchical")
-            perf.input_messages += len(job.messages)
-            perf.input_segments += metrics.segments
-            perf.generation_calls += metrics.calls
-            perf.total_input_tokens += metrics.input_tokens
-            perf.overflow_reductions += metrics.reductions
-            tier = perf.tier_for(metrics.source_tokens)
-            tier.threads += 1
-            tier.generation_calls += metrics.calls
-            progress.step(note=f"thread {job.thread_id} complete")
+            dispatcher.submit(job)
+        done, failed, skipped, outcomes = dispatcher.drain(progress)
         progress.done()
+        dispatcher.close()
+
+        if skipped and dispatcher.unavailable is not None:
+            print(f"summaries: {dispatcher.unavailable} — {skipped} threads"
+                  " left un-summarized; rerun 'ingest all' after starting"
+                  " oMLX")
+
+        for outcome in outcomes:
+            self._settle(outcome, embed_dispatcher, stats, perf)
+
+        self.conn.commit()
+        stats.inc("generated", done)
+        stats.inc("failed", failed)
+        stats.inc("skipped", skipped)
         return stats
 
+    def _settle(self, outcome: SummaryOutcome, embed_dispatcher,
+                stats: StageStats, perf) -> None:
+        """Main-thread settlement for one generated thread: merge telemetry,
+        write the DB row, dispatch the summary's embedding, and flag
+        failures. DB, Progress, and ReviewLog are touched only here."""
+        metrics = outcome.metrics
+        perf.timings_seconds.input_render += outcome.timings.input_render
+        perf.timings_seconds.model_execution += outcome.timings.model_execution
+        perf.input_messages += len(outcome.job.messages)
+        perf.input_segments += metrics.segments
+        perf.generation_calls += metrics.calls
+        perf.total_input_tokens += metrics.input_tokens
+        perf.overflow_reductions += metrics.reductions
+        tier = perf.tier_for(metrics.source_tokens)
+        tier.threads += 1
+        tier.generation_calls += metrics.calls
+
+        if outcome.skipped:
+            perf.pending_threads = max(0, perf.pending_threads - 1)
+            return
+        if outcome.error is not None:
+            self.conn.rollback()
+            self.review.flag(
+                f"thread:{outcome.stable_key}", self.name, "error",
+                outcome.error)
+            self.conn.commit()
+            perf.failed_threads += 1
+            return
+
+        self.conn.execute(
+            """INSERT INTO thread_summaries
+               (thread_id, summary_text, source_digest,
+                generator_model, prompt_version, is_stale, generated_at)
+               VALUES (?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(thread_id) DO UPDATE SET
+                 summary_text=excluded.summary_text,
+                 source_digest=excluded.source_digest,
+                 generator_model=excluded.generator_model,
+                 prompt_version=excluded.prompt_version,
+                 is_stale=0,
+                 generated_at=excluded.generated_at""",
+            (outcome.job.thread_id, outcome.summary_text,
+             outcome.job.source_digest, self.config.model_thread_summary,
+             SUMMARY_PROMPT_VERSION, now_iso()))
+        self.conn.commit()
+        if embed_dispatcher is not None:
+            embed_dispatcher.submit_summary(
+                outcome.job.thread_id, outcome.summary_text,
+                at_readiness=True)
+        perf.completed_threads += 1
+        if metrics.strategy == "thread":
+            perf.one_shot_threads += 1
+            stats.inc("one_shot")
+        else:
+            perf.hierarchical_threads += 1
+            stats.inc("hierarchical")
+
     def _load_work(self) -> tuple[list[_ThreadWork], list[_BrokenThread]]:
+        from modules.pipeline.summaries_core import _MessageSource
         root = self.config.project_root
         threads = self.conn.execute(
             """SELECT threads.id, threads.stable_key
@@ -299,7 +198,7 @@ class ThreadSummaryStage(Stage):
                 (thread["id"],)).fetchall()
             digest = hashlib.sha256()
             digest.update(thread["stable_key"].encode("utf-8"))
-            messages = []
+            messages: list[_MessageSource] = []
             missing: Path | None = None
             for row in rows:
                 message_path = root / row["body_text_path"]
@@ -328,161 +227,3 @@ class ThreadSummaryStage(Stage):
             and row["source_digest"] == job.source_digest \
             and row["generator_model"] == self.config.model_thread_summary \
             and row["prompt_version"] == SUMMARY_PROMPT_VERSION
-
-    def _generate(self, job: _ThreadWork, generator: SummaryGenerator,
-                  progress: Progress,
-                  metrics: _GenerationMetrics) -> str:
-        timings = self.ctx.telemetry.summaries.timings_seconds
-        render_started = time.monotonic()
-        raw_messages = [
-            message.path.read_text(encoding="utf-8")
-            for message in job.messages
-        ]
-        blocks = [
-            _render_message(message, text, position, len(job.messages))
-            for position, (message, text) in enumerate(
-                zip(job.messages, raw_messages, strict=True), 1)
-        ]
-        complete = _render_thread(blocks)
-        metrics.source_tokens = generator.count_tokens(complete)
-        timings.input_render += time.monotonic() - render_started
-
-        if metrics.source_tokens <= SUMMARY_ONE_SHOT_TOKENS:
-            metrics.strategy = "thread"
-            metrics.segments = 1
-            summary = self._call_generator(
-                generator, complete, "thread", progress, metrics,
-                f"thread {job.thread_id} · one-shot", timings)
-        else:
-            metrics.strategy = "hierarchical"
-            render_started = time.monotonic()
-            segments = self._structural_segments(
-                job, raw_messages, generator.count_tokens)
-            metrics.segments = len(segments)
-            timings.input_render += time.monotonic() - render_started
-            summaries = []
-            for position, segment in enumerate(segments, 1):
-                summaries.append(self._call_generator(
-                    generator, segment, "segment", progress, metrics,
-                    f"thread {job.thread_id} · segment {position}/"
-                    f"{len(segments)}", timings))
-            summary = self._reduce(
-                job.thread_id, summaries, generator, progress, metrics,
-                timings)
-        if not summary.strip():
-            raise RuntimeError("thread summary is empty")
-        return summary.strip()
-
-    @staticmethod
-    def _call_generator(generator: SummaryGenerator, evidence: str,
-                        mode: SummaryMode, progress: Progress,
-                        metrics: _GenerationMetrics, note: str,
-                        timings) -> str:
-        progress.start(note=note)
-        metrics.calls += 1
-        model_started = time.monotonic()
-        try:
-            result = generator.generate(evidence, mode)
-        finally:
-            timings.model_execution += time.monotonic() - model_started
-        # Exact prompt tokens come from the service's usage field when the
-        # generator exposes them; the deterministic estimate is the fallback.
-        metrics.input_tokens += \
-            getattr(generator, "last_prompt_tokens", 0) \
-            or generator.count_tokens(evidence)
-        if not result.strip():
-            raise RuntimeError("thread summarizer returned empty text")
-        return result.strip()
-
-    @staticmethod
-    def _structural_segments(job: _ThreadWork, raw_messages: list[str],
-                             count_tokens) -> list[str]:
-        """Pack complete messages into deterministic token-bounded segments.
-
-        Only a single message that cannot fit uses the explicit token-aware
-        character-slice fallback.  No source character is discarded.
-        """
-        message_blocks: list[str] = []
-        total_messages = len(job.messages)
-        for position, (message, text) in enumerate(
-                zip(job.messages, raw_messages, strict=True), 1):
-            block = _render_message(
-                message, text, position, total_messages)
-            conservative = _render_segment([block], 9_999, 9_999)
-            if count_tokens(conservative) <= SUMMARY_SEGMENT_TOKENS:
-                message_blocks.append(block)
-                continue
-
-            pieces = _split_text_token_aware(
-                text, SUMMARY_SEGMENT_TOKENS,
-                lambda piece: count_tokens(_render_segment([
-                    _render_message(
-                        message, piece, position, total_messages,
-                        9_999, 9_999)
-                ], 9_999, 9_999)))
-            for part, piece in enumerate(pieces, 1):
-                excerpt = _render_message(
-                    message, piece, position, total_messages,
-                    part, len(pieces))
-                if count_tokens(_render_segment(
-                        [excerpt], 9_999, 9_999)) > \
-                        SUMMARY_SEGMENT_TOKENS:
-                    raise RuntimeError(
-                        "oversized-message fallback exceeded summary"
-                        " segment budget")
-                message_blocks.append(excerpt)
-
-        groups: list[list[str]] = []
-        current: list[str] = []
-        for block in message_blocks:
-            candidate = [*current, block]
-            rendered = _render_segment(candidate, 9_999, 9_999)
-            if current and count_tokens(rendered) > SUMMARY_SEGMENT_TOKENS:
-                groups.append(current)
-                current = [block]
-            else:
-                current = candidate
-        if current:
-            groups.append(current)
-        segments = [
-            _render_segment(group, position, len(groups))
-            for position, group in enumerate(groups, 1)
-        ]
-        if len(segments) < 2:
-            raise RuntimeError(
-                "hierarchical summary planning did not produce multiple"
-                " structural segments")
-        return segments
-
-    def _reduce(self, thread_id: int, summaries: list[str],
-                generator: SummaryGenerator, progress: Progress,
-                metrics: _GenerationMetrics, timings) -> str:
-        round_number = 0
-        current = summaries
-        while len(current) > 1:
-            round_number += 1
-            reduced: list[str] = []
-            groups = [
-                current[start:start + SUMMARY_REDUCE_FAN_IN]
-                for start in range(0, len(current), SUMMARY_REDUCE_FAN_IN)
-            ]
-            for group_number, group in enumerate(groups, 1):
-                if len(group) == 1:
-                    reduced.append(group[0])
-                    continue
-                evidence = _render_reduction(
-                    group, round_number, group_number)
-                if generator.count_tokens(evidence) > \
-                        SUMMARY_ONE_SHOT_TOKENS:
-                    raise RuntimeError(
-                        "summary reduction input exceeds measured quality"
-                        " threshold")
-                metrics.reductions += 1
-                reduced.append(self._call_generator(
-                    generator, evidence, "reduce", progress, metrics,
-                    f"thread {thread_id} · reduce round {round_number} ·"
-                    f" group {group_number}/{len(groups)}", timings))
-            if len(reduced) >= len(current):
-                raise RuntimeError("summary reduction made no progress")
-            current = reduced
-        return current[0]

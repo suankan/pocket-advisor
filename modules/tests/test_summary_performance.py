@@ -15,8 +15,11 @@ from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
-from modules.pipeline.summaries import (ThreadSummaryStage,  # noqa: E402
-                                        _split_text_token_aware)
+from modules.pipeline.summaries import ThreadSummaryStage  # noqa: E402
+from modules.pipeline.summaries_core import (  # noqa: E402
+    _ThreadWork, _split_text_token_aware)
+from modules.pipeline.summary_dispatch import (  # noqa: E402
+    EmailThreadsSummaryDispatcher, SummaryOutcome)
 from modules.pipeline.thread import ThreadStage  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
@@ -161,5 +164,158 @@ def main() -> int:
     return 0
 
 
+def _make_job(root: Path, thread_id: int, text: str) -> "_ThreadWork":
+    from modules.pipeline.summaries_core import _MessageSource
+    path = root / f"msg-{thread_id}.txt"
+    path.write_text(text, encoding="utf-8")
+    return _ThreadWork(
+        thread_id, f"key-{thread_id}", f"digest-{thread_id}",
+        (_MessageSource(f"<m-{thread_id}@x>", "2025-01-01T00:00:00+00:00",
+                        path),))
+
+
+def _fake_ctx() -> PipelineContext:
+    from modules.config import Config
+    from modules.telemetry import PerformanceTelemetry
+    from modules.workspace import Registry
+    root = Path(tempfile.mkdtemp(prefix="pa_summary_ctx_"))
+    (root / "workspaces").mkdir()
+    (root / "workspaces" / "workspace-config.yaml").write_text(REGISTRY_YAML)
+    base = Config(project_root=root, workspaces_dir=root / "workspaces",
+                  rerank_enabled=False, embed_text=False)
+    registry = Registry.load(base)
+    workspace = registry.require_workspace("matter-x")
+    cfg = base.for_workspace(workspace.id)
+    return PipelineContext(config=cfg, registry=registry, workspace=workspace,
+                           conn=None, review=None,
+                           telemetry=PerformanceTelemetry())
+
+
+def test_concurrent_generation() -> None:
+    """Up to max_in_flight threads generate at once; DB settlement stays
+    serialized on the main thread; telemetry merges per task."""
+    import threading
+
+    from modules.inference import InferenceUnavailable
+
+    root = Path(tempfile.mkdtemp(prefix="pa_summary_conc_"))
+    try:
+        live: list[int] = []
+        gate = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+
+        class SlowGen:
+            def count_tokens(self, text: str) -> int:
+                return len(text)
+
+            def generate(self, evidence: str, mode: str) -> str:
+                with lock:
+                    live.append(1)
+                    concurrent = len(live)
+                gate.set()
+                release.wait(5.0)
+                with lock:
+                    live.pop()
+                return f"summary-{evidence[:8]}"
+
+        jobs = [_make_job(root, tid, f"evidence-body-{tid} " + "x" * 50)
+                for tid in range(6)]
+        ctx = _fake_ctx()
+        dispatcher = EmailThreadsSummaryDispatcher(
+            ctx, SlowGen(), max_in_flight=3)
+        for job in jobs:
+            assert dispatcher.submit(job)
+        # At most max_in_flight generate calls run concurrently.
+        gate.wait(5.0)
+        with lock:
+            assert len(live) <= 3, len(live)
+        release.set()
+        done, failed, skipped, outcomes = dispatcher.drain()
+        dispatcher.close()
+        assert (done, failed, skipped) == (6, 0, 0), (done, failed, skipped)
+        assert len(outcomes) == 6
+        assert all(o.summary_text for o in outcomes)
+        assert all(o.metrics.strategy for o in outcomes)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+    print("test_concurrent_generation: all ok")
+
+
+def test_unavailable_skips_all() -> None:
+    """An unreachable endpoint marks every attempted thread skipped
+    (pending gap), not failed; once down, submission stops."""
+    import threading
+
+    from modules.inference import InferenceUnavailable
+
+    root = Path(tempfile.mkdtemp(prefix="pa_summary_down_"))
+    try:
+        begin = threading.Event()
+
+        class DownGen:
+            def count_tokens(self, text: str) -> int:
+                return len(text)
+
+            def generate(self, evidence: str, mode: str) -> str:
+                begin.wait(5.0)
+                raise InferenceUnavailable("oMLX down")
+
+        jobs = [_make_job(root, tid, f"body-{tid}") for tid in range(4)]
+        ctx = _fake_ctx()
+        dispatcher = EmailThreadsSummaryDispatcher(ctx, DownGen())
+        for job in jobs:
+            dispatcher.submit(job)
+        begin.set()
+        done, failed, skipped, outcomes = dispatcher.drain()
+        dispatcher.close()
+        assert done == 0 and failed == 0, (done, failed, skipped)
+        assert skipped == 4, (done, failed, skipped)
+        assert dispatcher.unavailable is not None
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+    print("test_unavailable_skips_all: all ok")
+
+
+def test_per_thread_failure_isolated() -> None:
+    """One thread raising a non-unavailable error is flagged; others
+    still complete."""
+    root = Path(tempfile.mkdtemp(prefix="pa_summary_fail_"))
+    try:
+        class MostlyGood:
+            def __init__(self):
+                self.calls = 0
+
+            def count_tokens(self, text: str) -> int:
+                return len(text)
+
+            def generate(self, evidence: str, mode: str) -> str:
+                self.calls += 1
+                if "boom" in evidence:
+                    raise RuntimeError("boom on this thread")
+                return f"summary-{evidence[:8]}"
+
+        jobs = [_make_job(root, tid,
+                          f"boom-body" if tid == 2 else f"ok-body-{tid}")
+                for tid in range(5)]
+        ctx = _fake_ctx()
+        dispatcher = EmailThreadsSummaryDispatcher(ctx, MostlyGood())
+        for job in jobs:
+            dispatcher.submit(job)
+        done, failed, skipped, outcomes = dispatcher.drain()
+        dispatcher.close()
+        assert (done, failed, skipped) == (4, 1, 0), (done, failed, skipped)
+        boom = [o for o in outcomes if o.error is not None]
+        assert len(boom) == 1 and "boom" in boom[0].error
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+    print("test_per_thread_failure_isolated: all ok")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() or test_concurrent_generation()
+             or test_unavailable_skips_all()
+             or test_per_thread_failure_isolated())

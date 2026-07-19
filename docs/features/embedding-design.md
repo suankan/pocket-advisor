@@ -90,22 +90,22 @@ is governed solely by workspace collection mounts.
 
 ## Relational schema
 
-The existing `items`, `threads`, `attachments`, and `chunks` tables remain.
-Do not introduce parallel `messages` or attachment tables.
+The graph-owned `emails`, `documents`, `attachments`, `threads`, and `chunks`
+tables remain. Do not introduce parallel message or attachment tables.
 
 ### Reply relationship
 
-`items.parent_item_id` means physical attached-email lineage and keeps that
-meaning. Conversation ancestry is separate:
+`attachments.child_email_id` records physical attached-email lineage and keeps
+that meaning. Conversation ancestry is separate:
 
 ```sql
-ALTER TABLE items ADD COLUMN reply_parent_item_id INTEGER
-    REFERENCES items(id);
+ALTER TABLE emails ADD COLUMN reply_parent_email_id INTEGER
+    REFERENCES emails(id);
 
-CREATE INDEX idx_items_reply_parent ON items(reply_parent_item_id);
+CREATE INDEX idx_emails_reply_parent ON emails(reply_parent_email_id);
 ```
 
-`ThreadStage` sets `reply_parent_item_id` only when the direct RFC
+`ThreadStage` sets `reply_parent_email_id` only when the direct RFC
 `In-Reply-To`/final `References` parent is present in the corpus. Subject
 heuristics may group messages but never invent a reply-parent edge.
 
@@ -275,7 +275,7 @@ Run four candidate legs:
 3. thread-summary FTS (`thread_summaries_fts`);
 4. thread-summary dense vectors.
 
-Map leaf hits to `(item_id, thread_id)` and summary hits to `thread_id`, then
+Map leaf hits to `(email_id|document_id, thread_id)` and summary hits to `thread_id`, then
 fuse with Reciprocal Rank Fusion. The reranker may score both chunk text and
 summary text, but a summary hit is always labeled as generated navigation.
 Rerank input is capped at `fts_candidates + vec_candidates` fused keys
@@ -288,7 +288,7 @@ packet contains:
 
 - the matched email/document and match provenance;
 - full readable `email_message.txt` for selected emails;
-- `reply_parent_item_id` and direct child IDs;
+- `reply_parent_email_id` and direct child IDs;
 - the thread's chronological message list;
 - parsed attachment text for a matched attachment, with its parent email;
 - source identity needed for citations.
@@ -338,7 +338,7 @@ hard error.
    no new relational rows and loads no model when nothing is stale.
 2. Import order does not change thread stable keys, reply-parent edges,
    source digests, or summary prompts.
-3. Subject-heuristic grouping never creates `reply_parent_item_id`.
+3. Subject-heuristic grouping never creates `reply_parent_email_id`.
 4. Adding one message invalidates only its thread summary/vector and creates
    only its new leaf chunks/vectors.
 5. A summary-generation failure preserves the previous text but marks it

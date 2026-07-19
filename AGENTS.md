@@ -15,9 +15,8 @@ For every platform task, load these files in order:
    invariants;
 5. `docs/features/workspace-scoped-state.md` — locked per-workspace
    database/cache and command-scoped CLI workspace-selection design;
-6. `docs/features/ingestion-design-v2.md` — proposed fresh-schema
-   evidence-graph redesign; the shipped cache rules remain current until it is
-   implemented;
+6. `docs/features/ingestion-design-v2.md` — locked fresh-schema
+   content-addressed email/document evidence graph;
 7. `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
    worker/publishing design; it follows ingestion design v2;
 8. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
@@ -137,10 +136,11 @@ exist anywhere in the engine.
 
 1. `discover` — one read-only collection walk populates
    `ingestion_candidates` and refreshes `source_blob_index`;
-2. `emails` — MIME parsing, per-email cache folders, attachment routing,
+2. `emails` — MIME parsing into content-addressed email/document identities,
+   attachment routing,
    attached-email/ZIP recursion, then authored-body derivation and the
    two readable message artifacts;
-3. `pdfs` — verified PDF collection, OCR derivative using
+3. `pdfs` — graph-owned verified PDF collection, OCR derivative using
    `ocrmypdf --redo-ocr --clean` when the tool can produce one, then
    `pdftotext -layout`; structurally refused signed/tagged/form PDFs may use
    the verified original as the text source with a review warning;
@@ -158,8 +158,8 @@ exist; only CLI orchestration owns ordering.
 
 ### Cache layout invariants
 
-- Each email, including attached emails, has one flat
-  `<basename>__<sha8>/` folder.
+- Each email, including attached emails, has one
+  `emails/<email-sha256>/` folder.
 - Two readable message artifacts per email (2026-07-18 decision; shipped at
   `a48bf7b`): `email_message_full.txt` — envelope +
   lossless body, never compacted or embedded — and `email_message.txt` —
@@ -167,12 +167,10 @@ exist; only CLI orchestration owns ordering.
   region of `email_message.txt` is the leaf-chunk source
   (envelope-relative offsets); the header block is never chunked — the
   embedded envelope prefix derives from DB fields.
-- Attached-email lineage is stored in `items.parent_item_id`.
-- PDFs retain `pdf-original/` and `pdf-to-text/` artifacts plus a persistent
-  `pdf-ocr/` derivative whenever OCRmyPDF can produce one. Workspace-local
-  `pdf-transforms/` canonical source/recipe products may avoid duplicate work,
-  but occurrence artifacts remain independently verified plain copies;
-  hardlinks are prohibited.
+- Attached-email lineage is stored in `attachments.child_email_id`; one child
+  email may have more than one parent attachment occurrence.
+- PDFs retain verified `documents/<document-sha256>/source/` plus
+  recipe-addressed `transforms/` artifacts; hardlinks are prohibited.
 - Only authored email body regions and PDF text artifacts are leaf-chunked.
   Generated thread summaries have a separate vector namespace and are always
   labeled as navigation, never evidence.
@@ -190,8 +188,8 @@ Always confirm this against `docs/status.md` and
   warnings, ghost-root coverage);
 - the privileged-content concept is removed engine-wide;
 - leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
-  vector caches, while `chunks.text` stays a pure quote; email caches contain
-  only `email_message_full.txt` and `email_message.txt`;
+  vector caches, while `chunks.text` stays a pure quote; graph-owned email
+  artifacts contain only `email_message_full.txt` and `email_message.txt`;
 - `query` uses the native hybrid leaf/thread retriever cold or through the
   workspace-local warm daemon; workspace-scoped wipe state/index maintenance,
   full verification, blob lookup, and the retrieval-expectation `accuracy`
@@ -202,6 +200,9 @@ Always confirm this against `docs/status.md` and
 - flat workspace state shipped at `b6b0391`: each workspace owns
   `.state/workspace-<id>/<id>.db`; preserved expectations and results live in
   its `search-accuracy-tests/` directory and survive `wipe state`;
+- content-addressed evidence graph shipped at `88fc235`: SHA-unique emails and
+  documents own their artifacts, while source and attachment occurrence rows
+  retain all provenance; retired state is refused rather than migrated;
 - generic end-to-end validation is available through an isolated workspace
   rebuild, saved ingest reporting, and the native retrieval-expectation suite;
   no particular live-workspace ingestion is a platform roadmap dependency;
@@ -223,7 +224,8 @@ is verified and committed, then perform the documentation lifecycle above.
   its registry metadata.
 - Stage 1 owns blob-index refresh. Do not recreate the legacy transaction
   module's internal refresh.
-- Resolve statement files through blob index + memberships + file metadata.
+- Resolve statement files through discovery custody plus graph-owned document
+  and attachment occurrences.
 - Every PDF in a marked collection is expected to parse; report unparsed,
   not-ingested, and account-mismatch cases loudly.
 - Money is signed integer minor units, never float.
@@ -232,9 +234,9 @@ is verified and committed, then perform the documentation lifecycle above.
   citations.
 - `reconciliation.yaml` and `counterparties.yaml` remain in the selected
   workspace folder, not engine state.
-- Preserve `source_type='email_body'` for native-PDF chunks until a deliberate
-  fresh-schema change; reporters and retrieval derive semantic source type by
-  joining through `items.item_kind`.
+- Preserve `source_type='email_body'` for email authored-body chunks and use
+  `source_type='document_text'` for PDF chunks; reporters and retrieval join
+  directly through `email_id` or `document_id`.
 
 ## Verification
 

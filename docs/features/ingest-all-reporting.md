@@ -137,16 +137,16 @@ The stable human and JSON snapshot contains these sections:
 | Stages | stage name, outcome (`completed`, `skipped`, `failed`), duration, raw `StageStats`, skip/failure category |
 | Performance | required typed summary/embed/PDF objects; explicit measurement state; strategy/queue/transform counts; subphase timings; PDF resource topology and nullable peak RSS |
 | Sources | top-level custody sources from `source_blob_index`, joined to their email/PDF/other candidate status; source count and bytes exclude attached-email candidates |
-| Evidence | email/native-PDF item counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
+| Evidence | email/document counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
 | Threads | total/singleton/multi-message threads; eligible/current/stale/missing summaries |
-| Search | leaf chunks by email/native-PDF/attached-PDF source; enriched-payload coverage; leaf and summary FTS counts; configured vector fingerprint and leaf/summary manifest counts; mismatches |
+| Search | leaf chunks by email/document source; enriched-payload coverage; leaf and summary FTS counts; configured vector fingerprint and leaf/summary manifest counts; mismatches |
 | Transactions | mounted accounts, statements, rows, statement balance status, assertion passed/failed/unassessed, links, and aggregate coverage buckets |
 | Findings | new run flags by stage/severity plus current-state issue categories and the review-queue path |
 
 The reporter derives semantic totals rather than exposing accidental schema
-details. For example, native-PDF chunks currently retain
-`source_type='email_body'`, so the native-PDF total must join through
-`items.item_kind`; it must not label all such chunks as email text.
+details. Email chunks use `source_type='email_body'` and graph-owned PDF
+chunks use `source_type='document_text'`; their `email_id`/`document_id`
+foreign keys remain the authoritative semantic source.
 
 Vector state is current only when the configured fingerprint's manifest and ID
 arrays exist and agree with the eligible SQLite entity IDs. The report reads ID

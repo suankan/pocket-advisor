@@ -41,6 +41,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `6404eaa` | **One-shot and hierarchical summaries**: prompt-v2 complete-thread generation through a measured 48k-token quality ceiling; deterministic 24k structural segments and 16-way reduction beyond it; lossless oversized-message fallback; positional navigation expectations; native suite 14/14 |
 | `857d98e` | **Shape-stable embedding microbatches**: separate leaf/summary queues; tokenize-once 32-token buckets and batches of eight; recipe-fingerprinted numerical contract; recursive bad-entity isolation; independently verified atomic vector/matrix publication; measured 2.40x representative speedup; native suite 14/14 |
 | `ce6c27f` | **Content-addressed PDF transforms**: workspace-local source/recipe canonical products; independently verified plain-copy occurrence fan-out; split OCR/text recipes; benchmark-selected bounded 2-worker scheduling; deterministic coordinator publication and interruptible process trees; native suite 14/14 |
+| `88fc235` | **Content-addressed evidence graph**: fresh-schema `emails`/`documents` identities with source and attachment occurrences; graph-owned artifacts, PDFs, chunks, retrieval, verification, reporting, accuracy, and transactions; multi-parent attached-email/ZIP lineage; native suite 14/14 |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -72,7 +73,7 @@ failure rolls the whole Stage 5 rebuild back.
   deleted at Adapter retirement (`4037db7`).
 - **Embedding/thread implementation (`0fb9f6f`, refined at `9b9e052`):**
   `docs/features/embedding-design.md` is the locked design. Thread IDs now
-  use stable root Message-ID keys and store real `reply_parent_item_id` edges.
+  use stable root Message-ID keys and store real `reply_parent_email_id` edges.
   A local `summaries` stage generates digest/versioned navigation summaries
   for multi-email threads with `mlx-community/Qwen3.5-4B-MLX-4bit`; `embed`
   maintains separate leaf and summary vector matrices; and native `query`
@@ -206,18 +207,17 @@ failure rolls the whole Stage 5 rebuild back.
   delta <=0.01 and minimum cosine >=0.9999. A read-only 512-payload benchmark
   measured 2.40x end-to-end speedup with 3.6% padding overhead; synthetic
   retrieval and resumability fixtures pass.
-- **Content-addressed PDF transforms implemented (`ce6c27f`):** Stage 3 groups
-  occurrences by source SHA-256 and produces each current workspace-local
-  source/recipe only once under `pdf-transforms/`. Split OCR and text recipes
-  let a text-only change reuse a verified derivative; every occurrence still
-  receives independently hashed plain copies in its existing `pdf-ocr/` and
-  `pdf-to-text/` paths, with no hardlinks or pointer-only evidence artifacts.
-  Workers never touch SQLite or evidence roots; deterministic publication,
-  warnings, and failure fan-out remain on the coordinator. On the supported
-  10-core host, 2 workers × 5 OCR jobs completed the four-PDF benchmark in
-  22.493s versus 27.029s for 1×10 and 44.128s for 4×1. Timeouts and interrupts
-  terminate whole process groups, and telemetry enforces transform/reuse and
-  nested-CPU-budget reconciliation.
+- **Content-addressed evidence graph implemented (`88fc235`):** a fresh
+  workspace database now centres on SHA-unique `emails` and `documents`, with
+  `email_sources`, `document_sources`, and `attachments` retaining every
+  source/carrier occurrence. Attached emails use `attachments.child_email_id`,
+  so deduplication no longer loses multi-parent or ZIP lineage. Each email has
+  one readable artifact pair and each document one verified source/product
+  namespace; threading, chunks, retrieval/citation expansion, PDF transforms,
+  reporting, accuracy, verification, and transactions use graph identities
+  directly. Retired databases are refused rather than migrated. The preceding
+  PDF-transform work remains the current Stage 3 product/freshness mechanism;
+  its worker-topology replacement is the new roadmap head.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns the flat
@@ -286,23 +286,21 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Ingestion design v2: content-addressed evidence
-graph** (`docs/features/ingestion-design-v2.md`). It is a fresh-schema,
-operator-confirmed rebuild cutover that supersedes the current email-owned
-attachment-cache only after it ships. **2. PDF-to-text pipeline**
-(`docs/features/pdf-to-text-pipeline-design.md`) then supplies the graph-owned
-worker/publishing cutover. The three-workstream ingestion-performance program
-remains complete under the current architecture; transaction parser coverage is
-now item 3.
+The roadmap head is **1. PDF-to-text pipeline**
+(`docs/features/pdf-to-text-pipeline-design.md`): replace the inherited nested
+OCR topology with byte-bounded `--jobs 1` document workers and
+coordinator-only publication over the shipped graph. Transaction parser
+coverage is now item 2. Any real workspace cutover to the new fresh schema is
+an operator-owned `wipe state` plus complete re-ingest, requiring explicit
+confirmation immediately before deletion; it is not a platform roadmap gate.
 
 ## Watch-outs
 
 - `reconciliation.yaml` / `counterparties.yaml` live in the MATTER
   folder (selected workspace root), not engine state — keep that.
-- EmbedStage chunks native-PDF texts through `items.body_text_path`
-  (source_type 'email_body') — reporters and retrieval derive semantic source
-  type by joining through `items.item_kind`; change it only through a
-  deliberate fresh-schema decision.
+- EmbedStage chunks email authored bodies as `email_body` and graph-owned PDF
+  text as `document_text`; retrieval and reporters use the corresponding
+  `email_id`/`document_id` directly.
 - Quoted-reply detector changes can alter already-chunked authored bodies.
   The stale-chunk guard must continue to refuse in-place rewrites and direct
   the operator to an explicitly confirmed full workspace rebuild.
@@ -314,8 +312,7 @@ now item 3.
   cache directory on each workspace's next embed. The prior cache is left
   inactive and untouched; use the guarded `wipe index` workflow later if its
   duplication is no longer wanted.
-- `pdf-text-v3` introduces the split canonical PDF cache. Each workspace's
-  next PDF stage performs one normal recipe convergence for its unique source
-  hashes; no migration shim adopts older per-occurrence derivatives. Later
-  text-only recipe changes reuse current verified OCR products, and unchanged
-  runs perform no transform work.
+- `pdf-text-v3` products now live in each graph-owned document namespace.
+  Each workspace's first fresh-schema rebuild produces current products; no
+  migration shim adopts retired state. Later text-only recipe changes reuse
+  current verified OCR products, and unchanged runs perform no transform work.

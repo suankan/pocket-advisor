@@ -282,29 +282,27 @@ claim the earlier 10–18 minute planning target.
 
 ### Implemented decisions
 
-- Canonical products live under workspace-local
-  `pdf-transforms/<sha-prefix>/<source-sha>/`. An OCR-recipe directory contains
-  a strict manifest plus the actual derivative when one exists; each nested
-  text-recipe directory contains its strict manifest and extracted text.
-  Source, recipe, source-product, and output hashes are verified on every
-  reuse. No database columns or migration are required.
+- Canonical products now live in the graph-owned
+  `documents/<document-sha256>/transforms/` namespace. An OCR-recipe directory
+  contains a strict manifest plus the actual derivative when one exists; each
+  nested text-recipe directory contains its strict manifest and extracted
+  text. Source, recipe, source-product, and output hashes are verified on
+  every reuse.
 - OCR derivatives are not assumed byte-deterministic. The cache records and
   verifies the actual derivative SHA-256; a changed derivative automatically
   invalidates a text manifest whose recorded source-product hash differs.
-- Plain, independently verified atomic copies are the only implemented fan-out
-  mechanism. Copy-on-write clones remain counted by telemetry but unused;
-  hardlinks and pointer-only occurrence artifacts remain prohibited.
+- Graph occurrences share the one document product by relational identity;
+  there is no artifact fan-out. Hardlinks and pointer-only occurrence
+  artifacts remain prohibited.
 - The global budget is the reported process CPU count. Up to two file workers
   run concurrently and each receives `floor(cpu_budget/workers)` explicit
   OCRmyPDF jobs, so nested allocation cannot exceed the budget. On the
   supported 10-core host, 1×10 took 27.029s, 4×1 took 44.128s, and the selected
   2×5 topology took 22.493s over the same four unique PDFs. The worker cap
   adapts down for a one-core host or a single pending transform.
-- One failed unique transform records one transform failure and fans the same
-  bounded structural reason to each affected occurrence; successful unique
-  products remain durable and retries remain source/recipe-local. Missing
-  occurrence artifacts can be repaired from a verified canonical product
-  without running OCR or text extraction.
+- One failed unique transform records one bounded structural reason for every
+  affected graph occurrence; successful unique products remain durable and
+  retries remain source/recipe-local.
 - Workers own no SQLite connection and never write evidence or final cache
   paths. Coordinator publication is sorted and deterministic. Interrupts and
   timeouts terminate complete external-tool process groups, escalating from

@@ -1,9 +1,9 @@
 # PDF-to-Text Pipeline Design
 
-Status: **proposed**. This design is scheduled separately in `docs/roadmap.md`
-and depends on the document identity and state ownership introduced by
-`docs/features/ingestion-design-v2.md`. It does not alter the currently shipped
-Stage 3 topology until both designs are implemented and verified.
+Status: **proposed**. This design is roadmap item 1 and depends on the shipped
+document identity and state ownership in `docs/features/ingestion-design-v2.md`.
+It replaces only the current Stage 3 worker topology; the graph-owned product
+layout is already implemented.
 
 ## Purpose
 

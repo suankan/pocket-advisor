@@ -1,8 +1,9 @@
 # Ingestion Design v2: Content-Addressed Evidence Graph
 
-Status: **proposed**. This is a fresh-schema redesign scheduled in
-`docs/roadmap.md`; it does not alter the currently shipped cache layout or
-runtime contract until the roadmap item is implemented and verified.
+Status: **shipped 2026-07-19** in implementation commit `88fc235`. This is a
+fresh-schema cutover: retired state is refused, never migrated. A real
+workspace rebuild remains an explicit operator-owned `wipe state` followed by
+complete re-ingestion.
 
 ## Purpose
 
@@ -67,10 +68,10 @@ attached email. Duplicate raw email bytes resolve to one email row; its RFC
 `Message-ID` remains a non-unique header value so collisions are retained and
 reviewable rather than silently merged.
 
-`email_sources` records every top-level or recursively observed source
-occurrence that supplies an email byte stream, including its collection and
-custody provenance. It separates the email identity from the source paths
-that carried it.
+`email_sources` records every top-level collection source occurrence that
+supplies an email byte stream, including its collection and custody
+provenance. An attached email's carrier relationship is its `attachments`
+row, not a synthetic collection source; this preserves more than one parent.
 
 ### Documents and attachment occurrences
 
@@ -105,8 +106,8 @@ collection identity without depending on a cache path.
 
 ## Materialized state layout
 
-The current `cache/<collection>/<email>/...` and `pdf-transforms/` trees are
-replaced after the confirmed cutover by a content-addressed layout such as:
+The retired `cache/<collection>/<email>/...` and `pdf-transforms/` trees are
+replaced by this content-addressed layout:
 
 ```text
 workspaces/.state/
@@ -171,8 +172,9 @@ compatibility columns or a migration shim. Implementation must:
    workspace state and rebuilding it with the new schema. No real collection
    evidence is ever moved or changed, and preserved accuracy suites survive.
 
-Until that implementation ships, the current workspace-scoped-state feature
-and its email cache plus `pdf-transforms/` layout remain authoritative.
+The document graph and its content-addressed state layout are authoritative.
+The separately scheduled PDF worker topology is defined in
+`docs/features/pdf-to-text-pipeline-design.md`.
 
 ## Acceptance criteria
 

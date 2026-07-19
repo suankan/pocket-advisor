@@ -4,6 +4,37 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Content-addressed evidence graph
+
+Implementation commit: `88fc235` (roadmap item: Ingestion design v2;
+design `docs/features/ingestion-design-v2.md`).
+
+- Replaced the retired item/membership attachment schema with a fresh,
+  workspace-local graph of unique raw-email identities, unique retained binary
+  documents, native source occurrences, and explicit attachment occurrences.
+  Attached emails and ZIP members retain their complete multi-parent lineage
+  through attachment rows rather than a lossy scalar parent field.
+- Materialized one verified email artifact pair per email SHA and one verified
+  document source/product namespace per document SHA. Repeated source paths,
+  native PDFs, and email attachments remain independently citable relational
+  occurrences without per-email attachment-copy dependency.
+- Moved threading, chunks, hybrid retrieval, citation expansion, PDF products,
+  embeddings, maintenance/verification, ingest reporting, accuracy, and
+  transactions to direct email/document identities. Stage 5 now reports a
+  discovery-visible native statement with no current document text as
+  `NOT INGESTED`, rather than silently excluding it.
+- Added fresh-schema refusal for retired databases and isolated coverage for
+  duplicate raw emails/source paths, duplicate documents, repeated attached
+  emails, ZIP lineage, native/email document convergence, graph retrieval,
+  custody verification, reporting, PDF freshness, and transaction rebuilds.
+
+Verification: full native module suite and `./pocket-advisor.py test` pass
+14/14; Python compilation and `git diff --check` are clean. No real workspace
+state or collection evidence was modified. A selected real-workspace fresh
+rebuild remains operator-owned and requires explicit confirmation immediately
+before `wipe state`; preserved `search-accuracy-tests/` remains outside that
+regenerable deletion.
+
 ## 2026-07-19 — Content-addressed PDF transforms and bounded concurrency
 
 Implementation commit: `ce6c27f` (Workstream C in

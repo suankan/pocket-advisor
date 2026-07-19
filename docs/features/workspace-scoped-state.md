@@ -63,10 +63,14 @@ database.
 workspaces/.state/
 └── workspace-<workspace_id>/
     ├── <workspace_id>.db
-    ├── cache/
-    │   └── <collection_id>/
-    ├── pdf-transforms/
-    │   └── <sha-prefix>/<source-sha>/...  # canonical OCR/text products
+    ├── emails/
+    │   └── <email-sha256>/
+    │       ├── email_message_full.txt
+    │       └── email_message.txt
+    ├── documents/
+    │   └── <document-sha256>/
+    │       ├── source/
+    │       └── transforms/
     ├── vectors/
     │   └── text/<fingerprint>/
     ├── logs/
@@ -153,9 +157,9 @@ shared cache paths.
 ## Database and identity consequences
 
 Durable source identity remains `(collection_id, sha256)`, now within the
-owning workspace database. `items.message_id` uniqueness, thread identity,
-FTS indexes, vector entity IDs, and transaction rebuilds are consequently
-workspace-local.
+owning workspace database. SHA-unique `emails` and `documents`, their source
+and attachment occurrences, thread identity, FTS indexes, vector entity IDs,
+and transaction rebuilds are consequently workspace-local.
 
 `workspace_id` remains in custody and membership records even though the
 database has one owner. Inserts must use the bound workspace ID, and integrity

@@ -14,9 +14,8 @@ Feature-level designs refine this document:
 - `docs/features/workspace-scoped-state.md` — one database and derived-state
   tree per workspace, command-scoped CLI workspace selection, and wipe
   isolation.
-- `docs/features/ingestion-design-v2.md` — proposed fresh-schema replacement
-  for the current email-owned attachment cache; it is future work and does not
-  alter the shipped state contract.
+- `docs/features/ingestion-design-v2.md` — shipped fresh-schema
+  content-addressed email/document evidence graph and state layout.
 - `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
   transform worker/publishing pipeline, scheduled after ingestion design v2.
 - `docs/features/embedding-design.md` — thread reconstruction, navigation
@@ -74,7 +73,8 @@ ceremonial argument; the complete matrix is locked in
 
 Each workspace owns an independent flat state container at
 `workspaces/.state/workspace-<workspace_id>/`, including a workspace-named
-`<workspace_id>.db`, cache, vector indexes, logs, runtime files, and preserved
+`<workspace_id>.db`, content-addressed email/document artifacts, vector
+indexes, logs, runtime files, and preserved
 `search-accuracy-tests/`. Model weights under `models/` are the only shared
 runtime asset. Reprocessing a collection separately for each workspace that
 mounts it is an accepted cost. The complete contract is locked in
@@ -94,16 +94,16 @@ not authorize changes to originals.
 The fresh relational schema centres on:
 
 - `ingestion_candidates` and `source_blob_index` for discovery and custody;
-- `items`, `item_memberships`, `item_file_meta`, and `attachments` for parsed
-  evidence and provenance;
+- SHA-unique `emails` and `documents`, plus `email_sources`,
+  `document_sources`, and `attachments` for evidence and provenance;
 - `threads`, `thread_summaries`, and `chunks` plus their FTS indexes for
   retrieval;
 - accounts, statements, assertions, transactions, and transfer links for
   marked bank-statement collections.
 
-Email `items.parent_item_id` records physical attached-email lineage, while
-`items.reply_parent_item_id` records a proven RFC conversation edge. These are
-different relationships and must never be conflated.
+An attachment's `child_email_id` records physical attached-email lineage,
+while `emails.reply_parent_email_id` records a proven RFC conversation edge.
+These are different relationships and must never be conflated.
 
 ## Staged ingestion
 
@@ -112,16 +112,18 @@ order:
 
 1. **discover** — walk the selected workspace's mounted collections once,
    hash originals, populate candidates, and refresh the blob index;
-2. **emails** — parse MIME, render readable artifacts, route attachments,
+2. **emails** — parse MIME into SHA-unique email/document identities, render
+   readable email artifacts, route attachment occurrences,
    recursively process attached emails and ZIP members, then derive authored
    bodies after the run's message graph is available;
-3. **pdfs** — collect verified PDF copies, request OCR derivatives using
-   `ocrmypdf --redo-ocr --clean`, then extract layout-preserving text with
-   `pdftotext -layout`. Exact source duplicates share one workspace-local
-   canonical transform, but every occurrence retains independently verified
-   local artifacts. OCR and text recipes are fingerprinted separately so a
-   text-only change can reuse a current derivative. If OCRmyPDF structurally
-   refuses a signed, tagged, or fillable PDF without producing a derivative,
+3. **pdfs** — select graph-owned verified PDF documents, request OCR
+   derivatives using `ocrmypdf --redo-ocr --clean`, then extract
+   layout-preserving text with `pdftotext -layout`. Exact source duplicates
+   share the one document product while every source/attachment occurrence
+   remains relationally citable. OCR and text recipes are fingerprinted
+   separately so a text-only change can reuse a current derivative. If
+   OCRmyPDF structurally refuses a signed, tagged, or fillable PDF without
+   producing a derivative,
    `pdftotext` gets one guarded attempt against the verified original and the
    refusal remains a warning. Recipe mismatch requeues only the required
    product layer so downstream stages never mistake old text for current text;
@@ -154,9 +156,8 @@ operational assessment, not a substitute for the native full `verify` command.
 
 ## Derived artifacts
 
-Each collection has a cache below its owning workspace state. Every email,
-including attached emails, receives one flat
-`<basename>__<sha8>/` directory containing exactly two readable artifacts:
+Every email, including an attached email, has one SHA-addressed directory under
+`emails/<email-sha256>/` containing exactly two readable artifacts:
 
 - `email_message_full.txt` — decoded envelope plus lossless full body; never
   compacted or embedded;
@@ -168,14 +169,11 @@ Chunk offsets are relative to that region, so rendered-envelope changes do not
 change chunk identity. The header block is never chunked; the embedding payload
 derives its stable envelope prefix from database fields.
 
-PDFs retain verified `pdf-original/` and `pdf-to-text/` artifacts plus a
-persistent `pdf-ocr/` derivative whenever OCRmyPDF can produce one. Attached
-PDF artifacts remain under their carrying email folder; corpus-native PDF
-artifacts live at collection-cache level. A workspace-local
-`pdf-transforms/` cache stores strict source/recipe-addressed canonical OCR and
-text products solely to avoid duplicate work. Canonical objects never replace
-occurrence artifacts or database provenance: coordinator fan-out uses
-independently hashed atomic plain copies, and hardlinks are prohibited.
+Each unique PDF document retains its verified source plus recipe-addressed OCR
+and text products under `documents/<document-sha256>/`. Email attachments and
+native collection sources are relational occurrences of that same document;
+there are no per-occurrence PDF copies. Canonical objects never replace
+database provenance, and hardlinks are prohibited.
 OCRmyPDF may write a usable derivative and then return non-zero during its
 final structural validation. When a fresh derivative exists, Stage 3 still
 runs `pdftotext -layout`: a zero exit, present output file, and readable text

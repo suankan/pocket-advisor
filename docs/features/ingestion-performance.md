@@ -1,7 +1,8 @@
 # Ingestion Performance
 
-Status: **proposed and review-refined 2026-07-19; ingest-report telemetry
-schema v2 is locked, while benchmark-dependent tuning decisions remain open**.
+Status: **ingest-report telemetry schema v2 implemented at `eb8771e`
+(sequencing step 1); Workstreams A–C remain proposed, and their
+benchmark-dependent tuning decisions remain open**.
 
 This feature records the measured full-ingest bottlenecks and the candidate
 redesigns to reduce clean-build and recipe-invalidation time. It is a working

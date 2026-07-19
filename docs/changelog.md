@@ -4,6 +4,47 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Ingest performance telemetry and benchmark baseline
+
+Implementation commit: `eb8771e` (roadmap item 1; locked contract in
+`docs/features/ingestion-performance.md` and
+`docs/features/ingest-all-reporting.md`).
+
+- Added `modules/telemetry.py`: one typed PerformanceTelemetry run recorder
+  with explicit `measured`/`not_applicable`/`partial`/`not_run` states for the
+  summaries, embed, and PDF stages. The CLI creates it before orchestration,
+  injects it through the pipeline context, marks entry as `partial`, seals
+  success as `measured`, and preserves stage-recorded deliberate gates, so
+  aggregate telemetry survives any stage failure.
+- Instrumented the current hot-stage implementations: rolling summaries record
+  thread/message/segment/call counts, real tokenizer input tokens, fixed
+  8192-token length tiers, and render/model/publication timings; embedding
+  records separate leaf and summary queues with pending/successful/failed
+  entities, input tokens, cache publications, and model/publication/assembly
+  timings; the PDF stage records considered/pending occurrences, transform
+  outcomes, verified-original fallbacks, worker/jobs/CPU-budget topology, and
+  wall/OCR/text subphase timings.
+- Cut saved ingest records to schema version 2 with the required nested
+  `performance` block, typo-strict loading (unknown, missing, negative,
+  non-finite, and irreconcilable values rejected; gated and never-entered
+  stages must be all-zero), one compact terminal line per hot stage, and
+  identical re-rendering through `ingest report`. Version-1 records remain on
+  disk but are deliberately not loadable.
+- Established the comparison baseline mechanism for the three optimization
+  items: every full ingest now records its own reproducible aggregate
+  baseline, the feature document retains the measured large/small-profile
+  stage tables, and each workstream's tuning benchmarks land with that
+  workstream as locked.
+
+Verification: native suite 13/13 including new strict-contract,
+round-trip, partial-survival, and state-distinction fixtures. A live
+`ingest all` on the isolated test workspace converged the 27 PDF occurrences
+onto the current extraction recipe and recorded a measured PDF stage (86.6s
+OCR vs 0.5s text subphases within an 87s transform wall); the immediate
+rerun completed unchanged in 0.6s with explicit measured-zero telemetry.
+Saved records strict-load and re-render byte-identically; `git diff --check`
+clean. No collection evidence or non-derived state was touched.
+
 ## 2026-07-19 — Post-ingest integrity and reporting fixes
 
 Implementation commit: `5fd5bdd` (investigation record: `b678f14`,
@@ -36,8 +77,8 @@ fast Stage 5 rebuild because `westpac-v2` changes the parser fingerprint. No
 PDF, summary, embedding, schema, or wipe work is required.
 
 Deferred: the 121 unsupported AMP, MEBank, NAB, CBA, Revolut, and Qantas
-statements remain roadmap item 5. Genuine ambiguous transfer candidates remain
-operator reconciliation findings.
+statements remain the transaction-parser-coverage roadmap item. Genuine
+ambiguous transfer candidates remain operator reconciliation findings.
 
 ## 2026-07-19 — Multiple-ingestion regression fixes
 
@@ -75,8 +116,8 @@ once under `pdf-text-v2`, then rebuilds transactions once under
 
 Deferred: live-corpus acceptance is performed by that next operator-run
 ingest. Parser support for the 121 statements from currently unsupported
-institutions remains roadmap item 5 and was deliberately not folded into this
-regression fix.
+institutions remains the transaction-parser-coverage roadmap item and was
+deliberately not folded into this regression fix.
 
 ## 2026-07-18 — Transaction-stage convergence
 
@@ -112,8 +153,8 @@ state was modified. The first post-upgrade full ingest may reprocess existing
 PDF text once to establish the new recipe fingerprint, then performs one
 transaction rebuild to publish its initial manifest.
 
-Deferred: broader institution parser coverage remains roadmap item 5 and does
-not block roadmap item 6, the local answering pass.
+Deferred: broader institution parser coverage remains its own independent
+roadmap item and does not block the local answering pass.
 
 ## 2026-07-18 — PDF OCR validation-warning recovery
 

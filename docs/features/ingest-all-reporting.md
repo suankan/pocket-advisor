@@ -1,8 +1,8 @@
 # Full-Ingest Completion Reporting
 
-Status: **version 1 implemented at `78e705a`; version-2 performance telemetry
-schema locked 2026-07-19 and pending implementation**, including the
-saved-record display cutover described below.
+Status: **version 2 implemented at `eb8771e`, including the typed
+performance telemetry and the saved-record display cutover described below**
+(version 1 shipped at `78e705a`).
 
 This feature makes every successful or failed `ingest all` invocation end with
 one concise, trustworthy account of what the run did and what searchable state

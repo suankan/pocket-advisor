@@ -371,6 +371,14 @@ def _validate_pdfs(obj: PdfsTelemetry) -> None:
     if resources.process_tree_peak_rss_bytes is not None:
         _check_count(resources.process_tree_peak_rss_bytes,
                      f"{where}.resources.process_tree_peak_rss_bytes")
+    if resources.configured_worker_count \
+            * resources.configured_per_child_jobs \
+            > resources.configured_global_cpu_budget:
+        raise TelemetryError(
+            f"{where}: workers * per-child jobs exceeds global CPU budget")
+    if resources.observed_peak_workers > resources.configured_worker_count:
+        raise TelemetryError(
+            f"{where}: observed peak workers exceeds configured workers")
     _check_timings(obj.timings_seconds, f"{where}.timings_seconds")
     if obj.state in (NOT_RUN, NOT_APPLICABLE):
         _require_zero(obj, where)
@@ -380,6 +388,13 @@ def _validate_pdfs(obj: PdfsTelemetry) -> None:
         raise TelemetryError(
             f"{where}: successful+failed transforms ({outcomes}) must equal"
             f" unique_transforms ({obj.unique_transforms})")
+    if obj.state == MEASURED and (
+            obj.unique_transforms > obj.pending_occurrences
+            or obj.duplicate_reuses !=
+            obj.pending_occurrences - obj.unique_transforms):
+        raise TelemetryError(
+            f"{where}: pending occurrences must equal unique transforms plus"
+            " duplicate reuses")
     if obj.state == PARTIAL and outcomes > obj.unique_transforms:
         raise TelemetryError(
             f"{where}: a partial record may not claim more transform"

@@ -243,6 +243,7 @@ def fill_measured_telemetry(ctx: PipelineContext) -> None:
     pdfs.unique_transforms = 2
     pdfs.successful_transforms = 1
     pdfs.failed_transforms = 1
+    pdfs.duplicate_reuses = 0
     pdfs.direct_original_fallbacks = 1
     pdfs.resources.configured_worker_count = 1
     pdfs.resources.configured_per_child_jobs = 10
@@ -251,6 +252,28 @@ def fill_measured_telemetry(ctx: PipelineContext) -> None:
     pdfs.timings_seconds.transform_wall = 2.5
     pdfs.timings_seconds.ocr_process_total = 2.0
     pdfs.timings_seconds.text_process_total = 0.25
+
+
+def test_pdf_telemetry_reconciliation(ctx: PipelineContext) -> None:
+    fill_measured_telemetry(ctx)
+    pdfs = ctx.telemetry.pdfs
+    pdfs.resources.configured_worker_count = 2
+    try:
+        ctx.telemetry.validate()
+    except TelemetryError as exc:
+        assert "exceeds global CPU budget" in str(exc)
+    else:
+        raise AssertionError("nested OCR oversubscription was accepted")
+
+    fill_measured_telemetry(ctx)
+    ctx.telemetry.pdfs.duplicate_reuses = 1
+    try:
+        ctx.telemetry.validate()
+    except TelemetryError as exc:
+        assert "pending occurrences" in str(exc)
+    else:
+        raise AssertionError("impossible PDF reuse cardinality was accepted")
+    fill_measured_telemetry(ctx)
 
 
 def test_snapshot_and_record(ctx: PipelineContext) -> None:
@@ -523,6 +546,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa_ingest_report_") as td:
         ctx = build_context(Path(td))
         test_snapshot_and_record(ctx)
+        test_pdf_telemetry_reconciliation(ctx)
         test_telemetry_contract(ctx)
         test_transaction_run_flag_dedup(ctx)
         test_index_drift(ctx)

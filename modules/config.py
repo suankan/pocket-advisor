@@ -208,6 +208,11 @@ class Config:
         return self.state_dir / "cache"
 
     @property
+    def pdf_transform_dir(self) -> Path:
+        """Workspace-local canonical PDF products; never cross-workspace."""
+        return self.state_dir / "pdf-transforms"
+
+    @property
     def logs_dir(self) -> Path:
         return self.state_dir / "logs"
 

@@ -7,6 +7,7 @@ must never be processed further, and making the check an exception
 means it cannot be skipped by accident.
 """
 import hashlib
+import shutil
 from pathlib import Path
 
 
@@ -43,3 +44,28 @@ def write_verified(path: Path, data: bytes) -> str:
             f"write verification FAILED for {path}: "
             f"expected {expected[:12]}…, disk has {actual[:12]}…")
     return actual
+
+
+def copy_verified(source: Path, target: Path,
+                  *, expected_sha256: str | None = None) -> str:
+    """Stream-copy one derived artifact and verify both source and target.
+
+    Large PDF derivatives must not be materialized as one in-memory bytes
+    object. The source is hashed before copying, the target is re-read after
+    copying, and an optional expected identity prevents a wrong source from
+    being propagated.
+    """
+    source_sha = sha256_file(source)
+    if expected_sha256 is not None and source_sha != expected_sha256:
+        raise CustodyError(
+            f"copy source verification FAILED for {source}: expected "
+            f"{expected_sha256[:12]}…, disk has {source_sha[:12]}…")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as src, target.open("wb") as dst:
+        shutil.copyfileobj(src, dst, length=1 << 20)
+    target_sha = sha256_file(target)
+    if target_sha != source_sha:
+        raise CustodyError(
+            f"copy verification FAILED for {target}: source "
+            f"{source_sha[:12]}…, disk has {target_sha[:12]}…")
+    return target_sha

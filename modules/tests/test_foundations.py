@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.config import (Config, artifact_folder_name,  # noqa: E402
                             safe_component)
-from modules.custody import (CustodyError, sha256_bytes,  # noqa: E402
+from modules.custody import (CustodyError, copy_verified,  # noqa: E402
+                             sha256_bytes,
                              write_verified)
 from modules.database import (Database, LegacyDatabaseError,  # noqa: E402
                               WorkspaceDatabaseError)
@@ -61,6 +62,7 @@ def test_config(tmp: Path) -> None:
     assert cfg.state_dir == ws_dir / ".state" / "workspace-matter-x"
     assert cfg.db_path == cfg.state_dir / "matter-x.db"
     assert cfg.runtime_dir == cfg.state_dir / "runtime"
+    assert cfg.pdf_transform_dir == cfg.state_dir / "pdf-transforms"
     assert cfg.transaction_manifest_path == \
         cfg.state_dir / "logs" / "transactions" / "build-state.json"
     assert cfg.accuracy_tests_dir == \
@@ -265,6 +267,10 @@ def test_custody_review(tmp: Path) -> None:
     out = tmp / "copies" / "x.bin"
     assert write_verified(out, data) == sha256_bytes(data)
     assert out.read_bytes() == data
+    copied = tmp / "copies" / "y.bin"
+    assert copy_verified(
+        out, copied, expected_sha256=sha256_bytes(data)) == sha256_bytes(data)
+    assert copied.read_bytes() == data
     assert isinstance(CustodyError("x"), RuntimeError)
 
     db = Database(tmp / "state" / "r.db", "w")

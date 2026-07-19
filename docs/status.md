@@ -39,6 +39,7 @@ Shipped history: `docs/changelog.md`. Future work: `docs/roadmap.md`.
 | `5fd5bdd` | **Post-ingest integrity and reporting fixes**: `westpac-v2` compact account-line identity recognition; exact transaction finding/run-flag deduplication; proven attached-email custody-chain verification; live read-only verify pass and native suite 13/13 |
 | `eb8771e` | **Ingest performance telemetry**: typed four-state hot-stage run recorder injected through the pipeline context; subphase-instrumented summaries/embed/PDF stages with real tokenizer counts; schema-2 records with strict nested performance validation, compact terminal lines, and identical re-rendering; live convergence + unchanged-run verification |
 | `6404eaa` | **One-shot and hierarchical summaries**: prompt-v2 complete-thread generation through a measured 48k-token quality ceiling; deterministic 24k structural segments and 16-way reduction beyond it; lossless oversized-message fallback; positional navigation expectations; native suite 14/14 |
+| `857d98e` | **Shape-stable embedding microbatches**: separate leaf/summary queues; tokenize-once 32-token buckets and batches of eight; recipe-fingerprinted numerical contract; recursive bad-entity isolation; independently verified atomic vector/matrix publication; measured 2.40x representative speedup; native suite 14/14 |
 
 Current self-tests: all 14 `modules/tests/test_*.py` pass, including daemon,
 maintenance, workspace-isolation, ingest-reporting, accuracy, and quoted-reply
@@ -193,6 +194,17 @@ failure rolls the whole Stage 5 rebuild back.
   completed thread remains independently durable and resumable; beginning,
   middle, and end navigation is covered by native retrieval expectations.
   The retired `thread_summary_segment_chars` key is now rejected.
+- **Shape-stable embedding microbatches implemented (`857d98e`):** leaf and
+  thread-summary payloads remain separate queues and namespaces but share the
+  locked `bucket32-batch8-v1` passage recipe. Inputs tokenize once with their
+  Jina prefix, round up to a 32-token masked shape, and execute in batches of
+  eight. Failed batches bisect to one entity without discarding successful
+  peers. Each finite, dimension-correct vector and both aligned matrices are
+  read-verified before atomic publication. The execution recipe participates
+  in fingerprint identity; the measured equivalence rule is max absolute
+  delta <=0.01 and minimum cosine >=0.9999. A read-only 512-payload benchmark
+  measured 2.40x end-to-end speedup with 3.6% padding overhead; synthetic
+  retrieval and resumability fixtures pass.
 - **Workspace-scoped state implemented (`23b0a42`, refined at `c6df0a3`):**
   workspace-bound actions require global `--workspace`; the selected workspace
   is explicit in runtime context and owns the flat
@@ -261,10 +273,10 @@ failure rolls the whole Stage 5 rebuild back.
 
 ## Next steps
 
-The roadmap head is **1. Shape-stable embedding microbatches** (Workstream B
-in `docs/features/ingestion-performance.md`), followed by the content-addressed
-PDF-transform/concurrency item. Transaction parser coverage is now item 3 and
-remains independent; the local answering pass is item 4 (`docs/roadmap.md`).
+The roadmap head is **1. Content-addressed PDF transforms and bounded
+concurrency** (Workstream C in `docs/features/ingestion-performance.md`).
+Transaction parser coverage is item 2 and remains independent; the local
+answering pass is item 3 (`docs/roadmap.md`).
 
 ## Watch-outs
 
@@ -281,3 +293,7 @@ remains independent; the local answering pass is item 4 (`docs/roadmap.md`).
   behavior changes require a new parser ID, while shared Stage 5 detection,
   assertion, canonicalization, or linking changes require a transaction
   recipe bump. These fingerprints are what make unchanged skips safe.
+- `bucket32-batch8-v1` changes vector identity and therefore selects a fresh
+  cache directory on each workspace's next embed. The prior cache is left
+  inactive and untouched; use the guarded `wipe index` workflow later if its
+  duplication is no longer wanted.

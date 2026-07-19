@@ -163,49 +163,65 @@ than improve throughput. The opportunity is not “largest batch possible”; it
 is reducing thousands of variable one-item tensor shapes through token-length
 bucketing and small, stable microbatches.
 
-### Proposed direction
+### Implemented decision (`857d98e`)
 
-1. Add an `embed_many()` backend contract while retaining `embed_one()` for
+1. The backend exposes `embed_many()` while retaining `embed_one()` for
    queries, fallback, and failure isolation.
-2. Keep leaf chunks and thread summaries in separate batching/progress queues.
+2. Leaf chunks and thread summaries stay in separate batching/progress queues.
    They already occupy separate vector namespaces and lifecycles; independent
    queues let each use its measured length distribution and keep progress
    legible. Both queues may reuse the same backend and benchmarked bucket
    definitions where their lengths overlap.
-3. Tokenize each pending payload once, assign it to a fixed length bucket, and
-   use a small benchmark-selected microbatch within its queue and bucket.
-4. Preserve entity-to-vector ordering explicitly; padding must be masked and
-   must not alter the semantic input.
-5. On a batch failure, bisect or retry its members individually. Successful
-   entities remain durable even when one peer fails.
-6. Publish every successful vector independently: validate dimension and
+3. Each pending payload tokenizes once, enters a fixed length bucket, and uses
+   the benchmark-selected microbatch within its queue and bucket.
+4. Entity-to-vector ordering is explicit; padding is masked and does not alter
+   the semantic input.
+5. On a batch failure, the stage bisects or retries its members individually.
+   Successful entities remain durable even when one peer fails.
+6. Every successful vector publishes independently: validate dimension and
    finite values, write to a temporary per-entity file, read-verify it, and
    atomically replace the cache entry. A partial or failed batch never exposes
    an entity cache file and never contributes to the assembled matrix.
-7. Keep the per-entity `.npy` cache and its crash-resume semantics. A fresh
+7. The per-entity `.npy` cache keeps its crash-resume semantics. A fresh
    build may assemble the final matrix from in-memory vectors only after their
    corresponding cache entries have passed publication verification; the
    durable cache remains authoritative.
-8. Compare single and batched execution through maximum absolute/relative
+8. Single and batched execution are compared through maximum absolute/relative
    error and cosine similarity. Bit identity is not required unless the
-   runtime provides it without losing the intended speedup. Lock tolerances
-   only after same-hardware measurement; if execution changes vector identity
-   materially, include the execution recipe in the fingerprint rather than
-   mixing caches.
+   runtime provides it without losing the intended speedup. The locked
+   tolerance follows the same-hardware measurement below, and the execution
+   recipe participates in the fingerprint so identities never mix.
 
-The initial target is at least 1.5x end-to-end embedding throughput on the same
-hardware and inputs, with no retrieval-expectation regression. Batch size and
-bucket boundaries are benchmark results, not configuration knobs unless an
-operator genuinely needs to control them.
+The locked recipe uses 32-token fixed-width buckets through the model's
+8,192-token limit and a microbatch size of eight. These are repository-owned
+benchmark results, not configuration knobs. Passage tokenization includes the
+real `Document: ` task prefix; each entity's token IDs feed both bucket
+selection and masked model execution without a second successful-path
+tokenization. Leaf and summary queues remain separate even though they share
+the recipe.
 
-### Open decisions
+`bucket32-batch8-v1` participates in vector fingerprint identity. Same-hardware
+mixed-length execution is accepted when maximum absolute coordinate delta is
+at most `0.01` and minimum cosine similarity is at least `0.9999`. Maximum
+relative error is measured with a `1e-6` denominator floor but is diagnostic,
+not a pass/fail bound: coordinates close to zero made it numerically unbounded
+while absolute and whole-vector directional agreement remained tight.
 
-- fixed token bucket boundaries and padding implementation;
-- microbatch size under available unified memory;
-- numerical-equivalence thresholds after measuring absolute error, relative
-  error, and cosine similarity (with `1e-5` a candidate, not an assumed
-  universal bound);
-- how much matrix assembly time remains after model-call optimization.
+A read-only representative benchmark over 512 existing leaf payload shadows
+occupied 34 buckets and added 7,898 padding tokens to 221,990 real input tokens
+(3.6%). Single execution took 28.1032 seconds; the locked recipe took 11.6945
+seconds, a 2.40x end-to-end speedup including tokenization and bucketing.
+Maximum absolute delta was 0.007135, minimum cosine was 0.999919, and the
+initial 1.5x target was exceeded. Matrix assembly remains separately visible
+through schema-2 telemetry rather than being folded into model time.
+
+Every successful entity is finite/dimension validated and published through a
+same-directory temporary file, read-back equality check, and atomic replace.
+The durable per-entity cache remains matrix authority. Batch execution failure
+recursively bisects; a singleton then uses `embed_one()`, so one bad entity
+cannot discard successful peers or expose a partial cache entry. Matrices,
+aligned ID arrays, and metadata also publish atomically, and obsolete summary
+vectors prune only after their replacement matrix is durable.
 
 ## Workstream C — content-addressed PDF transforms
 
@@ -447,12 +463,12 @@ per-entity profiling still belongs only in an explicit local benchmark mode.
 
 ## Sequencing
 
-1. Add the aggregate instrumentation and a reproducible local comparison
-   method by implementing ingest-report schema version 2 first.
-2. Benchmark the summary one-shot quality threshold, then implement the
-   one-shot/hierarchical paths and positional quality checks.
-3. Benchmark numerical equivalence and then implement separate leaf/summary
-   shape-stable embedding microbatches.
+1. Shipped at `eb8771e`: aggregate instrumentation and ingest-report schema
+   version 2.
+2. Shipped at `6404eaa`: benchmarked summary one-shot threshold,
+   one-shot/hierarchical paths, and positional quality checks.
+3. Shipped at `857d98e`: benchmarked numerical equivalence and separate
+   leaf/summary shape-stable embedding microbatches.
 4. Implement unique-hash PDF transformation and occurrence fan-out.
 5. Benchmark one-worker/multi-job against multi-worker/one-job OCR, then add
    bounded concurrency under one global CPU budget.

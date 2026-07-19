@@ -4,6 +4,48 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-19 — Shape-stable embedding microbatches
+
+Implementation commit: `857d98e` (Workstream B in
+`docs/features/ingestion-performance.md`).
+
+- Replaced one-model-call-per-passage execution with independent leaf and
+  summary queues using repository-owned 32-token buckets and microbatches of
+  eight. Model inputs include the real Jina task prefix, tokenize once, retain
+  explicit entity ordering, and use padding attention masks; `embed_one()`
+  remains the query and isolated-fallback path.
+- Added recursive batch bisection. A failing member is retried individually,
+  while successful peers publish durably and remain available to crash-resume;
+  telemetry now reports occupied buckets, model batches, real/padded tokens,
+  bisections, individual fallbacks, and all three embed subphase timers.
+- Made `bucket32-batch8-v1` part of vector fingerprint identity because batched
+  execution is semantically equivalent but not bit-identical on mixed-length
+  inputs. The locked same-hardware rule is maximum absolute coordinate delta
+  at most 0.01 and minimum cosine similarity at least 0.9999. Maximum relative
+  error is still measured but is diagnostic only because near-zero coordinates
+  make it unbounded and operationally misleading.
+- Every vector is dimension/finite validated, written to a same-directory
+  temporary `.npy`, read-verified, and atomically replaced. Leaf and summary
+  matrices, aligned ID arrays, and metadata use the same verified atomic
+  publication discipline, and obsolete summary vectors are pruned only after
+  the replacement matrix is durable.
+
+Verification: a read-only representative benchmark over 512 existing leaf
+payload shadows used 34 occupied buckets and 7,898 padding tokens over 221,990
+real input tokens. End-to-end embedding improved from 28.1032s to 11.6945s
+(2.40x); maximum absolute delta was 0.007135 and minimum cosine similarity was
+0.999919. Synthetic fixtures prove separate queues, bad-peer bisection, no
+partial failed-entity cache entry, successful-peer durability, retry
+convergence, aligned matrices, and unchanged-run behavior. The full native
+module loop and `./pocket-advisor.py test` pass 14/14; `git diff --check` is
+clean. The benchmark was local and read-only; tests mutated only temporary
+fixtures.
+
+Deferred: none from Workstream B. The execution-recipe fingerprint deliberately
+causes the next embed for each workspace to build a new vector cache while
+leaving the prior inactive cache untouched. Content-addressed PDF transforms
+and bounded concurrency are the new roadmap head.
+
 ## 2026-07-19 — One-shot and hierarchical thread summaries
 
 Implementation commit: `6404eaa` (Workstream A in

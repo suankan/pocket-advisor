@@ -237,9 +237,16 @@ workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
   shadow column so BM25 sees it too.
 - Passage embeddings use `retrieval.passage`; questions use
   `retrieval.query`.
+- Pending passages run in independent leaf/summary queues through the locked
+  `bucket32-batch8-v1` execution recipe: one prefixed tokenization, 32-token
+  masked buckets, and batches of eight. Batch failure bisects to an isolated
+  `embed_one()` retry without losing successful peers.
 - The existing per-model cache, transliteration shadow, and matrix rebuild
-  semantics remain; the payload recipe joins the fingerprint so plain
-  and enriched indexes can never mix.
+  semantics remain; both payload and execution recipes join the fingerprint
+  so plain/enriched or single/batched vector identities can never mix.
+- Every finite, dimension-correct per-entity vector is written to a temporary
+  file, read-verified, and atomically published before it may enter the matrix.
+  Matrix and aligned-ID artifacts follow the same atomic discipline.
 
 ### Thread index
 
@@ -357,3 +364,7 @@ hard error.
 14. Envelope enrichment never alters `chunks.text`, snippets, or
     citations; a payload-recipe change selects a new vector cache
     directory and re-embeds without re-chunking.
+15. The locked batched passage recipe satisfies maximum absolute coordinate
+    delta <=0.01 and minimum cosine similarity >=0.9999 against single
+    execution; one bad batch member exposes no cache entry and does not
+    prevent successful peers from becoming durable.

@@ -1,42 +1,20 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local RAG engine over personal
-content. The solution architecture is locked under `docs/`.
+Pocket Advisor is a local RAG engine over personal content.
 
 ## Read first
 
 For every platform task, load these files in order:
 
 1. this file;
-2. `docs/status.md` — the single status-tracking document and pickup
-   point;
-3. `docs/changelog.md` — shipped roadmap history, newest first;
-4. `docs/design.md` — concise holistic solution architecture and system
-   invariants;
-5. `docs/features/workspace-scoped-state.md` — locked per-workspace
-   database/cache and command-scoped CLI workspace-selection design;
-6. `docs/features/ingestion-design-v2.md` — locked fresh-schema
-   content-addressed email/document content graph;
-7. `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
-   worker/publishing design; it follows ingestion design v2;
-8. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
-   design (review-refined); its local-MLX *execution* concern is superseded
-   by the next item;
-9. `docs/features/embedding-design-v2.md` — locked inference-server (oMLX)
-   design: all inference is HTTP to one loopback endpoint, producers
-   dispatch embeddings at readiness, `embed` converges;
-10. `docs/features/ingest-all-reporting.md` — locked default full-ingest
-   timing, statistics, and finding-summary design;
-11. `docs/features/transaction-stage-convergence.md` — locked Stage 3 PDF-text
-   freshness plus Stage 5 convergence, findings, and force-rebuild design;
-12. `docs/features/ingestion-performance.md` — proposed measured optimization
-   work for summaries, embedding, and PDF transforms; implementation choices
-   remain benchmark-driven;
-13. `docs/features/accuracy-testing.md` — locked native retrieval-expectation
-   and accuracy-measurement design;
-14. `docs/features/query-daemon.md` — locked workspace-local warm retrieval
-   service design;
-15. `docs/roadmap.md` — ordered future work only.
+2. `docs/design.md` — holistic solution architecture, pipeline, artifacts,
+   retrieval, transactions, and system invariants;
+   - load the relevant `docs/features/` feature design as needed by the task;
+   - read the code as needed;
+3. `docs/work-in-progress.md` — check for unfinished work; cross-reference
+   with `git status`;
+4. `docs/roadmap.md` — ordered future work only;
+5. `docs/changelog.md` — shipped history, newest first (optional context).
 
 For case work, additionally load:
 
@@ -48,195 +26,43 @@ Do not answer case questions from platform instructions alone.
 
 ## Documentation lifecycle
 
-Keep the three current planning records distinct:
+The three planning records are:
 
-- `docs/roadmap.md` contains only ordered, unshipped work.
-- `docs/status.md` is the concise current pickup point: completed commit table,
-  operating state, next action, and watch-outs.
-- `docs/changelog.md` is the durable, reverse-chronological history of shipped
-  roadmap items.
+- `docs/roadmap.md` — ordered, unshipped work.
+- `docs/work-in-progress.md` — scratch pad for the feature currently being
+  implemented. Near-empty when idle.
+- `docs/changelog.md` — durable, reverse-chronological history of shipped
+  items.
 
-When a roadmap item ships (implemented, verified, and committed):
+The implementation workflow is:
 
-1. remove the completed item from `docs/roadmap.md`; renumber the remaining
-   items and repair every item-number cross-reference;
-2. move any genuinely unfinished or deferred sub-item to the appropriate
-   remaining roadmap item before removing the completed section;
-3. prepend a changelog entry with the date, shipped item title, implementation
-   commit, behavioral summary, verification performed, and any explicitly
-   deferred follow-up;
-4. add the implementation commit to the `docs/status.md` Done table, reconcile
-   Current operating state, and make Next steps name the new roadmap head;
-5. remove stale labels such as "uncommitted", "in progress", or "next" from
-   shipped work—do not leave completed sections parked in the roadmap.
-
-Perform this documentation transition immediately after the implementation
-commit while the context is fresh. It does not override the no-autocommit rule:
-if the current prompt does not authorize another commit, leave the doc
-transition in the working tree and report that clearly.
+1. **Design and commit.** Plan the feature, lock down an initial design in the
+   relevant `docs/features/` doc, and commit.
+2. **Pick up.** Move the roadmap item into `docs/work-in-progress.md` with any
+   active context needed to resume.
+3. **Implement.** Build and verify.
+4. **Lock down and commit.** Update the feature design doc to reflect the final
+   implemented state and commit.
+5. **Changelog.** Add a condensed entry to `docs/changelog.md`
+   (date, title, commit, summary, verification).
+6. **Clean up.** Remove the item from `docs/work-in-progress.md`; remove the
+   completed item from `docs/roadmap.md`, renumber remaining items, and repair
+   cross-references.
+7. **Commit.** One atomic commit with changelog entry, roadmap and
+   work-in-progress records cleanup.
 
 ## Hard rules
 
-1. **Content is read-only.** Never write, rename, or delete anything under a
+1. **Source of truth corpora collections is read-only.** Never write, rename, or delete anything under a
    collection root (`workspaces/corpora/...` or a registry path). Durable
    identity is `(collection_id, sha256)`, never a path. Only engine-derived
    state under `workspaces/.state/` is regenerable; preserved
    `search-accuracy-tests/` directories are human-authored workspace test data.
-2. **Preserve integrity.** Hash originals before parsing, write-verify every
-   derived copy, tolerate renames through `source_blob_index`, and treat a
-   changed hash at a known path as an integrity alarm—not an update.
-3. **Corpus claims require citations.** Cite emails by message ID, date, and
-   sender, adding collection/source identity when useful. Cite standalone
-   documents by filename and date, and surface weak date provenance.
-4. **Case data stays local.** Never send originals, extracted text,
-   embeddings, case facts, or narrative content to a cloud/API/service.
-   Inbound model weights and abstract web research are allowed. This
-   repository has no remote and must never be pushed.
-5. **No autocommit.** Commit only when the user's current prompt explicitly
-   requests it. Permission does not carry to later prompts.
-6. **No unsupervised state deletion.** Obtain explicit user confirmation
-   immediately before any workspace-state wipe or retired shared-state
-   cleanup. A workspace rebuild requires `wipe state` followed by a complete
-   re-ingest, but it is an operator-owned action, not a platform roadmap gate.
 
-There is no content-access-control concept. It was removed by decision on
-2026-07-18 (`docs/design.md`): the sole user already owns every document fed
-into the system, so no privilege flags, restricted retrieval passes, or ACLs
-exist anywhere in the engine.
+## Design references
 
-## New engine architecture
-
-- Runtime: Python 3.14.
-- New implementation: repository-root `modules/`.
-- Style: typed domain dataclasses, clear classes, reuse, readability, and one
-  pipeline stage class behind the common `Stage` interface.
-- The retired `scripts/` implementation is deleted. Historical mechanics live
-  in `docs/changelog.md` (pre-rewrite section); runtime code and tests live under `modules/`.
-- `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
-  only in `modules/cli.py`; every supported command is native. Stage modules
-  never parse arguments or sequence one another.
-- The new database is fresh-schema only and deliberately refuses legacy
-  state. Do not add compatibility migrations or shims.
-- Every workspace owns a separate database/cache/vector/log/runtime tree.
-  Workspace-bound CLI actions require global `--workspace`; repository-global,
-  fixture-only, and help actions do not. Explicit file addressing does not by
-  itself determine scope: saved ingest reports and every accuracy action remain
-  workspace-bound. There is no active/default workspace registry setting.
-  Existing shared state is retired and is neither migrated nor touched.
-- Originals are email and PDF only. Images, ZIPs, and other attachments are
-   retained for manual inspection but are not text-extracted or
-  embedded.
-
-### Pipeline order
-
-`ingest all` maps directly to:
-
-1. `discover` — one read-only collection walk populates
-   `ingestion_candidates` and refreshes `source_blob_index`;
-2. `emails` — MIME parsing into content-addressed email/document identities,
-   attachment routing,
-   attached-email/ZIP recursion, then authored-body derivation and the
-   two readable message artifacts;
-3. `pdfs` — graph-owned verified PDF collection, OCR derivative using
-   `ocrmypdf --redo-ocr --clean` when the tool can produce one, then
-   `pdftotext -layout`; structurally refused signed/tagged/form PDFs may use
-   the verified original as the text source with a review warning;
-4. `thread` — full thread reconstruction;
-5. `summaries` — navigation summaries for complete multi-email threads
-   via the oMLX inference server; staleness maintenance always runs, and
-   `ingestion.summarize_threads` gates only the generative pass;
-6. `embed` — authored email bodies/PDF text plus the separate thread-summary
-   index, using the per-model vector cache;
-7. `transactions` — parse and link marked bank-statement collections.
-
-Stages receive a shared `PipelineContext`, do not call one another, and
-return `StageStats`. CLI orchestration owns ordering: `ingest all` runs the
-full gated pipeline; a named stage runs the ordered prefix through itself so
-prerequisites always exist.
-
-
-### Cache layout invariants
-
-- Each email, including attached emails, has one
-  `emails/<email-sha256>/` folder.
-- Two readable message artifacts per email (2026-07-18 decision; shipped at
-  `a48bf7b`): `email_message_full.txt` — envelope +
-  lossless body, never compacted or embedded — and `email_message.txt` —
-  envelope + Stage 2b authored body, write-verified. The authored body
-  region of `email_message.txt` is the leaf-chunk source
-  (envelope-relative offsets); the header block is never chunked — the
-  embedded envelope prefix derives from DB fields.
-- Attached-email lineage is stored in `attachments.child_email_id`; one child
-  email may have more than one parent attachment occurrence.
-- PDFs retain verified `documents/<document-sha256>/source/` plus
-  recipe-addressed `transforms/` artifacts; hardlinks are prohibited.
-- Only authored email body regions and PDF text artifacts are leaf-chunked.
-  Generated thread summaries have a separate vector namespace and are always
-   labeled as navigation, never content.
-
-## Current implementation state
-
-Always confirm this against `docs/status.md` and
-`git status` before editing. At the 2026-07-19 handoff:
-
-- foundations, Stages 1–5, stable thread relationships, thread summaries,
-  dual indexes, and cold relational query are implemented under `modules/`;
-- the post-implementation review's actionable findings are all fixed and
-  folded into `docs/features/embedding-design.md` (per-answer context budget,
-  always-on summary staleness maintenance, rerank cap, match dedup,
-  warnings, ghost-root coverage);
-- the content-access-control concept is removed engine-wide;
-- leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
-  vector caches, while `chunks.text` stays a pure quote; graph-owned email
-  artifacts contain only `email_message_full.txt` and `email_message.txt`;
-- `query` uses the native hybrid leaf/thread retriever cold or through the
-  workspace-local warm daemon; workspace-scoped wipe state/index maintenance,
-  full verification, blob lookup, and the retrieval-expectation `accuracy`
-  suite are native;
-- command-scoped selection shipped at `c6df0a3` (the shared `fetch-model`
-  it introduced was retired at `b2d06a4`): fixture
-  `test` and help are workspace-free; every `accuracy` action is
-  workspace-bound (native compare is `--last N`, not file-addressed);
-- flat workspace state shipped at `b6b0391`: each workspace owns
-  `.state/workspace-<id>/<id>.db`; preserved expectations and results live in
-  its `search-accuracy-tests/` directory and survive `wipe state`;
-- content-addressed content graph shipped at `88fc235`: SHA-unique emails and
-  documents own their artifacts, while source and attachment occurrence rows
-  retain all provenance; retired state is refused rather than migrated;
-- generic end-to-end validation is available through an isolated workspace
-  rebuild, saved ingest reporting, and the native retrieval-expectation suite;
-  no particular live-workspace ingestion is a platform roadmap dependency;
-- the ingestion-performance program is implemented: typed schema-2 telemetry,
-  one-shot/hierarchical summaries, shape-stable embedding microbatches, and
-  workspace-local content-addressed PDF transforms with bounded concurrency;
-- retired shared-layout state was manually removed by the operator on
-  2026-07-18; workspace-scoped commands never opened or migrated it.
-
-The committed continuation lives in `docs/roadmap.md`. When working-tree
-changes implement its head item, keep that item unshipped until implementation
-is verified and committed, then perform the documentation lifecycle above.
-
-## Transaction-stage constraints
-
-- Scope only collections mounted on the selected workspace and marked
-  `ingestion-type: bank-transactions`.
-- One marked collection represents one account; seed holders/accounts from
-  its registry metadata.
-- Stage 1 owns blob-index refresh. Do not recreate the legacy transaction
-  module's internal refresh.
-- Resolve statement files through discovery integrity plus graph-owned document
-  and attachment occurrences.
-- Every PDF in a marked collection is expected to parse; report unparsed,
-  not-ingested, and account-mismatch cases loudly.
-- Money is signed integer minor units, never float.
-- Keep assertion validation, deterministic rebuilds, transfer matching,
-   reconciliation overrides, coverage reporting, drift signals, and row-level
-  citations.
-- `reconciliation.yaml` and `counterparties.yaml` remain in the selected
-  workspace folder, not engine state.
-- Preserve `source_type='email_body'` for email authored-body chunks and use
-  `source_type='document_text'` for PDF chunks; reporters and retrieval join
-  directly through `email_id` or `document_id`.
+All design and architecture detail lives in `docs/`. When working on a
+concern, load the relevant feature doc from the index in `docs/design.md`. Or create the new one if needed.
 
 ## Verification
 

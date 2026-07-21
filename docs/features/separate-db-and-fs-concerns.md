@@ -1,6 +1,6 @@
 # Separate DB and Filesystem Concerns
 
-Status: **proposed design**. Implementation state lives in `docs/status.md`;
+Status: **proposed design**. Active work lives in `docs/work-in-progress.md`;
 ordered unfinished work lives in `docs/roadmap.md`; shipped history lives in
 `docs/changelog.md`. This document locks the storage architecture only.
 
@@ -222,5 +222,5 @@ follows that pattern for emails and vectors. This design completes it.
 - **RAG API contract.** A RAG read-path interface is documented
   elsewhere and is out of scope here.
 - **No code, no schema migration scripts, no `AGENTS.md` edits, and no
-  `roadmap.md` / `status.md` / `changelog.md` transitions** accompany
+  `roadmap.md` / `work-in-progress.md` / `changelog.md` transitions** accompany
   this proposed design until implementation is committed.

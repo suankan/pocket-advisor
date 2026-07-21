@@ -1,7 +1,7 @@
 # Pocket Advisor Changelog
 
 Reverse-chronological history of shipped platform changes, including completed
-roadmap items. Current operating state lives in `docs/status.md`; future work
+roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
 ## 2026-07-22 — Doc cleanup: merge old specs, consolidate howtos, delete dead artifacts

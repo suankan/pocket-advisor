@@ -1,38 +1,33 @@
 # Pocket Advisor Design
 
-Status: **locked architecture**. Implementation state lives in
-`docs/status.md`; ordered unfinished work lives in `docs/roadmap.md`; shipped
-history lives in `docs/changelog.md`.
+Status: **locked architecture**. Active work lives in
+`docs/work-in-progress.md`; ordered unfinished work lives in `docs/roadmap.md`;
+shipped history lives in `docs/changelog.md`.
 
 Pocket Advisor is a local retrieval-augmented generation
 engine over personal content. It turns read-only email and PDF collections
 into searchable, relational content while preserving integrity and keeping all
 corpus-bearing computation on the local machine.
 
-Feature-level designs refine this document:
+Feature-level designs refine this document. If a feature document is more
+specific, it governs that feature. No feature document may weaken the integrity
+rules here.
 
-- `docs/features/workspace-scoped-state.md` — one database and derived-state
-  tree per workspace, command-scoped CLI workspace selection, and wipe
-  isolation.
-- `docs/features/ingestion-design-v2.md` — shipped fresh-schema
-  content-addressed email/document content graph and state layout.
-- `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
-  transform worker/publishing pipeline, scheduled after ingestion design v2.
-- `docs/features/embedding-design.md` — thread reconstruction, navigation
-  summaries, dual indexes, hybrid retrieval, retrieval expansion, and the
-  future answering boundary.
-- `docs/features/ingest-all-reporting.md` — default full-ingest timing,
-  converged-state statistics, finding rollups, and local run records.
-- `docs/features/ingestion-performance.md` — measured clean-build bottlenecks
-  and the proposed summary, embedding, and PDF-transform optimization work.
-- `docs/features/accuracy-testing.md` — native retrieval-expectation suites
-   with local-LLM questions generated from authored email bodies and PDF text,
-   workspace-owned results, and comparison workflow.
-- `docs/features/query-daemon.md` — workspace-local warm retrieval resource
-  lifetime, Unix-socket protocol, and query fallback behavior.
+### Feature document index
 
-If a feature document is more specific, it governs that feature. No feature
-document may weaken the integrity rules here.
+| Concern | Doc |
+|---|---|
+| Per-workspace state and CLI scoping | `docs/features/workspace-scoped-state.md` |
+| Content-addressed email/document graph | `docs/features/ingestion-design-v2.md` |
+| PDF text pipeline | `docs/features/pdf-to-text-pipeline-design.md` |
+| Embedding and thread retrieval | `docs/features/embedding-design.md` |
+| Inference server (oMLX) | `docs/features/embedding-design-v2.md` |
+| Ingest reporting and timing | `docs/features/ingest-all-reporting.md` |
+| PDF-text freshness and convergence | `docs/features/transaction-stage-convergence.md` |
+| Ingestion performance | `docs/features/ingestion-performance.md` |
+| Retrieval-expectation accuracy | `docs/features/accuracy-testing.md` |
+| Warm retrieval daemon | `docs/features/query-daemon.md` |
+| Bank transaction domain rules | `docs/features/transaction-domain-design.md` |
 
 ## System boundaries
 
@@ -279,7 +274,7 @@ No automatic workspace or retired shared-state deletion is permitted.
 
 ## System acceptance invariants
 
-1. Originals are never modified, and every derived copy is write-verified.
+1. Workspace corpora collections are never modified.
 2. Import order cannot change durable identity, thread keys, reply edges,
    summary source digests, or chunk identity.
 3. A workspace operation cannot read, mutate, search, or delete another

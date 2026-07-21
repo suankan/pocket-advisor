@@ -1,7 +1,7 @@
 # Pocket Advisor Roadmap
 
-Ordered future work only. Current state lives in `docs/status.md`; shipped
-roadmap history in `docs/changelog.md`; locked architecture in
+Ordered future work only. Active work lives in `docs/work-in-progress.md`;
+shipped history in `docs/changelog.md`; locked architecture in
 `docs/design.md`, with detailed feature decisions under `docs/features/`.
 
 ## 1. Transaction parser coverage

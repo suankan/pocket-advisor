@@ -742,3 +742,54 @@ clean. No live corpus or derived state was touched.
 
 Deferred: measure enriched versus plain payload retrieval after the native
 accuracy runner is ported; adoption of the enriched recipe is already locked.
+
+---
+
+## Pre-rewrite history (2026-07-10 – 2026-07-17)
+
+The following milestones are from the original engine implementation, which
+was fully rewritten under `modules/` starting 2026-07-18. Archived design
+artifacts live in `docs_old/`.
+
+**2026-07-17 — Layout-preserving OCRmyPDF extraction**: all PDF and image
+text now follows one OCRmyPDF `--redo-ocr` → `pdftotext -layout` sequence.
+The former direct image OCR binding, confidence threshold, and review-copy
+configuration were removed. Full-page image-vector retrieval was retired
+after benchmarking showed no retrieval benefit.
+
+**2026-07-16 — Single-entrypoint CLI + workspace wipe**: new
+`./pocket-advisor.py` CLI owns all argument parsing (the only argparse in
+the codebase). `wipe state` provides confirmed derived-state deletion for
+from-scratch re-ingests. Interactive progress reporting added for long
+pipeline loops.
+
+**2026-07-15 — Structured transactions v2**: replaced regex heuristic with
+a real bank-statement pipeline (`holders`/`accounts`/`statements`/
+`transactions` schema, signed minor units, per-format parsers, assertion
+validation, transfer matching, coverage reporting). First live Westpac
+parser shipped.
+
+**2026-07-14 — Multi-model vector cache + MLX-only stack**: per-model
+vector cache directories so model switching never deletes another model's
+cache. Unified MLX loader for embed and rerank; GGUF/llama.cpp backend
+removed. `eval.py` renamed to `search_accuracy_test.py`.
+
+**2026-07-13 — Schema evolution + purpose-scoped mounts**: three schema
+iterations (A: collection-scoped identity, B: items+memberships rename,
+C: polish) established the relational foundation. Purpose-scoped mount
+filtering shipped. Warm-mode accuracy testing and session-warm query
+daemon landed.
+
+**2026-07-12 — Pocket Advisor rename + pluggable backends**:
+repo/branding renamed from `pocket-lawyer` to `pocket-advisor`. Pluggable
+embedding backends (`llama_cpp` | `mlx`) with fingerprint wipe-on-change.
+Search-accuracy-test harness, pre-filter, reranker, and transliteration
+shipped.
+
+**2026-07-11 — Standalone document ingestion**: non-`.eml` documents
+ingested as synthetic email parents with a `documents` table and
+`date_source` tracking.
+
+**2026-07-10 — Core pipeline**: parse → attachments/OCR → JWZ threading
+→ chunk/embed → hybrid query (FTS + dense + RRF). End-to-end on live
+corpus.

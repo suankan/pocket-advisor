@@ -32,9 +32,3 @@ material, and never cites a generated thread summary as content.
 - **Accuracy question hardness** — generated questions can still drift toward
   envelope-adjacent phrasing (e.g. sender name); prompt filters or a small
   human-curated harder suite remain open experiments beside the ship harness.
-
-## 4. venv-to-uv runtime migration
-
-Replace `venv` + `requirements.txt` + `pip` with `uv` (`pyproject.toml` +
-`uv.lock` + `uv run`). Independent of all feature work. Locked design in
-`docs/features/uv-migration.md`.

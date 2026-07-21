@@ -7,7 +7,7 @@ workspaces/
 .claude/
 .cursor/
 # Local environment
-venv/
+.venv/
 __pycache__/
 *.pyc
 .DS_Store

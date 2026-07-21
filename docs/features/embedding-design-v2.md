@@ -112,9 +112,8 @@ Jina v5 is retired.
    `MlxReranker`), the in-process `TextBackend` execution path,
    `MlxSummaryGenerator`, the local-MLX question generator, and the
    `fetch-model` CLI action (rejected as a removed spelling). Where oMLX
-   stores its weights is oMLX's business. `requirements.txt` drops `mlx`,
-   `mlx-lm`, `tokenizers`, `safetensors`, and `huggingface_hub`; it gains
-   `httpx`.
+   stores its weights is oMLX's business. `pyproject.toml` carries no
+   MLX-stack dependency; `httpx` is the only new runtime addition.
 4. **One thin client, synchronous facade.** `modules/inference.py` provides
    `InferenceClient` with three methods mirroring the three services:
    `embed(texts) -> vectors`, `rerank(query, documents) -> ordering`, and
@@ -318,8 +317,8 @@ identically to service-side embedding). New: `modules/inference.py`.
   stage succeeds, entities pending; unknown model id → clear error;
   non-loopback endpoint → refused.
 - No-model-code assertion: `modules/` contains no `mlx` import and
-  `requirements.txt` carries no MLX-stack package.
-- Native suite (`for f in modules/tests/test_*.py; do venv/bin/python $f; done`)
+  `pyproject.toml` carries no MLX-stack dependency.
+- Native suite (`for f in modules/tests/test_*.py; do uv run python $f; done`)
   passes; tests exercise the client seam with a local fake HTTP server or a
   stub client — never a live model download.
 

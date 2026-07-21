@@ -3,21 +3,10 @@
 
 The argparse surface and every workspace-scoped operation live in
 :mod:`modules.cli`; the retired implementation has no runtime adapter.
+
+Invoke via ``uv run ./pocket-advisor.py [args]``.
 """
-import os
 import sys
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parent
-VENV = ROOT / "venv"
-VENV_PYTHON = VENV / "bin" / "python"
-
-if VENV_PYTHON.is_file() and Path(sys.prefix).resolve() != VENV.resolve():
-    os.execv(
-        str(VENV_PYTHON),
-        [str(VENV_PYTHON), str(ROOT / "pocket-advisor.py"), *sys.argv[1:]],
-    )
 
 
 def main() -> int:

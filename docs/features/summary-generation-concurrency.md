@@ -148,8 +148,8 @@ same hardware.
   `InferenceUnavailable` → all `skipped` not `failed`, (d) a per-thread
   exception → that thread flagged and others succeed, (e) ≥2 `generate` calls
   overlap (proven via a `threading.Event`).
-- Full suite: `for test_file in modules/tests/test_*.py; do venv/bin/python
-  "$test_file"; done` and `./pocket-advisor.py test` — all green.
+- Full suite: `for test_file in modules/tests/test_*.py; do uv run python
+  "$test_file"; done` and `uv run ./pocket-advisor.py test` — all green.
 - `git diff --check` + `git status --short` clean.
 - Manual: `ingest all` on `case-documents-demo` shows `generate thread
   summaries` advancing ~8× faster with no "database is locked" and no

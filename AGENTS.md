@@ -71,9 +71,9 @@ Before handing off a change:
 
 ```bash
 for test_file in modules/tests/test_*.py; do
-  venv/bin/python "$test_file"
+  uv run python "$test_file"
 done
-./pocket-advisor.py test
+uv run ./pocket-advisor.py test
 git diff --check
 git status --short
 ```

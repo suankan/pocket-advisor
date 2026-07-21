@@ -34,9 +34,9 @@ database.
    each parses, stores, summarizes, and embeds it independently. Correct
    isolation and simple lifecycle operations take precedence over storage or
    compute reuse.
-5. **Only model weights are shared.** Inbound MLX model snapshots remain
-   under repository-root `models/`; they contain no case data. No other
-   corpus-derived artifact is shared between workspaces.
+5. **Only the inference server is shared.** The external oMLX server
+   handles all model inference via HTTP; no model weights are stored in the
+   repository. No other corpus-derived artifact is shared between workspaces.
 6. **Workspace selection is explicit in runtime context.** Stages and
    retrieval receive the selected `Workspace` through `PipelineContext` and
    operate only on its mounts. They never rediscover a workspace through an
@@ -130,8 +130,6 @@ These actions are workspace-free and must use no selector:
 ./pocket-advisor.py test
 ```
 
-- `fetch-model` reads global model configuration and writes only shared
-  repository-root `models/` weights.
 - `test` runs isolated fixtures and must remain usable when the workspace
   registry is missing or invalid.
 - Help at every parser level is workspace-free. A future `--version`,

@@ -1,7 +1,8 @@
-# Pocket Advisor Runbook
+# RAG Dev Howto
 
-Workspace-bound commands require an explicit selector before the command.
-There is no active/default workspace registry setting:
+Developer and operator CLI reference. Workspace-bound commands require an
+explicit selector before the command. There is no active/default workspace
+registry setting:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
@@ -19,8 +20,8 @@ venv/bin/pip install -r requirements.txt
 ./pocket-advisor.py --workspace <workspace_id> db init
 ```
 
-All inference (embedding, summarization, reranking) is served by the external
-oMLX localhost server at `models.inference_endpoint`
+All inference (embedding, summarization, reranking) is served by the
+external oMLX localhost server at `models.inference_endpoint`
 (`docs/features/embedding-design-v2.md`). Start oMLX with the three
 configured model ids loaded before ingest, summaries, accuracy, or query;
 the engine downloads and loads no models itself.
@@ -40,8 +41,8 @@ workspaces/.state/workspace-<workspace_id>/
 ```
 
 Do not move, rename, or edit content as an operational shortcut. Collection
-roots are read-only. Only the selected workspace's derived-state directory is
-regenerable.
+roots are read-only. Only the selected workspace's derived-state directory
+is regenerable.
 
 ## Ingestion
 
@@ -51,10 +52,10 @@ Run the full ordered pipeline:
 ./pocket-advisor.py --workspace <workspace_id> ingest all
 ```
 
-The order is `discover`, `emails`, `pdfs`, `thread`, `summaries`, `embed`, then
-`transactions` when the selected workspace mounts a bank-transaction
-collection. A single stage may be run when all prerequisite artifacts already
-exist:
+The order is `discover`, `emails`, `pdfs`, `thread`, `summaries`, `embed`,
+then `transactions` when the selected workspace mounts a bank-transaction
+collection. A single stage may be run when all prerequisite artifacts
+already exist:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> ingest discover
@@ -82,44 +83,16 @@ the workspace's `logs/ingest-runs/`. Re-display a saved report later with:
 After ingestion, inspect the selected workspace's
 `logs/review_queue.csv`. Email cache folders contain
 `email_message_full.txt` (envelope plus lossless body) and
-`email_message.txt` (envelope plus authored body). Standalone PDF artifacts
-live in collection-level `pdf-original/`, `pdf-ocr/`, and `pdf-to-text/`
-folders under that workspace's cache.
-
-## Query
-
-```bash
-./pocket-advisor.py --workspace <workspace_id> query "question text"
-./pocket-advisor.py --workspace <workspace_id> query "question text" \
-  --after 2024-01-01 --before 2024-12-31 --top-k 20 --json
-./pocket-advisor.py --workspace <workspace_id> query "question text" \
-  --thread 42 --purpose correspondence --no-thread-context
-```
-
-Query uses the selected workspace's native hybrid leaf/thread retriever. It
-never searches unmounted collections or another workspace's database. By
-default it uses that workspace's warm daemon when available and falls back to
-cold retrieval otherwise:
-
-```bash
-./pocket-advisor.py --workspace <workspace_id> daemon serve
-./pocket-advisor.py --workspace <workspace_id> daemon status
-./pocket-advisor.py --workspace <workspace_id> daemon stop
-./pocket-advisor.py --workspace <workspace_id> query "question" --no-daemon
-./pocket-advisor.py --workspace <workspace_id> query "question" --require-daemon
-```
-
-`daemon serve` runs in the foreground and keeps the current leaf and
-thread matrices plus a warm inference client loaded (model warmth is the
-oMLX server's concern). Restart it after embedding or changing retrieval
-model/index configuration. Its mode-`0600` Unix socket and PID record live
-only below the selected workspace's `runtime/` directory.
+`email_message.txt` (envelope plus authored body). Standalone PDF
+artifacts live in collection-level `pdf-original/`, `pdf-ocr/`, and
+`pdf-to-text/` folders under that workspace's cache.
 
 ## Transactions
 
 Bank-statement collections must be marked `ingestion-type:
 bank-transactions` and include their account metadata in the registry.
-Ingestion parses, validates, and links the selected workspace's statements:
+Ingestion parses, validates, and links the selected workspace's
+statements:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> ingest transactions
@@ -127,15 +100,15 @@ Ingestion parses, validates, and links the selected workspace's statements:
 ```
 
 Reconciliation overrides and counterparty mappings remain in the workspace
-folder as `reconciliation.yaml` and `counterparties.yaml`; they are user data,
-not derived state.
+folder as `reconciliation.yaml` and `counterparties.yaml`; they are user
+data, not derived state.
 
 ## Workspace rebuild
 
 `wipe state` displays and deletes the regenerable children of exactly one
 selected workspace state root. It preserves that workspace's
-`search-accuracy-tests/` directory and leaves content, workspace user data,
-and every other workspace untouched:
+`search-accuracy-tests/` directory and leaves content, workspace user
+data, and every other workspace untouched:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> wipe state
@@ -150,8 +123,8 @@ stopped only after confirmation and immediately before deletion.
 
 Earlier shared and nested per-workspace layouts are retired and are never
 migrated or touched by workspace commands. Human-authored expectation sets
-from an earlier workspace-root `search-accuracy-test/` are relocated only by
-an explicit operator action, never silently copied.
+from an earlier workspace-root `search-accuracy-test/` are relocated only
+by an explicit operator action, never silently copied.
 
 ## Integrity and index maintenance
 
@@ -164,10 +137,10 @@ walking or rebuilding collection roots:
   --source <collection_id> --sha256 <64-hex-digest>
 ```
 
-Lookup verifies the current file size and SHA-256 by default. A missing or
-stale row points to `ingest discover`; lookup never steals discovery's
-ownership by rebuilding on demand. `--no-verify` is for path inspection only
-and deliberately skips the final content rehash.
+Lookup verifies the current file size and SHA-256 by default. A missing
+or stale row points to `ingest discover`; lookup never steals discovery's
+ownership by rebuilding on demand. `--no-verify` is for path inspection
+only and deliberately skips the final content rehash.
 
 Run the full native verifier after ingestion or suspected drift:
 
@@ -176,13 +149,13 @@ Run the full native verifier after ingestion or suspected drift:
 ```
 
 It checks SQLite and foreign keys, both FTS5 indexes with their native
-`integrity-check`, indexed originals, durable memberships, derived artifacts
-and stored copy hashes, current leaf/thread vector matrices and per-entity
-files, plus statement/assertion failures. It reads and hashes content but
-never modifies collection roots.
+`integrity-check`, indexed originals, durable memberships, derived
+artifacts and stored copy hashes, current leaf/thread vector matrices and
+per-entity files, plus statement/assertion failures. It reads and hashes
+content but never modifies collection roots.
 
-List or explicitly delete only the selected workspace's model-specific vector
-caches:
+List or explicitly delete only the selected workspace's model-specific
+vector caches:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> wipe list
@@ -190,9 +163,9 @@ caches:
 ./pocket-advisor.py --workspace <workspace_id> wipe index --all-inactive
 ```
 
-Deleting the active index requires `--force`, stops that workspace's daemon
-after confirmation, and leaves SQLite, cache artifacts, other indexes,
-content, and every other workspace untouched.
+Deleting the active index requires `--force`, stops that workspace's
+daemon after confirmation, and leaves SQLite, cache artifacts, other
+indexes, content, and every other workspace untouched.
 
 ## Retrieval accuracy testing
 
@@ -202,9 +175,9 @@ preserved workspace test data under
 (`expectations/*.yaml`, `results/<utc>__<label>.json`):
 
 ```bash
-./pocket-advisor.py --workspace <id> accuracy generate          # anchor-verified scaffold (TODO questions)
+./pocket-advisor.py --workspace <id> accuracy generate
 ./pocket-advisor.py --workspace <id> accuracy run [--label L] [--expectations F] [--top-k N]
-./pocket-advisor.py --workspace <id> accuracy compare --last N  # newest vs N previous results
+./pocket-advisor.py --workspace <id> accuracy compare --last N
 ./pocket-advisor.py --workspace <id> accuracy list
 ```
 
@@ -229,5 +202,6 @@ git status --short
 ```
 
 Integrity and isolation tests must use temporary fixtures. Never modify a
-real collection to test an alarm. The query-daemon socket self-test may need
-permission to bind a temporary local Unix socket in a restricted environment.
+real collection to test an alarm. The query-daemon socket self-test may
+need permission to bind a temporary local Unix socket in a restricted
+environment.

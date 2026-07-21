@@ -71,9 +71,8 @@ and compares runs over time. It is the sole accuracy implementation.
 
 ### Model and endpoint
 
-- Generator reuses `models.mlx_model_thread_summary` (local snapshot under
-  `models/` only). Missing weights abort with the same fetch-model guidance as
-  summaries.
+- Generator reuses the oMLX-served thread-summary model via HTTP. An
+  unreachable endpoint aborts with a clear error.
 - `QUESTION_PROMPT_VERSION` starts at 1 and participates in result environment
   identity. Greedy / deterministic decode; no cloud calls; corpus text never
   leaves the machine.

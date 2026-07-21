@@ -4,6 +4,27 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Current operating state lives in `docs/status.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-22 — Doc cleanup: merge old specs, consolidate howtos, delete dead artifacts
+
+No functional code changes. Documentation-only cleanup:
+
+- Merged old `docs_old/CHANGELOG.md` into `docs/changelog.md` as condensed
+  "Pre-rewrite history" section
+- Merged `docs_old/specs/structured-transactions-v2.md` into
+  `docs/features/transaction-domain-design.md`; purged legal/custody/evidence
+  terminology
+- Moved `QUERY.md` into `docs/rag-user-howto.md` (RAG query contract,
+  citations, daemon management)
+- Moved `RUNBOOK.md` into `docs/rag-dev-howto.md` (setup, ingestion,
+  maintenance, accuracy testing, verification)
+- Deleted `docs_old/` entirely (dead pre-rewrite design docs and specs)
+- Deleted `models/` folder (6.8GB dead Jina/Qwen weights; all inference is
+  HTTP to oMLX)
+- Cleaned `.gitignore` (removed stale `models/` entry, fixed `evidence`
+  comment)
+- Updated stale local-model references in design docs to reflect oMLX
+- Zero broken references; 14/14 tests pass
+
 ## 2026-07-20 — Thread-summary generation concurrency
 
 Design lock: `17be322`; implementation commit: `b884ed1` (design
@@ -748,8 +769,7 @@ accuracy runner is ported; adoption of the enriched recipe is already locked.
 ## Pre-rewrite history (2026-07-10 – 2026-07-17)
 
 The following milestones are from the original engine implementation, which
-was fully rewritten under `modules/` starting 2026-07-18. Archived design
-artifacts live in `docs_old/`.
+was fully rewritten under `modules/` starting 2026-07-18.
 
 **2026-07-17 — Layout-preserving OCRmyPDF extraction**: all PDF and image
 text now follows one OCRmyPDF `--redo-ocr` → `pdftotext -layout` sequence.

@@ -58,11 +58,10 @@ is governed solely by workspace collection mounts.
 6. **Summarization runs after complete thread reconstruction.** It never
    depends on filesystem/import order. A changed thread is summarized again
    from the chronological authored messages, starting from an empty summary.
-7. **All corpus-bearing model work is local.** The default thread summarizer
-   is `mlx-community/Qwen3.5-4B-MLX-4bit` through the installed `mlx-lm`
-   runtime's text-only Qwen 3.5 path. The vision path is neither loaded nor
-   used. Model weights are inbound-only and stored under
-   `models/`; the configured model is replaceable.
+7. **All corpus-bearing model work goes through oMLX.** Thread summarization,
+   embedding, reranking, and accuracy question generation are HTTP services
+   behind one localhost endpoint. The engine loads no models and stores no
+   weights locally.
 8. **Retrieval expands relationships after ranking.** Vector and FTS hits
    select messages/threads; SQLite then supplies matched messages, direct
    reply relationships, chronology, and readable `email_message.txt`

@@ -111,8 +111,7 @@ Jina v5 is retired.
    `modules/embedding/loader.py` (`ModelStore`, `MlxTextEmbedder`,
    `MlxReranker`), the in-process `TextBackend` execution path,
    `MlxSummaryGenerator`, the local-MLX question generator, and the
-   `fetch-model` CLI action (rejected as a removed spelling). The `models/`
-   directory and `Config.models_dir` stop being engine concepts — where oMLX
+   `fetch-model` CLI action (rejected as a removed spelling). Where oMLX
    stores its weights is oMLX's business. `requirements.txt` drops `mlx`,
    `mlx-lm`, `tokenizers`, `safetensors`, and `huggingface_hub`; it gains
    `httpx`.

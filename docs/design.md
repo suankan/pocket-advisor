@@ -76,8 +76,8 @@ Each workspace owns an independent flat state container at
 `workspaces/.state/workspace-<workspace_id>/`, including a workspace-named
 `<workspace_id>.db`, content-addressed email/document artifacts, vector
 indexes, logs, runtime files, and preserved
-`search-accuracy-tests/`. Model weights under `models/` are the only shared
-runtime asset. Reprocessing a collection separately for each workspace that
+`search-accuracy-tests/`. The external oMLX inference server is the only shared
+runtime asset (all inference is HTTP to one loopback endpoint). Reprocessing a collection separately for each workspace that
 mounts it is an accepted cost. The complete contract is locked in
 `docs/features/workspace-scoped-state.md`.
 
@@ -199,8 +199,7 @@ only the earliest occurrence when the first 64 parent tokens (or the complete
 parent when shorter) match there exactly and nowhere else. It never selects a
 later nested match after the earliest candidate diverges. Missing, unresolved,
 still-ambiguous, or interleaved parents preserve the full body. Client wrapper
-recognition may only expand an already-proven cut. The frozen historical
-mechanics are documented in `docs_old/specs/quoted-reply-compaction.md`; native
+recognition may only expand an already-proven cut. Native
 regression findings are tracked under `docs/bugs/`.
 
 ## Retrieval and answering
@@ -248,8 +247,8 @@ data outside engine state and survive state wipes.
 - New implementation lives under `modules/` as typed domain classes and one
   class per pipeline stage.
 - Stage modules do not import or sequence other stages.
-- The retired `scripts/` tree is deleted. Historical mechanics remain under
-  `docs_old/`; all runtime code and self-tests live under `modules/`.
+- The retired `scripts/` tree is deleted. Historical mechanics are recorded in
+  `docs/changelog.md` (pre-rewrite section); all runtime code and self-tests live under `modules/`.
 - SQLite is the relational source of truth. Local NumPy vector matrices and
   per-entity files are convergent derived indexes, not a second authority.
 - The optional query daemon is Unix-socket-only and workspace-local. It reuses

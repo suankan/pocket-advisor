@@ -1,4 +1,4 @@
-# ALL user/case data (evidence corpora, derived output, chronology,
+# ALL user/case data (content corpora, derived output, chronology,
 # journal, eval). Platform code stays case-free. See
 # docs/design.md.
 workspaces/
@@ -6,9 +6,8 @@ workspaces/
 # Platform config.yaml is committed (no case data).
 .claude/
 .cursor/
-# Local environment / weights
+# Local environment
 venv/
-models/
 __pycache__/
 *.pyc
 .DS_Store

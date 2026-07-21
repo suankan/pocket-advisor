@@ -38,12 +38,6 @@ For every platform task, load these files in order:
    service design;
 15. `docs/roadmap.md` — ordered future work only.
 
-`docs_old/` is an archive of the superseded engine design, specs, learnings,
-roadmap, changelog, and prior `AGENTS.md`. Consult it only for historical
-context or when the new design explicitly says an old mechanism is carried
-over. Do not treat archived paths or CLI spellings as current design, and do
-not update archived documents.
-
 For case work, additionally load:
 
 1. `workspaces/workspace-config.yaml`;
@@ -79,8 +73,7 @@ When a roadmap item ships (implemented, verified, and committed):
 Perform this documentation transition immediately after the implementation
 commit while the context is fresh. It does not override the no-autocommit rule:
 if the current prompt does not authorize another commit, leave the doc
-transition in the working tree and report that clearly. Never update the
-archived `docs_old/` changelog.
+transition in the working tree and report that clearly.
 
 ## Hard rules
 
@@ -118,7 +111,7 @@ exist anywhere in the engine.
 - Style: typed domain dataclasses, clear classes, reuse, readability, and one
   pipeline stage class behind the common `Stage` interface.
 - The retired `scripts/` implementation is deleted. Historical mechanics live
-  only under `docs_old/`; runtime code and tests live under `modules/`.
+  in `docs/changelog.md` (pre-rewrite section); runtime code and tests live under `modules/`.
 - `pocket-advisor.py` remains the sole executable entrypoint. Argparse lives
   only in `modules/cli.py`; every supported command is native. Stage modules
   never parse arguments or sequence one another.

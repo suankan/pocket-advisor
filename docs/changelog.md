@@ -4,6 +4,27 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-22 — Endpoint-based inference configuration
+
+Implementation commit: `527fd25` (design
+`docs/features/inference-endpoints.md`).
+
+- Replaced `models.inference_endpoint` + `model_embed_text` +
+  `model_rerank` + `model_thread_summary` with three user-configurable
+  endpoint URLs: `embedding_endpoint`, `reranker_endpoint`,
+  `summarisation_endpoint`. The engine sends no model names in requests;
+  users swap models on the server side (oMLX admin panel or any
+  compatible API). Remote and paid endpoints are allowed — no loopback
+  enforcement. `embed_dim` is auto-detected from the first embedding
+  response.
+- Removed `generator_model` from thread-summary staleness check
+  (`prompt_version` is the sole staleness authority). Old config keys
+  are silently deprecated.
+
+Verification: full native suite 14/14 and `uv run ./pocket-advisor.py
+test` 14/14 pass; `git diff --check` clean. No collection content
+modified.
+
 ## 2026-07-22 — venv-to-uv runtime migration
 
 Implementation commit: `3a7f8b0` (design `dc97b19`,

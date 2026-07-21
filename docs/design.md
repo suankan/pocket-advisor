@@ -28,6 +28,7 @@ rules here.
 | Retrieval-expectation accuracy | `docs/features/accuracy-testing.md` |
 | Warm retrieval daemon | `docs/features/query-daemon.md` |
 | Bank transaction domain rules | `docs/features/transaction-domain-design.md` |
+| venv-to-uv runtime migration | `docs/features/uv-migration.md` |
 
 ## System boundaries
 

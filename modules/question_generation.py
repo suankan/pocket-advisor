@@ -41,9 +41,8 @@ class ServiceQuestionGenerator:
     def __init__(self, config: Config, client: InferenceClient | None = None):
         self._client = client if client is not None \
             else InferenceClient(config)
-        self._client.check_ready(config.model_thread_summary)
+        self._client.check_ready()
         self._max_tokens = QUESTION_MAX_OUTPUT_TOKENS
-        self.model_id = config.model_thread_summary
 
     def count_tokens(self, text: str) -> int:
         return estimate_tokens(text)

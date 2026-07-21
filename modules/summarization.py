@@ -73,7 +73,7 @@ class ServiceSummaryGenerator:
             else InferenceClient(config)
         # Hard fail-fast: the summaries stage explicitly asked for
         # generation, so an unreachable endpoint is a loud error.
-        self._client.check_ready(config.model_thread_summary)
+        self._client.check_ready()
         self._max_tokens = config.thread_summary_max_tokens
         self.last_prompt_tokens = 0
 

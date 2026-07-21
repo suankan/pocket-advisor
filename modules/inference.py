@@ -1,34 +1,27 @@
-"""HTTP client for the external oMLX Inference Server.
+"""HTTP client for the external Inference Server.
 
-Per `docs/features/embedding-design-v2.md`, embedding, summarization, and
-reranking are HTTP services behind one localhost OpenAI-compatible endpoint
-(`models.inference_endpoint`). This module is the engine's single inference
-surface — a synchronous facade; the only concurrency lives in the embedding
-dispatcher's bounded pool (`modules/embedding/dispatch.py`).
+Embedding, reranking, and generation are HTTP services behind separate
+configurable endpoints (``models.embedding_endpoint``,
+``models.reranker_endpoint``, ``models.summarisation_endpoint``). This
+module is the engine's single inference surface — a synchronous facade;
+the only concurrency lives in the embedding dispatcher's bounded pool
+(``modules/embedding/dispatch.py``).
 
-Corpus text goes only to the loopback endpoint; non-local endpoints are
-refused outright (`docs/design.md` local-only rule). The engine never loads a
-model and never auto-spawns the server: if it is down, the caller gets one
-clear actionable error.
+Defaults point to a local oMLX instance; users may override any endpoint
+to use a remote or paid API. The engine never loads a model and never
+auto-spawns a server: if an endpoint is down, the caller gets one clear
+actionable error.
 """
-import ipaddress
 import math
 import threading
-from urllib.parse import urlparse
 
 import numpy as np
 
-# oMLX's continuous-batching default (max_concurrent_requests); the
-# dispatcher never keeps more requests in flight than the server batches.
 INFERENCE_MAX_IN_FLIGHT = 8
 CONNECT_TIMEOUT_SEC = 5.0
 EMBED_TIMEOUT_SEC = 300.0
 RERANK_TIMEOUT_SEC = 300.0
 GENERATE_TIMEOUT_SEC = 1800.0
-# Deterministic conservative pre-call token estimate (design decision 12):
-# no local tokenizer exists, so budgeting overestimates tokens and only ever
-# segments earlier than strictly necessary. Exact counts for telemetry come
-# from the service's usage fields after each call.
 CHARS_PER_TOKEN_ESTIMATE = 3
 
 
@@ -56,89 +49,59 @@ def truncate_by_estimate(text: str, max_tokens: int) -> str:
     return text[:cut if cut > 0 else limit]
 
 
-def require_loopback(endpoint: str) -> None:
-    """Refuse any non-loopback inference endpoint: case text never leaves
-    the machine, and this is the mechanical enforcement of that rule."""
-    host = urlparse(endpoint).hostname
-    if host == "localhost":
-        return
-    try:
-        address = ipaddress.ip_address(host or "")
-    except ValueError:
-        raise SystemExit(
-            f"models.inference_endpoint must be loopback-only, got"
-            f" {endpoint!r} — case text never leaves the machine")
-    if not address.is_loopback:
-        raise SystemExit(
-            f"models.inference_endpoint must be loopback-only, got"
-            f" {endpoint!r} — case text never leaves the machine")
-
-
 class InferenceClient:
-    """One synchronous client over the three oMLX services.
+    """One synchronous client over the three inference services.
 
     Thread-safe: the underlying httpx client supports concurrent requests
     and the readiness cache is lock-guarded.
     """
 
     def __init__(self, config):
-        require_loopback(config.inference_endpoint)
-        self.endpoint = config.inference_endpoint.rstrip("/")
-        self.embed_model = config.model_embed_text
-        self.rerank_model = config.model_rerank
-        self.generate_model = config.model_thread_summary
-        self.embed_dim = config.embed_dim
+        self.embed_endpoint = config.embedding_endpoint.rstrip("/")
+        self.rerank_endpoint = config.reranker_endpoint.rstrip("/")
+        self.generate_endpoint = config.summarisation_endpoint.rstrip("/")
+        self.embed_dim: int = getattr(config, "embed_dim", 0) or 0
         self.last_prompt_tokens = 0
-        self._ready_models: set[str] = set()
+        self._ready: bool = False
         self._lock = threading.Lock()
         import httpx
         self._http = httpx.Client(
-            base_url=self.endpoint,
             timeout=httpx.Timeout(EMBED_TIMEOUT_SEC,
                                   connect=CONNECT_TIMEOUT_SEC))
 
     # -- readiness ---------------------------------------------------------
 
-    def ready_error(self, *model_ids: str) -> str | None:
-        """None when the endpoint serves every given model id, else one
-        actionable error message. Never raises for connectivity."""
-        needed = set(model_ids) - self._ready_models
-        if not needed:
-            return None
+    def _probe(self, url: str) -> str | None:
+        """None when reachable, else an actionable error message."""
         try:
-            served = self._served_models()
-        except InferenceUnavailable as exc:
-            return str(exc)
-        missing = needed - served
-        if missing:
-            return (f"model(s) not served at {self.endpoint}:"
-                    f" {', '.join(sorted(missing))} — load them in oMLX"
-                    f" (served: {', '.join(sorted(served)) or 'none'})")
-        with self._lock:
-            self._ready_models |= needed
-        return None
+            self._http.get(url, timeout=CONNECT_TIMEOUT_SEC)
+            return None
+        except Exception as exc:
+            return (f"inference endpoint unreachable at {url} —"
+                    f" ({type(exc).__name__}: {exc})")
 
-    def check_ready(self, *model_ids: str) -> None:
+    def check_ready(self) -> None:
         """Hard fail-fast readiness gate (design decision 6)."""
-        error = self.ready_error(*model_ids)
-        if error is not None:
-            raise SystemExit(f"inference: {error}")
-
-    def _served_models(self) -> set[str]:
-        data = self._request("GET", "/models", None, CONNECT_TIMEOUT_SEC)
-        return {str(item.get("id")) for item in data.get("data", [])}
+        with self._lock:
+            if self._ready:
+                return
+        for url in (self.embed_endpoint, self.rerank_endpoint,
+                    self.generate_endpoint):
+            error = self._probe(url)
+            if error is not None:
+                raise SystemExit(f"inference: {error}")
+        with self._lock:
+            self._ready = True
 
     # -- services ----------------------------------------------------------
 
     def embed(self, texts: list[str]) -> tuple[list[np.ndarray], int]:
-        """Embed passages/queries (symmetric — oMLX forwards no
-        instruction). Returns (vectors, usage prompt tokens)."""
+        """Embed passages/queries. Returns (vectors, usage prompt
+        tokens)."""
         if not texts:
             return [], 0
-        data = self._request(
-            "POST", "/embeddings",
-            {"model": self.embed_model, "input": texts},
-            EMBED_TIMEOUT_SEC)
+        data = self._post(
+            self.embed_endpoint, {"input": texts}, EMBED_TIMEOUT_SEC)
         rows = sorted(data.get("data", []),
                       key=lambda item: int(item.get("index", 0)))
         if len(rows) != len(texts):
@@ -148,17 +111,18 @@ class InferenceClient:
         vectors = []
         for row in rows:
             vector = np.asarray(row["embedding"], dtype=np.float32)
-            if vector.shape != (self.embed_dim,):
+            if self.embed_dim and vector.shape != (self.embed_dim,):
                 raise InferenceError(
-                    f"embedding dim {vector.shape} != configured"
-                    f" models.embed_dim ({self.embed_dim},) — check"
-                    " model_embed_text/embed_dim")
+                    f"embedding dim {vector.shape} != expected"
+                    f" ({self.embed_dim},) — model may have changed")
+            if not self.embed_dim:
+                self.embed_dim = vector.shape[0]
             vectors.append(vector)
         usage = data.get("usage") or {}
         return vectors, int(usage.get("prompt_tokens", 0))
 
     def embed_one(self, text: str, is_query: bool = False) -> np.ndarray:
-        _ = is_query  # symmetric encoder: query == passage scheme
+        _ = is_query
         return self.embed([text])[0][0]
 
     def rerank(self, question: str, text_by_id: dict) -> list:
@@ -167,9 +131,9 @@ class InferenceClient:
         ids = list(text_by_id.keys())
         if not ids:
             return []
-        data = self._request(
-            "POST", "/rerank",
-            {"model": self.rerank_model, "query": question,
+        data = self._post(
+            self.rerank_endpoint,
+            {"query": question,
              "documents": [text_by_id[key] for key in ids]},
             RERANK_TIMEOUT_SEC)
         results = sorted(
@@ -180,19 +144,16 @@ class InferenceClient:
         return ranked + [key for key in ids if key not in set(ranked)]
 
     def generate(self, system: str, user: str, *, max_tokens: int) -> str:
-        """One greedy, bounded chat completion with Qwen thinking output
-        disabled (verified against oMLX's chat_template_kwargs)."""
-        data = self._request(
-            "POST", "/chat/completions",
+        """One greedy, bounded chat completion."""
+        data = self._post(
+            self.generate_endpoint,
             {
-                "model": self.generate_model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
                 "max_tokens": max_tokens,
                 "temperature": 0.0,
-                "chat_template_kwargs": {"enable_thinking": False},
             },
             GENERATE_TIMEOUT_SEC)
         choices = data.get("choices") or []
@@ -204,18 +165,16 @@ class InferenceClient:
 
     # -- transport ---------------------------------------------------------
 
-    def _request(self, method: str, path: str, payload: dict | None,
-                 timeout: float) -> dict:
+    def _post(self, url: str, payload: dict, timeout: float) -> dict:
         import httpx
         try:
-            response = self._http.request(
-                method, path, json=payload, timeout=timeout)
+            response = self._http.post(url, json=payload, timeout=timeout)
         except (httpx.TransportError, OSError) as exc:
             raise InferenceUnavailable(
-                f"inference endpoint unreachable at {self.endpoint} —"
-                f" is oMLX running? ({type(exc).__name__}: {exc})") from exc
+                f"inference endpoint unreachable at {url} —"
+                f" ({type(exc).__name__}: {exc})") from exc
         if response.status_code >= 400:
             raise InferenceError(
-                f"{path}: HTTP {response.status_code}:"
+                f"{url}: HTTP {response.status_code}:"
                 f" {response.text[:300]}")
         return response.json()

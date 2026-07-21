@@ -42,11 +42,10 @@ class IndexPaths:
 
 def current_fingerprint(config: Config) -> dict:
     """Identity of the index the current config would build. The model
-    lives server-side, so dim comes from ``models.embed_dim`` and is
-    asserted against every embedding response by the client."""
+    lives server-side; dim is auto-detected from the first embedding
+    response."""
     return {
         "backend": "omlx",
-        "model": config.model_embed_text,
         "dim": config.embed_dim,
         "chunk_chars": config.chunk_chars,
         "chunk_overlap": config.chunk_overlap,
@@ -59,15 +58,17 @@ def meta_fingerprint(meta: dict) -> dict:
     """Fingerprint of an existing meta.json. chunk knobs default to
     None (unknown) so we never hide drift by falling back to current
     config."""
-    return {
+    fp = {
         "backend": meta.get("backend", "mlx"),
-        "model": meta["model"],
         "dim": meta["dim"],
         "chunk_chars": meta.get("chunk_chars"),
         "chunk_overlap": meta.get("chunk_overlap"),
         "payload_recipe": meta.get("payload_recipe"),
         "execution_recipe": meta.get("execution_recipe"),
     }
+    if "model" in meta:
+        fp["model"] = meta["model"]
+    return fp
 
 
 def chunking_fields_changed(a: dict, b: dict) -> bool:
@@ -155,7 +156,7 @@ class TextBackend:
         self.dim = client.embed_dim
 
     def check_ready(self) -> None:
-        self._client.check_ready(self._client.embed_model)
+        self._client.check_ready()
 
     def embed_one(self, text: str, is_query: bool = False) -> np.ndarray:
         return self._client.embed_one(text, is_query=is_query)

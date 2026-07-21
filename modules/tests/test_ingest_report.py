@@ -61,7 +61,6 @@ def build_context(tmp: Path) -> PipelineContext:
     base = Config(
         project_root=tmp,
         workspaces_dir=workspaces,
-        model_embed_text="fixture/missing-model",
         embed_dim=3,
     )
     registry = Registry.load(base)

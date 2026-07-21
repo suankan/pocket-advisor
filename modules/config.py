@@ -113,16 +113,14 @@ class Config:
     summarize_threads: bool = True
     thread_summary_max_tokens: int = 600
 
-    # -- inference server --------------------------------------------------
-    # All inference (embedding, summarization, reranking) is served by the
-    # external oMLX localhost server (OpenAI-compatible); the engine loads
-    # no models (docs/features/embedding-design-v2.md). Model ids are the
-    # server's advertised ids (GET /v1/models). Loopback-only by design.
-    inference_endpoint: str = "http://127.0.0.1:8000/v1"
-    model_embed_text: str = "Qwen3-Embedding-0.6B-8bit"
-    model_rerank: str = "Qwen3-Reranker-0.6B-4bit"
-    model_thread_summary: str = "Qwen3.5-4B-MLX-4bit"
-    embed_dim: int = 1024
+    # -- inference endpoints ------------------------------------------------
+    # Embedding, reranking, and generation are served by separate HTTP
+    # endpoints. Defaults point to a local oMLX instance; override for
+    # remote or paid APIs.
+    embedding_endpoint: str = "http://127.0.0.1:8000/v1/embeddings"
+    reranker_endpoint: str = "http://127.0.0.1:8000/v1/rerank"
+    summarisation_endpoint: str = "http://127.0.0.1:8000/v1/chat/completions"
+    embed_dim: int = 0
 
     # -- retrieval knobs (used by the retrieval port; accepted now so one
     #    Config serves the whole engine) -----------------------------------
@@ -246,12 +244,12 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
         ("summarize_threads", lambda _, v: bool(v)),
     "ingestion.thread_summary_max_tokens":
         ("thread_summary_max_tokens", lambda _, v: int(v)),
-    "models.inference_endpoint":
-        ("inference_endpoint", lambda _, v: str(v)),
-    "models.model_embed_text": ("model_embed_text", lambda _, v: str(v)),
-    "models.model_rerank": ("model_rerank", lambda _, v: str(v)),
-    "models.model_thread_summary":
-        ("model_thread_summary", lambda _, v: str(v)),
+    "models.embedding_endpoint":
+        ("embedding_endpoint", lambda _, v: str(v)),
+    "models.reranker_endpoint":
+        ("reranker_endpoint", lambda _, v: str(v)),
+    "models.summarisation_endpoint":
+        ("summarisation_endpoint", lambda _, v: str(v)),
     "models.embed_dim": ("embed_dim", lambda _, v: int(v)),
     "query.fts_candidates": ("fts_candidates", lambda _, v: int(v)),
     "query.vec_candidates": ("vec_candidates", lambda _, v: int(v)),
@@ -270,6 +268,10 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
 # silently. Retired pipeline knobs are deliberately unknown, not deprecated.
 _DEPRECATED_KEYS: frozenset[str] = frozenset({
     "workspace.dir",  # legacy single-workspace pointer
+    "models.inference_endpoint",  # replaced by per-concern endpoints
+    "models.model_embed_text",  # removed: engine uses endpoint URLs
+    "models.model_rerank",  # removed: engine uses endpoint URLs
+    "models.model_thread_summary",  # removed: engine uses endpoint URLs
 })
 
 

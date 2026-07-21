@@ -99,8 +99,7 @@ class SearchResources:
             "workspace_id": ctx.workspace.id,
             "embed": self.fingerprint,
             "rerank_enabled": self.reranker is not None,
-            "rerank_model": ctx.config.model_rerank
-            if self.reranker is not None else None,
+            "rerank_model": self.reranker is not None,
             "leaf_index": namespace(leaf, self.leaf_matrix),
             "thread_index": namespace(thread, self.thread_matrix),
         }

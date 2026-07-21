@@ -90,18 +90,10 @@ ingestion:
   thread_summary_max_tokens: 600
 
 models:
-  # All inference (embedding, summarization, reranking) is served by the
-  # oMLX localhost server (OpenAI-compatible); the engine loads no models.
-  # See docs/features/embedding-design-v2.md. Start oMLX before ingest/query.
-  # Loopback-only: non-local endpoints are refused.
-  inference_endpoint: "http://127.0.0.1:8000/v1"
-  # Server model ids — must match what GET /v1/models advertises.
-  # INDEX-INVALIDATING: changing model_embed_text resolves to a different
-  # per-model vector cache on next `ingest embed` — never deletes another
-  # model's cache. Reranker/summarizer are not index-invalidating (a
-  # summarizer change regenerates summaries via generator_model).
-  model_embed_text: Qwen3-Embedding-0.6B-8bit
-  model_rerank: Qwen3-Reranker-0.6B-4bit
-  model_thread_summary: Qwen3.5-4B-MLX-4bit
-  # Asserted against every embedding response; a mismatch is a hard error.
-  embed_dim: 1024
+  # Inference endpoints. Defaults point to a local oMLX instance; override
+  # for remote or paid APIs. The engine loads no models itself.
+  # embed_dim is auto-detected from the first embedding response; set
+  # explicitly only if the endpoint returns non-standard dimensions.
+  embedding_endpoint: "http://127.0.0.1:8000/v1/embeddings"
+  reranker_endpoint: "http://127.0.0.1:8000/v1/rerank"
+  summarisation_endpoint: "http://127.0.0.1:8000/v1/chat/completions"

@@ -296,7 +296,7 @@ def main() -> int:
 
         base = Config(
             project_root=root, workspaces_dir=workspaces,
-            model_embed_text="fake/model", embed_dim=4)
+            embed_dim=4)
         registry = Registry.load(base)
         workspace = registry.require_workspace("test")
         config = base.for_workspace(workspace.id)

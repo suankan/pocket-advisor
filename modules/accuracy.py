@@ -270,11 +270,9 @@ def generate_expectations(
     if limit is not None:
         candidates = candidates[:limit]
 
-    model_id = ctx.config.model_thread_summary
     if generator is None:
-        print(f"accuracy: loading question model {model_id}…", flush=True)
+        print("accuracy: loading question model…", flush=True)
         generator = get_question_generator(ctx.config)
-        model_id = getattr(generator, "model_id", model_id)
 
     entries: list[dict] = []
     rejected = 0
@@ -307,8 +305,7 @@ def generate_expectations(
                 **candidate.anchors,
                 "flags": list(candidate.flags),
                 "hint": candidate.hint,
-                "notes": (f"generated v{QUESTION_PROMPT_VERSION} "
-                          f"{model_id}"),
+                "notes": (f"generated v{QUESTION_PROMPT_VERSION}"),
                 "origin": "generated",
             }
             entries.append(entry)
@@ -326,7 +323,6 @@ def generate_expectations(
         f"# Retrieval expectations — generated "
         f"{datetime.now(timezone.utc).date()} from workspace "
         f"'{ctx.workspace.id}'.\n"
-        f"# model: {model_id}\n"
         f"# question_prompt_version: {QUESTION_PROMPT_VERSION}\n"
         "# Questions were synthesized from authored email bodies and PDF "
         "text only\n"
@@ -345,7 +341,7 @@ def generate_expectations(
         skipped_empty=skipped_empty,
         rejected=rejected,
         considered=considered,
-        model=model_id,
+        model=ctx.config.summarisation_endpoint,
         prompt_version=QUESTION_PROMPT_VERSION,
     )
     return target, stats
@@ -497,13 +493,13 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
         "environment": {
             "embed": fingerprint,
             "rerank_enabled": bool(ctx.config.rerank_enabled),
-            "rerank_model": ctx.config.model_rerank
+            "rerank_model": ctx.config.reranker_endpoint
             if ctx.config.rerank_enabled else None,
             "top_k": top_k,
             "corpus": corpus,
             **({
                 "question_generator": {
-                    "model": ctx.config.model_thread_summary,
+                    "endpoint": ctx.config.summarisation_endpoint,
                     "prompt_version": QUESTION_PROMPT_VERSION,
                 },
             } if any(entry.get("origin") == "generated"

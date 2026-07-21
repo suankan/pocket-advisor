@@ -87,9 +87,8 @@ class ThreadSummaryStage(Stage):
         perf.new_tiers()
 
         print(f"summaries: {len(stale)} stale"
-              f" {'thread' if len(stale) == 1 else 'threads'} — using"
-              f" {self.config.model_thread_summary} via"
-              f" {self.config.inference_endpoint}")
+              f" {'thread' if len(stale) == 1 else 'threads'} —"
+              f" {self.config.summarisation_endpoint}")
         generator = get_summary_generator(self.config)
         # Each finished summary's vector is dispatched at readiness
         # (design decision 5) without waiting — the embed stage drains;
@@ -162,8 +161,8 @@ class ThreadSummaryStage(Stage):
                  is_stale=0,
                  generated_at=excluded.generated_at""",
             (outcome.job.thread_id, outcome.summary_text,
-             outcome.job.source_digest, self.config.model_thread_summary,
-             SUMMARY_PROMPT_VERSION, now_iso()))
+             outcome.job.source_digest, "",
+              SUMMARY_PROMPT_VERSION, now_iso()))
         self.conn.commit()
         if embed_dispatcher is not None:
             embed_dispatcher.submit_summary(
@@ -225,5 +224,4 @@ class ThreadSummaryStage(Stage):
     def _is_current(self, row, job: _ThreadWork) -> bool:
         return bool(row) and not row["is_stale"] \
             and row["source_digest"] == job.source_digest \
-            and row["generator_model"] == self.config.model_thread_summary \
             and row["prompt_version"] == SUMMARY_PROMPT_VERSION

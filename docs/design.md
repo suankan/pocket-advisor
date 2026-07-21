@@ -29,6 +29,7 @@ rules here.
 | Warm retrieval daemon | `docs/features/query-daemon.md` |
 | Bank transaction domain rules | `docs/features/transaction-domain-design.md` |
 | venv-to-uv runtime migration | `docs/features/uv-migration.md` |
+| Endpoint-based inference config | `docs/features/inference-endpoints.md` |
 
 ## System boundaries
 

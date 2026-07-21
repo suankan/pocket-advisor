@@ -23,7 +23,7 @@ This was not one class of failure. The transcript combines:
 - the known statement-parser coverage gap; and
 - harmless macOS `MallocStackLogging` child-process diagnostics.
 
-No evidence or workspace state was modified during the investigation. All
+No content or workspace state was modified during the investigation. All
 database inspection used SQLite read-only mode, and direct extraction probes
 wrote PDF text only to captured process output.
 
@@ -196,7 +196,7 @@ The implementation now addresses every regression identified above:
 - Transaction recipe `transactions-v2` accepts statements containing
   assertions but no rows, so genuine zero-activity periods are published and
   validated without an empty `max()` operation.
-- Ingest snapshots count top-level originals from the custody blob index,
+- Ingest snapshots count top-level originals from the integrity blob index,
   excluding recursively discovered attached emails. PDF extraction failures,
   OCR warnings, and weak-date warnings are reported as distinct categories
   without equivalent run-flag duplicates.

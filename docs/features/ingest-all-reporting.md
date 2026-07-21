@@ -57,7 +57,7 @@ still showing a complete, useful workspace snapshot.
    not a replacement for live progress.
 6. **Current-state findings drive the assessment.** Candidate errors, missing
    readable PDF text, stale/missing eligible summaries, index-count divergence,
-   failed statement validation, and current-run custody/review flags are rolled
+   failed statement validation, and current-run integrity/review flags are rolled
    up. Old review-log rows alone do not keep a recovered workspace unhealthy.
    A run-local PDF error count is not repeated when it exactly describes the
    same current failed occurrences; PDF OCR-recovery and weak-date warnings are
@@ -86,15 +86,15 @@ still showing a complete, useful workspace snapshot.
 10. **No corpus narrative in the run record.** JSON may contain workspace ID,
     timestamps, timings, counter names, aggregate counts, model/index
     fingerprints, status, and finding categories. It must not contain email
-    bodies, PDF text, transaction descriptions, questions, answers, or evidence
+    bodies, PDF text, transaction descriptions, questions, answers, or content
     snippets. A failed stage retains its exception type and an allowlisted,
     structural failure category; arbitrary exception text is not serialized.
 11. **Reporting performs no model or corpus work.** It may query SQLite, read
     small index metadata/ID arrays, and inspect configured derived paths. It
-    never walks collection roots, parses evidence, runs OCR, summarizes,
+    never walks collection roots, parses content, runs OCR, summarizes,
     embeds, or loads the vector matrix.
 12. **This is not full verification.** Default reporting checks cheap
-    relational/index cardinality and freshness invariants. Custody rehashing,
+    relational/index cardinality and freshness invariants. Integrity rehashing,
     SQLite/FTS integrity commands, artifact hash verification, and exhaustive
     reconciliation remain the responsibility of the future native `verify`
     command.
@@ -136,8 +136,8 @@ The stable human and JSON snapshot contains these sections:
 | Run | workspace, start/end UTC, completion status, pipeline/report seconds |
 | Stages | stage name, outcome (`completed`, `skipped`, `failed`), duration, raw `StageStats`, skip/failure category |
 | Performance | required typed summary/embed/PDF objects; explicit measurement state; strategy/queue/transform counts; subphase timings; PDF resource topology and nullable peak RSS |
-| Sources | top-level custody sources from `source_blob_index`, joined to their email/PDF/other candidate status; source count and bytes exclude attached-email candidates |
-| Evidence | email/document counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
+| Sources | top-level integrity sources from `source_blob_index`, joined to their email/PDF/other candidate status; source count and bytes exclude attached-email candidates |
+| Content | email/document counts; parse issues; attachment counts by PDF/image/other; readable and failed PDFs, including occurrence and unique-hash counts |
 | Threads | total/singleton/multi-message threads; eligible/current/stale/missing summaries |
 | Search | leaf chunks by email/document source; enriched-payload coverage; leaf and summary FTS counts; configured vector fingerprint and leaf/summary manifest counts; mismatches |
 | Transactions | mounted accounts, statements, rows, statement balance status, assertion passed/failed/unassessed, links, and aggregate coverage buckets |
@@ -303,9 +303,9 @@ migrated nor required to render through the new loader.
 ## Non-goals
 
 - Answer-quality or retrieval-expectation accuracy measurement.
-- Full custody, artifact-hash, SQLite, or FTS integrity verification.
+- Full integrity, artifact-hash, SQLite, or FTS integrity verification.
 - Historical trend dashboards or cross-workspace run aggregation.
 - Migrating or preserving native re-render compatibility for version-1 run
   records after the deliberate version-2 observability cutover.
 - Changing stage transaction boundaries or retry semantics.
-- Printing evidence content or every review finding in the default summary.
+- Printing content content or every review finding in the default summary.

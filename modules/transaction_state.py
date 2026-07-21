@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from modules.custody import sha256_bytes, sha256_file, write_verified
+from modules.integrity import sha256_bytes, sha256_file, write_verified
 
 
 MANIFEST_SCHEMA_VERSION = 1

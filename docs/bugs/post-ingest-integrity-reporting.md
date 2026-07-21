@@ -20,7 +20,7 @@ They remain roadmap work and are not part of this bug.
 
 Read-only inspection identified three implementation defects around otherwise
 valid state: a Westpac account-line false warning, duplicated transaction
-finding totals, and a verifier false failure for attached emails. No evidence
+finding totals, and a verifier false failure for attached emails. No content
 or derived workspace state was modified during the investigation.
 
 ## Finding 1 — Westpac Flexi account line is not recognized
@@ -88,7 +88,7 @@ Those problems are exactly 19 attached-email hashes reported twice:
 - 19 `membership item ... has no blob-index row` findings.
 
 All 19 candidates are recursively extracted attached `.eml` payloads with a
-non-null `items.parent_item_id`. They correctly have custody membership and a
+non-null `items.parent_item_id`. They correctly have integrity membership and a
 synthetic ingestion candidate, but are derived from a carrying original and
 must not have their own collection-root `source_blob_index` row. The verifier's
 membership comment recognizes this distinction, while its `candidate_keys`
@@ -102,7 +102,7 @@ Required fix:
 2. Exempt only proven attached-email candidates from the direct blob-index
    requirement.
 3. Verify their complete parent chain instead: it must be acyclic, resolve
-   through existing parent items, and terminate at an item whose custody
+   through existing parent items, and terminate at an item whose integrity
    membership maps to a mounted, blob-indexed original.
 4. Continue failing for a top-level candidate without a blob-index row, an
    attached item without a parent, a broken/cyclic lineage, or a lineage with
@@ -111,14 +111,14 @@ Required fix:
 
 The attached candidates currently use synthetic relpaths beginning with
 `?::`. This is weak first-seen diagnostic provenance but is not an identity or
-custody failure. It may be corrected while working in this area only if the
+integrity failure. It may be corrected while working in this area only if the
 fix remains path-independent and does not broaden the verification exemption.
 
 ## Remediation order
 
 1. Fix and version the Westpac parser identity extraction.
 2. Add structured transaction run-flag deduplication.
-3. Correct attached-email verification and add custody-chain regressions.
+3. Correct attached-email verification and add integrity-chain regressions.
 4. Run every native temporary-fixture test and `./pocket-advisor.py test`.
 5. Run read-only verification against the existing
    `case-documents-demo` workspace. No wipe or re-ingestion is required for the
@@ -135,13 +135,13 @@ fix remains path-independent and does not broaden the verification exemption.
    rebuild, while all 56 supported statements remain balance-valid.
 3. Equivalent transaction run flags are absent from the completion report;
    non-equivalent flags remain visible.
-4. `verify` passes the existing 1,008-original plus 19-attached-email custody
+4. `verify` passes the existing 1,008-original plus 19-attached-email integrity
    graph without weakening original hashing or derived-artifact checks.
-5. Synthetic fixtures prove that broken and cyclic attached-email custody
+5. Synthetic fixtures prove that broken and cyclic attached-email integrity
    chains still fail verification.
 6. The 121 unsupported statements and genuine ambiguous transfer candidates
    remain visible as current findings.
-7. No test writes to collection evidence or live workspace state.
+7. No test writes to collection content or live workspace state.
 
 ## Resolution
 
@@ -153,7 +153,7 @@ fix remains path-independent and does not broaden the verification exemption.
   warning totals and suppresses a same-severity run flag only on exact count
   equivalence. A non-equivalent flag remains visible.
 - Verification now distinguishes attached-email candidates through proven
-  `parent_item_id` lineage. Every attached email must have custody membership,
+  `parent_item_id` lineage. Every attached email must have integrity membership,
   an acyclic existing parent chain, and a terminal item with a mounted
   blob-indexed original. Synthetic relpaths alone never grant an exemption.
 

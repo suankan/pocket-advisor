@@ -45,7 +45,7 @@ numbered roadmap item).
   synchronous client (`modules/inference.py`). The engine loads no models,
   imports no `mlx`, and `requirements.txt` carries no MLX stack; `httpx` is
   the only new dependency. The client refuses non-loopback endpoints
-  (mechanical enforcement of the privacy rule) and fail-fasts with a clear
+  (mechanical enforcement of the local-only rule) and fail-fasts with a clear
   "is oMLX running?" error including a `GET /v1/models` model-id check.
 - Models switched to symmetric Qwen3 served ids: `Qwen3-Embedding-0.6B-8bit`
   (dim 1024), `Qwen3-Reranker-0.6B-4bit`, `Qwen3.5-4B-MLX-4bit`. Config keys
@@ -109,7 +109,7 @@ Implementation commit: `bf62292` (roadmap item: 1. PDF-to-text pipeline; design
   (`telemetry.py`, `ingest_report.py`).
 
 Verification: full native module suite and `./pocket-advisor.py test` pass
-14/14; `git diff --check` is clean. No collection evidence was modified.
+14/14; `git diff --check` is clean. No collection content was modified.
 
 ## 2026-07-19 — Content-generated accuracy questions
 
@@ -134,7 +134,7 @@ Content-generated accuracy questions; design
   ~1m07s, then `accuracy run` 25/25 scored, 0 miss, 100% thread-or-better.
 
 Verification: full native module suite and `./pocket-advisor.py test` pass
-14/14; `git diff --check` is clean. No collection evidence was modified.
+14/14; `git diff --check` is clean. No collection content was modified.
 Generated expectations and result records live under the preserved test
 workspace suite path only.
 
@@ -142,7 +142,7 @@ Deferred: optional hardness experiments (stricter anti-envelope prompt filters
 or a small human-curated harder suite) remain on the roadmap watchlist; they
 do not block the shipped regression harness.
 
-## 2026-07-19 — Content-addressed evidence graph
+## 2026-07-19 — Content-addressed content graph
 
 Implementation commit: `88fc235` (roadmap item: Ingestion design v2;
 design `docs/features/ingestion-design-v2.md`).
@@ -164,11 +164,11 @@ design `docs/features/ingestion-design-v2.md`).
 - Added fresh-schema refusal for retired databases and isolated coverage for
   duplicate raw emails/source paths, duplicate documents, repeated attached
   emails, ZIP lineage, native/email document convergence, graph retrieval,
-  custody verification, reporting, PDF freshness, and transaction rebuilds.
+  integrity verification, reporting, PDF freshness, and transaction rebuilds.
 
 Verification: full native module suite and `./pocket-advisor.py test` pass
 14/14; Python compilation and `git diff --check` are clean. No real workspace
-state or collection evidence was modified. A selected real-workspace fresh
+state or collection content was modified. A selected real-workspace fresh
 rebuild remains operator-owned and requires explicit confirmation immediately
 before `wipe state`; preserved `search-accuracy-tests/` remains outside that
 regenerable deletion.
@@ -183,7 +183,7 @@ Implementation commit: `ce6c27f` (Workstream C in
   transform once; a text-only recipe change reuses the verified OCR product,
   while an OCR change rebuilds both layers. Strict sidecar manifests and
   product hashes reject missing, corrupt, mismatched, or unknown state.
-- Preserved occurrence-level custody and citations: canonical products fan out
+- Preserved occurrence-level integrity and citations: canonical products fan out
   as independently hashed, atomically published plain copies to every existing
   `pdf-ocr/` and `pdf-to-text/` location. No hardlinks or pointer-only
   occurrence artifacts are used; missing local artifacts repair from verified
@@ -196,7 +196,7 @@ Implementation commit: `ce6c27f` (Workstream C in
   and leaves successful canonical products independently resumable.
 - Strengthened schema-2 PDF telemetry reconciliation for unique outcomes,
   duplicate reuse, configured/observed workers, and nested CPU allocation.
-  Streaming custody copies avoid materializing large derivative PDFs in
+  Streaming integrity copies avoid materializing large derivative PDFs in
   memory, and fallback to the verified original still requires a successful,
   present, readable `pdftotext` result.
 
@@ -208,7 +208,7 @@ baseline). Synthetic fixtures cover exact duplicates, independent inodes,
 OCR-only/text-only invalidation, fallback and failure retry, canonical repair,
 bounded scheduling, and strict telemetry. The complete native module loop,
 full synthetic `verify` invariants, and `./pocket-advisor.py test` pass 14/14;
-`git diff --check` is clean. No collection evidence or live workspace state
+`git diff --check` is clean. No collection content or live workspace state
 was mutated.
 
 Deferred: cross-stage CPU/GPU overlap remains an explicit non-goal because the
@@ -269,13 +269,13 @@ Implementation commit: `6404eaa` (Workstream A in
   generation over an explicitly delimited complete chronological thread at or
   below a measured 48,000-token one-shot quality ceiling. The prompt gives
   beginning, middle, and end facts equal weight and remains bounded, greedy,
-  local, non-evidentiary, and independently durable per completed thread.
+   local, non-source, and independently durable per completed thread.
 - Added the deterministic long-thread path: complete messages pack into
   24,000-token structural segments, segment summaries reduce chronologically
   through a fixed 16-way tree, and every reducer input stays below the measured
   quality ceiling. Only a single structurally oversized message may use the
   explicit tokenizer-aware fallback; its exact text is reconstructable from
-  the slices, so no evidence is silently truncated.
+  the slices, so no content is silently truncated.
 - Bumped `SUMMARY_PROMPT_VERSION` to 2 so existing summaries and their vectors
   converge through the existing stale-summary mechanism. Retired the obsolete
   character-count `thread_summary_segment_chars` setting and made that key a
@@ -291,7 +291,7 @@ middle, and end. The native fixture proves the three-segment plus one-reduction
 path, exact deterministic oversized-message reconstruction, prompt-version
 publication, and three `THREAD(sum)` positional retrieval expectations. All 14
 native tests and `./pocket-advisor.py test` pass; `git diff --check` clean. No
-live evidence or workspace state was read or mutated by tests or benchmarks.
+live content or workspace state was read or mutated by tests or benchmarks.
 
 Deferred: none from Workstream A. Shape-stable embedding microbatches are the
 new roadmap head.
@@ -335,7 +335,7 @@ onto the current extraction recipe and recorded a measured PDF stage (86.6s
 OCR vs 0.5s text subphases within an 87s transform wall); the immediate
 rerun completed unchanged in 0.6s with explicit measured-zero telemetry.
 Saved records strict-load and re-render byte-identically; `git diff --check`
-clean. No collection evidence or non-derived state was touched.
+clean. No collection content or non-derived state was touched.
 
 ## 2026-07-19 — Post-ingest integrity and reporting fixes
 
@@ -350,11 +350,11 @@ Implementation commit: `5fd5bdd` (investigation record: `b678f14`,
   severity counts exactly equal the corresponding structured manifest finding
   totals. Non-equivalent flags remain visible as fallback signals.
 - Made native verification distinguish recursively attached-email candidates
-  from collection-root originals only after proving custody membership, email
+  from collection-root originals only after proving integrity membership, email
   type, an acyclic existing parent chain, and a terminal mounted blob-indexed
   carrying original. Added the verified attached-lineage count to the report.
 - Added temporary-fixture regressions for both Westpac account layouts,
-  equivalent and non-equivalent finding totals, valid attached-email custody,
+  equivalent and non-equivalent finding totals, valid attached-email integrity,
   missing lineage, an unindexed carrying root, and cyclic parents.
 
 Verification: `./pocket-advisor.py test` passed 13/13; Python compilation and
@@ -362,7 +362,7 @@ Verification: `./pocket-advisor.py test` passed 13/13; Python compilation and
 family workspace passed with 1,008 indexed originals, 1,027 memberships, 19
 attached-email lineages, 3,691 derived artifacts, 10,541 leaf vectors, 126
 navigation vectors, and a valid transaction manifest. No live derived state or
-collection evidence was mutated.
+collection content was mutated.
 
 Operational note: the next normal family-workspace `ingest all` performs one
 fast Stage 5 rebuild because `westpac-v2` changes the parser fingerprint. No
@@ -389,7 +389,7 @@ Implementation commit: `a9c9d96` (investigation and resolution record:
 - Made assertion-bearing zero-activity statements valid Stage 5 output with
   zero transaction rows, and bumped the shared transaction recipe so prior
   builds are safely invalidated.
-- Corrected top-level source totals to derive from the custody blob index and
+- Corrected top-level source totals to derive from the integrity blob index and
   exclude recursively discovered attached emails. Split PDF extraction
   failures, OCR-recovery warnings, and weak-date warnings into distinct
   categories without equivalent run-flag duplication.
@@ -435,7 +435,7 @@ Implementation commit: `aedd667` (locked design: `892a3bb`,
   findings and verification, exact current account/owner/holder convergence,
   and one-time graph cleanup when the final bank collection is unmounted.
 - Added temporary-fixture coverage for Stage 3 recipe reprocessing, every core
-  Stage 5 invalidation path, output tampering, parser-set changes, manifest
+   Stage 5 invalidation path, output drift, parser-set changes, manifest
   publication failure, persisted findings, CLI restrictions, final unmount,
   and cross-workspace manifest isolation.
 
@@ -500,7 +500,7 @@ Implementation commit: `b6b0391` (locked design:
   preservation fixtures.
 
 Verification: native suite 13/13; Python compilation and `git diff --check`
-clean. No live workspace state, accuracy files, or evidence was moved, copied,
+clean. No live workspace state, accuracy files, or content was moved, copied,
 deleted, initialized, or migrated.
 
 Operational note: earlier nested state roots and workspace-root
@@ -545,7 +545,7 @@ Implementation commit: `99cc7b9`.
 Verification: the existing affected artifacts resolve read-only at the
 correct Gmail wrapper (13,972 redundant characters identified); native suite
 13/13; Python compilation and `git diff --check` clean. No workspace state or
-original evidence was changed.
+original content was changed.
 
 Operational note: an already-chunked workspace requires its normal explicitly
 confirmed state wipe and complete re-ingestion to apply a changed authored
@@ -557,7 +557,7 @@ Implementation commit: `4037db7` (locked daemon design:
 `docs/features/query-daemon.md`).
 
 - Replaced every remaining frozen-adapter command with native workspace-safe
-  implementations: session-warm relational query daemon, full custody/index
+  implementations: session-warm relational query daemon, full integrity/index
   verification (including both FTS5 integrity checks), indexed-blob lookup,
   and vector-index list/wipe maintenance.
 - Made query and accuracy reuse one warm retrieval-resource bundle while
@@ -572,7 +572,7 @@ Implementation commit: `4037db7` (locked daemon design:
 
 Verification: native suite 13/13; Python compilation, `git diff --check`, and
 `pip check` clean; read-only daemon status, index listing, and blob-source
-listing exercised against workspace-scoped state. No evidence or workspace
+listing exercised against workspace-scoped state. No content or workspace
 derived state was changed.
 
 Deferred: none from Adapter retirement. Transaction-parser coverage remains
@@ -642,7 +642,7 @@ Implementation commit: `78e705a`.
 
 - Every `ingest all` run now ends with the typed completion report:
   monotonic per-stage/pipeline timings with run-local `StageStats`, a
-  read-only workspace snapshot (sources, evidence, PDFs, threads/summaries,
+  read-only workspace snapshot (sources, content, PDFs, threads/summaries,
   search indexes, transactions), and severity-graded finding rollups.
 - Wrote an aggregate-only, schema-versioned, atomically write-verified JSON
   record per run under the selected workspace's `logs/ingest-runs/`;
@@ -665,7 +665,7 @@ CLI-display fixtures); frozen tests 11/11; `git diff --check` clean;
 an isolated validation workspace. No live corpus or workspace state was
 touched.
 
-Subsequently completed: native custody/FTS integrity verification shipped with
+Subsequently completed: native integrity/FTS integrity verification shipped with
 Adapter retirement (`4037db7`).
 
 ## 2026-07-18 — Command-scoped workspace selection
@@ -674,7 +674,7 @@ Implementation commit: `c6df0a3`.
 
 - Enforced workspace selection after parsing the complete command/action,
   requiring it for every database, ingestion, retrieval, daemon, wipe,
-  custody, verification, transaction, and workspace-owned accuracy action.
+  integrity, verification, transaction, and workspace-owned accuracy action.
 - Made shared `fetch-model` and fixture `test` registry-free and
   workspace-free; preserved explicitly file-addressed `accuracy compare` as
   workspace-free while its native port remains fail-closed.
@@ -703,7 +703,7 @@ Implementation commit: `23b0a42`.
   `workspaces/.state/workspaces/<workspace_id>/`, with only model weights
   shared.
 - Added database ownership metadata, legacy/mismatch refusal before schema
-  mutation, and foreign-workspace custody-row checks.
+  mutation, and foreign-workspace integrity-row checks.
 - Added exact, confirmed workspace-state deletion with protected-root and
   symlink defences; frozen commands that cannot honor workspace isolation now
   fail closed rather than entering shared-state adapters.
@@ -728,7 +728,7 @@ Implementation commit: `a48bf7b`.
 - Consolidated each email cache to write-verified
   `email_message_full.txt` and `email_message.txt` artifacts.
 - Made the authored body region of `email_message.txt` the email leaf-chunk
-  source, with envelope-relative offsets and pure evidentiary `chunks.text`.
+   source, with envelope-relative offsets and pure source `chunks.text`.
 - Added source-aware email, attachment, and native-document retrieval payloads
   shared identically by dense embedding and `chunks_fts.payload_shadow`.
 - Added the `envelope-v1` payload recipe to the embedding fingerprint so a

@@ -104,7 +104,7 @@ what it owns.
 |---|---|---|---|
 | Email/PDF embeddings | `EmbedDispatcher` | `embed(text)` → `atomic_publish_array` | matrix rebuild |
 | Summary embeddings | `EmbedDispatcher` (`submit_summary`) | `embed(summary)` → `atomic_publish_array` | matrix rebuild |
-| **Summary generation** | **`EmailThreadsSummaryDispatcher`** | **`generate(evidence, mode)`** | **DB upsert + commit + `submit_summary`** |
+| **Summary generation** | **`EmailThreadsSummaryDispatcher`** | **`generate(body, mode)`** | **DB upsert + commit + `submit_summary`** |
 
 ## Generation concurrency shape
 

@@ -7,7 +7,7 @@ Package layout:
     workspace.py   workspace-config.yaml v2 registry
     database.py    SQLite schema + connections (fresh schema, no migrations)
     domain.py      domain dataclasses / enums
-    custody.py     sha256 + write-and-verify primitives
+    integrity.py   sha256 + write-and-verify primitives
     review.py      review queue / ingestion_log flagging
     progress.py    terminal progress reporting
     statement_parsers.py  typed bank-statement layout parsers

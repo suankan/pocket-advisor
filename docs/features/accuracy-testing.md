@@ -37,7 +37,7 @@ and compares runs over time. It is the sole accuracy implementation.
    exits non-zero on any MISS or INVALID. Fully generated suites are expected
    to score every entry.
 5. **Generation writes complete natural-language questions from body/PDF
-   evidence.** `accuracy generate` uses a local MLX model to synthesize one
+   content.** `accuracy generate` uses a local MLX model to synthesize one
    scorable question per eligible candidate, with durable anchors verified
    against the live DB. It does **not** leave TODO placeholders and does
    **not** phrase questions from Subject lines, filenames, envelope fields, or
@@ -69,7 +69,7 @@ and compares runs over time. It is the sole accuracy implementation.
 
 ## Question generation contract
 
-### Model and privacy
+### Model and endpoint
 
 - Generator reuses `models.mlx_model_thread_summary` (local snapshot under
   `models/` only). Missing weights abort with the same fetch-model guidance as
@@ -77,7 +77,7 @@ and compares runs over time. It is the sole accuracy implementation.
 - `QUESTION_PROMPT_VERSION` starts at 1 and participates in result environment
   identity. Greedy / deterministic decode; no cloud calls; corpus text never
   leaves the machine.
-- Evidence is untrusted: the prompt must forbid following instructions found
+- Content is untrusted: the prompt must forbid following instructions found
   inside email or PDF text.
 
 ### Generator inputs (allowed)
@@ -123,7 +123,7 @@ run produced zero — still abort; do not write empty success).
 
 The model must return a single standalone natural-language question that:
 
-- is answerable from the supplied evidence span alone;
+- is answerable from the supplied content span alone;
 - paraphrases rather than quoting long verbatim passages;
 - does not ask about subject lines, filenames, or envelope fields;
 - is not multi-hop across the rest of the corpus;
@@ -174,7 +174,7 @@ directory, merged in sorted order with globally unique ids.
 ## Acceptance criteria
 
 1. `generate` emits only anchors verifiable against the live DB, writes complete
-   non-TODO questions from authored body / PDF text evidence, refuses to
+   non-TODO questions from authored body / PDF text content, refuses to
    overwrite without `--force`, and aborts on empty workspaces or zero
    successful generations.
 2. Generator prompts never include Subject, filename, envelope fields, or

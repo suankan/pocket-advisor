@@ -39,7 +39,7 @@ publishes matrices.
 
 ## Why oMLX, and what it costs
 
-Spike evidence (2026-07-19) against a running oMLX instance:
+Spike content (2026-07-19) against a running oMLX instance:
 
 - **oMLX serves BGE-M3, ModernBERT, XLM-RoBERTa, and Qwen3-family models as
   embeddings**, and Qwen3/Jina/ModernBERT/XLM-RoBERTa models as rerankers,
@@ -51,7 +51,7 @@ Spike evidence (2026-07-19) against a running oMLX instance:
 - **oMLX normalizes embedding output** (Qwen3-Embedding returned
   L2 norm ≈ 1.0).
 - **Verified working through oMLX:** Qwen3-Embedding-0.6B-8bit (dim 1024,
-  normalized) and Qwen3-Reranker-0.6B-4bit (correct ordering on a custody
+  normalized) and Qwen3-Reranker-0.6B-4bit (correct ordering on a integrity
   query). bge-m3 also works.
 
 Critical limitation discovered during the spike, and the reason for the model
@@ -100,7 +100,7 @@ Jina v5 is retired.
    engine depends on, not bundled code. All inference goes to
    `models.inference_endpoint` (default `http://127.0.0.1:8000/v1`). The
    client **refuses non-loopback hosts** — this mechanically enforces the
-   `docs/design.md` privacy rule that case text never leaves the machine.
+   `docs/design.md` local rule that case text never leaves the machine.
    No auto-spawn: if the server is down, the engine fails fast with a clear
    actionable error, it never starts one.
 2. **Three service models, configured by server id.** The `models.model_*`
@@ -144,7 +144,7 @@ Jina v5 is retired.
    Returned vectors land in the current fingerprint's per-entity cache
    through the same atomic write-verify-publish discipline. **Dispatch is
    best-effort:** a failed or unavailable dispatch never fails the producing
-   stage — evidence custody must never depend on inference availability.
+   stage — content integrity must never depend on inference availability.
    On the first endpoint failure the producer logs one warning, stops
    dispatching for the run, and leaves entities pending; the run report then
    states plainly how many entities were left un-embedded and that
@@ -197,7 +197,7 @@ Jina v5 is retired.
 11. **Summarization and question generation are chat calls.** The summaries
     stage and `accuracy generate` call `generate()` against
     `model_thread_summary` with their existing prompts. Prompt versions,
-    source digests, staleness semantics, and the untrusted-evidence rules
+    source digests, staleness semantics, and the untrusted-content rules
     are untouched; `generator_model` records the server model id, so the
     switch itself invalidates and regenerates all summaries and generated
     questions through the existing digest/model/version comparison — no

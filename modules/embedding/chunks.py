@@ -3,7 +3,7 @@
 Shared by the producer stages (which chunk each artifact the moment it is
 published — design decision 5) and the embed convergence stage (whose sweep
 fills anything a producer run missed). Chunks are immutable once created;
-`chunks.text` stays a pure evidentiary quote while `payload_shadow` carries
+`chunks.text` stays a pure source quote while `payload_shadow` carries
 the envelope-enriched payload for both dense and FTS retrieval.
 """
 from collections.abc import Iterator
@@ -43,7 +43,7 @@ def chunk_text(text: str, chunk_chars: int,
 def sync_email_chunks(conn, config: Config) -> int:
     """Create chunk rows for any authored email body that has none yet.
     Chunks are immutable once created (source docs never change; changed
-    source = custody alarm upstream)."""
+    source = integrity alarm upstream)."""
     created = 0
     root = config.project_root
     chunk_args = (config.chunk_chars, config.chunk_overlap)

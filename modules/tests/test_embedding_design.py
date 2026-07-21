@@ -14,7 +14,7 @@ import modules.pipeline.embed as embed_mod  # noqa: E402
 import modules.pipeline.summaries as summaries_mod  # noqa: E402
 import modules.retrieval as retrieval_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
-from modules.custody import sha256_bytes  # noqa: E402
+from modules.integrity import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
                                index_paths,
@@ -70,12 +70,12 @@ class FakeSummarizer:
     def count_tokens(self, text: str) -> int:
         return len(text)
 
-    def generate(self, evidence: str, mode: str) -> str:
+    def generate(self, body: str, mode: str) -> str:
         self.calls += 1
         self.modes.append(mode)
-        if self.fail_on and self.fail_on in evidence:
+        if self.fail_on and self.fail_on in body:
             raise RuntimeError("simulated summary failure")
-        return evidence
+        return body
 
 
 def insert_email(conn, root: Path, mid: str, subject: str, body: str,
@@ -198,7 +198,7 @@ def main() -> int:
         old_vector = next(tpaths.vecs_dir.glob("*.npy")).name
 
         # Leaf and summary matches deduplicate to one relational packet. The
-        # readable evidence includes the full chronology and real reply edge.
+        # readable content includes the full chronology and real reply edge.
         with patch.object(retrieval_mod, "current_fingerprint",
                           return_value=dict(FINGERPRINT)), \
              patch.object(retrieval_mod, "get_backend",

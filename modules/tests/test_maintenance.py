@@ -54,7 +54,7 @@ def email_bytes() -> bytes:
         "To: Receiver <receiver@example.test>\n"
         "Subject: Maintenance fixture\n"
         "Content-Type: text/plain; charset=utf-8\n\n"
-        "Verified evidence body.\n"
+        "Verified content body.\n"
     ).encode()
 
 
@@ -64,8 +64,8 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
     ).fetchone()
     ctx.conn.execute(
         "INSERT INTO chunks(source_type, email_id, chunk_index, text, "
-        "payload_shadow) VALUES ('email_body', ?, 0, 'verified evidence', "
-        "'Subject: Maintenance fixture verified evidence')",
+        "payload_shadow) VALUES ('email_body', ?, 0, 'verified content', "
+        "'Subject: Maintenance fixture verified content')",
         (email["id"],),
     )
     ctx.conn.execute(
@@ -220,7 +220,7 @@ def test_document_occurrence_verification(ctx: PipelineContext) -> None:
     """Document-occurrence coverage (Pass 2 of ``_verify_originals``): every
     ``document_sources``/``attachments`` row must trace to a real
     ``ingestion_candidates`` entry (or, for attachments, to a carrying email
-    with verified custody lineage) — a gap on either side is a problem, not
+    with verified integrity lineage) — a gap on either side is a problem, not
     silently accepted noise."""
 
     def add_document(document_id: int, sha256: str) -> None:
@@ -264,7 +264,7 @@ def test_document_occurrence_verification(ctx: PipelineContext) -> None:
     ctx.conn.execute("RELEASE missing_document_source")
 
     # -- broken: an attachments occurrence carried by an email that itself
-    # has no verified custody lineage (no email_sources occurrence). ---------
+    # has no verified integrity lineage (no email_sources occurrence). ---------
     ctx.conn.execute("SAVEPOINT uncustodied_carrier")
     root_id, body_text_path, body_full_text_path = _root_email(ctx)
     _insert_email(
@@ -278,7 +278,7 @@ def test_document_occurrence_verification(ctx: PipelineContext) -> None:
         "ordinal, ingested_at) VALUES (210, 201, 'attached.pdf', 0, 't')")
     report = verify_workspace(ctx)
     assert not report.ok
-    assert any("has no verified custody lineage" in problem
+    assert any("has no verified integrity lineage" in problem
                for problem in report.problems)
     ctx.conn.execute("ROLLBACK TO uncustodied_carrier")
     ctx.conn.execute("RELEASE uncustodied_carrier")
@@ -288,9 +288,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa_maintenance_") as td:
         root = Path(td)
         workspaces = root / "workspaces"
-        evidence = workspaces / "corpora" / "mail" / "one.eml"
-        evidence.parent.mkdir(parents=True)
-        evidence.write_bytes(email_bytes())
+        content_path = workspaces / "corpora" / "mail" / "one.eml"
+        content_path.parent.mkdir(parents=True)
+        content_path.write_bytes(email_bytes())
         (workspaces / "test").mkdir()
         (workspaces / "workspace-config.yaml").write_text(REGISTRY)
 
@@ -317,7 +317,7 @@ def main() -> int:
         digest = ctx.conn.execute(
             "SELECT sha256 FROM source_blob_index WHERE source_id='mail'"
         ).fetchone()[0]
-        assert lookup_blob(ctx, "mail", digest) == evidence.resolve()
+        assert lookup_blob(ctx, "mail", digest) == content_path.resolve()
         assert "mail: 1 indexed blobs" in format_sources(ctx)
         try:
             lookup_blob(ctx, "mail", "bad")
@@ -372,8 +372,8 @@ def main() -> int:
         assert wipe_indexes(config, all_inactive=True, yes=True) == 0
         assert not inactive.exists() and active_dir.exists()
 
-        # Temp-fixture tamper checks are permitted; real evidence is untouched.
-        evidence.write_bytes(b"tampered")
+        # Temp-fixture drift checks are permitted; real content is untouched.
+        content_path.write_bytes(b"modified")
         report = verify_workspace(ctx)
         assert not report.ok
         assert any("size changed" in problem or "hash changed" in problem

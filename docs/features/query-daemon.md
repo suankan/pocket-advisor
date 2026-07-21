@@ -6,7 +6,7 @@ and accuracy execution.
 
 The daemon removes repeated model and vector-matrix loading during an
 interactive retrieval session. It changes resource lifetime, not ranking or
-evidence semantics.
+content semantics.
 
 ## Locked decisions
 

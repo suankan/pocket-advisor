@@ -1,4 +1,4 @@
-"""Hybrid leaf/thread retrieval followed by relational evidence expansion.
+"""Hybrid leaf/thread retrieval followed by relational retrieval expansion.
 
 Post-cutover shape (`docs/features/ingestion-design-v2.md`): a search hit's
 identity is either an email (correspondence, grouped by thread) or a
@@ -557,7 +557,7 @@ def _document_packet(ctx: PipelineContext, document_id: int,
     lightweight shape: the winning chunk match(es) plus the full
     occurrence list (every carrying email + filename, every native mount)
     for citation completeness. No "whole document" text expansion is
-    attempted here; the matched chunk snippet(s) are the evidentiary
+    attempted here; the matched chunk snippet(s) are the source
     quote, same as an attachment match was under the old schema."""
     doc = ctx.conn.execute(
         """SELECT sha256, media_kind, content_type, doc_date,
@@ -762,7 +762,7 @@ def _format_thread_packet(index: int, packet: dict) -> None:
     print(f"\n=== [{index}] Thread {packet['thread_id']}:"
           f" {packet['subject']} ===")
     if packet["generated_summary"]:
-        print("\n[GENERATED NAVIGATION SUMMARY — NOT EVIDENCE]")
+        print("\n[GENERATED NAVIGATION SUMMARY — NOT CONTENT]")
         print(packet["generated_summary"])
     for match in packet["matches"]:
         # Every thread-packet match is an email_body chunk; the full

@@ -1,7 +1,7 @@
 """workspace-config.yaml registry — schema_version 2 ONLY.
 
 v2 layout (`docs_old/specs/workspace-config-v2.md`): global `collections:`
-(evidence stores) + `workspaces:` each mounting collections by id.
+(source stores) + `workspaces:` each mounting collections by id.
 schema_version 1 is no longer supported (clean-break refactor); the
 loader aborts with a migration pointer.
 
@@ -45,7 +45,7 @@ class BankAccount:
 
 @dataclass(frozen=True, slots=True)
 class Collection:
-    """One evidence store. Originals under `root` are READ ONLY."""
+    """One source store. Originals under `root` are READ ONLY."""
 
     id: str
     title: str

@@ -9,7 +9,7 @@ gives the submitting producer backpressure.
 
 Producer dispatch is best-effort: an unreachable endpoint prints one
 warning, stops dispatching for the run, and leaves entities pending —
-evidence custody never depends on inference availability. The embed stage
+content integrity never depends on inference availability. The embed stage
 is the loud, authoritative convergence pass over the same dispatcher.
 
 Every published vector follows the atomic write-verify-publish discipline,

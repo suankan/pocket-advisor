@@ -1,4 +1,4 @@
-"""Workspace-scoped custody lookup and full integrity verification."""
+"""Workspace-scoped blob lookup and full integrity verification."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from modules.custody import sha256_file
+from modules.integrity import sha256_file
 from modules.embedding import (current_fingerprint, index_paths,
                                meta_fingerprint, thread_index_paths,
                                thread_vector_filename)
@@ -80,7 +80,7 @@ def format_sources(ctx: PipelineContext) -> str:
 def lookup_blob(
         ctx: PipelineContext, source_id: str, sha256: str, *,
         verify_hash: bool = True) -> Path:
-    """Resolve one indexed original without rebuilding or walking evidence."""
+    """Resolve one indexed original without rebuilding or walking content."""
     digest = sha256.strip().lower()
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise MaintenanceError(
@@ -102,10 +102,10 @@ def lookup_blob(
             "'ingest discover' to refresh the selected workspace")
     if row["size_bytes"] is not None and path.stat().st_size != row["size_bytes"]:
         raise MaintenanceError(
-            f"blob-index lookup: custody alarm — size changed at {path}")
+            f"blob-index lookup: integrity alarm — size changed at {path}")
     if verify_hash and sha256_file(path) != digest:
         raise MaintenanceError(
-            f"blob-index lookup: custody alarm — hash changed at {path}")
+            f"blob-index lookup: integrity alarm — hash changed at {path}")
     return path
 
 
@@ -168,7 +168,7 @@ def _verify_sqlite(ctx: PipelineContext, report: VerificationReport) -> None:
 
 
 def _verify_originals(ctx: PipelineContext, report: VerificationReport) -> None:
-    """Verify custody and graph lineage without relying on cache paths.
+    """Verify integrity and graph lineage without relying on cache paths.
 
     Top-level source occurrences are `email_sources`/`document_sources` rows;
     attached-email lineage is `attachments.child_email_id`. A deduplicated
@@ -312,7 +312,7 @@ def _verify_originals(ctx: PipelineContext, report: VerificationReport) -> None:
                 report,
                 f"document attachment occurrence {row['id']} (document "
                 f"{str(row['sha256'])[:12]}…) carrying email {email_id} has "
-                "no verified custody lineage")
+                "no verified integrity lineage")
             continue
         doc_occurrences_checked += 1
 
@@ -557,7 +557,7 @@ def verify_workspace(ctx: PipelineContext) -> VerificationReport:
     """Run deep, read-only workspace integrity checks.
 
     FTS ``integrity-check`` uses SQLite's special maintenance command but does
-    not change indexed content. Evidence roots are only read and hashed.
+    not change indexed content. Content roots are only read and hashed.
     """
     report = VerificationReport(workspace_id=ctx.workspace.id)
     _verify_sqlite(ctx, report)

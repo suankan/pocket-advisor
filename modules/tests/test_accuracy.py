@@ -67,9 +67,9 @@ class FakeQuestionGenerator:
             return text
         return " ".join(words[:max_tokens])
 
-    def generate(self, evidence: str) -> str:
-        snippet = " ".join(evidence.split()[:6]) or "evidence"
-        return f"What does the evidence say about {snippet}?"
+    def generate(self, body: str) -> str:
+        snippet = " ".join(body.split()[:6]) or "content"
+        return f"What does the content say about {snippet}?"
 
 
 def main() -> int:
@@ -128,7 +128,7 @@ def main() -> int:
         assert not generated[0]["question"].upper().startswith("TODO")
         assert "Opening" in generated[0]["question"] \
             or "Direct" in generated[0]["question"] \
-            or "evidence" in generated[0]["question"]
+            or "content" in generated[0]["question"]
         assert "subject" not in generated[0].get("hint", "").lower()
         try:
             generate_expectations(ctx, target, force=False, generator=fake)

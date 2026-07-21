@@ -68,7 +68,7 @@ def _render_thread(blocks: list[str]) -> str:
 
 def _render_segment(blocks: list[str], position: int, total: int) -> str:
     return "\n\n".join((
-        f"THREAD SEGMENT {position} OF {total} — chronological evidence",
+        f"THREAD SEGMENT {position} OF {total} — chronological content",
         *blocks,
     ))
 
@@ -134,20 +134,20 @@ def _split_text_token_aware(text: str, token_budget: int,
     return tuple(pieces)
 
 
-def _call_generator(generator: SummaryGenerator, evidence: str,
+def _call_generator(generator: SummaryGenerator, body: str,
                     mode: SummaryMode, metrics: _GenerationMetrics,
                     timings) -> str:
     metrics.calls += 1
     model_started = time.monotonic()
     try:
-        result = generator.generate(evidence, mode)
+        result = generator.generate(body, mode)
     finally:
         timings.model_execution += time.monotonic() - model_started
     # Exact prompt tokens come from the service's usage field when the
     # generator exposes them; the deterministic estimate is the fallback.
     metrics.input_tokens += \
         getattr(generator, "last_prompt_tokens", 0) \
-        or generator.count_tokens(evidence)
+        or generator.count_tokens(body)
     if not result.strip():
         raise RuntimeError("thread summarizer returned empty text")
     return result.strip()
@@ -225,15 +225,15 @@ def _reduce(thread_id: int, summaries: list[str],
             if len(group) == 1:
                 reduced.append(group[0])
                 continue
-            evidence = _render_reduction(
+            body = _render_reduction(
                 group, round_number, group_number)
-            if generator.count_tokens(evidence) > SUMMARY_ONE_SHOT_TOKENS:
+            if generator.count_tokens(body) > SUMMARY_ONE_SHOT_TOKENS:
                 raise RuntimeError(
                     "summary reduction input exceeds measured quality"
                     " threshold")
             metrics.reductions += 1
             reduced.append(_call_generator(
-                generator, evidence, "reduce", metrics, timings))
+                generator, body, "reduce", metrics, timings))
         if len(reduced) >= len(current):
             raise RuntimeError("summary reduction made no progress")
         current = reduced

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from modules.custody import write_verified
+from modules.integrity import write_verified
 from modules.domain import StageStats
 from modules.embedding import (IndexPaths, atomic_publish_array,
                                chunking_fields_changed, current_fingerprint,

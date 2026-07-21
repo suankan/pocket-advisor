@@ -38,10 +38,10 @@ class AnchorSummarizer:
     def count_tokens(text: str) -> int:
         return len(text)
 
-    def generate(self, evidence: str, mode: str) -> str:
+    def generate(self, body: str, mode: str) -> str:
         self.modes.append(mode)
         positions = list(dict.fromkeys(re.findall(
-            r"(?:ANCHOR_|nav)(EARLY|MIDDLE|LATE)", evidence,
+            r"(?:ANCHOR_|nav)(EARLY|MIDDLE|LATE)", body,
             flags=re.IGNORECASE)))
         return " ".join(f"nav{position.lower()}fact"
                         for position in positions) \
@@ -51,7 +51,7 @@ class AnchorSummarizer:
 def main() -> int:
     # The last-resort oversized-message split is deterministic, token-bounded,
     # Unicode-safe, and exactly lossless at the Python-text boundary.
-    source = ("абвгд long evidence line\n" * 23) + "TAIL"
+    source = ("абвгд long body line\n" * 23) + "TAIL"
     pieces = _split_text_token_aware(source, 97, len)
     assert len(pieces) > 1
     assert "".join(pieces) == source
@@ -73,7 +73,7 @@ def main() -> int:
             config=cfg, registry=registry, workspace=workspace, conn=conn,
             review=ReviewLog(conn, cfg.review_queue_csv))
 
-        filler = "repeatable synthetic evidence " * 690
+        filler = "repeatable synthetic body " * 690
         first = insert_email(
             conn, root, "<long-a@x>", "Long chronology",
             "ANCHOR_EARLY\n" + filler,
@@ -124,7 +124,7 @@ def main() -> int:
 
         # The middle message is a real direct reply and the late message
         # remains in the same deterministic thread; hierarchy never rewrites
-        # relational evidence to obtain its speedup.
+        # relational body to obtain its speedup.
         assert conn.execute(
             "SELECT reply_parent_email_id FROM emails WHERE id=?",
             (second,)).fetchone()[0] == first
@@ -209,7 +209,7 @@ def test_concurrent_generation() -> None:
             def count_tokens(self, text: str) -> int:
                 return len(text)
 
-            def generate(self, evidence: str, mode: str) -> str:
+            def generate(self, body: str, mode: str) -> str:
                 with lock:
                     live.append(1)
                     concurrent = len(live)
@@ -217,9 +217,9 @@ def test_concurrent_generation() -> None:
                 release.wait(5.0)
                 with lock:
                     live.pop()
-                return f"summary-{evidence[:8]}"
+                return f"summary-{body[:8]}"
 
-        jobs = [_make_job(root, tid, f"evidence-body-{tid} " + "x" * 50)
+        jobs = [_make_job(root, tid, f"body-body-{tid} " + "x" * 50)
                 for tid in range(6)]
         ctx = _fake_ctx()
         dispatcher = EmailThreadsSummaryDispatcher(
@@ -258,7 +258,7 @@ def test_unavailable_skips_all() -> None:
             def count_tokens(self, text: str) -> int:
                 return len(text)
 
-            def generate(self, evidence: str, mode: str) -> str:
+            def generate(self, body: str, mode: str) -> str:
                 begin.wait(5.0)
                 raise InferenceUnavailable("oMLX down")
 
@@ -291,11 +291,11 @@ def test_per_thread_failure_isolated() -> None:
             def count_tokens(self, text: str) -> int:
                 return len(text)
 
-            def generate(self, evidence: str, mode: str) -> str:
+            def generate(self, body: str, mode: str) -> str:
                 self.calls += 1
-                if "boom" in evidence:
+                if "boom" in body:
                     raise RuntimeError("boom on this thread")
-                return f"summary-{evidence[:8]}"
+                return f"summary-{body[:8]}"
 
         jobs = [_make_job(root, tid,
                           f"boom-body" if tid == 2 else f"ok-body-{tid}")

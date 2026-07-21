@@ -1,7 +1,7 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local, privacy-preserving RAG engine over personal
-evidence. The solution architecture is locked under `docs/`.
+Pocket Advisor is a local RAG engine over personal
+content. The solution architecture is locked under `docs/`.
 
 ## Read first
 
@@ -16,7 +16,7 @@ For every platform task, load these files in order:
 5. `docs/features/workspace-scoped-state.md` — locked per-workspace
    database/cache and command-scoped CLI workspace-selection design;
 6. `docs/features/ingestion-design-v2.md` — locked fresh-schema
-   content-addressed email/document evidence graph;
+   content-addressed email/document content graph;
 7. `docs/features/pdf-to-text-pipeline-design.md` — proposed graph-owned PDF
    worker/publishing design; it follows ingestion design v2;
 8. `docs/features/embedding-design.md` — locked embedding/thread-retrieval
@@ -84,14 +84,14 @@ archived `docs_old/` changelog.
 
 ## Hard rules
 
-1. **Evidence is read-only.** Never write, rename, or delete anything under a
+1. **Content is read-only.** Never write, rename, or delete anything under a
    collection root (`workspaces/corpora/...` or a registry path). Durable
    identity is `(collection_id, sha256)`, never a path. Only engine-derived
    state under `workspaces/.state/` is regenerable; preserved
    `search-accuracy-tests/` directories are human-authored workspace test data.
-2. **Preserve custody.** Hash originals before parsing, write-verify every
+2. **Preserve integrity.** Hash originals before parsing, write-verify every
    derived copy, tolerate renames through `source_blob_index`, and treat a
-   changed hash at a known path as a custody alarm—not an update.
+   changed hash at a known path as an integrity alarm—not an update.
 3. **Corpus claims require citations.** Cite emails by message ID, date, and
    sender, adding collection/source identity when useful. Cite standalone
    documents by filename and date, and surface weak date provenance.
@@ -106,7 +106,7 @@ archived `docs_old/` changelog.
    cleanup. A workspace rebuild requires `wipe state` followed by a complete
    re-ingest, but it is an operator-owned action, not a platform roadmap gate.
 
-There is no privileged-content concept. It was removed by decision on
+There is no content-access-control concept. It was removed by decision on
 2026-07-18 (`docs/design.md`): the sole user already owns every document fed
 into the system, so no privilege flags, restricted retrieval passes, or ACLs
 exist anywhere in the engine.
@@ -131,7 +131,7 @@ exist anywhere in the engine.
   workspace-bound. There is no active/default workspace registry setting.
   Existing shared state is retired and is neither migrated nor touched.
 - Originals are email and PDF only. Images, ZIPs, and other attachments are
-  retained for custody/manual inspection but are not text-extracted or
+   retained for manual inspection but are not text-extracted or
   embedded.
 
 ### Pipeline order
@@ -179,7 +179,7 @@ prerequisites always exist.
   recipe-addressed `transforms/` artifacts; hardlinks are prohibited.
 - Only authored email body regions and PDF text artifacts are leaf-chunked.
   Generated thread summaries have a separate vector namespace and are always
-  labeled as navigation, never evidence.
+   labeled as navigation, never content.
 
 ## Current implementation state
 
@@ -192,7 +192,7 @@ Always confirm this against `docs/status.md` and
   folded into `docs/features/embedding-design.md` (per-answer context budget,
   always-on summary staleness maintenance, rerank cap, match dedup,
   warnings, ghost-root coverage);
-- the privileged-content concept is removed engine-wide;
+- the content-access-control concept is removed engine-wide;
 - leaf retrieval uses envelope-enriched dense/FTS payloads with recipe-bound
   vector caches, while `chunks.text` stays a pure quote; graph-owned email
   artifacts contain only `email_message_full.txt` and `email_message.txt`;
@@ -207,7 +207,7 @@ Always confirm this against `docs/status.md` and
 - flat workspace state shipped at `b6b0391`: each workspace owns
   `.state/workspace-<id>/<id>.db`; preserved expectations and results live in
   its `search-accuracy-tests/` directory and survive `wipe state`;
-- content-addressed evidence graph shipped at `88fc235`: SHA-unique emails and
+- content-addressed content graph shipped at `88fc235`: SHA-unique emails and
   documents own their artifacts, while source and attachment occurrence rows
   retain all provenance; retired state is refused rather than migrated;
 - generic end-to-end validation is available through an isolated workspace
@@ -231,13 +231,13 @@ is verified and committed, then perform the documentation lifecycle above.
   its registry metadata.
 - Stage 1 owns blob-index refresh. Do not recreate the legacy transaction
   module's internal refresh.
-- Resolve statement files through discovery custody plus graph-owned document
+- Resolve statement files through discovery integrity plus graph-owned document
   and attachment occurrences.
 - Every PDF in a marked collection is expected to parse; report unparsed,
   not-ingested, and account-mismatch cases loudly.
 - Money is signed integer minor units, never float.
 - Keep assertion validation, deterministic rebuilds, transfer matching,
-  reconciliation overrides, coverage reporting, tamper signals, and row-level
+   reconciliation overrides, coverage reporting, drift signals, and row-level
   citations.
 - `reconciliation.yaml` and `counterparties.yaml` remain in the selected
   workspace folder, not engine state.
@@ -247,7 +247,7 @@ is verified and committed, then perform the documentation lifecycle above.
 
 ## Verification
 
-Use temp fixtures for any custody/tamper test; never modify real corpus files.
+Use temp fixtures for any integrity/drift test; never modify real corpus files.
 Before handing off a change:
 
 ```bash

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from modules.config import Config
-from modules.custody import sha256_file, write_verified
+from modules.integrity import sha256_file, write_verified
 from modules.embedding import (current_fingerprint, index_paths,
                                meta_fingerprint, thread_index_paths,
                                thread_vector_filename)
@@ -55,7 +55,7 @@ class Finding:
 @dataclass(frozen=True, slots=True)
 class WorkspaceSnapshot:
     sources: dict[str, int]
-    evidence: dict[str, int]
+    documents: dict[str, int]
     threads: dict[str, int | bool]
     search: dict[str, Any]
     transactions: dict[str, Any]
@@ -122,7 +122,7 @@ def _source_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
     return values
 
 
-def _evidence_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
+def _document_snapshot(conn: sqlite3.Connection) -> dict[str, int]:
     """PDF readiness is a document-level property now (``documents``' own
     ``extraction_method``/``is_skipped``) — there is no more native/attached
     split for "is this PDF's text ready"; a document is a document regardless
@@ -377,7 +377,7 @@ def build_snapshot(
     """Build a cheap post-run snapshot from workspace-derived state only."""
     return WorkspaceSnapshot(
         sources=_source_snapshot(ctx.conn),
-        evidence=_evidence_snapshot(ctx.conn),
+        documents=_document_snapshot(ctx.conn),
         threads=_thread_snapshot(
             ctx.conn, generation_enabled=ctx.config.summarize_threads),
         search=_search_snapshot(ctx),
@@ -399,8 +399,8 @@ def snapshot_findings(
 
     add("error", "candidate_errors", snapshot.sources["errors"])
     add("warning", "candidate_pending", snapshot.sources["candidate"])
-    add("warning", "email_parse_issues", snapshot.evidence["parse_issues"])
-    add("error", "pdf_failures", snapshot.evidence["pdf_failed"])
+    add("warning", "email_parse_issues", snapshot.documents["parse_issues"])
+    add("error", "pdf_failures", snapshot.documents["pdf_failed"])
     if snapshot.threads["summary_generation_enabled"]:
         add("error", "summaries_stale",
             int(snapshot.threads["summaries_stale"]))
@@ -662,7 +662,7 @@ def format_report(report: IngestRunReport, record_path: Path | None) -> str:
     snapshot = report.snapshot
     if snapshot is not None:
         sources = snapshot.sources
-        evidence = snapshot.evidence
+        docs = snapshot.documents
         threads = snapshot.threads
         search = snapshot.search
         transactions = snapshot.transactions
@@ -671,16 +671,16 @@ def format_report(report: IngestRunReport, record_path: Path | None) -> str:
             f"  Sources       {sources['originals']} originals — "
             f"{sources['emails']} emails, {sources['pdfs']} PDFs, "
             f"{sources['other']} other")
-        occurrences = (evidence['native_pdf_occurrences']
-                      + evidence['attached_pdf_occurrences'])
+        occurrences = (docs['native_pdf_occurrences']
+                      + docs['attached_pdf_occurrences'])
         lines.append(
-            f"  PDFs          {evidence['pdf_readable']}/"
-            f"{evidence['pdf_total']} readable — "
-            f"{evidence['pdf_failed']} failed "
-            f"{_noun(evidence['pdf_failed'], 'document')} "
+            f"  PDFs          {docs['pdf_readable']}/"
+            f"{docs['pdf_total']} readable — "
+            f"{docs['pdf_failed']} failed "
+            f"{_noun(docs['pdf_failed'], 'document')} "
             f"({occurrences} {_noun(occurrences, 'occurrence')}: "
-            f"{evidence['native_pdf_occurrences']} native + "
-            f"{evidence['attached_pdf_occurrences']} attached)")
+            f"{docs['native_pdf_occurrences']} native + "
+            f"{docs['attached_pdf_occurrences']} attached)")
         lines.append(
             f"  Threads       {threads['total']} — "
             f"{threads['summaries_current']}/"

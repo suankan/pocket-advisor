@@ -6,17 +6,17 @@ Stage 1 never parses content). One walk feeds BOTH tables:
 
 - ingestion_candidates — the working set, keyed (collection_id, sha256).
   email/pdf files enter as status='candidate'; anything else is
-  recorded as status='skipped' (custody-visible, never processed).
-- source_blob_index — pure custody cache of every observed source path,
+  recorded as status='skipped' (tracked, never processed).
+- source_blob_index — sha256-to-path cache of every observed source path,
   replaced per collection on every run. The durable blob identity remains
   `(collection_id, sha256)`; duplicate paths deliberately remain visible
   as distinct occurrences.
 
-Idempotency and custody:
+Idempotency and integrity:
 - A sha already recorded for the collection is counted as known.
 - A KNOWN relpath whose content hash changed — while the old hash is
-  gone from the walk — is a chain-of-custody alarm: flagged to the
-  review queue and NOT ingested. Evidence is immutable; a changed file
+  gone from the walk — is an integrity alarm: flagged to the
+  review queue and NOT ingested. Content is immutable; a changed file
   needs a human decision, not silent re-ingestion.
 - A moved/renamed file (same sha, new relpath) is just known; the blob
   index picks up the new location.
@@ -28,14 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modules.config import IGNORED_FILENAMES
-from modules.custody import sha256_file
+from modules.integrity import sha256_file
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.pipeline.base import Stage
 from modules.progress import Progress
 from modules.review import now_iso
 from modules.workspace import Collection
 
-# Workspace/agent metadata that may sit inside source trees — never evidence.
+# Workspace/agent metadata that may sit inside source trees — never content.
 _SKIP_NAMES = IGNORED_FILENAMES | {"WORKSPACE.md", "workspace-config.yaml"}
 
 
@@ -95,7 +95,7 @@ class DiscoverStage(Stage):
         self.conn.commit()
         return stats
 
-    # -- source_blob_index (pure custody cache) ---------------------------
+    # -- source_blob_index (sha256-to-path cache) -------------------------
 
     def _refresh_blob_index(self, workspace_id: str, coll: Collection,
                             files: list[FoundFile],
@@ -140,9 +140,9 @@ class DiscoverStage(Stage):
                 self.review.flag(
                     f"{coll.id}/{file.relpath}", self.name, "error",
                     f"content CHANGED at known path (was {prior[:12]}…,"
-                    f" now {file.sha256[:12]}…) — chain-of-custody alarm,"
+                    f" now {file.sha256[:12]}…) — integrity alarm,"
                     " NOT ingested; resolve in review queue")
-                stats.inc("custody_alarms")
+                stats.inc("integrity_alarms")
                 continue
             document_type = DocumentType.classify(Path(file.relpath))
             status = (CandidateStatus.CANDIDATE

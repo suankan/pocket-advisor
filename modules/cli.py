@@ -49,7 +49,7 @@ _HELP = {
     "daemon": "serve | status | stop — workspace-local warm retrieval",
     "wipe": "list | index | state — confirmed derived-state deletion",
     "blob-index": "list-sources | lookup — indexed original resolution",
-    "verify": "full custody, SQLite, FTS, artifact, and vector verification",
+    "verify": "full integrity, SQLite, FTS, artifact, and vector verification",
     "accuracy": ("generate | run | compare [--last N] | list — "
                  "retrieval expectation testing"),
     "test": "run every modules/tests/test_*.py self-test (workspace-free)",
@@ -660,7 +660,7 @@ def _handle_verify(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pocket-advisor.py",
-        description="Pocket Advisor — local evidence ingestion and retrieval",
+        description="Pocket Advisor — local content ingestion and retrieval",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_epilog(),
     )

@@ -456,7 +456,7 @@ def test_stage(ctx: PipelineContext) -> None:
 
     logs: list[str] = []
     report = report_transactions(ctx, log=logs.append)
-    assert report["tamper"] == []
+    assert report["drift"] == []
     assert isinstance(report["buckets"]["external"], list)
 
 
@@ -511,9 +511,9 @@ def test_convergence(ctx: PipelineContext) -> None:
         assert TransactionsStage(ctx).run().get("parsed") == 1
     assert TransactionsStage(ctx).run().get("parsed") == 1
 
-    # Live relational tampering cannot produce a false hit.
+    # Live relational drift cannot produce a false hit.
     ctx.conn.execute(
-        "UPDATE transactions SET description_raw='tampered'")
+        "UPDATE transactions SET description_raw='drifted'")
     ctx.conn.commit()
     repaired = TransactionsStage(ctx).run()
     assert repaired.get("parsed") == 1, repaired

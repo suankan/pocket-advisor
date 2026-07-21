@@ -1,6 +1,6 @@
 """Leaf retrieval payloads.
 
-Chunk text remains a pure evidentiary quote. This module derives the separate
+Chunk text remains a pure source quote. This module derives the separate
 envelope-enriched payload used by both the dense embedder and the FTS shadow.
 """
 import json

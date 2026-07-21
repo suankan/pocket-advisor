@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from modules.domain import StageStats
-from modules.custody import sha256_file
+from modules.integrity import sha256_file
 from modules.ocr import pdf_text_extraction_method
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import now_iso
@@ -162,7 +162,7 @@ def load_counterparties(workspace_root: Path) -> list[dict]:
 
 
 def pdf_metadata(pdf_path: Path | None) -> dict[str, str | None]:
-    """Read best-effort file-level evidence-quality signals."""
+    """Read best-effort file-level quality signals."""
     metadata: dict[str, str | None] = {
         "producer": None,
         "created": None,
@@ -465,7 +465,7 @@ class TransactionService:
                     -- Discovery is the authoritative native-PDF inventory.
                     -- Keep a NULL document_id when Stage 3 has not yet
                     -- materialized the content-addressed document: the
-                    -- caller must report that custody-visible statement as
+                    -- caller must report that integrity-tracked statement as
                     -- not ingested rather than silently omitting it.
                     SELECT d.id AS document_id,
                            c.sha256 AS document_sha256,
@@ -1070,7 +1070,7 @@ def _build_report(
         "coverage_gaps": [],
         "overlaps": [],
         "buckets": {},
-        "tamper": [],
+        "drift": [],
         "watchlist": {},
         "ambiguous": 0,
     }
@@ -1170,15 +1170,15 @@ def _build_report(
                 and statement["pdf_created"] != statement["pdf_modified"]:
             signals.append("modified after creation")
         if signals:
-            report["tamper"].append(statement["id"])
-            log(f"TAMPER SIGNAL stmt {statement['id']}: "
+            report["drift"].append(statement["id"])
+            log(f"DRIFT SIGNAL stmt {statement['id']}: "
                 + "; ".join(signals) + " — review the original")
         if statement["account_id"] is not None and producer:
             producers[(statement["account_id"],
                        statement["parser_id"])].add(producer)
     for key, values in producers.items():
         if len(values) > 1:
-            log(f"TAMPER SIGNAL account/parser {key}: inconsistent "
+            log(f"DRIFT SIGNAL account/parser {key}: inconsistent "
                 "producers — review originals")
 
     counterparties = load_counterparties(workspace_root)

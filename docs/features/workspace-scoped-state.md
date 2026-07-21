@@ -90,7 +90,7 @@ components. Registry loading rejects IDs outside
 `[A-Za-z0-9][A-Za-z0-9._-]*`; it must not sanitize two distinct IDs into the
 same directory name.
 
-Evidence remains under registry collection roots and is read-only.
+Content remains under registry collection roots and is read-only.
 Reconciliation overrides, counterparties, and workspace playbooks remain
 workspace user data under `workspaces/<workspace-path>/`. Retrieval-expectation
 sets and accuracy results live in the state container only to consolidate the
@@ -119,8 +119,8 @@ The following actions are workspace-bound and require `--workspace`:
 | `query` | selected database, vectors, and mounts |
 | `daemon serve/status/stop` | selected database and runtime directory |
 | `wipe list/index/state` | selected vectors or regenerable workspace state |
-| `blob-index list-sources/lookup` | selected custody database and mounts |
-| `verify` | selected evidence and derived state |
+| `blob-index list-sources/lookup` | selected integrity database and mounts |
+| `verify` | selected content and derived state |
 | `accuracy generate/run/compare/list` | selected retrieval state, expectation sets, or results |
 
 These actions are workspace-free and must use no selector:
@@ -161,10 +161,10 @@ owning workspace database. SHA-unique `emails` and `documents`, their source
 and attachment occurrences, thread identity, FTS indexes, vector entity IDs,
 and transaction rebuilds are consequently workspace-local.
 
-`workspace_id` remains in custody and membership records even though the
+`workspace_id` remains in integrity and membership records even though the
 database has one owner. Inserts must use the bound workspace ID, and integrity
 verification must reject any different non-null value. This redundancy is a
-deliberate custody assertion, not a tenancy mechanism.
+deliberate integrity assertion, not a tenancy mechanism.
 
 Query-time collection filtering remains required. It enforces the selected
 workspace's current mounts and prevents stale derived rows from becoming
@@ -202,7 +202,7 @@ searchable if a collection is unmounted before the next clean rebuild.
    databases without collision or cross-workspace reuse.
 6. `wipe state` resolves and displays the exact selected state root, requires
    confirmation, deletes only its regenerable children, preserves
-   `search-accuracy-tests/` byte-identically, and leaves all evidence and
+   `search-accuracy-tests/` byte-identically, and leaves all content and
    other workspace state byte-identical.
 7. A copied or misaddressed database whose bound workspace ID differs from
    `--workspace` is refused before mutation.

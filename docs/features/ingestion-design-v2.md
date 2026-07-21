@@ -1,4 +1,4 @@
-# Ingestion Design v2: Content-Addressed Evidence Graph
+# Ingestion Design v2: Content-Addressed Content Graph
 
 Status: **shipped 2026-07-19** in implementation commit `88fc235`. This is a
 fresh-schema cutover: retired state is refused, never migrated. A real
@@ -14,11 +14,11 @@ several emails produces several materialized PDF paths. The later
 `pdf-transforms/` cache avoids repeating OCR work for exact duplicate PDF
 bytes, but adds a second derived-artifact namespace alongside the email cache.
 
-The replacement makes the relational evidence graph the source of truth and
+The replacement makes the relational content graph the source of truth and
 uses a compute-oriented materialization layout. A unique email and a unique
 binary document are each stored once per workspace; every observed attachment
 relationship remains explicit and citable. This deliberately trades
-filesystem browsing by email for a simpler, normalized custody graph and a
+filesystem browsing by email for a simpler, normalized integrity graph and a
 single canonical location for each derived document product.
 
 PDF document-to-text execution is deliberately specified separately in
@@ -28,8 +28,8 @@ worker, scheduling, and publication contract.
 
 ## Non-negotiable invariants
 
-- Evidence collection roots remain read-only. Durable source identity is
-  `(collection_id, sha256)`; a known path with changed bytes remains a custody
+- Content collection roots remain read-only. Durable source identity is
+  `(collection_id, sha256)`; a known path with changed bytes remains a integrity
   alarm, never an in-place update.
 - State remains wholly workspace-local. No documents, products, vectors, or
   work queues cross a workspace boundary.
@@ -47,7 +47,7 @@ worker, scheduling, and publication contract.
   before the required `wipe state`; no compatibility migration or implicit
   cleanup is permitted.
 
-## Relational evidence graph
+## Relational content graph
 
 The exact table names are implementation-owned, but the following ownership
 and cardinality are locked.
@@ -69,7 +69,7 @@ attached email. Duplicate raw email bytes resolve to one email row; its RFC
 reviewable rather than silently merged.
 
 `email_sources` records every top-level collection source occurrence that
-supplies an email byte stream, including its collection and custody
+supplies an email byte stream, including its collection and integrity
 provenance. An attached email's carrier relationship is its `attachments`
 row, not a synthetic collection source; this preserves more than one parent.
 
@@ -170,7 +170,7 @@ compatibility columns or a migration shim. Implementation must:
    retrieval/transaction paths; and
 3. require explicit operator confirmation immediately before wiping a selected
    workspace state and rebuilding it with the new schema. No real collection
-   evidence is ever moved or changed, and preserved accuracy suites survive.
+   content is ever moved or changed, and preserved accuracy suites survive.
 
 The document graph and its content-addressed state layout are authoritative.
 The separately scheduled PDF worker topology is defined in
@@ -187,7 +187,7 @@ The separately scheduled PDF worker topology is defined in
   statement first mounted natively and later received by email resolves to
   that same document row with both native-source and email-attachment
   provenance.
-- Thread reconstruction, retrieval evidence expansion, FTS/vector identity,
+- Thread reconstruction, retrieval content expansion, FTS/vector identity,
   transaction parsing, `verify`, wipe preservation, and the accuracy suite
   work exclusively through the graph, not retired cache paths.
 - A clean rebuild has no `cache/<collection>/<email>` or `pdf-transforms/`

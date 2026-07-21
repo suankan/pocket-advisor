@@ -7,7 +7,7 @@ nested OCR worker topology on top of the shipped graph-owned product layout in
 ## Purpose
 
 Stage 3 must transform each pending unique PDF document efficiently without
-weakening source custody, over-subscribing the host, or allowing concurrent
+weakening source integrity, over-subscribing the host, or allowing concurrent
 workers to contend for SQLite or final derived-state paths. The input unit is
 a graph-owned `document_id`, not an email cache attachment occurrence. One
 transform result therefore serves every email attachment and native source

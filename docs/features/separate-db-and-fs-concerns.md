@@ -13,12 +13,12 @@ architecture; the locked workspace state boundary and path prefix are
 defined in `docs/features/workspace-scoped-state.md`; the retrieval and
 dual-index design are defined in `docs/features/embedding-design.md`.
 
-> Context note: the solution is repositioning from an evidentiary /
-> privacy / law / custody framing toward general-purpose RAG. That
+> Context note: the solution is repositioning from an source /
+> local / law / integrity framing toward general-purpose RAG. That
 > repositioning is **out of scope here** and will be its own feature
 > design. This document only locks the uniform-text storage model that
-> the repositioning implies: there is no special "evidence" text class,
-> no "navigation-only" text class, and no custody-grade "evidentiary
+> the repositioning implies: there is no special "content" text class,
+> no "navigation-only" text class, and no integrity-grade "source
 > quote" concept. All derived text is uniform, retrievable content.
 
 ## Objective
@@ -39,7 +39,7 @@ FS content-addressed cache (documents, emails, summaries, chunk spans)
 
 The corpus is owned and operated locally. There are no user-specific
 indexes, ACLs, or multi-tenant retrieval paths, and — per the
-2026-07-18 decision in `docs/design.md` — no privileged-content concept
+2026-07-18 decision in `docs/design.md` — no content-access-control concept
 anywhere in the engine: retrieval visibility is governed solely by
 workspace collection mounts.
 
@@ -52,7 +52,7 @@ workspace collection mounts.
 2. **All derived text is a uniform filesystem content-addressed cache.**
    Document text, email text, thread summaries, and chunk spans are all
    the same kind of artifact: regenerable derived text addressed by
-   content/identity. There is no distinction between "evidence" text and
+   content/identity. There is no distinction between "content" text and
    "navigation" text.
 3. **Parallel worker pools write the filesystem directly.** Only a cheap
    link-row commit touches SQLite. This respects SQLite's write
@@ -132,7 +132,7 @@ vectors/text/<fingerprint>/
   `text_path` pointer plus `char_start` / `char_end`. Note that chunk
   spans are reconstructable from `email_message.txt` /
   `extracted_text_path` via `chunk_text()` (`modules/embedding/chunks.py:17`),
-  so the filesystem copy is a regenerable cache, not a custody-bound
+  so the filesystem copy is a regenerable cache, not a integrity-bound
   original.
 
 ## Call-site migration map
@@ -215,8 +215,8 @@ follows that pattern for emails and vectors. This design completes it.
   separate index store). This document locks only the principle "no
   text stays in the database"; the concrete new FTS mechanism is an
   explicit **TODO decision** and is not specified here.
-- **Solution repositioning to general-purpose RAG.** The evidentiary /
-  custody / privacy framing of `docs/design.md` and `AGENTS.md` is left
+- **Solution repositioning to general-purpose RAG.** The source /
+  integrity / local framing of `docs/design.md` and `AGENTS.md` is left
   unchanged by this document. Its revision is a separate future feature
   design.
 - **RAG API contract.** A RAG read-path interface is documented

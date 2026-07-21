@@ -154,7 +154,7 @@ def main() -> int:
 
         shared_path = workspaces / "corpora/shared-mail/shared.eml"
         shared_bytes = email_bytes(
-            "<shared@test>", "Shared evidence", "shared immutable body")
+            "<shared@test>", "Shared content", "shared immutable body")
         shared_path.write_bytes(shared_bytes)
         (workspaces / "corpora/mail-a/a.eml").write_bytes(
             email_bytes("<only-a@test>", "Only A", "workspace a body"))
@@ -225,7 +225,7 @@ def main() -> int:
         b_sentinel = b.config.state_dir / "keep.bin"
         b_sentinel.write_bytes(b"workspace-b-state")
         b_state_before = snapshot_tree(b.config.state_dir)
-        evidence_before = shared_path.read_bytes()
+        content_before = shared_path.read_bytes()
         a_state = a.config.state_dir
         expectations = a.config.accuracy_tests_dir / "expectations"
         expectations.mkdir(parents=True)
@@ -260,7 +260,7 @@ def main() -> int:
             assert not derived.exists(), derived
         assert b_sentinel.read_bytes() == b"workspace-b-state"
         assert snapshot_tree(b.config.state_dir) == b_state_before
-        assert shared_path.read_bytes() == evidence_before == shared_bytes
+        assert shared_path.read_bytes() == content_before == shared_bytes
         assert b.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] \
             == 1
 

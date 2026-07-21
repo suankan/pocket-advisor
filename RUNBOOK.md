@@ -39,7 +39,7 @@ workspaces/.state/workspace-<workspace_id>/
 └── search-accuracy-tests/     # preserved by wipe state
 ```
 
-Do not move, rename, or edit evidence as an operational shortcut. Collection
+Do not move, rename, or edit content as an operational shortcut. Collection
 roots are read-only. Only the selected workspace's derived-state directory is
 regenerable.
 
@@ -66,9 +66,9 @@ exist:
 ./pocket-advisor.py --workspace <workspace_id> ingest transactions
 ```
 
-Discovery owns custody-index refresh; there is no separate operational
+Discovery owns blob-index refresh; there is no separate operational
 blob-index rebuild. Originals supported for extraction are email and PDF.
-Images, ZIPs, and other attachments are retained for custody/manual inspection
+Images, ZIPs, and other attachments are retained for manual inspection
 but are not text-extracted or embedded.
 
 Every full `ingest all` run persists its completion report as JSON under
@@ -134,7 +134,7 @@ not derived state.
 
 `wipe state` displays and deletes the regenerable children of exactly one
 selected workspace state root. It preserves that workspace's
-`search-accuracy-tests/` directory and leaves evidence, workspace user data,
+`search-accuracy-tests/` directory and leaves content, workspace user data,
 and every other workspace untouched:
 
 ```bash
@@ -153,9 +153,9 @@ migrated or touched by workspace commands. Human-authored expectation sets
 from an earlier workspace-root `search-accuracy-test/` are relocated only by
 an explicit operator action, never silently copied.
 
-## Custody and index maintenance
+## Integrity and index maintenance
 
-Inspect and resolve the selected workspace's Stage-1 custody index without
+Inspect and resolve the selected workspace's Stage-1 blob index without
 walking or rebuilding collection roots:
 
 ```bash
@@ -169,7 +169,7 @@ stale row points to `ingest discover`; lookup never steals discovery's
 ownership by rebuilding on demand. `--no-verify` is for path inspection only
 and deliberately skips the final content rehash.
 
-Run the full native verifier after ingestion or suspected tampering:
+Run the full native verifier after ingestion or suspected drift:
 
 ```bash
 ./pocket-advisor.py --workspace <workspace_id> verify
@@ -178,7 +178,7 @@ Run the full native verifier after ingestion or suspected tampering:
 It checks SQLite and foreign keys, both FTS5 indexes with their native
 `integrity-check`, indexed originals, durable memberships, derived artifacts
 and stored copy hashes, current leaf/thread vector matrices and per-entity
-files, plus statement/assertion failures. It reads and hashes evidence but
+files, plus statement/assertion failures. It reads and hashes content but
 never modifies collection roots.
 
 List or explicitly delete only the selected workspace's model-specific vector
@@ -192,7 +192,7 @@ caches:
 
 Deleting the active index requires `--force`, stops that workspace's daemon
 after confirmation, and leaves SQLite, cache artifacts, other indexes,
-evidence, and every other workspace untouched.
+content, and every other workspace untouched.
 
 ## Retrieval accuracy testing
 
@@ -228,6 +228,6 @@ git diff --check
 git status --short
 ```
 
-Custody and isolation tests must use temporary fixtures. Never tamper with a
+Integrity and isolation tests must use temporary fixtures. Never modify a
 real collection to test an alarm. The query-daemon socket self-test may need
 permission to bind a temporary local Unix socket in a restricted environment.

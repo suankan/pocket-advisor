@@ -257,7 +257,7 @@ def compact_authored_bodies(conn: sqlite3.Connection,
 
     The full body is written by sub-step 2a and is REQUIRED — in this
     pipeline there is no lossless-migration fallback: a missing full
-    body is a custody fault, not a legacy condition.
+    body is an integrity fault, not a legacy condition.
 
     The returned body map is persisted by sub-step 2c. If applying a changed
     authored body would strand existing chunks

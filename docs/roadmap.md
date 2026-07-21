@@ -16,10 +16,10 @@ platform validation or the local answering pass.
 
 ## 2. Local answering pass
 
-The retrieval layer returns delimited evidence packets; the answering
+The retrieval layer returns delimited result packets; the answering
 pass (design sketch in `docs/features/embedding-design.md`) feeds them to a
 local MLX model that produces a cited answer, shows readable source
-material, and never cites a generated thread summary as evidence.
+material, and never cites a generated thread summary as content.
 
 ## 3. Experiments and watchlist
 

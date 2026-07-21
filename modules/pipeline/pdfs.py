@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modules.custody import CustodyError, sha256_bytes, sha256_file, write_verified
+from modules.integrity import IntegrityError, sha256_bytes, sha256_file, write_verified
 from modules.docdates import extract_document_date
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.ocr import (
@@ -132,9 +132,9 @@ class PdfTextStage(Stage):
             raise RuntimeError(f"unknown collection {cand.collection_id!r}")
         raw = (coll.root / cand.relpath).read_bytes()
         if sha256_bytes(raw) != cand.sha256:
-            raise CustodyError(
+            raise IntegrityError(
                 "content changed between discover and collect — "
-                "chain-of-custody alarm")
+                "integrity alarm")
 
         document_id = self._get_or_create_document(raw, cand.filename, stats)
 
@@ -214,12 +214,12 @@ class PdfTextStage(Stage):
 
     def _safe_state_path(self, path: Path, *, must_exist: bool) -> Path:
         if path.is_symlink():
-            raise CustodyError(f"workspace artifact is a symlink: {path}")
+            raise IntegrityError(f"workspace artifact is a symlink: {path}")
         resolved = path.resolve(strict=must_exist)
         try:
             resolved.relative_to(self.config.state_dir.resolve())
         except ValueError as exc:
-            raise CustodyError(
+            raise IntegrityError(
                 f"workspace artifact escapes selected state: {path}") from exc
         return path
 
@@ -237,7 +237,7 @@ class PdfTextStage(Stage):
                 self._safe_state_path(copy_path, must_exist=True)
                 if sha256_file(copy_path) == doc.sha256:
                     return copy_path
-            except (CustodyError, OSError):
+            except (IntegrityError, OSError):
                 continue
         return None
 
@@ -297,7 +297,7 @@ class PdfTextStage(Stage):
                 source_path = self._verified_document_source(doc)
                 if source_path is None:
                     errors[doc.sha256] = (
-                        "CustodyError: document source copy no longer"
+                        "IntegrityError: document source copy no longer"
                         " matches its recorded SHA-256")
                     continue
                 requests[doc.sha256] = TransformRequest(
@@ -337,7 +337,7 @@ class PdfTextStage(Stage):
                     try:
                         self._publish_document(
                             doc, product, recipes.combined, stats)
-                    except (CustodyError, OSError, ValueError) as exc:
+                    except (IntegrityError, OSError, ValueError) as exc:
                         self._record_document_error(
                             doc, f"{type(exc).__name__}: {exc}", stats)
                     else:
@@ -486,7 +486,7 @@ class PdfTextStage(Stage):
                     raise RuntimeError("transform produced no publishable text")
                 products[source_sha] = cache.publish_text(
                     source_sha, recipes, ocr_product, result.text_temp)
-            except (CustodyError, OSError, RuntimeError, ValueError) as exc:
+            except (IntegrityError, OSError, RuntimeError, ValueError) as exc:
                 perf.failed_transforms += 1
                 errors[source_sha] = f"{type(exc).__name__}: {exc}"
             else:

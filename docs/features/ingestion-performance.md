@@ -6,22 +6,22 @@ Workstream A at `6404eaa`, Workstream B at `857d98e`, and Workstream C at
 
 This feature records the measured full-ingest bottlenecks and the candidate
 redesigns used to reduce clean-build and recipe-invalidation time. The
-implemented benchmark decisions below are now locked alongside the custody,
+implemented benchmark decisions below are now locked alongside the integrity,
 convergence, and retrieval-quality constraints.
 
 `docs/design.md` remains authoritative for system-wide invariants. The
 existing contracts in `embedding-design.md`, `ingest-all-reporting.md`, and
-`transaction-stage-convergence.md` continue to govern evidence semantics,
+`transaction-stage-convergence.md` continue to govern content semantics,
 reporting, and freshness.
 
 ## Objective
 
 Reduce material full-ingest wall time without:
 
-- weakening read-only evidence custody or write verification;
+- weakening read-only content integrity or write verification;
 - sharing corpus-derived state across workspaces;
 - accepting stale OCR, text, summaries, chunks, or vectors;
-- changing evidentiary chunks or allowing summaries to become evidence;
+- changing source chunks or allowing summaries to become content;
 - hiding per-item failures behind batch processing; or
 - making an unchanged run perform model or OCR work.
 
@@ -52,7 +52,7 @@ both profiles. Their per-unit rates are also consistent:
 
 Discovery, email convergence, threading, transaction parsing, and reporting
 are not current performance targets. In particular, discovery's complete
-custody hash pass took less than half a second in the large recorded run;
+integrity hash pass took less than half a second in the large recorded run;
 skipping hashes would trade away a hard invariant for no material gain.
 
 ## Workstream A — one bounded generation per thread
@@ -118,7 +118,7 @@ retrieval-expectation scorer.
    chronological tree. A single message that exceeds the segment budget uses
    deterministic binary-search character slices measured by the real
    tokenizer; nearby whitespace is preferred and concatenating the slices
-   reconstructs the exact source text. No path silently truncates evidence.
+   reconstructs the exact source text. No path silently truncates content.
 5. Keep one session-warm model per stage run and commit each completed thread
    independently so interruption remains resumable.
 6. `SUMMARY_PROMPT_VERSION=2`; old summaries and their vectors become stale
@@ -247,14 +247,14 @@ recipe was unchanged.
    relevant producing recipe.
 2. OCR each unique input/recipe once, then write-verify the required derivative
    and text artifacts for every occurrence. Per-occurrence cache layout,
-   custody lineage, database rows, warnings, and citations remain intact.
+   integrity lineage, database rows, warnings, and citations remain intact.
 3. A workspace-local canonical transform object may be used as an internal
    reuse source, but it does not replace occurrence-local `pdf-ocr/` and
    `pdf-to-text/` artifacts with database pointers. Fan-out publishes and
    read-verifies each occurrence independently. Plain copies are the baseline;
    an optional copy-on-write clone requires platform detection and verification.
    Hardlinks are prohibited because one inode would make corruption or an
-   accidental in-place write affect several evidentiary occurrences.
+   accidental in-place write affect several source occurrences.
 4. Run independent unique transforms through a bounded worker pool with one
    explicit global CPU budget. Nested parallelism must satisfy
    `workers * ocrmypdf_jobs <= cpu_budget`; an OCR child may never default to
@@ -303,7 +303,7 @@ claim the earlier 10–18 minute planning target.
 - One failed unique transform records one bounded structural reason for every
   affected graph occurrence; successful unique products remain durable and
   retries remain source/recipe-local.
-- Workers own no SQLite connection and never write evidence or final cache
+- Workers own no SQLite connection and never write content or final cache
   paths. Coordinator publication is sorted and deterministic. Interrupts and
   timeouts terminate complete external-tool process groups, escalating from
   TERM to KILL after a short grace period.
@@ -332,7 +332,7 @@ This state prevents zero counters from ambiguously meaning disabled,
 unmeasured, unchanged, or failed. All counts are non-negative integers; all
 timings are finite non-negative seconds measured with a monotonic clock. The
 record remains aggregate-only and may not contain filenames, subjects,
-Message-IDs, text, transaction descriptions, questions, or evidence snippets.
+Message-IDs, text, transaction descriptions, questions, or content snippets.
 
 The locked `performance` portion of the version-2 report is:
 
@@ -509,9 +509,9 @@ measurements show material remaining headroom.
 2. Summary generation performs one call for every thread below the measured
    quality threshold; long-thread calls are deterministic, counted, split only
    at message boundaries except for the explicit oversized-message fallback,
-   and never truncate evidence.
+   and never truncate content.
 3. Summary prompt/version invalidation, stale exclusion, resumability, and
-   non-evidentiary labeling remain intact.
+   non-source labeling remain intact.
 4. Retrieval-expectation results show no unexplained regression, with explicit
    beginning/middle/end anchors for long-thread summary navigation.
 5. Batched and single embeddings meet the locked numerical-equivalence rule;
@@ -524,13 +524,13 @@ measurements show material remaining headroom.
    provenance.
 8. PDF concurrency is bounded, deterministic in publication, interruptible,
    cannot oversubscribe nested OCR jobs beyond the global CPU budget, and
-   cannot let a worker write SQLite or collection evidence.
+   cannot let a worker write SQLite or collection content.
 9. OCR-only, text-only, tool-version, language, fallback, missing-artifact,
    and failed-artifact changes invalidate exactly the required product layer.
 10. An unchanged run remains fast and performs no OCR, summary generation, or
     embedding regardless of the new scheduling mechanisms.
-11. All correctness and custody tests use synthetic temporary fixtures; no
-    benchmark or test mutates live evidence or workspace state.
+11. All correctness and integrity tests use synthetic temporary fixtures; no
+    benchmark or test mutates live content or workspace state.
 12. The native module suite, full `verify` invariants, and
     `git diff --check` pass before implementation ships.
 13. Every full-ingest record contains all three typed performance objects with
@@ -542,13 +542,13 @@ measurements show material remaining headroom.
 
 ## Non-goals
 
-- Skipping Stage 1 source hashing or weakening custody alarms.
+- Skipping Stage 1 source hashing or weakening integrity alarms.
 - Cross-workspace OCR, summary, embedding, or vector reuse.
 - Replacing occurrence-local PDF artifacts with pointer-only shared CAS files
   or hardlinks; canonical transform reuse is internal to one workspace and
   every occurrence remains independently materialized and verified.
 - Replacing models merely to claim a faster implementation.
-- Treating generated summaries as evidence or citation targets.
+- Treating generated summaries as content or citation targets.
 - A born-digital `pdftotext`-first policy change; that is a separate quality
   experiment because the current locked policy deliberately requests OCR.
 - Per-statement transaction micro-optimization before parser coverage makes

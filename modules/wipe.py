@@ -209,7 +209,7 @@ def validated_state_dir(
                 continue
         raise SystemExit(
             "wipe: refusing — workspace state overlaps protected "
-            f"workspace/evidence root {root}")
+            f"workspace root {root}")
     return resolved
 
 

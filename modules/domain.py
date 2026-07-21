@@ -36,7 +36,7 @@ class CandidateStatus(StrEnum):
 class Candidate:
     """One row of ingestion_candidates — the Stage 1 working set.
 
-    Identity is (collection_id, sha256): pathless, custody-consistent.
+    Identity is (collection_id, sha256): pathless, content-addressed.
     relpath is provenance (first-seen path within the collection root),
     not identity.
     """

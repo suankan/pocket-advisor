@@ -1,4 +1,4 @@
-"""Stage 2 — Parse emails into the content-addressed evidence graph.
+"""Stage 2 — Parse emails into the content-addressed content graph.
 
 For each EMAIL candidate from Stage 1
 (`docs/features/ingestion-design-v2.md`), one `emails` row is
@@ -14,7 +14,7 @@ Repeated occurrences of the same bytes — across emails, collections, or
 both a native mount and an email attachment — share that one document row
 and each get their own `attachments` occurrence row (email_id, document_id,
 filename, ordinal). Attachment routing: PDFs are pending work for Stage 3;
-images / zips / everything else are stored with a verified custody copy but
+images / zips / everything else are stored with a verified integrity copy but
 never text-extracted (design scope: email + PDF only).
 
 Recursion:
@@ -48,7 +48,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from modules.config import IMAGE_EXTS, ZIP_MAX_DEPTH, ZIP_MAX_UNPACKED_BYTES
-from modules.custody import CustodyError, sha256_bytes, write_verified
+from modules.integrity import IntegrityError, sha256_bytes, write_verified
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.emailbody import (compact_authored_bodies, decode_maybe_encoded,
                                extract_body, normalize_message_id,
@@ -143,7 +143,7 @@ def _iter_attachments(msg: EmailMessage):
         filename = part.get_filename()
         disposition = part.get_content_disposition()
         is_rfc822 = part.get_content_type() == "message/rfc822"
-        # Inline images with filenames are evidence too; skip only
+        # Inline images with filenames are content too; skip only
         # nameless inline parts (those are the body) — except attached
         # emails, which Gmail can embed without name or disposition.
         if not filename and disposition != "attachment" and not is_rfc822:
@@ -239,9 +239,9 @@ class EmailStage(Stage):
             self.review.flag(
                 cand.relpath, self.name, "error",
                 "content changed between discover and parse — "
-                "chain-of-custody alarm, NOT ingested")
+                "integrity alarm, NOT ingested")
             set_candidate_status(self.conn, cand.id, CandidateStatus.ERROR)
-            stats.inc("custody_alarms")
+            stats.inc("integrity_alarms")
             return
         try:
             self._ingest_email(raw, cand.filename, cand.relpath, coll,
@@ -411,7 +411,7 @@ class EmailStage(Stage):
         copy_path = self.config.document_artifacts(sha).source_path(name)
         try:
             write_verified(copy_path, payload)
-        except CustodyError as exc:
+        except IntegrityError as exc:
             self.review.flag(copy_path, self.name, "error",
                              f"document {sha[:12]}…: {exc}")
             return None

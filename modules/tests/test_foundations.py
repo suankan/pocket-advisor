@@ -1,4 +1,4 @@
-"""Self-test: config, workspace registry, database, custody, domain.
+"""Self-test: config, workspace registry, database, integrity, domain.
 
 Standalone script (no pytest): plain asserts, non-zero exit on failure.
 Everything runs against a temp directory — no repo state touched.
@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.config import Config  # noqa: E402
-from modules.custody import (CustodyError, copy_verified,  # noqa: E402
+from modules.integrity import (IntegrityError, copy_verified,  # noqa: E402
                              sha256_bytes,
                              write_verified)
 from modules.database import (Database, LegacyDatabaseError,  # noqa: E402
@@ -223,10 +223,10 @@ def test_database(tmp: Path) -> None:
         " ingested_at) VALUES (1, 2, 'forwarded.eml', 0, 't')")
     conn.execute("INSERT INTO chunks (source_type, email_id, chunk_index,"
                  " text, payload_shadow) VALUES"
-                 " ('email_body', 1, 0, 'hello custody',"
-                 "  'Subject: envelopeonlyterm\\n\\nhello custody')")
+                 " ('email_body', 1, 0, 'hello content',"
+                 "  'Subject: envelopeonlyterm\\n\\nhello content')")
     hit = conn.execute("SELECT rowid FROM chunks_fts WHERE chunks_fts"
-                       " MATCH 'custody'").fetchone()
+                       " MATCH 'content'").fetchone()
     assert hit is not None
     envelope_hit = conn.execute(
         "SELECT rowid FROM chunks_fts WHERE chunks_fts"
@@ -336,8 +336,8 @@ def test_legacy_database_detection(tmp: Path) -> None:
     conn2.close()
 
 
-def test_custody_review(tmp: Path) -> None:
-    data = b"evidence bytes"
+def test_integrity_review(tmp: Path) -> None:
+    data = b"test bytes"
     out = tmp / "copies" / "x.bin"
     assert write_verified(out, data) == sha256_bytes(data)
     assert out.read_bytes() == data
@@ -345,7 +345,7 @@ def test_custody_review(tmp: Path) -> None:
     assert copy_verified(
         out, copied, expected_sha256=sha256_bytes(data)) == sha256_bytes(data)
     assert copied.read_bytes() == data
-    assert isinstance(CustodyError("x"), RuntimeError)
+    assert isinstance(IntegrityError("x"), RuntimeError)
 
     db = Database(tmp / "state" / "r.db", "w")
     conn = db.open()
@@ -383,7 +383,7 @@ def main() -> int:
         test_workspace(tmp)
         test_database(tmp)
         test_legacy_database_detection(tmp)
-        test_custody_review(tmp)
+        test_integrity_review(tmp)
         test_domain()
     print("test_foundations: all ok")
     return 0

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import yaml
 
-from modules.custody import write_verified
+from modules.integrity import write_verified
 from modules.emailbody import body_text as message_body_text
 from modules.pipeline.base import PipelineContext
 from modules.progress import Progress
@@ -148,14 +148,14 @@ class GenerateStats:
 class _Candidate:
     kind: str  # "thread" | "document"
     entry_id: str
-    evidence: str
+    body: str
     anchors: dict
     flags: list[str]
     hint: str
 
 
 def _thread_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
-    """Multi-email threads with a loadable authored body as evidence."""
+    """Multi-email threads with a loadable authored body as body."""
     root = ctx.config.project_root
     rows = ctx.conn.execute(
         """SELECT id, stable_key, first_date, last_date, item_count
@@ -199,7 +199,7 @@ def _thread_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
         candidates.append(_Candidate(
             kind="thread",
             entry_id=f"thread-{slug}",
-            evidence=best_body,
+            body=best_body,
             anchors=anchors,
             flags=["thread-level", "generated"],
             hint=(f"{row['item_count']} emails, "
@@ -209,7 +209,7 @@ def _thread_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
 
 
 def _document_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
-    """PDFs with a readable extracted-text product as evidence."""
+    """PDFs with a readable extracted-text product as body."""
     root = ctx.config.project_root
     rows = ctx.conn.execute(
         """SELECT sha256, extracted_text_path
@@ -237,7 +237,7 @@ def _document_candidates(ctx: PipelineContext) -> tuple[list[_Candidate], int]:
         candidates.append(_Candidate(
             kind="document",
             entry_id=f"document-{slug}",
-            evidence=text,
+            body=text,
             anchors={"expect_any": [row["sha256"]]},
             flags=["document", "generated"],
             hint="pdf",
@@ -250,7 +250,7 @@ def generate_expectations(
         limit: int | None = None,
         generator: QuestionGenerator | None = None,
 ) -> tuple[Path, GenerateStats]:
-    """Synthesize a complete expectation set from body/PDF evidence."""
+    """Synthesize a complete expectation set from body/PDF body."""
     if target.exists() and not force:
         raise ExpectationError(
             f"accuracy: {target} already exists (pass --force to replace)")
@@ -282,14 +282,14 @@ def generate_expectations(
     try:
         for candidate in candidates:
             progress.start(note=candidate.entry_id)
-            evidence = generator.truncate(
-                candidate.evidence, QUESTION_MAX_INPUT_TOKENS)
-            if not evidence.strip():
+            body = generator.truncate(
+                candidate.body, QUESTION_MAX_INPUT_TOKENS)
+            if not body.strip():
                 rejected += 1
                 progress.step(note=candidate.entry_id)
                 continue
             try:
-                raw = generator.generate(evidence)
+                raw = generator.generate(body)
             except Exception as exc:  # noqa: BLE001 — isolate one failure
                 progress.println(
                     f"accuracy: {candidate.entry_id}: generation failed: {exc}")

@@ -7,7 +7,7 @@ surface — a synchronous facade; the only concurrency lives in the embedding
 dispatcher's bounded pool (`modules/embedding/dispatch.py`).
 
 Corpus text goes only to the loopback endpoint; non-local endpoints are
-refused outright (`docs/design.md` privacy rule). The engine never loads a
+refused outright (`docs/design.md` local-only rule). The engine never loads a
 model and never auto-spawns the server: if it is down, the caller gets one
 clear actionable error.
 """

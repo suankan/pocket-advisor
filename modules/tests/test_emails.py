@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.config import Config  # noqa: E402
-from modules.custody import sha256_bytes  # noqa: E402
+from modules.integrity import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.domain import CandidateStatus, DocumentType  # noqa: E402
 from modules.emailbody import (COMPACTION_VERSION, body_bytes,
@@ -119,7 +119,7 @@ def build_fixtures(mail: Path, solicitor: Path) -> None:
     reply["Cc"] = "Carol Example <carol@example.com>"
     (mail / "reply.eml").write_bytes(reply.as_bytes())
 
-    rich = base_msg("<rich@x>", "Evidence pack", "See attached.")
+    rich = base_msg("<rich@x>", "Content pack", "See attached.")
     rich.add_attachment(b"%PDF-direct", maintype="application",
                         subtype="pdf", filename="contract.pdf")
     rich.add_attachment(b"\x89PNG fake image bytes", maintype="image",
@@ -322,7 +322,7 @@ def main() -> int:
             cfg.document_artifacts(invoice_sha).source_dir.glob("original*"))
         assert len(invoice_source_files) == 1, invoice_source_files
 
-        # Custody copies: exactly ONE verified copy per unique document
+        # Integrity copies: exactly ONE verified copy per unique document
         # (not one per attachment occurrence) — the whole point of the
         # content-addressed rewrite. 6 unique documents: contract.pdf,
         # photo.png, memo.docx, bundle.zip (the archive itself is now a

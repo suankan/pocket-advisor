@@ -152,7 +152,7 @@ def populate(ctx: PipelineContext) -> None:
            VALUES (?, ?, ?, ?, 0, ?, ?)""",
         ((1, "email_body", 1, None, "email one", "From: fixture\nemail one"),
          (2, "email_body", 2, None, "email two", "From: fixture\nemail two"),
-         (3, "document_text", None, 3, "pdf evidence", "Document: x\npdf")),
+         (3, "document_text", None, 3, "pdf content", "Document: x\npdf")),
     )
     conn.execute(
         """INSERT INTO accounts(
@@ -306,8 +306,8 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert first.sources["emails"] == 1
     assert first.sources["pdfs"] == 1
     assert first.sources["ingested"] == 2
-    assert first.evidence["pdf_readable"] == 1
-    assert first.evidence["pdf_failed"] == 1
+    assert first.documents["pdf_readable"] == 1
+    assert first.documents["pdf_failed"] == 1
     assert first.threads["summaries_current"] == 1
     assert first.search["email_chunks"] == 2
     assert first.search["document_chunks"] == 1
@@ -509,7 +509,7 @@ def test_index_drift(ctx: PipelineContext) -> None:
 
 
 def test_real_empty_pipeline(tmp: Path) -> None:
-    """Exercise real CLI orchestration without models or evidence."""
+    """Exercise real CLI orchestration without models or content."""
     workspaces = tmp / "workspaces"
     (workspaces / "corpora" / "empty").mkdir(parents=True)
     (workspaces / "empty-workspace").mkdir(parents=True)

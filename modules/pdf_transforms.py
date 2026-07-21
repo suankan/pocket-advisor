@@ -1,6 +1,6 @@
 """Per-document content-addressed PDF transform cache and workers.
 
-This module owns no SQLite connection and never touches collection evidence.
+This module owns no SQLite connection and never touches collection content.
 Workers consume a verified document source original, write only
 stage-temporary outputs, and return typed results. The coordinating PDF
 stage publishes the canonical products directly into `documents.*` columns
@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from modules.custody import (CustodyError, copy_verified, sha256_file,
+from modules.integrity import (IntegrityError, copy_verified, sha256_file,
                              write_verified)
 from modules.ocr import (OcrError, PdfRecipes, ocr_to_derivative,
                          pdf_to_text)
@@ -77,7 +77,7 @@ def copy_verified_atomic(source: Path, target: Path,
     finally:
         temp.unlink(missing_ok=True)
     if sha256_file(target) != expected_sha256:
-        raise CustodyError(
+        raise IntegrityError(
             f"atomic copy publication verification failed: {target}")
     return True
 
@@ -153,7 +153,7 @@ def run_transform(request: TransformRequest) -> TransformResult:
     text_path = request.work_dir / "output.txt"
     try:
         if sha256_file(request.source_path) != request.source_sha256:
-            raise CustodyError(
+            raise IntegrityError(
                 "workspace-cache PDF original no longer matches its"
                 " recorded SHA-256")
         request.work_dir.mkdir(parents=True, exist_ok=True)
@@ -191,7 +191,7 @@ def run_transform(request: TransformRequest) -> TransformResult:
             used_cached_ocr=used_cached, ocr_seconds=ocr_seconds,
             text_seconds=text_seconds, queue_wait_seconds=queue_wait,
             started_at=started, finished_at=time.monotonic(), error=None)
-    except (CustodyError, OcrError, OSError, ValueError) as exc:
+    except (IntegrityError, OcrError, OSError, ValueError) as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if warning:
             detail = f"{warning}; {detail}"
@@ -227,7 +227,7 @@ class PdfTransformCache:
         try:
             resolved.relative_to(root)
         except ValueError as exc:
-            raise CustodyError(
+            raise IntegrityError(
                 f"canonical PDF transform path escapes cache: {directory}") \
                 from exc
 
@@ -284,7 +284,7 @@ class PdfTransformCache:
                 derivative_path=derivative_path,
                 derivative_sha256=derivative_sha,
                 direct_original_fallback=fallback, warning=warning)
-        except (CustodyError, OSError, ValueError, TypeError,
+        except (IntegrityError, OSError, ValueError, TypeError,
                 json.JSONDecodeError):
             return None
 
@@ -319,7 +319,7 @@ class PdfTransformCache:
                 source_sha256=source_sha256, ocr_recipe=recipes.ocr,
                 text_recipe=recipes.text, text_path=text_path,
                 text_sha256=manifest["text_sha256"], ocr=ocr_product)
-        except (CustodyError, OSError, ValueError, TypeError,
+        except (IntegrityError, OSError, ValueError, TypeError,
                 json.JSONDecodeError):
             return None
 

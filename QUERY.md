@@ -17,7 +17,7 @@ Each leaf or document hit gives a source message-id/document, date, sender, and 
 matched passage;
 
 Each THREAD(sum) hit is a navigation summary, not
-evidence — use it to locate the underlying emails, never to cite.
+content — use it to locate the underlying emails, never to cite.
 
 Compose the final answer strictly from those packets, citing every claim as
 <message-id> (<date>, <sender>).

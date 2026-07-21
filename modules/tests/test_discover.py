@@ -1,4 +1,4 @@
-"""Self-test: DiscoverStage — working set, blob index, custody alarm."""
+"""Self-test: DiscoverStage — working set, blob index, integrity alarm."""
 import sys
 import tempfile
 from pathlib import Path
@@ -67,7 +67,7 @@ def main() -> int:
         assert stats.get("known") == 1, stats
         assert stats.get("other_skipped") == 1, stats
         assert stats.get("blob_rows") == 4, stats      # every source occurrence
-        assert stats.get("custody_alarms", ) == 0, stats
+        assert stats.get("integrity_alarms", ) == 0, stats
 
         pdfs = load_candidates(ctx.conn, DocumentType.PDF)
         assert len(pdfs) == 1 and pdfs[0].relpath == "copy.pdf", pdfs
@@ -86,7 +86,7 @@ def main() -> int:
         # Rename keeps identity (same sha): known, blob index follows.
         (docs / "note.docx").rename(docs / "renamed.docx")
         stats3 = DiscoverStage(ctx).run()
-        assert stats3.get("custody_alarms") == 0
+        assert stats3.get("integrity_alarms") == 0
         assert stats3.get("other_skipped") == 0        # not re-inserted
         row = ctx.conn.execute(
             "SELECT relpath_within_source r FROM source_blob_index"
@@ -94,16 +94,16 @@ def main() -> int:
             " ingestion_candidates WHERE relpath='note.docx')").fetchone()
         assert row["r"] == "renamed.docx", row["r"]
 
-        # Changed content at a known path = custody alarm, NOT ingested.
-        write(mail / "in/one.eml", b"From: a@x\n\ntampered!")
+        # Changed content at a known path = integrity alarm, NOT ingested.
+        write(mail / "in/one.eml", b"From: a@x\n\nmodified!")
         stats4 = DiscoverStage(ctx).run()
-        assert stats4.get("custody_alarms") == 1, stats4
+        assert stats4.get("integrity_alarms") == 1, stats4
         assert stats4.get("new_emails") == 0
         assert len(load_candidates(ctx.conn, DocumentType.EMAIL)) == 1
         alarm = ctx.conn.execute(
             "SELECT message FROM ingestion_log WHERE severity='error'"
             " AND stage='discover'").fetchone()
-        assert alarm and "chain-of-custody" in alarm["message"]
+        assert alarm and "integrity" in alarm["message"]
 
         ctx.conn.close()
     print("test_discover: all ok")

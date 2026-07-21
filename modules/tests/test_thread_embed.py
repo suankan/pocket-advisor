@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import modules.pipeline.embed as embed_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
-from modules.custody import sha256_bytes  # noqa: E402
+from modules.integrity import sha256_bytes  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.emailbody import body_text  # noqa: E402
 from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402

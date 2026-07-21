@@ -2,7 +2,7 @@
 
 Ingestion design v2 (`docs/features/ingestion-design-v2.md`) replaces the
 `item_kind`-conflated `items` table and the email-owned attachment cache
-with a normalized content-addressed evidence graph: unique `emails`, unique
+with a normalized content-addressed content graph: unique `emails`, unique
 `documents`, and explicit source/attachment occurrence tables. This ships
 as a wipe + full re-ingest, so this module carries no legacy migrations.
 A database created by an earlier engine generation is detected and refused
@@ -286,7 +286,7 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     resolved    INTEGER NOT NULL DEFAULT 0
 );
 
--- Pure custody cache (sha256 -> path), refreshed by the discover walk.
+-- sha256-to-path cache, refreshed by the discover walk.
 CREATE TABLE IF NOT EXISTS source_blob_index (
     workspace_id          TEXT,
     source_id             TEXT NOT NULL,
@@ -342,7 +342,7 @@ CREATE INDEX IF NOT EXISTS idx_source_blob_source
 """
 
 # chunks_fts is contentless-synced to chunks via triggers. `text` remains the
-# pure evidentiary quote; payload_shadow carries the envelope-enriched search
+# pure source quote; payload_shadow carries the envelope-enriched search
 # payload, while translit_shadow preserves the proper-noun fallback.
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -496,7 +496,7 @@ class Database:
             if "document_id" not in columns:
                 raise LegacyDatabaseError(
                     self.path, self.workspace_id,
-                    "attachments predates the content-addressed evidence"
+                    "attachments predates the content-addressed content"
                     " graph (missing document_id)")
         if "emails" in tables:
             columns = {row["name"] for row in

@@ -25,7 +25,7 @@ import modules.ocr as ocr  # noqa: E402
 import modules.pipeline.pdfs as pdfs_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
-from modules.custody import sha256_bytes  # noqa: E402
+from modules.integrity import sha256_bytes  # noqa: E402
 from modules.domain import CandidateStatus, DocumentType  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402

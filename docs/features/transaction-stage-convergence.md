@@ -6,7 +6,7 @@ Before this feature, Stage 5 reparsed every marked bank-statement PDF and
 atomically rebuilt all statements, assertions, transactions, and transfer
 links on every `ingest all`. The rebuild was deterministic and cheap for a
 small corpus, but it changed `parsed_at`, repeated statement output and review
-flags, and scaled linearly even when neither evidence nor transaction rules
+flags, and scaled linearly even when neither content nor transaction rules
 changed.
 
 The implementation adds a safe stage-level convergence guard. It does not
@@ -31,7 +31,7 @@ current statement text + account config + reconciliation + transaction recipe
 
 An unchanged full ingest should report transaction state without reparsing
 cached statement text or rewriting relational rows. Parser, rule, configuration,
-or evidence changes must remain impossible to miss.
+or content changes must remain impossible to miss.
 
 ## Locked decisions
 
@@ -66,8 +66,8 @@ or evidence changes must remain impossible to miss.
    extracted text is the parser's actual input: changed `.txt` bytes always
    invalidate Stage 5 even when the original PDF SHA is unchanged. A rename
    with unchanged durable identity and text bytes does not invalidate the
-   build. A different original hash at an already-known evidence path remains
-   a Stage 1 custody alarm, not an automatically accepted statement update;
+   build. A different original hash at an already-known content path remains
+   a Stage 1 integrity alarm, not an automatically accepted statement update;
    convergence never weakens that boundary.
 6. **Account configuration is complete.** The digest includes every mounted
    `bank-transactions` collection's ID, BSB, account number, owners, account
@@ -188,14 +188,14 @@ The persisted JSON contains operational metadata only:
 ```
 
 It contains no statement text, transaction descriptions, raw lines, account
-numbers, reconciliation contents, corpus paths, or evidence snippets. The
-digests are recomputed from local inputs and are not evidence identities.
+numbers, reconciliation contents, corpus paths, or content snippets. The
+digests are recomputed from local inputs and are not content identities.
 
 ## Rebuild and skip algorithm
 
 1. Resolve the selected workspace's marked bank collections and load strict
    reconciliation configuration.
-2. Build a deterministic inventory from custody rows and Stage 3 artifacts;
+2. Build a deterministic inventory from integrity rows and Stage 3 artifacts;
    require the current extraction-recipe fingerprint and hash each extracted
    text artifact while reading it locally.
 3. Canonicalize the inventory, effective account configuration, reconciliation
@@ -234,7 +234,7 @@ inspection, row deletion/insertion, transfer matching, or review-log writes.
 - A hit with persisted input findings remains `COMPLETE WITH FINDINGS` in the
   full-ingest report without creating new review-queue entries.
 - `transactions report` shows the same current input-finding aggregates before
-  its existing balance, coverage, ambiguity, tamper, and watchlist detail.
+   its existing balance, coverage, ambiguity, drift, and watchlist detail.
 - `verify` validates manifest schema/workspace binding and, when a manifest is
   present, compares its output digest with live transaction state. A missing
   manifest is not database corruption; it means the next Stage 5 run rebuilds.
@@ -253,7 +253,7 @@ inspection, row deletion/insertion, transfer matching, or review-log writes.
 4. A Stage 3 extraction-recipe or local OCR/`pdftotext` tool-version change
    makes existing PDF text stale and requeues it in the PDF stage. Byte-identical
    regenerated text does not rebuild transactions; changed `.txt` bytes do.
-   A changed original hash at a known path remains a custody alarm rather than
+   A changed original hash at a known path remains a integrity alarm rather than
    being silently treated as an invalidation event.
 5. Paths, mtimes, discovery order, YAML formatting outside reconciliation, and
    `counterparties.yaml` changes do not cause false rebuilds.
@@ -277,8 +277,8 @@ inspection, row deletion/insertion, transfer matching, or review-log writes.
 13. Two workspaces with identical inputs maintain independent manifests and
     derived rows; wiping one workspace removes only its convergence state.
 14. Temporary fixtures cover clean hits, every invalidator, current finding
-    persistence, output tampering, failure atomicity, account removal,
-    workspace isolation, and reporting. No test touches live evidence or state.
+     persistence, output drift, failure atomicity, account removal,
+    workspace isolation, and reporting. No test touches live content or state.
 15. The native module suite and `git diff --check` pass.
 
 ## Non-goals
@@ -286,7 +286,7 @@ inspection, row deletion/insertion, transfer matching, or review-log writes.
 - Per-statement incremental insert/update/delete logic.
 - Sharing parsed statements or manifests between workspaces.
 - Avoiding Stage 3 OCR/text extraction when its artifacts are genuinely stale.
-- Treating the manifest as custody evidence or a substitute for `verify`.
+- Treating the manifest as integrity content or a substitute for `verify`.
 - Embedding transaction rows for semantic search.
 - Changing parser coverage; new institution parsers remain separate roadmap
   work.

@@ -9,13 +9,13 @@ still-open items live in `docs/roadmap.md`).
 This document defines the project-native embedding, thread-summary, and
 relational retrieval design. It supersedes the generic relational/vector
 reference from which it was derived. `docs/design.md` remains authoritative
-for system-wide evidence ingestion and custody; the locked workspace state
+for system-wide content ingestion and integrity; the locked workspace state
 boundary and path prefix are defined in
 `docs/features/workspace-scoped-state.md`.
 
 ## Objective
 
-Use semantic search as an entry point into relational evidence:
+Use semantic search as an entry point into relational content:
 
 ```text
 leaf chunks + thread summaries
@@ -24,7 +24,7 @@ leaf chunks + thread summaries
             |
       SQLite thread pull
             |
- email_message.txt evidence packets
+ email_message.txt content packets
             |
       local answering LLM
 ```
@@ -32,7 +32,7 @@ leaf chunks + thread summaries
 The corpus is owned and operated by one individual. There are no
 user-specific indexes, ACLs, or multi-tenant retrieval paths, and — per
 the 2026-07-18 decision in `docs/design.md` — no
-privileged-content concept anywhere in the engine: retrieval visibility
+content-access-control concept anywhere in the engine: retrieval visibility
 is governed solely by workspace collection mounts.
 
 ## Locked decisions
@@ -40,7 +40,7 @@ is governed solely by workspace collection mounts.
 1. **SQLite remains the relational source of truth.** There is no external
    vector database. Dense indexes remain local NumPy matrices backed by
    durable per-entity `.npy` files.
-2. **Leaf chunks remain immutable and evidentiary.** Authored email
+2. **Leaf chunks remain immutable and source.** Authored email
    bodies (the authored body region of `email_message.txt`, offsets
    envelope-relative — see the 2026-07-18 two-artifact decision in
    `docs/design.md`) and PDF text are chunked exactly once.
@@ -52,7 +52,7 @@ is governed solely by workspace collection mounts.
 4. **Thread summaries are a separate retrieval channel.** One summary and
    one dense vector are maintained per multi-message thread. Singleton
    threads use their leaf chunks and do not pay a generative-summary cost.
-5. **Summaries are navigation aids, not evidence.** Answers cite the source
+5. **Summaries are navigation aids, not content.** Answers cite the source
    emails/documents, never the generated summary. Summary rows retain their
    source digest, generator model, and prompt version.
 6. **Summarization runs after complete thread reconstruction.** It never
@@ -78,7 +78,7 @@ is governed solely by workspace collection mounts.
     are otherwise retrievally dead, and envelope-enriched leaves
     complement thread summaries at message granularity — including
     singletons and PDF/attachment chunks that summaries never touch.
-    Constraints: `chunks.text` remains a pure evidentiary quote — the
+    Constraints: `chunks.text` remains a pure source quote — the
     envelope is prepended only to the payload fed to the embedder and
     mirrored into an FTS shadow column (the `translit_shadow` pattern);
     the envelope is minimal (From, Date, Subject, To — never Cc lists or
@@ -121,7 +121,7 @@ The stable key is the normalized Message-ID of the JWZ root container,
 including a referenced-but-not-imported root. A headerless root already has
 a deterministic content-derived synthetic Message-ID. `ThreadStage` upserts
 by `stable_key` instead of deleting and recreating all thread rows. If new
-evidence genuinely changes a root or merges threads, the affected identity
+content genuinely changes a root or merges threads, the affected identity
 and derived summary are rebuilt. `threads.item_count` counts every member
 item (emails and documents alike); summary eligibility separately counts
 email items only.
@@ -190,7 +190,7 @@ therefore always executes this stage.
 
 The local model is loaded once per run and only if at least one thread is
 stale. Generation is greedy, bounded, disables Qwen thinking output, and uses
-the model chat template. The prompt treats email content as untrusted evidence,
+the model chat template. The prompt treats email content as untrusted content,
 requests only a concise factual chronology, and forbids following instructions
 found inside emails.
 
@@ -284,7 +284,7 @@ one prompt; the tail keeps its RRF order), and the search entry point accepts
 a prebuilt reranker so a future warm daemon holds the model loaded.
 
 Deduplicate selected threads and perform a relational pull, keeping one
-match per item — the best-ranked chunk wins. Each evidence
+match per item — the best-ranked chunk wins. Each content
 packet contains:
 
 - the matched email/document and match provenance;
@@ -304,9 +304,9 @@ added in that order only while they still fit. Omitted context keeps its
 Relationship labels are retained; chronological order is not presented
 as proof of a direct reply edge.
 
-The future local answering pass receives these delimited evidence packets,
+The future local answering pass receives these delimited content packets,
 shows the readable source material to the human, and produces a cited answer.
-It never cites a generated thread summary as corpus evidence.
+It never cites a generated thread summary as corpus content.
 
 ## Configuration
 
@@ -347,8 +347,8 @@ hard error.
 6. A summary change cannot reuse the previous vector file.
 7. FTS and dense retrieval can independently find both a leaf and a thread
    summary; RRF deduplicates their common thread.
-8. Evidence expansion returns readable source emails and correct relationship
-   labels; generated summaries are visibly non-evidentiary.
+8. Retrieval expansion returns readable source emails and correct relationship
+   labels; generated summaries are visibly non-source.
 9. All tests use temporary synthetic fixtures. No test modifies corpus or
    live derived state.
 10. The existing and new self-test suites pass before embedding changes ship.

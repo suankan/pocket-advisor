@@ -4,6 +4,29 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-22 — venv-to-uv runtime migration
+
+Implementation commit: `3a7f8b0` (design `dc97b19`,
+`docs/features/uv-migration.md`).
+
+- Replaced `venv` + `requirements.txt` + `pip` with `uv`. Introduced
+  `pyproject.toml` (`requires-python >=3.14`, 7 runtime dependencies) and
+  committed `uv.lock` for reproducible installs. Setup is now `uv sync`;
+  invocation is `uv run ./pocket-advisor.py`.
+- Removed the `os.execv` venv auto-re-exec logic from `pocket-advisor.py`
+  (deleted `os`/`Path` imports, `VENV`/`VENV_PYTHON` constants, and the
+  re-exec block). `uv run` handles environment transparently.
+- Deleted `requirements.txt`. Updated `AGENTS.md`, `docs/rag-dev-howto.md`,
+  `docs/features/embedding-design-v2.md`,
+  `docs/features/summary-generation-concurrency.md`, and `.gitignore`
+  (`venv/` → `.venv/`).
+
+Verification: full native suite 14/14 and `uv run ./pocket-advisor.py test`
+14/14 pass; `git diff --check` clean. No collection content modified.
+
+Operational note: the old `venv/` directory should be deleted manually by the
+operator after confirming the uv environment works.
+
 ## 2026-07-22 — Doc cleanup: merge old specs, consolidate howtos, delete dead artifacts
 
 No functional code changes. Documentation-only cleanup:

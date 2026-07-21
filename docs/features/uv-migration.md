@@ -1,5 +1,7 @@
 # uv Migration
 
+Status: **implemented** (operator still needs to delete old `venv/`).
+
 Replace `venv` + `requirements.txt` + `pip` with `uv` for all Python runtime
 concerns: dependency resolution, lockfile, virtual environment, and invocation.
 

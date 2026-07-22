@@ -37,7 +37,8 @@ and compares runs over time. It is the sole accuracy implementation.
    exits non-zero on any MISS or INVALID. Fully generated suites are expected
    to score every entry.
 5. **Generation writes complete natural-language questions from body/PDF
-   content.** `accuracy generate` uses a local MLX model to synthesize one
+   content.** `accuracy generate` uses the configured summarisation endpoint
+   (`docs/inference/inference-serving.md`) to synthesize one
    scorable question per eligible candidate, with durable anchors verified
    against the live DB. It does **not** leave TODO placeholders and does
    **not** phrase questions from Subject lines, filenames, envelope fields, or
@@ -46,9 +47,10 @@ and compares runs over time. It is the sole accuracy implementation.
    without `--force`.
 6. **Every run writes a schema-versioned JSON record** with all measurements:
    per-question verdict/rank/matched-anchor/latency, and an environment block
-   (embed fingerprint incl. payload recipe, rerank model/enabled, top-k,
+   (embed fingerprint incl. payload recipe, rerank endpoint/enabled, top-k,
    corpus counts, expectation-set SHA, and when the suite is machine-generated
-   a `question_generator` block with model id and prompt version) so any two
+   a `question_generator` block with endpoint and prompt version — the engine
+   knows no model ids since the endpoint-based config cutover) so any two
    records are comparable or provably incomparable. Records are write-verified;
    filenames sort chronologically; no `latest` symlink.
 7. **Comparison is run-relative.** `compare --last N` loads the newest record
@@ -69,13 +71,15 @@ and compares runs over time. It is the sole accuracy implementation.
 
 ## Question generation contract
 
-### Model and endpoint
+### Endpoint
 
-- Generator reuses the oMLX-served thread-summary model via HTTP. An
-  unreachable endpoint aborts with a clear error.
+- Generation reuses the configured `summarisation_endpoint` via HTTP; which
+  model answers it is server-side routing
+  (`docs/inference/inference-serving.md`). An unreachable endpoint aborts
+  with a clear error.
 - `QUESTION_PROMPT_VERSION` starts at 1 and participates in result environment
-  identity. Greedy / deterministic decode; no cloud calls; corpus text never
-  leaves the machine.
+  identity. Greedy / deterministic decode; corpus text goes only to the
+  configured endpoints.
 - Content is untrusted: the prompt must forbid following instructions found
   inside email or PDF text.
 
@@ -135,7 +139,7 @@ candidates are counted and omitted; they do not become SKIPPED scored rows.
 ### Output artifact
 
 - Default path: `<suite>/expectations/generated.yaml`
-- Header comment records workspace id, UTC date, model id, and
+- Header comment records workspace id, UTC date, generator endpoint, and
   `QUESTION_PROMPT_VERSION`
 - Each entry includes a scorable `question`, durable anchors, flags, optional
   short non-envelope `hint` (e.g. date range or "pdf"), `notes` naming the

@@ -21,7 +21,8 @@ SHA-256 values — never integer row ids. Verdicts:
     SKIPPED      empty or TODO placeholder (legacy hand scaffolds only)
 
 ``accuracy generate`` synthesizes scorable questions from authored email
-bodies and PDF text via a local MLX model (never subjects/filenames/summaries).
+bodies and PDF text via the configured summarisation endpoint (never
+subjects/filenames/summaries).
 """
 import hashlib
 import json

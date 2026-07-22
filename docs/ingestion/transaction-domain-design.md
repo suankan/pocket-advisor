@@ -35,7 +35,7 @@ accounts  (id INTEGER PK, config_id TEXT UNIQUE NOT NULL,
 account_owners (account_id INTEGER NOT NULL REFERENCES accounts(id),
                 holder_id INTEGER NOT NULL REFERENCES holders(id),
                 PRIMARY KEY (account_id, holder_id));
-statements (id INTEGER PK, item_id FK->items,
+statements (id INTEGER PK, document_id FK->documents,
            account_id FK->accounts,
            period_start TEXT, period_end TEXT,
            opening_balance_minor INTEGER, closing_balance_minor INTEGER,
@@ -47,7 +47,7 @@ statements (id INTEGER PK, item_id FK->items,
            pdf_modified TEXT,                   -- file-level quality signals
            parsed_at TEXT,
            excluded INTEGER DEFAULT 0,
-           UNIQUE(item_id, account_id, period_start));
+           UNIQUE(document_id, account_id, period_start));
 statement_assertions (id INTEGER PK,
            statement_id FK->statements,
            kind TEXT CHECK(kind IN ('opening_balance','closing_balance',
@@ -80,7 +80,7 @@ transfer_links (id INTEGER PK,
 ```
 
 Money is **signed integer minor units** everywhere; never float.
-A transaction's stable external reference is `(item_id, row_index)` —
+A transaction's stable external reference is `(document_id, row_index)` —
 survives wipe+rebuild as long as the parser is deterministic.
 
 ## Two-layer rule
@@ -96,10 +96,10 @@ survives wipe+rebuild as long as the parser is deterministic.
 
 ```yaml
 links:                          # manual transfer confirmations
-  - from: {item_id: 123, row_index: 7}
-    to:   {item_id: 456, row_index: 2}
+  - from: {document_id: 123, row_index: 7}
+    to:   {document_id: 456, row_index: 2}
 exclude:                        # resolve period overlaps
-  - item_id: 321
+  - document_id: 321
     reason: "quarterly stmt duplicates monthly 2024-Q2"
 ```
 

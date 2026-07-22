@@ -4,6 +4,62 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-23 — Full design/code alignment audit
+
+No functional code changes (two stale docstring comments only). Audited
+every design doc against the implemented code, classifying each
+misalignment as *superseded by implementation* (removed) or *never
+implemented but worth keeping* (kept, added to roadmap):
+
+Superseded content removed/corrected:
+
+- `docs/design.md` + `docs/storage/workspace-scoped-state.md`: the retired
+  `fetch-model` action and "model download" were still described as
+  workspace-free actions; the engine downloads no models since the oMLX
+  cutover.
+- `docs/retrieval/query-daemon.md`: rationale still described in-process
+  MLX model loading ("MLX backends are not assumed thread-safe", "models
+  load once"); now matrices + a warm inference client, with model warmth
+  the server's concern.
+- `docs/benchmarks/accuracy-testing.md` (+ `modules/accuracy.py`
+  docstring): "local MLX model" and "model id" in result/environment
+  records → the configured summarisation endpoint and prompt version,
+  matching what `persist_result` actually writes.
+- `docs/ingestion/transaction-domain-design.md`: schema and
+  `reconciliation.yaml` examples still used the retired `items` table
+  (`item_id`) — now `documents`/`document_id`, matching Schema C and
+  `load_reconciliation`.
+- `docs/ingestion/ingest-all-reporting.md`: contract said "schema version
+  2 locked" while code is at version 4 (`REPORT_SCHEMA_VERSION`); embed
+  telemetry example fields (buckets/microbatches/padding/bisections) were
+  retired at the oMLX cutover in favor of the service-execution counters in
+  `modules/telemetry.py`; "future `verify` command" → `verify` is
+  implemented.
+- `docs/ingestion/ingestion-performance.md`: rewritten. Removed the
+  superseded Workstream B local micro-batching machinery
+  (`bucket32-batch8-v1` — retired with in-process embedding), the
+  superseded 2-workers×5-jobs PDF topology (replaced by
+  `pdf-to-text-pipeline-design.md`'s full-core `--jobs 1` pool), the stale
+  schema-v2 JSON block, and the session-warm-model detail. Kept what still
+  governs: the 48k one-shot / 24k segment / 16-way reduce thresholds
+  (`modules/summarization.py`), content-addressed transform identity, and
+  the historical measured baseline.
+- `docs/generation/rag-gateway.md` and
+  `docs/benchmarks/rag-metrics-and-evaluation.md`: stripped LLM-chat
+  preamble cruft and added explicit not-implemented status headers.
+
+Never-implemented, kept and roadmapped (`docs/roadmap.md` new item 3
+"Proposed designs awaiting implementation"): the DB/filesystem storage
+split (`docs/storage/separate-db-and-fs-concerns.md`), the RAG gateway
+draft, and generation-quality evaluation.
+
+Verified consistent with code and left unchanged: ingestion-design-v2,
+pdf-to-text-pipeline-design, transaction-stage-convergence (`pdfinfo`
+fingerprint confirmed in `transactions.py`), summary-generation-concurrency,
+chunking-and-embedding, hybrid-retrieval-and-ranking, inference-serving,
+query CLI/daemon howtos, and the summary thresholds
+(`SUMMARY_ONE_SHOT_TOKENS`/`SUMMARY_SEGMENT_TOKENS` confirmed at 48k/24k).
+
 ## 2026-07-23 — Design lock: OOP-style Python
 
 `docs/design.md` "Runtime and code boundaries" now locks the existing

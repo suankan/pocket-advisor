@@ -1,19 +1,10 @@
-### 🔍 Gap Verification: Did we omit anything?
-
-Every key concept from your original transcript was successfully retained and refined:
-
-* **The "Vibe Check" Warning:** Retained (highlighted as essential but insufficient for production).
-* **Component Split:** Retained (Retrieval vs. Generation).
-* **All 5 Retrieval Metrics:** Retained (Precision, Recall, Hit Rate, MRR, NDCG).
-* **All 3 Generation Metrics:** Retained (Faithfulness, Relevancy, Correctness).
-* **Dataset Generation:** Retained (Domain experts, LLM-generated from index, human refinement).
-* **All 5 LLM-as-a-Judge Bias Fixes:** Retained (Pairwise, Randomization, Ties, Chain of Thought/Token limits, Length bias).
-* **User Data & Optimization Strategy:** Retained (Query logging, 80/20 rule via topic clustering).
-* **Tooling & Final Guardrails:** Retained (Ragas library, Human/AB testing as gold standard, course CTA).
-
----
-
 # 📋 Production RAG Audit Checklist
+
+**Status:** Draft candidate — **not implemented**; roadmap item 3 in
+`docs/roadmap.md`. A generic industry checklist kept as reference material
+for a future generation-quality evaluation pass. Nothing below describes
+current code; the implemented retrieval-side accuracy harness is
+`docs/benchmarks/accuracy-testing.md`.
 
 Use this checklist to grade your current RAG implementation and identify immediate engineering gaps.
 

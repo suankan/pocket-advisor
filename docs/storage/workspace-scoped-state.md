@@ -126,9 +126,11 @@ The following actions are workspace-bound and require `--workspace`:
 These actions are workspace-free and must use no selector:
 
 ```bash
-./pocket-advisor.py fetch-model
 ./pocket-advisor.py test
 ```
+
+(`fetch-model` was retired with the oMLX cutover — the engine downloads no
+models — and is rejected as a removed spelling, not aliased.)
 
 - `test` runs isolated fixtures and must remain usable when the workspace
   registry is missing or invalid.
@@ -189,7 +191,7 @@ searchable if a collection is unmounted before the next clean rebuild.
 1. Every action is classified by the locked matrix above. Workspace-bound
    actions reject omitted or unknown selection before side effects;
    workspace-free actions reject an unnecessary selector.
-2. `fetch-model` and `test` run without loading the workspace registry;
+2. `test` runs without loading the workspace registry;
    parser help at every level remains state-free. Every native accuracy action
    requires a selected workspace, and tests lock both sides of that boundary.
 3. Selecting workspace A cannot create, read, update, search, or delete any

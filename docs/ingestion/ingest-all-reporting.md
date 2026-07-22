@@ -1,13 +1,16 @@
 # Full-Ingest Completion Reporting
 
-Status: **version 2 implemented at `eb8771e`, including the typed
-performance telemetry and the saved-record display cutover described below**
-(version 1 shipped at `78e705a`).
+Status: **implemented**; the current record contract is **schema version 4**
+(`REPORT_SCHEMA_VERSION`, `modules/ingest_report.py`). Version 1 shipped at
+`78e705a`; version 2 added the typed performance telemetry at `eb8771e`;
+later bumps followed the content-graph and oMLX cutovers (each a clean cut —
+the loader accepts only the current version, per the strict-versioning rule
+below). Where this document says "the current schema version" it means 4.
 
 This feature makes every successful or failed `ingest all` invocation end with
 one concise, trustworthy account of what the run did and what searchable state
 now exists. It replaces manual SQLite/vector inspection for routine ingestion
-assessment without turning ingestion into the future full `verify` command.
+assessment without turning ingestion into the full `verify` command.
 
 ## Objective
 
@@ -79,10 +82,10 @@ still showing a complete, useful workspace snapshot.
    attempt writes one aggregate-only, schema-versioned JSON report below
    `<workspace-state>/logs/ingest-runs/`. It is workspace-derived operational
    state, is removed by that workspace's `wipe state`, and is never a source of
-   truth for retrieval. The performance work deliberately bumps this contract
-   to schema version 2 and requires the nested `performance` block locked in
-   `docs/ingestion/ingestion-performance.md`; preserving the flat version-1
-   shape is not a constraint on observability.
+   truth for retrieval. The record is schema-versioned and carries the
+   required nested `performance` block (decision 14); each schema bump is a
+   deliberate clean cut, and preserving an earlier version's shape is not a
+   constraint on observability.
 10. **No corpus narrative in the run record.** JSON may contain workspace ID,
     timestamps, timings, counter names, aggregate counts, model/index
     fingerprints, status, and finding categories. It must not contain email
@@ -96,7 +99,7 @@ still showing a complete, useful workspace snapshot.
 12. **This is not full verification.** Default reporting checks cheap
     relational/index cardinality and freshness invariants. Integrity rehashing,
     SQLite/FTS integrity commands, artifact hash verification, and exhaustive
-    reconciliation remain the responsibility of the future native `verify`
+    reconciliation remain the responsibility of the native `verify`
     command.
 13. **Saved records are re-renderable** (added 2026-07-18). `ingest report
     [--last | <path>]` loads one persisted JSON record and prints it through
@@ -108,15 +111,21 @@ still showing a complete, useful workspace snapshot.
     aborts with a clear message. A relative path is resolved as given, then
     against the project root, matching the `record_path` stored inside each
     record.
-14. **Performance telemetry is typed and visible** (locked 2026-07-19).
-    Schema version 2 separates concise operational stage stats from a required
-    nested `performance` object for summaries, embed, and PDFs. Each hot stage
-    explicitly records `measured`, `not_applicable`, `partial`, or `not_run`;
-    zero never stands in for unavailable measurement. The terminal and saved-
-    record renderer add one compact line per hot stage, while the JSON retains
-    the complete aggregate queue/tier/resource/timing structure. Version-1
-    records remain untouched files but are not migrated and are not required
-    to load after the version-2 cutover.
+14. **Performance telemetry is typed and visible** (locked 2026-07-19;
+    embed-queue fields revised at the oMLX cutover). The record separates
+    concise operational stage stats from a required nested `performance`
+    object for summaries, embed, and PDFs. Each hot stage explicitly records
+    `measured`, `not_applicable`, `partial`, or `not_run`; zero never stands
+    in for unavailable measurement. Embed queues carry service-execution
+    counters (`pending_entities`, `input_tokens` from service `usage`
+    responses, `dispatched_at_readiness`, `successful_entities`,
+    `failed_entities` — `modules/telemetry.py`); the retired local-batching
+    counters (buckets, microbatches, padding, bisections) are gone with the
+    in-process embedding path. The terminal and saved-record renderer add
+    one compact line per hot stage, while the JSON retains the complete
+    aggregate queue/tier/resource/timing structure. Records from earlier
+    schema versions remain untouched files but are not migrated and are not
+    required to load after each cutover.
 15. **Telemetry survives stage failure.** The CLI creates one typed run
     telemetry recorder before orchestration, initially marking every hot stage
     `not_run`, and injects it through the pipeline context. Entering a stage
@@ -240,8 +249,8 @@ Run report: <workspace-state>/logs/ingest-runs/<timestamp>.json
 
 ## Displaying saved records
 
-Implemented for version 1 on 2026-07-18. After the performance cutover, any
-version-2 record can be re-rendered later in exactly the shape above:
+Any current-schema record can be re-rendered later in exactly the shape
+above:
 
 ```bash
 ./pocket-advisor.py --workspace <id> ingest report          # latest record
@@ -251,9 +260,9 @@ version-2 record can be re-rendered later in exactly the shape above:
 
 `--last` combined with a path is rejected, as are report flags on a real
 pipeline stage. Loading round-trips the versioned JSON back into the typed
-report (`load_report`) and reuses `format_report`. The cutover changes the
-accepted contract from `schema_version` 1 to 2; version-1 files are neither
-migrated nor required to render through the new loader.
+report (`load_report`) and reuses `format_report`. The loader accepts only
+the current `schema_version` (4); records from earlier schema versions are
+neither migrated nor required to render through it.
 
 ## Acceptance criteria
 
@@ -277,7 +286,7 @@ migrated nor required to render through the new loader.
    block, and fixes the standalone transaction report wording too.
 9. Multi-account fixtures cover matched, external, coverage-unknown, and truly
    suspicious transactions using the same shared classifier.
-10. The version-2 JSON record contains no corpus text or transaction
+10. The current-schema JSON record contains no corpus text or transaction
     descriptions, is written only inside the selected workspace state, and
     round-trips the complete typed performance structure including explicit
     measurement states, ordered length tiers, nullable RSS, and finite timing
@@ -305,7 +314,7 @@ migrated nor required to render through the new loader.
 - Answer-quality or retrieval-expectation accuracy measurement.
 - Full integrity, artifact-hash, SQLite, or FTS integrity verification.
 - Historical trend dashboards or cross-workspace run aggregation.
-- Migrating or preserving native re-render compatibility for version-1 run
-  records after the deliberate version-2 observability cutover.
+- Migrating or preserving native re-render compatibility for earlier-schema run
+  records after a deliberate observability cutover.
 - Changing stage transaction boundaries or retry semantics.
 - Printing content content or every review finding in the default summary.

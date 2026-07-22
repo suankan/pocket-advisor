@@ -1,10 +1,8 @@
-Here is a complete, production-ready **Design Document (Design.md)** tailored for your project. You can copy and paste this directly into your repository to serve as the baseline architecture for your `pocket-advisor` gateway.
-
----
-
 # Design Document: Pocket Advisor RAG Gateway
 
-**Status:** Draft / Proposed
+**Status:** Draft / Proposed — **not implemented**; roadmap item 3 in
+`docs/roadmap.md`. Kept as a candidate for future revision; nothing below
+describes current code.
 
 **Author:** Pocket Advisor Team
 

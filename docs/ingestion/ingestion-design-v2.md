@@ -22,7 +22,7 @@ filesystem browsing by email for a simpler, normalized integrity graph and a
 single canonical location for each derived document product.
 
 PDF document-to-text execution is deliberately specified separately in
-`docs/features/pdf-to-text-pipeline-design.md`. This design supplies its
+`docs/ingestion/pdf-to-text-pipeline-design.md`. This design supplies its
 unique-document identity and product ownership; the PDF design supplies the
 worker, scheduling, and publication contract.
 
@@ -154,7 +154,7 @@ remain available to Stage 4 for thread reconstruction.
 Once the graph is complete, Stage 3 selects pending **unique PDF document
 IDs**, never email-owned attachment paths. The detailed transform queue,
 worker lifecycle, and product publication are locked in
-`docs/features/pdf-to-text-pipeline-design.md`. Stage 3 must not rediscover
+`docs/ingestion/pdf-to-text-pipeline-design.md`. Stage 3 must not rediscover
 attachments by crawling a cache folder.
 
 ## Fresh-schema cutover
@@ -174,7 +174,7 @@ compatibility columns or a migration shim. Implementation must:
 
 The document graph and its content-addressed state layout are authoritative.
 The separately scheduled PDF worker topology is defined in
-`docs/features/pdf-to-text-pipeline-design.md`.
+`docs/ingestion/pdf-to-text-pipeline-design.md`.
 
 ## Acceptance criteria
 

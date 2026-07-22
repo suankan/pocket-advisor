@@ -6,7 +6,7 @@ index_paths) — switching models never deletes another model's cache;
 switching back reuses it.
 
 Execution moved to the external oMLX Inference Server
-(`docs/features/embedding-design-v2.md`); the engine loads no models.
+(`docs/inference/inference-serving.md`); the engine loads no models.
 """
 import hashlib
 import json

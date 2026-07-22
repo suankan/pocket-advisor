@@ -2,7 +2,7 @@
 
 Status: **shipped 2026-07-19** (implementation pending commit). Replaces the
 nested OCR worker topology on top of the shipped graph-owned product layout in
-`docs/features/ingestion-design-v2.md`.
+`docs/ingestion/ingestion-design-v2.md`.
 
 ## Purpose
 

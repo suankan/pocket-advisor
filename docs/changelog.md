@@ -4,6 +4,149 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-23 — Design lock: OOP-style Python
+
+`docs/design.md` "Runtime and code boundaries" now locks the existing
+class-based convention as an explicit preference: classes are the default
+unit of design (stage classes, frozen domain dataclasses, stateful concerns
+as lifecycle-owning classes); module-level functions are reserved for small
+pure helpers. Documents what the codebase already practices — no code
+changes.
+
+## 2026-07-23 — Docs restructured into RAG-pipeline folders
+
+No functional code changes (docstring path references only). Restructured the
+flat `docs/features/` list into seven concern folders mirroring the canonical
+RAG pipeline split, per the plan recorded in `docs/design-split-plan.md`.
+The folders live directly under `docs/` (the intermediate `features/` level
+is removed entirely):
+
+- **`ingestion/`** — `ingestion-design-v2.md`, `pdf-to-text-pipeline-design.md`,
+  `ingest-all-reporting.md`, `ingestion-performance.md`,
+  `transaction-stage-convergence.md`, `summary-generation-concurrency.md`,
+  `transaction-domain-design.md` (non-RAG rider on the ingest pipeline), and
+  the new `chunking-and-embedding.md`.
+- **`retrieval/`** — `query-daemon.md` and the new
+  `hybrid-retrieval-and-ranking.md`.
+- **`generation/`** — `rag-gateway.md` (draft candidate) and a new
+  `local-answering-pass.md` stub holding the locked constraints for the
+  not-yet-implemented answering pass.
+- **`storage/`** — `workspace-scoped-state.md`,
+  `separate-db-and-fs-concerns.md`.
+- **`benchmarks/`** — `accuracy-testing.md`, `rag-metrics-and-evaluation.md`.
+- **`platform/`** — `uv-migration.md`.
+- **`inference/`** — the new `inference-serving.md` (shared by all three
+  pipelines; its own bucket rather than a pipeline folder).
+
+`embedding-design.md` (yesterday's three-doc merge) was split along pipeline
+seams into `ingestion/chunking-and-embedding.md` (decisions 1–10, schema,
+summary stage, dense index layout — decision 9's number preserved for
+`storage/separate-db-and-fs-concerns.md`'s citation),
+`retrieval/hybrid-retrieval-and-ranking.md` (four-leg RRF fusion, rerank,
+packet expansion), and `inference/inference-serving.md` (oMLX client,
+endpoints, decisions 5/6 numbering preserved for code-docstring citations);
+its forward-looking answering-pass material became the `generation/` stub.
+The original file is deleted.
+
+`docs/design.md` was reorganized around the same three pipeline sections
+(Ingestion / Retrieval / Generation-not-yet-implemented) plus cross-cutting
+concerns, with its feature index grouped by folder. Every path reference
+across `docs/` and `modules/` docstrings was updated to the new locations,
+including historical changelog entries for files that merely moved;
+references to deleted filenames (`embedding-design*.md`,
+`inference-endpoints.md`) remain by their historical names.
+
+## 2026-07-23 — Doc merge: embedding-design.md absorbs v2 and inference-endpoints
+
+No functional code changes. At the operator's request, folded
+`docs/features/embedding-design-v2.md` (oMLX execution model) and
+`docs/features/inference-endpoints.md` (endpoint config surface) into
+`docs/features/embedding-design.md`, which is now the single authoritative
+document for retrieval semantics, the oMLX inference-server design, and the
+current endpoint-based config. Both source files are deleted.
+
+- The three-way split had already drifted out of sync with shipped code more
+  than once (loopback enforcement, model-name config keys, and the vector
+  fingerprint's `model` field all disagreed across the two inference docs
+  before yesterday's fixes). Merging removes that structural risk.
+- The merge surfaced two more stale passages that the split had hidden inside
+  `embedding-design.md` itself: a "Dense index layout" paragraph still
+  describing the retired local `bucket32-batch8-v1` tokenize/bucket/batch/
+  bisect recipe, and a "passage vs. query embedding" asymmetry claim that
+  oMLX's instruction-dropping behavior had already made false. Both are
+  corrected in the merged doc.
+- Preserved decision numbers referenced elsewhere: decision 9 in the
+  retrieval-semantics list (cited by
+  `docs/storage/separate-db-and-fs-concerns.md`) and decisions 5/6 in the
+  inference-server list (cited by docstrings in `modules/inference.py`,
+  `modules/pipeline/embed.py`, `modules/pipeline/emails.py`,
+  `modules/pipeline/pdfs.py`, `modules/pipeline/base.py`,
+  `modules/embedding/dispatch.py`) are unchanged.
+- Updated every `embedding-design-v2.md`/`inference-endpoints.md` reference
+  across `docs/` and `modules/` (8 code docstrings, `docs/design.md`'s
+  feature index, `docs/rag-dev-howto.md`, and
+  `docs/ingestion/summary-generation-concurrency.md`) to point at the merged
+  `embedding-design.md`.
+- Condensed the two docs' "Migration from current code"/"File changes"
+  tables into a single "Implementation history" section; full dated detail
+  remains in this changelog under "Inference-server (oMLX) cutover"
+  (2026-07-20), "Endpoint-based inference configuration" (2026-07-22), and
+  "oMLX alias routing" (2026-07-22).
+
+## 2026-07-22 — Doc cleanup: align design docs with implemented code
+
+No functional code changes. Read every module under `modules/` as source of
+truth, then reconciled `docs/` against it:
+
+- Left `docs/generation/rag-gateway.md` and
+  `docs/benchmarks/rag-metrics-and-evaluation.md` in place at the operator's
+  request: draft material kept as candidates for future revision/
+  implementation, not a description of current code. Neither has any
+  corresponding implementation today (no gateway process, no ragas-style
+  metrics), and both are deliberately absent from `docs/design.md`'s feature
+  index for that reason. The real, implemented retrieval-accuracy system
+  remains documented in `docs/benchmarks/accuracy-testing.md`.
+- Updated `docs/ingestion/summary-generation-concurrency.md` status from
+  "proposed" to shipped — `modules/pipeline/summary_dispatch.py` already
+  implements the design exactly (commit `b884ed1`), and the changelog
+  already carried its ship entry.
+- Updated `docs/platform/uv-migration.md`: the old `venv/` directory is
+  confirmed deleted, so the doc no longer carries that operator TODO.
+- Reconciled `docs/features/embedding-design-v2.md` decisions 1, 2, 6, and
+  8 and its Config surface section with the later endpoint-based config
+  cutover (`docs/features/inference-endpoints.md`): no loopback
+  enforcement, no server-id model config keys, no `model` field in the
+  vector fingerprint, and readiness checks are reachability-only. Added a
+  cross-reference note at the top of the document.
+- Fixed `docs/features/inference-endpoints.md` decision D2, which predated
+  and was contradicted by commit `3142d1f` (fixed concern-alias `model`
+  field required by oMLX) — see the entry above.
+- Fixed `docs/features/embedding-design.md`'s example config, which still
+  showed the retired `mlx_model_thread_summary` key.
+- Added `docs/ingestion/summary-generation-concurrency.md` to
+  `docs/design.md`'s feature index (it was shipped but never indexed).
+- Fixed `docs/rag-dev-howto.md`: a doubled `uv run uv run` typo (two
+  places), a stale `models.inference_endpoint`/`embedding-design-v2.md`
+  reference (now points at `inference-endpoints.md`), and a directory-layout
+  diagram/description still describing the pre-ingestion-design-v2
+  `cache/`, `pdf-original/`, `pdf-ocr/` layout instead of the actual
+  content-addressed `emails/<sha256>/` / `documents/<sha256>/{source,transforms}`
+  layout.
+- Made `docs/rag-user-howto.md`'s command examples consistently use
+  `uv run pocket-advisor.py`, matching every other doc post-uv-migration.
+
+## 2026-07-22 — oMLX alias routing: model field in inference requests
+
+Implementation commit: `3142d1f` (design `docs/features/inference-endpoints.md`
+decision D2, updated).
+
+- oMLX's request schema requires a `model` field even without server-id
+  configuration. `modules/inference.py` now sends a fixed, non-configurable
+  literal per concern — `"embedding"`, `"reranker"`, `"summariser"` — matching
+  the alias each endpoint is configured under in oMLX's own
+  `model_settings.json`. This is not a user-configurable model name; the
+  engine still knows nothing about real model ids or weights.
+
 ## 2026-07-22 — Endpoint-based inference configuration
 
 Implementation commit: `527fd25` (design
@@ -21,28 +164,28 @@ Implementation commit: `527fd25` (design
   (`prompt_version` is the sole staleness authority). Old config keys
   are silently deprecated.
 
-Verification: full native suite 14/14 and `uv run ./pocket-advisor.py
+Verification: full native suite 14/14 and `uv run pocket-advisor.py
 test` 14/14 pass; `git diff --check` clean. No collection content
 modified.
 
 ## 2026-07-22 — venv-to-uv runtime migration
 
 Implementation commit: `3a7f8b0` (design `dc97b19`,
-`docs/features/uv-migration.md`).
+`docs/platform/uv-migration.md`).
 
 - Replaced `venv` + `requirements.txt` + `pip` with `uv`. Introduced
   `pyproject.toml` (`requires-python >=3.14`, 7 runtime dependencies) and
   committed `uv.lock` for reproducible installs. Setup is now `uv sync`;
-  invocation is `uv run ./pocket-advisor.py`.
+  invocation is `uv run pocket-advisor.py`.
 - Removed the `os.execv` venv auto-re-exec logic from `pocket-advisor.py`
   (deleted `os`/`Path` imports, `VENV`/`VENV_PYTHON` constants, and the
   re-exec block). `uv run` handles environment transparently.
 - Deleted `requirements.txt`. Updated `AGENTS.md`, `docs/rag-dev-howto.md`,
   `docs/features/embedding-design-v2.md`,
-  `docs/features/summary-generation-concurrency.md`, and `.gitignore`
+  `docs/ingestion/summary-generation-concurrency.md`, and `.gitignore`
   (`venv/` → `.venv/`).
 
-Verification: full native suite 14/14 and `uv run ./pocket-advisor.py test`
+Verification: full native suite 14/14 and `uv run pocket-advisor.py test`
 14/14 pass; `git diff --check` clean. No collection content modified.
 
 Operational note: the old `venv/` directory should be deleted manually by the
@@ -55,7 +198,7 @@ No functional code changes. Documentation-only cleanup:
 - Merged old `docs_old/CHANGELOG.md` into `docs/changelog.md` as condensed
   "Pre-rewrite history" section
 - Merged `docs_old/specs/structured-transactions-v2.md` into
-  `docs/features/transaction-domain-design.md`; purged legal/custody/evidence
+  `docs/ingestion/transaction-domain-design.md`; purged legal/custody/evidence
   terminology
 - Moved `QUERY.md` into `docs/rag-user-howto.md` (RAG query contract,
   citations, daemon management)
@@ -72,7 +215,7 @@ No functional code changes. Documentation-only cleanup:
 ## 2026-07-20 — Thread-summary generation concurrency
 
 Design lock: `17be322`; implementation commit: `b884ed1` (design
-`docs/features/summary-generation-concurrency.md`; user-directed platform
+`docs/ingestion/summary-generation-concurrency.md`; user-directed platform
 change, not a numbered roadmap item).
 
 - The summaries stage no longer generates thread summaries one at a time. A
@@ -150,7 +293,7 @@ numbered roadmap item).
 ## 2026-07-19 — PDF-to-text pipeline, interrupt-safe shutdown, core-count workers
 
 Implementation commit: `bf62292` (roadmap item: 1. PDF-to-text pipeline; design
-`docs/features/pdf-to-text-pipeline-design.md`).
+`docs/ingestion/pdf-to-text-pipeline-design.md`).
 
 - Replaced the inherited nested OCR topology with a shared work-stealing queue
   over the content-addressed document graph. Documents are admitted
@@ -180,7 +323,7 @@ Verification: full native module suite and `./pocket-advisor.py test` pass
 
 Implementation commit: `a6557fe` (design `ff5ddfd`; roadmap item:
 Content-generated accuracy questions; design
-`docs/features/accuracy-testing.md`).
+`docs/benchmarks/accuracy-testing.md`).
 
 - Replaced scaffold-only `accuracy generate` (TODO placeholders) with local-MLX
   synthesis of complete natural-language questions from graph-owned authored
@@ -210,7 +353,7 @@ do not block the shipped regression harness.
 ## 2026-07-19 — Content-addressed content graph
 
 Implementation commit: `88fc235` (roadmap item: Ingestion design v2;
-design `docs/features/ingestion-design-v2.md`).
+design `docs/ingestion/ingestion-design-v2.md`).
 
 - Replaced the retired item/membership attachment schema with a fresh,
   workspace-local graph of unique raw-email identities, unique retained binary
@@ -241,7 +384,7 @@ regenerable deletion.
 ## 2026-07-19 — Content-addressed PDF transforms and bounded concurrency
 
 Implementation commit: `ce6c27f` (Workstream C in
-`docs/features/ingestion-performance.md`).
+`docs/ingestion/ingestion-performance.md`).
 
 - Added a workspace-local canonical transform cache keyed independently by
   source SHA-256, OCR recipe, and text-extraction recipe. Exact duplicates now
@@ -286,7 +429,7 @@ not a roadmap gate.
 ## 2026-07-19 — Shape-stable embedding microbatches
 
 Implementation commit: `857d98e` (Workstream B in
-`docs/features/ingestion-performance.md`).
+`docs/ingestion/ingestion-performance.md`).
 
 - Replaced one-model-call-per-passage execution with independent leaf and
   summary queues using repository-owned 32-token buckets and microbatches of
@@ -328,7 +471,7 @@ and bounded concurrency are the new roadmap head.
 ## 2026-07-19 — One-shot and hierarchical thread summaries
 
 Implementation commit: `6404eaa` (Workstream A in
-`docs/features/ingestion-performance.md`).
+`docs/ingestion/ingestion-performance.md`).
 
 - Replaced sequential per-message rolling recompression with one prompt-v2
   generation over an explicitly delimited complete chronological thread at or
@@ -364,8 +507,8 @@ new roadmap head.
 ## 2026-07-19 — Ingest performance telemetry and benchmark baseline
 
 Implementation commit: `eb8771e` (ingest-performance telemetry item; locked
-contract in `docs/features/ingestion-performance.md` and
-`docs/features/ingest-all-reporting.md`).
+contract in `docs/ingestion/ingestion-performance.md` and
+`docs/ingestion/ingest-all-reporting.md`).
 
 - Added `modules/telemetry.py`: one typed PerformanceTelemetry run recorder
   with explicit `measured`/`not_applicable`/`partial`/`not_run` states for the
@@ -479,7 +622,7 @@ deliberately not folded into this regression fix.
 ## 2026-07-18 — Transaction-stage convergence
 
 Implementation commit: `aedd667` (locked design: `892a3bb`,
-`docs/features/transaction-stage-convergence.md`).
+`docs/ingestion/transaction-stage-convergence.md`).
 
 - Added a versioned Stage 3 PDF-text recipe fingerprint covering the local
   OCRmyPDF/`pdftotext` wrapper contract, OCR languages, and tool versions.
@@ -542,8 +685,8 @@ Deferred: none.
 ## 2026-07-18 — Flat workspace-state layout
 
 Implementation commit: `b6b0391` (locked design:
-`docs/features/workspace-scoped-state.md`; accuracy refinement:
-`docs/features/accuracy-testing.md`).
+`docs/storage/workspace-scoped-state.md`; accuracy refinement:
+`docs/benchmarks/accuracy-testing.md`).
 
 - Flattened each workspace container from
   `.state/workspaces/<workspace_id>/` to
@@ -619,7 +762,7 @@ body; the stale-chunk guard deliberately refuses an in-place rewrite.
 ## 2026-07-18 — Adapter retirement
 
 Implementation commit: `4037db7` (locked daemon design:
-`docs/features/query-daemon.md`).
+`docs/retrieval/query-daemon.md`).
 
 - Replaced every remaining frozen-adapter command with native workspace-safe
   implementations: session-warm relational query daemon, full integrity/index
@@ -647,7 +790,7 @@ completed manually by the operator.
 ## 2026-07-18 — Native retrieval-expectation accuracy suite
 
 Implementation commit: `3d8d9d7` (locked design:
-`docs/features/accuracy-testing.md`). Ships the accuracy portion of the
+`docs/benchmarks/accuracy-testing.md`). Ships the accuracy portion of the
 adapter-retirement phase ahead of schedule.
 
 - Added workspace-generic, workspace-bound `accuracy

@@ -2,7 +2,9 @@
 
 Ordered future work only. Active work lives in `docs/work-in-progress.md`;
 shipped history in `docs/changelog.md`; locked architecture in
-`docs/design.md`, with detailed feature decisions under `docs/features/`.
+`docs/design.md`, with detailed feature decisions in the per-concern
+folders under `docs/` (`ingestion/`, `retrieval/`, `generation/`,
+`inference/`, `storage/`, `benchmarks/`, `platform/`).
 
 ## 1. Transaction parser coverage
 
@@ -17,7 +19,7 @@ platform validation or the local answering pass.
 ## 2. Local answering pass
 
 The retrieval layer returns delimited result packets; the answering
-pass (design sketch in `docs/features/embedding-design.md`) feeds them to a
+pass (design sketch in `docs/generation/local-answering-pass.md`) feeds them to a
 local MLX model that produces a cited answer, shows readable source
 material, and never cites a generated thread summary as content.
 

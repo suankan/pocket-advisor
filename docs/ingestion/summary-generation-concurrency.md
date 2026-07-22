@@ -1,10 +1,12 @@
 # Pocket Advisor — Thread-Summary Generation Concurrency
 
-Status: proposed 2026-07-20; supersedes nothing. Companion to
-`docs/features/embedding-design-v2.md` (which moves all inference to the
+Status: **shipped 2026-07-20** (design lock `17be322`, implementation commit
+`b884ed1`). Supersedes nothing. Companion to
+`docs/inference/inference-serving.md` (which moves all inference to the
 external oMLX server). This design parallelizes the summarization *generation*
 stage only; embedding of generated summaries is already concurrent through
-`EmbedDispatcher` and is unchanged.
+`EmbedDispatcher` and is unchanged. Implementation lives in
+`modules/pipeline/summary_dispatch.py`.
 
 ## Problem
 
@@ -149,7 +151,7 @@ same hardware.
   exception → that thread flagged and others succeed, (e) ≥2 `generate` calls
   overlap (proven via a `threading.Event`).
 - Full suite: `for test_file in modules/tests/test_*.py; do uv run python
-  "$test_file"; done` and `uv run ./pocket-advisor.py test` — all green.
+  "$test_file"; done` and `uv run pocket-advisor.py test` — all green.
 - `git diff --check` + `git status --short` clean.
 - Manual: `ingest all` on `case-documents-demo` shows `generate thread
   summaries` advancing ~8× faster with no "database is locked" and no

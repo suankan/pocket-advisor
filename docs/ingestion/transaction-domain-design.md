@@ -2,7 +2,7 @@
 
 Status: **locked**. Implementation lives in `modules/statement_parsers.py`
 and `modules/pipeline/transactions.py`. Convergence guard:
-`docs/features/transaction-stage-convergence.md`. Pipeline order:
+`docs/ingestion/transaction-stage-convergence.md`. Pipeline order:
 `docs/design.md`.
 
 This document defines the transaction domain model: schema, assertion

@@ -1,7 +1,7 @@
 """Stage 2 — Parse emails into the content-addressed content graph.
 
 For each EMAIL candidate from Stage 1
-(`docs/features/ingestion-design-v2.md`), one `emails` row is
+(`docs/ingestion/ingestion-design-v2.md`), one `emails` row is
 materialized once at:
 
     emails/<sha256>/
@@ -179,7 +179,7 @@ class EmailStage(Stage):
         return stats
 
     def _dispatch_embeddings(self, stats: StageStats) -> None:
-        """Readiness dispatch (embedding-design-v2 decision 5): authored
+        """Readiness dispatch (inference-serving.md decision 5): authored
         bodies are final once compaction has run, so their leaf chunks are
         cut and handed to the run-wide dispatcher right here — and the
         stage moves on. Nothing waits: the embed stage (or end-of-run)

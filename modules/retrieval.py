@@ -1,6 +1,6 @@
 """Hybrid leaf/thread retrieval followed by relational retrieval expansion.
 
-Post-cutover shape (`docs/features/ingestion-design-v2.md`): a search hit's
+Post-cutover shape (`docs/ingestion/ingestion-design-v2.md`): a search hit's
 identity is either an email (correspondence, grouped by thread) or a
 document (a unique binary — pdf/image/zip/other — which may be attached to
 zero, one, or many emails across different threads, or mounted natively).

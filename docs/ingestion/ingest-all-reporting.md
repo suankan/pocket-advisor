@@ -81,7 +81,7 @@ still showing a complete, useful workspace snapshot.
    state, is removed by that workspace's `wipe state`, and is never a source of
    truth for retrieval. The performance work deliberately bumps this contract
    to schema version 2 and requires the nested `performance` block locked in
-   `docs/features/ingestion-performance.md`; preserving the flat version-1
+   `docs/ingestion/ingestion-performance.md`; preserving the flat version-1
    shape is not a constraint on observability.
 10. **No corpus narrative in the run record.** JSON may contain workspace ID,
     timestamps, timings, counter names, aggregate counts, model/index

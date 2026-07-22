@@ -1,6 +1,6 @@
 # uv Migration
 
-Status: **implemented** (operator still needs to delete old `venv/`).
+Status: **implemented**. The old `venv/` directory has been deleted.
 
 Replace `venv` + `requirements.txt` + `pip` with `uv` for all Python runtime
 concerns: dependency resolution, lockfile, virtual environment, and invocation.
@@ -28,7 +28,7 @@ The live venv contains ~160 stale packages from pre-MLX iterations. No
 | Dependency spec | `pyproject.toml` `[project.dependencies]` | `pyproject.toml` |
 | Env + install | `uv sync` (creates `.venv`, installs from lockfile) | automatic |
 | Lockfile | `uv.lock` (committed, reproducible) | `uv.lock` |
-| Invocation | `uv run ./pocket-advisor.py` | shell |
+| Invocation | `uv run pocket-advisor.py` | shell |
 | Test runner | `uv run python "$test_file"` | docs, agents |
 | Python version | `requires-python = ">=3.14"` in `pyproject.toml` | `pyproject.toml` |
 | .gitignore | `.venv/` (replaces `venv/`) | `.gitignore` |
@@ -48,7 +48,7 @@ version constraint, and runtime dependencies. `requirements.txt` is deleted.
 
 Remove the `os.execv` venv-detection logic from `pocket-advisor.py`. The
 script becomes a thin entrypoint that imports and calls `modules.cli.main`.
-Users invoke via `uv run ./pocket-advisor.py [args]`.
+Users invoke via `uv run pocket-advisor.py [args]`.
 
 Rationale: `uv run` already ensures the correct Python and dependencies are
 available. Duplicating that logic inside the script adds complexity with no
@@ -114,7 +114,7 @@ Replace verification block:
 for test_file in modules/tests/test_*.py; do
   uv run python "$test_file"
 done
-uv run ./pocket-advisor.py test
+uv run pocket-advisor.py test
 ```
 
 ### `docs/rag-dev-howto.md`
@@ -125,7 +125,7 @@ uv run ./pocket-advisor.py test
   ```
 - **All command examples**: prefix with `uv run`:
   ```bash
-  uv run ./pocket-advisor.py --workspace <id> <command>
+  uv run pocket-advisor.py --workspace <id> <command>
   ```
 - **Verification section**: replace `venv/bin/python` with `uv run python`.
 
@@ -139,7 +139,7 @@ declaration.
 
 - `docs/features/embedding-design-v2.md:322` — replace `venv/bin/python` with
   `uv run python`.
-- `docs/features/summary-generation-concurrency.md:151-152` — same.
+- `docs/ingestion/summary-generation-concurrency.md:151-152` — same.
 
 ### `docs/changelog.md`
 
@@ -173,7 +173,7 @@ uv sync
 for test_file in modules/tests/test_*.py; do
   uv run python "$test_file"
 done
-uv run ./pocket-advisor.py test
+uv run pocket-advisor.py test
 git diff --check
 git status --short
 ```

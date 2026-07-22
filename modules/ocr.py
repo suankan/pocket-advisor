@@ -174,7 +174,7 @@ def pdf_recipes(*, langs: str) -> PdfRecipes:
             "version": _tool_version(["ocrmypdf", "--version"]),
             # Nested OCR process pools are forbidden: each Stage 3 worker
             # runs exactly one ocrmypdf child with --jobs 1
-            # (docs/features/pdf-to-text-pipeline-design.md).
+            # (docs/ingestion/pdf-to-text-pipeline-design.md).
             "args": ["--redo-ocr", "--clean", "--output-type", "pdf",
                       "--optimize", "0", "--language", langs, "--jobs", "1"],
         },

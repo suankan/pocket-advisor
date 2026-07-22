@@ -14,10 +14,10 @@ contents.
 ## Query CLI
 
 ```bash
-./pocket-advisor.py --workspace <workspace_id> query "question text" --json
-./pocket-advisor.py --workspace <workspace_id> query "question text" \
+uv run pocket-advisor.py --workspace <workspace_id> query "question text" --json
+uv run pocket-advisor.py --workspace <workspace_id> query "question text" \
   --after 2024-01-01 --before 2024-12-31 --top-k 20 --json
-./pocket-advisor.py --workspace <workspace_id> query "question text" \
+uv run pocket-advisor.py --workspace <workspace_id> query "question text" \
   --thread 42 --purpose correspondence --no-thread-context --json
 ```
 
@@ -45,11 +45,11 @@ By default query uses the workspace's warm daemon when available and
 falls back to cold retrieval otherwise:
 
 ```bash
-./pocket-advisor.py --workspace <workspace_id> daemon serve
-./pocket-advisor.py --workspace <workspace_id> daemon status
-./pocket-advisor.py --workspace <workspace_id> daemon stop
-./pocket-advisor.py --workspace <workspace_id> query "question" --no-daemon
-./pocket-advisor.py --workspace <workspace_id> query "question" --require-daemon
+uv run pocket-advisor.py --workspace <workspace_id> daemon serve
+uv run pocket-advisor.py --workspace <workspace_id> daemon status
+uv run pocket-advisor.py --workspace <workspace_id> daemon stop
+uv run pocket-advisor.py --workspace <workspace_id> query "question" --no-daemon
+uv run pocket-advisor.py --workspace <workspace_id> query "question" --require-daemon
 ```
 
 `daemon serve` runs in the foreground and keeps the current leaf and

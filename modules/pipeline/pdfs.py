@@ -1,7 +1,7 @@
 """Stage 3 — PDFs: collect corpora-native PDFs, then OCR everything.
 
 3.1 Collect: every PDF candidate from Stage 1
-    (`docs/features/ingestion-design-v2.md`) resolves to a `documents` row
+    (`docs/ingestion/ingestion-design-v2.md`) resolves to a `documents` row
     by SHA-256 — exactly the same content-addressed identity an
     email-attached PDF gets in Stage 2 (`modules/pipeline/emails.py`'s
     `_get_or_create_document`). A native PDF needs no `emails` row, subject,
@@ -87,7 +87,7 @@ class PdfTextStage(Stage):
         return stats
 
     def _dispatch_document(self, document_id: int) -> None:
-        """Readiness dispatch (embedding-design-v2 decision 5): the moment
+        """Readiness dispatch (inference-serving.md decision 5): the moment
         a document's text product is published its leaf chunks are cut and
         handed to the run-wide dispatcher — no waiting here. Best-effort:
         any failure leaves pending gaps for `ingest embed` and never fails

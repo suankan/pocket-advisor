@@ -5,7 +5,7 @@ the committed platform config.yaml. It is
 constructed once (Config.load) and passed explicitly to everything that
 needs it — no module-global mutation, no import-time side effects.
 
-Cache layout (`docs/features/ingestion-design-v2.md`):
+Cache layout (`docs/ingestion/ingestion-design-v2.md`):
 
     workspaces/.state/workspace-<workspace_id>/
         emails/<email-sha256>/

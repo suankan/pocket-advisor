@@ -1,7 +1,7 @@
 """Thread-summary generation through the oMLX Inference Server.
 
 Corpus text goes only to the loopback inference endpoint
-(`docs/features/embedding-design-v2.md`); the engine loads no models.
+(`docs/inference/inference-serving.md`); the engine loads no models.
 Pre-call token budgeting uses the deterministic conservative character
 estimate (`modules/inference.py`) — thresholds stay token-denominated and
 an overestimate only segments earlier than strictly necessary.

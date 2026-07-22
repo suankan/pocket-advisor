@@ -6,7 +6,7 @@ This module fans out the summarization *generation* loop: each stale thread's
 bounded pool, so up to ``INFERENCE_MAX_IN_FLIGHT`` threads decode
 concurrently instead of one at a time.
 
-Design (``docs/features/summary-generation-concurrency.md``):
+Design (``docs/ingestion/summary-generation-concurrency.md``):
 
 * Only the inference call runs off-thread. The worker mutates its own
   per-task ``_GenerationMetrics`` and a fresh ``SummariesTimings``; it never

@@ -32,7 +32,7 @@ class PipelineContext:
         default_factory=PerformanceTelemetry)
     # One shared readiness-dispatch pool for the whole run: producers
     # submit and move on, never blocking the pipeline; the embed stage
-    # (or end-of-run) drains it (embedding-design-v2 decision 5).
+    # (or end-of-run) drains it (inference-serving.md decision 5).
     embed_dispatcher: Any = None
 
 

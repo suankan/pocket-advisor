@@ -1,7 +1,7 @@
 """Stage 6 — embedding convergence.
 
 Producers dispatch embedding payloads at artifact readiness
-(`docs/features/embedding-design-v2.md`, decision 5); this stage is the
+(`docs/inference/inference-serving.md`, decision 5); this stage is the
 authoritative convergence pass: it sweeps for chunk rows any producer run
 missed, converges payload shadows, backfills every pending vector through
 the inference endpoint (failures, downtime, interrupted runs), reports

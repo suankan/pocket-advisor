@@ -4,7 +4,7 @@
 The argparse surface and every workspace-scoped operation live in
 :mod:`modules.cli`; the retired implementation has no runtime adapter.
 
-Invoke via ``uv run ./pocket-advisor.py [args]``.
+Invoke via ``uv run pocket-advisor.py [args]``.
 """
 import sys
 

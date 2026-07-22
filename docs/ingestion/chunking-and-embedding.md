@@ -1,39 +1,44 @@
-# Pocket Advisor Embedding and Thread-Retrieval Design
+# Chunking, Embedding, and Thread-Summary Indexing
 
-Status: locked 2026-07-17; implemented at `0fb9f6f`, refined
-2026-07-18 by incorporating the post-implementation review findings, and
-extended at `a48bf7b` with decision 10's envelope payload
-(the separate review-findings document is superseded by this text; its
-still-open items live in `docs/roadmap.md`).
+Status: locked 2026-07-17; implemented at `0fb9f6f`, refined 2026-07-18 by
+incorporating the post-implementation review findings, and extended at
+`a48bf7b` with decision 10's envelope payload.
 
-This document defines the project-native embedding, thread-summary, and
-relational retrieval design. It supersedes the generic relational/vector
-reference from which it was derived. `docs/design.md` remains authoritative
-for system-wide content ingestion and integrity; the locked workspace state
-boundary and path prefix are defined in
-`docs/features/workspace-scoped-state.md`.
+**2026-07-23 — split.** This is the ingestion-side portion of the former
+`docs/features/embedding-design.md` (itself a 2026-07-23 merge of three
+drifted documents). Its two siblings are
+`docs/retrieval/hybrid-retrieval-and-ranking.md` (query-time
+search, fusion, reranking, packet expansion) and
+`docs/inference/inference-serving.md` (the oMLX HTTP client and
+endpoint configuration all pipelines share). Decision numbering below is
+preserved from the original document — decision 9 is cited by number from
+`docs/storage/separate-db-and-fs-concerns.md`.
+
+This document defines what gets chunked, how chunks and thread summaries
+become dense vectors and FTS rows, and how those indexes stay convergent.
+`docs/design.md` remains authoritative for system-wide content ingestion and
+integrity; the locked workspace state boundary and path prefix are defined
+in `docs/storage/workspace-scoped-state.md`.
 
 ## Objective
 
-Use semantic search as an entry point into relational content:
+Build the two searchable namespaces that retrieval consumes:
 
 ```text
-leaf chunks + thread summaries
-            |
-       hybrid retrieval
-            |
-      SQLite thread pull
-            |
- email_message.txt content packets
-            |
-      local answering LLM
+authored email bodies + PDF text          multi-message threads
+            |                                       |
+     leaf chunks (immutable)            generated navigation summaries
+            |                                       |
+   envelope-enriched payloads               summary payloads
+            |                                       |
+   leaf FTS + leaf dense index         summary FTS + summary dense index
 ```
 
 The corpus is owned and operated by one individual. There are no
-user-specific indexes, ACLs, or multi-tenant retrieval paths, and — per
-the 2026-07-18 decision in `docs/design.md` — no
-content-access-control concept anywhere in the engine: retrieval visibility
-is governed solely by workspace collection mounts.
+user-specific indexes, ACLs, or multi-tenant paths, and — per the 2026-07-18
+decision in `docs/design.md` — no content-access-control concept anywhere in
+the engine: retrieval visibility is governed solely by workspace collection
+mounts.
 
 ## Locked decisions
 
@@ -54,18 +59,22 @@ is governed solely by workspace collection mounts.
    threads use their leaf chunks and do not pay a generative-summary cost.
 5. **Summaries are navigation aids, not content.** Answers cite the source
    emails/documents, never the generated summary. Summary rows retain their
-   source digest, generator model, and prompt version.
+   source digest and prompt version (see
+   `docs/inference/inference-serving.md` decision 11 for why
+   `generator_model` is no longer part of that check).
 6. **Summarization runs after complete thread reconstruction.** It never
    depends on filesystem/import order. A changed thread is summarized again
    from the chronological authored messages, starting from an empty summary.
 7. **All corpus-bearing model work goes through oMLX.** Thread summarization,
    embedding, reranking, and accuracy question generation are HTTP services
-   behind one localhost endpoint. The engine loads no models and stores no
-   weights locally.
+   behind configured endpoints —
+   `docs/inference/inference-serving.md`. The engine loads no
+   models and stores no weights locally.
 8. **Retrieval expands relationships after ranking.** Vector and FTS hits
    select messages/threads; SQLite then supplies matched messages, direct
    reply relationships, chronology, and readable `email_message.txt`
-   artifacts.
+   artifacts. The full query-time algorithm lives in
+   `docs/retrieval/hybrid-retrieval-and-ranking.md`.
 9. **Derived-state convergence replaces false cross-store atomicity.**
    SQLite summary rows carry source digests; vector files carry content
    identity. Missing/stale files are retried and matrices are rebuilt from
@@ -140,12 +149,19 @@ CREATE TABLE thread_summaries (
 );
 ```
 
+`generator_model` is stored as an empty string since the 2026-07-22
+endpoint-based config cutover (`docs/inference/inference-serving.md`
+decision 11): the engine no longer knows a server-side model id, and
+staleness is determined by `source_digest` and `prompt_version` alone. The
+column is retained rather than dropped so the schema doesn't need a
+migration if a future revision reintroduces model identity.
+
 `thread_summaries_fts` is an FTS5 index over `summary_text`, maintained by
 SQLite triggers in the same manner as `chunks_fts`.
 
 ## Pipeline
 
-The complete ordered pipeline becomes:
+The complete ordered pipeline is:
 
 ```text
 discover -> emails -> pdfs -> thread -> summaries -> embed -> transactions
@@ -154,7 +170,7 @@ discover -> emails -> pdfs -> thread -> summaries -> embed -> transactions
 ### Thread stage
 
 The existing JWZ/reference algorithm and subject/participant fallback remain.
-The stage now:
+The stage:
 
 1. builds the complete in-memory forest;
 2. upserts threads by stable root key;
@@ -169,14 +185,16 @@ For every thread with at least two email items:
 1. order messages by `date_utc`, then item ID;
 2. hash the stable key plus each ordered Message-ID, timestamp, and readable
    `email_message.txt` bytes to produce `source_digest`;
-3. skip when digest, model, and prompt version match the stored row;
+3. skip when digest and prompt version match the stored row;
 4. otherwise render the complete chronological thread once and generate one
    bounded prompt-v2 summary when it is at or below the measured 48,000-token
    quality ceiling;
 5. above that ceiling, pack complete messages into deterministic 24,000-token
    segments and reduce their summaries through a fixed 16-way chronological
-   tree; only an individually oversized message uses the exact, tokenizer-
-   measured fallback, whose slices reconstruct its source text without loss;
+   tree; only an individually oversized message uses the exact, character-
+   estimate-measured fallback
+   (`docs/inference/inference-serving.md` decision 12), whose
+   slices reconstruct its source text without loss;
 6. upsert the finished summary only after all generations succeed.
 
 Staleness maintenance is unconditional: the stage always runs its
@@ -187,18 +205,21 @@ generative pass, so retrieval can never serve a summary whose sources
 have silently diverged while generation was disabled. `ingest all`
 therefore always executes this stage.
 
-The local model is loaded once per run and only if at least one thread is
-stale. Generation is greedy, bounded, disables Qwen thinking output, and uses
-the model chat template. The prompt treats email content as untrusted content,
-requests only a concise factual chronology, and forbids following instructions
-found inside emails.
+Generation is bounded and greedy against the configured
+`summarisation_endpoint`; up to `INFERENCE_MAX_IN_FLIGHT` threads generate
+concurrently through `EmailThreadsSummaryDispatcher`
+(`docs/ingestion/summary-generation-concurrency.md`) rather than
+one at a time. The prompt treats email content as untrusted content,
+requests only a concise factual chronology, and forbids following
+instructions found inside emails; suppressing the model's "thinking" output,
+if any, is the responsibility of the inference server's own configuration,
+not the engine.
 
 The generative pass reports progress (added at `e07ac2c`, refined at
-`6404eaa`): an explicit stale-count line before the silent model load, then a
-per-thread progress bar whose active-item heartbeat keeps elapsed time ticking
-during one-shot, segment, or reduction calls without counting an in-flight
-thread as complete.
-Per-thread failures print through the bar and are review-flagged.
+`6404eaa`): an explicit stale-count line, then a per-thread progress bar whose
+active-item heartbeat keeps elapsed time ticking during one-shot, segment, or
+reduction calls without counting an in-flight thread as complete. Per-thread
+failures print through the bar and are review-flagged.
 
 Before regeneration, an existing row is marked `is_stale=1`; stale summaries
 are excluded from retrieval and embedding. A successful upsert clears the
@@ -211,7 +232,7 @@ the stage continues with the remaining threads.
 
 ## Dense index layout
 
-Each embedding-model fingerprint keeps two namespaces:
+Each embedding fingerprint keeps two namespaces:
 
 ```text
 workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
@@ -234,15 +255,23 @@ workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
 - The embedded payload is the minimal envelope plus the chunk text
   (decision 10); the same enriched payload is mirrored into an FTS
   shadow column so BM25 sees it too.
-- Passage embeddings use `retrieval.passage`; questions use
-  `retrieval.query`.
-- Pending passages run in independent leaf/summary queues through the locked
-  `bucket32-batch8-v1` execution recipe: one prefixed tokenization, 32-token
-  masked buckets, and batches of eight. Batch failure bisects to an isolated
-  `embed_one()` retry without losing successful peers.
-- The existing per-model cache, transliteration shadow, and matrix rebuild
-  semantics remain; both payload and execution recipes join the fingerprint
-  so plain/enriched or single/batched vector identities can never mix.
+- Query and passage text are embedded identically. oMLX's embedding request
+  schema exposes no instruction/task parameter, so there is no
+  `retrieval.passage`/`retrieval.query` asymmetry to preserve — see
+  `docs/inference/inference-serving.md` ("Why oMLX") for why this
+  symmetric mode is an accepted tradeoff rather than a regression.
+- Pending passages run in independent leaf/summary queues, dispatched through
+  the bounded `InferenceClient` fan-out (at most `INFERENCE_MAX_IN_FLIGHT`
+  requests in flight — `docs/inference/inference-serving.md`
+  decision 4). A failed multi-text request retries per-entity so one bad
+  payload never discards successful peers. The retired local
+  `bucket32-batch8-v1` tokenize/bucket/batch/bisect machinery no longer
+  exists — batching, if any, happens server-side via oMLX's own continuous
+  batching.
+- The existing per-model cache and matrix rebuild semantics remain; the
+  payload recipe and the (now model-agnostic) `omlx-v1` execution recipe
+  both join the fingerprint so plain/enriched vector identities can never
+  mix.
 - Every finite, dimension-correct per-entity vector is written to a temporary
   file, read-verified, and atomically published before it may enter the matrix.
   Matrix and aligned-ID artifacts follow the same atomic discipline.
@@ -254,79 +283,29 @@ workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
   changed summary cannot reuse a stale vector.
 - Obsolete derived thread-vector files are pruned during a successful matrix
   rebuild.
-- Summary and leaf matrices use the same configured text embedding model but
-  remain separately searchable.
+- Summary and leaf matrices use the same configured text embedding endpoint
+  but remain separately searchable.
 
-## Retrieval
-
-Candidate visibility is computed once per query, always as concrete id
-sets — the workspace mount filter is always enforced, so there is no
-unfiltered fast path and no nullable filter type. Thread summaries are
-searchable only for threads whose every item is visible through the
-selected workspace mounts (whole-thread visibility, one aggregate query). The query
-also reports operational warnings: chunks not yet embedded under the
-current model, and chunking-config drift since the index was built.
-
-Run four candidate legs:
-
-1. leaf FTS (`chunks_fts`);
-2. leaf dense vectors;
-3. thread-summary FTS (`thread_summaries_fts`);
-4. thread-summary dense vectors.
-
-Map leaf hits to `(email_id|document_id, thread_id)` and summary hits to `thread_id`, then
-fuse with Reciprocal Rank Fusion. The reranker may score both chunk text and
-summary text, but a summary hit is always labeled as generated navigation.
-Rerank input is capped at `rerank_candidates` fused keys (default 24, a
-small window because the listwise reranker concatenates every candidate into
-one prompt; the tail keeps its RRF order), and the search entry point accepts
-a prebuilt reranker so a future warm daemon holds the model loaded.
-
-Deduplicate selected threads and perform a relational pull, keeping one
-match per item — the best-ranked chunk wins. Each content
-packet contains:
-
-- the matched email/document and match provenance;
-- full readable `email_message.txt` for selected emails;
-- `reply_parent_email_id` and direct child IDs;
-- the thread's chronological message list;
-- parsed attachment text for a matched attachment, with its parent email;
-- source identity needed for citations.
-
-Short threads may be returned in full. Readable context is budgeted
-against a single per-answer `thread_context_chars` allowance shared
-across all returned packets (decided 2026-07-18): matched messages are
-always included in full and draw the budget down first, then direct
-parents/children, chronological neighbors, and remaining chronology are
-added in that order only while they still fit. Omitted context keeps its
-`email_message.txt` path so the reader can pull it manually.
-Relationship labels are retained; chronological order is not presented
-as proof of a direct reply edge.
-
-The future local answering pass receives these delimited content packets,
-shows the readable source material to the human, and produces a cited answer.
-It never cites a generated thread summary as corpus content.
-
-## Configuration
-
-The typed engine accepts these platform knobs:
+## Configuration (ingestion-side)
 
 ```yaml
 ingestion:
   summarize_threads: true        # gates GENERATION only; staleness
                                  # maintenance always runs
   thread_summary_max_tokens: 600
-
-models:
-  mlx_model_thread_summary: mlx-community/Qwen3.5-4B-MLX-4bit
-
-query:
-  thread_context_chars: 120000   # per ANSWER, shared across packets
 ```
 
-Changing the summarizer model or prompt version invalidates summaries and
-their vectors, not leaf chunks. Changing the text embedding model selects a
-new cache for both leaf and thread indexes.
+Endpoint configuration (`models.*`) is owned by
+`docs/inference/inference-serving.md`; retrieval-side knobs
+(`query.*`) are owned by
+`docs/retrieval/hybrid-retrieval-and-ranking.md`.
+
+Changing which model answers `summarisation_endpoint` or the prompt version
+invalidates summaries and their vectors, not leaf chunks — through
+`prompt_version` alone, since `generator_model` is no longer tracked.
+Changing which model answers `embedding_endpoint` (or its dimension)
+selects a new cache for both leaf and thread indexes
+(`docs/inference/inference-serving.md` decision 8).
 
 These values are committed in `config.yaml` and retain typed fallbacks in
 `modules/config.py` for isolated fixtures. Unknown configuration remains a
@@ -344,27 +323,22 @@ hard error.
 5. A summary-generation failure preserves the previous text but marks it
    stale, excludes it from retrieval/embedding, logs the failure, and retries.
 6. A summary change cannot reuse the previous vector file.
-7. FTS and dense retrieval can independently find both a leaf and a thread
-   summary; RRF deduplicates their common thread.
-8. Retrieval expansion returns readable source emails and correct relationship
-   labels; generated summaries are visibly non-source.
-9. All tests use temporary synthetic fixtures. No test modifies corpus or
-   live derived state.
-10. The existing and new self-test suites pass before embedding changes ship.
-11. With `summarize_threads` disabled, a changed thread is still marked
-    stale and leaves both summary retrieval legs; no model is loaded;
-    re-enabling regenerates it.
-12. A reply imported before its referenced root keys the thread on the
-    missing root; importing the root later joins the same thread,
-    materializes the reply edge, and regenerates the summary (digest
-    change) — ghost-root ordering.
-13. A result packet carries at most one match per item, and readable
-    context across all packets respects the single per-answer
-    `thread_context_chars` budget with matched messages exempt.
-14. Envelope enrichment never alters `chunks.text`, snippets, or
-    citations; a payload-recipe change selects a new vector cache
-    directory and re-embeds without re-chunking.
-15. The locked batched passage recipe satisfies maximum absolute coordinate
-    delta <=0.01 and minimum cosine similarity >=0.9999 against single
-    execution; one bad batch member exposes no cache entry and does not
-    prevent successful peers from becoming durable.
+7. With `summarize_threads` disabled, a changed thread is still marked
+   stale and leaves both summary retrieval legs; no model is loaded;
+   re-enabling regenerates it.
+8. A reply imported before its referenced root keys the thread on the
+   missing root; importing the root later joins the same thread,
+   materializes the reply edge, and regenerates the summary (digest
+   change) — ghost-root ordering.
+9. Envelope enrichment never alters `chunks.text`, snippets, or
+   citations; a payload-recipe change selects a new vector cache
+   directory and re-embeds without re-chunking.
+10. All tests use temporary synthetic fixtures. No test modifies corpus or
+    live derived state, and the existing and new self-test suites pass
+    before embedding changes ship.
+
+Retrieval-side acceptance criteria (four-leg fusion, packet budgets) live in
+`docs/retrieval/hybrid-retrieval-and-ranking.md`; inference-side
+criteria (numerical contract, readiness-dispatch equivalence, interrupt and
+endpoint-failure behavior) live in
+`docs/inference/inference-serving.md`.

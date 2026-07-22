@@ -9,27 +9,53 @@ engine over personal content. It turns read-only email and PDF collections
 into searchable, relational content while preserving integrity and keeping all
 corpus-bearing computation on the local machine.
 
-Feature-level designs refine this document. If a feature document is more
-specific, it governs that feature. No feature document may weaken the integrity
-rules here.
+The architecture follows the three canonical RAG pipelines — **Ingestion &
+Indexing**, **Retrieval**, and **Generation** — plus the cross-cutting
+concerns (storage, inference serving, benchmarks, platform) that all
+pipelines share. `docs/` mirrors this split with one folder per
+concern. Feature-level designs refine this document. If a feature document
+is more specific, it governs that feature. No feature document may weaken
+the integrity rules here.
 
 ### Feature document index
 
+**Ingestion pipeline** (`docs/ingestion/`)
+
 | Concern | Doc |
 |---|---|
-| Per-workspace state and CLI scoping | `docs/features/workspace-scoped-state.md` |
-| Content-addressed email/document graph | `docs/features/ingestion-design-v2.md` |
-| PDF text pipeline | `docs/features/pdf-to-text-pipeline-design.md` |
-| Embedding and thread retrieval | `docs/features/embedding-design.md` |
-| Inference server (oMLX) | `docs/features/embedding-design-v2.md` |
-| Ingest reporting and timing | `docs/features/ingest-all-reporting.md` |
-| PDF-text freshness and convergence | `docs/features/transaction-stage-convergence.md` |
-| Ingestion performance | `docs/features/ingestion-performance.md` |
-| Retrieval-expectation accuracy | `docs/features/accuracy-testing.md` |
-| Warm retrieval daemon | `docs/features/query-daemon.md` |
-| Bank transaction domain rules | `docs/features/transaction-domain-design.md` |
-| venv-to-uv runtime migration | `docs/features/uv-migration.md` |
-| Endpoint-based inference config | `docs/features/inference-endpoints.md` |
+| Content-addressed email/document graph | `ingestion-design-v2.md` |
+| PDF text pipeline | `pdf-to-text-pipeline-design.md` |
+| Chunking, embedding, thread-summary indexing | `chunking-and-embedding.md` |
+| Thread-summary generation concurrency | `summary-generation-concurrency.md` |
+| Ingest reporting and timing | `ingest-all-reporting.md` |
+| Ingestion performance | `ingestion-performance.md` |
+| Bank transaction domain rules (non-RAG rider) | `transaction-domain-design.md` |
+| Transaction-stage convergence | `transaction-stage-convergence.md` |
+
+**Retrieval pipeline** (`docs/retrieval/`)
+
+| Concern | Doc |
+|---|---|
+| Hybrid search, RRF fusion, rerank, packet expansion | `hybrid-retrieval-and-ranking.md` |
+| Warm retrieval daemon | `query-daemon.md` |
+
+**Generation pipeline** (`docs/generation/`) — *not yet implemented*
+
+| Concern | Doc |
+|---|---|
+| Local answering pass (constraints stub) | `local-answering-pass.md` |
+| OpenAI-compatible gateway (draft candidate) | `rag-gateway.md` |
+
+**Cross-cutting**
+
+| Concern | Doc |
+|---|---|
+| Inference serving (oMLX client, endpoints) | `docs/inference/inference-serving.md` |
+| Per-workspace state and CLI scoping | `docs/storage/workspace-scoped-state.md` |
+| DB-as-index vs. filesystem-as-content split (proposed) | `docs/storage/separate-db-and-fs-concerns.md` |
+| Retrieval-expectation accuracy | `docs/benchmarks/accuracy-testing.md` |
+| RAG metrics checklist (draft candidate) | `docs/benchmarks/rag-metrics-and-evaluation.md` |
+| venv-to-uv runtime migration | `docs/platform/uv-migration.md` |
 
 ## System boundaries
 
@@ -62,21 +88,22 @@ Every workspace-bound CLI invocation names its workspace explicitly:
 ./pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
-Repository-global actions such as model download, fixture tests, and help run
+Repository-global actions such as fixture tests and help run
 without a workspace and must not load the registry. File addressing alone does
 not make an action workspace-free: saved ingest reports and accuracy results
 remain workspace-owned. Selection is required by action scope, never as a
 ceremonial argument; the complete matrix is locked in
-`docs/features/workspace-scoped-state.md`.
+`docs/storage/workspace-scoped-state.md`.
 
 Each workspace owns an independent flat state container at
 `workspaces/.state/workspace-<workspace_id>/`, including a workspace-named
 `<workspace_id>.db`, content-addressed email/document artifacts, vector
 indexes, logs, runtime files, and preserved
 `search-accuracy-tests/`. The external oMLX inference server is the only shared
-runtime asset (all inference is HTTP to one loopback endpoint). Reprocessing a collection separately for each workspace that
+runtime asset (all inference is HTTP to configured endpoints). Reprocessing a
+collection separately for each workspace that
 mounts it is an accepted cost. The complete contract is locked in
-`docs/features/workspace-scoped-state.md`.
+`docs/storage/workspace-scoped-state.md`.
 
 ## Data and integrity model
 
@@ -103,7 +130,9 @@ An attachment's `child_email_id` records physical attached-email lineage,
 while `emails.reply_parent_email_id` records a proven RFC conversation edge.
 These are different relationships and must never be conflated.
 
-## Staged ingestion
+## 1. Ingestion pipeline
+
+### Staged ingestion
 
 `ingest all` is the sole full-pipeline orchestration and runs these stages in
 order:
@@ -132,7 +161,8 @@ order:
    thread-summary indexes;
 7. **transactions** — parse, validate, reconcile, and link statements from
    mounted collections marked `ingestion-type: bank-transactions`. The locked
-   convergence design in `docs/features/transaction-stage-convergence.md`
+   convergence design in
+   `docs/ingestion/transaction-stage-convergence.md`
    skips an unchanged, independently verified transaction graph while retaining
    a complete atomic rebuild for every relevant input or rule change.
 
@@ -147,13 +177,14 @@ independent work continues where integrity permits. Summary-staleness maintenanc
 always runs; configuration gates only the generative pass.
 
 Every `ingest all` attempt ends with the CLI-owned completion report locked in
-`docs/features/ingest-all-reporting.md`: run-local stage work and monotonic
+`docs/ingestion/ingest-all-reporting.md`: run-local stage work and
+monotonic
 timings remain distinct from a read-only snapshot of the workspace's converged
 content, retrieval, and transaction state. The concise report is printed by
 default and stored as aggregate-only JSON below that workspace's logs. It is an
 operational assessment, not a substitute for the native full `verify` command.
 
-## Derived artifacts
+### Derived artifacts
 
 Every email, including an attached email, has one SHA-addressed directory under
 `emails/<email-sha256>/` containing exactly two readable artifacts:
@@ -199,29 +230,14 @@ still-ambiguous, or interleaved parents preserve the full body. Client wrapper
 recognition may only expand an already-proven cut. Native
 regression findings are tracked under `docs/bugs/`.
 
-## Retrieval and answering
-
-Only authored email body regions and PDF text are source leaf chunks.
-Generated thread summaries are a separate navigation namespace and are never
-content or citation targets.
-
-Retrieval combines leaf FTS, leaf dense, summary FTS, and summary dense legs;
-fuses and reranks candidates; deduplicates relational matches; and expands
-readable source context through SQLite. Dense and FTS leaf search consume the
-same source-aware envelope-enriched payload while `chunks.text` remains a pure
-source quote.
-
-Every corpus claim must cite its underlying email or document. The future local
-answering pass consumes delimited result packets and may use summaries only
-to navigate toward content. Detailed invariants and acceptance criteria live
-in `docs/features/embedding-design.md`.
-
-## Bank transactions
+### Bank transactions (non-RAG rider on the ingest pipeline)
 
 A mounted collection marked `ingestion-type: bank-transactions` represents one
 configured account. Stage 1 owns discovery and blob-index refresh; the
 transaction stage resolves statement PDFs through integrity records and parsed
-artifacts rather than walking content again.
+artifacts rather than walking content again. This subsystem is structured
+extraction and validation, not retrieval — it rides the ingest pipeline for
+shared discovery, identity, and state management.
 
 Money is signed integer minor units, never floating point. Every expected PDF
 must either parse successfully or produce a loud unparsed, not-ingested, or
@@ -236,21 +252,62 @@ an adjacent summary field such as a loan limit cannot masquerade as a balance.
 Workspace-owned `reconciliation.yaml` and `counterparties.yaml` remain user
 data outside engine state and survive state wipes.
 
+## 2. Retrieval pipeline
+
+Only authored email body regions and PDF text are source leaf chunks.
+Generated thread summaries are a separate navigation namespace and are never
+content or citation targets.
+
+Retrieval combines leaf FTS, leaf dense, summary FTS, and summary dense legs;
+fuses and reranks candidates; deduplicates relational matches; and expands
+readable source context through SQLite. Dense and FTS leaf search consume the
+same source-aware envelope-enriched payload while `chunks.text` remains a pure
+source quote.
+
+Every corpus claim must cite its underlying email or document. Detailed
+invariants and acceptance criteria live in
+`docs/retrieval/hybrid-retrieval-and-ranking.md`.
+
+The optional query daemon is Unix-socket-only and workspace-local. It reuses
+the same native retriever while keeping matrices and a warm inference client
+loaded; it is not a second search implementation or a chat service
+(`docs/retrieval/query-daemon.md`).
+
+## 3. Generation pipeline (not yet implemented)
+
+The future local answering pass consumes the retrieval layer's delimited
+result packets, feeds them to a local model through the shared inference
+client, shows readable source material, and produces a cited answer. It may
+use summaries only to navigate toward content and never cites a generated
+thread summary as corpus content. Until it ships, `query --json` output plus
+the answering rules in `docs/rag-user-howto.md` are the generation contract,
+executed by a human or external agent. Locked constraints for the future
+implementation: `docs/generation/local-answering-pass.md`; ordered
+work: `docs/roadmap.md` item 2.
+
 ## Runtime and code boundaries
 
 - Runtime is Python 3.14.
 - `pocket-advisor.py` is the sole executable entrypoint.
 - `modules/cli.py` is the sole argparse surface and owns orchestration.
-- New implementation lives under `modules/` as typed domain classes and one
-  class per pipeline stage.
+- **Python is written in OOP style.** Classes are the default unit of
+  design: one class per pipeline stage (the `Stage` interface), typed
+  domain values as frozen dataclasses (`Workspace`, `ExtractedBody`,
+  `TransactionRow`, `SummaryOutcome`, …), and stateful concerns as
+  dedicated classes owning their lifecycle (`InferenceClient`,
+  `EmbedDispatcher`, `EmailThreadsSummaryDispatcher`, `PdfTransformCache`,
+  statement parsers in a class-per-format registry). Module-level
+  functions are reserved for small, pure, stateless helpers; new features
+  must not accrete as loose function collections when they carry state,
+  configuration, or a lifecycle.
 - Stage modules do not import or sequence other stages.
 - The retired `scripts/` tree is deleted. Historical mechanics are recorded in
   `docs/changelog.md` (pre-rewrite section); all runtime code and self-tests live under `modules/`.
 - SQLite is the relational source of truth. Local NumPy vector matrices and
   per-entity files are convergent derived indexes, not a second authority.
-- The optional query daemon is Unix-socket-only and workspace-local. It reuses
-  the same native retriever while keeping models and matrices warm; it is not a
-  second search implementation or a chat service.
+- All model inference is HTTP through the one thin client in
+  `modules/inference.py` (`docs/inference/inference-serving.md`);
+  the engine owns zero model code.
 
 ## Lifecycle
 

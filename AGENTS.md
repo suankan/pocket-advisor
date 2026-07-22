@@ -9,7 +9,9 @@ For every platform task, load these files in order:
 1. this file;
 2. `docs/design.md` — holistic solution architecture, pipeline, artifacts,
    retrieval, transactions, and system invariants;
-   - load the relevant `docs/features/` feature design as needed by the task;
+   - load the relevant feature design from the per-concern folders under
+     `docs/` (`ingestion/`, `retrieval/`, `generation/`, `inference/`,
+     `storage/`, `benchmarks/`, `platform/`) as needed by the task;
    - read the code as needed;
 3. `docs/work-in-progress.md` — check for unfinished work; cross-reference
    with `git status`;
@@ -36,8 +38,8 @@ The three planning records are:
 
 The implementation workflow is:
 
-1. **Design and commit.** Plan the feature, lock down an initial design in the
-   relevant `docs/features/` doc, and commit.
+1. **Design and commit.** Plan the feature, lock down an initial design in a
+   doc under the relevant `docs/` concern folder, and commit.
 2. **Pick up.** Move the roadmap item into `docs/work-in-progress.md` with any
    active context needed to resume.
 3. **Implement.** Build and verify.
@@ -73,7 +75,7 @@ Before handing off a change:
 for test_file in modules/tests/test_*.py; do
   uv run python "$test_file"
 done
-uv run ./pocket-advisor.py test
+uv run pocket-advisor.py test
 git diff --check
 git status --short
 ```

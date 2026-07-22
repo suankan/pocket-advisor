@@ -1,6 +1,6 @@
 """SQLite schema and connections — fresh Schema C, NO migration chain.
 
-Ingestion design v2 (`docs/features/ingestion-design-v2.md`) replaces the
+Ingestion design v2 (`docs/ingestion/ingestion-design-v2.md`) replaces the
 `item_kind`-conflated `items` table and the email-owned attachment cache
 with a normalized content-addressed content graph: unique `emails`, unique
 `documents`, and explicit source/attachment occurrence tables. This ships

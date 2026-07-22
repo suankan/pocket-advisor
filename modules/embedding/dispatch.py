@@ -1,6 +1,6 @@
 """Readiness-time embedding dispatch and convergence fan-out.
 
-Design decision 5 (`docs/features/embedding-design-v2.md`): the moment a
+Design decision 5 (`docs/inference/inference-serving.md`): the moment a
 producer publishes an inference-ready artifact its embedding payloads are
 dispatched asynchronously to the inference endpoint. There is no internal
 queue — a bounded pool keeps at most ``INFERENCE_MAX_IN_FLIGHT`` requests

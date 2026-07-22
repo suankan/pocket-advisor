@@ -5,7 +5,7 @@ explicit selector before the command. There is no active/default workspace
 registry setting:
 
 ```bash
-uv run uv run ./pocket-advisor.py --workspace <workspace_id> <command> ...
+uv run pocket-advisor.py --workspace <workspace_id> <command> ...
 ```
 
 Fixture tests and parser help are workspace-free and reject an
@@ -16,14 +16,16 @@ workspace-bound.
 
 ```bash
 uv sync
-uv run uv run ./pocket-advisor.py --workspace <workspace_id> db init
+uv run pocket-advisor.py --workspace <workspace_id> db init
 ```
 
-All inference (embedding, summarization, reranking) is served by the
-external oMLX localhost server at `models.inference_endpoint`
-(`docs/features/embedding-design-v2.md`). Start oMLX with the three
-configured model ids loaded before ingest, summaries, accuracy, or query;
-the engine downloads and loads no models itself.
+All inference (embedding, summarization, reranking) is served by three
+independently configured endpoint URLs — `models.embedding_endpoint`,
+`models.reranker_endpoint`, `models.summarisation_endpoint`
+(`docs/inference/inference-serving.md`). Start the inference server(s)
+before ingest, summaries, accuracy, or query; the engine downloads and
+loads no models itself, and sends no model name of its own — model
+selection is entirely server-side.
 
 Workspace and collection mounts are declared in
 `workspaces/workspace-config.yaml`. The selected ID must exist there. All
@@ -32,8 +34,13 @@ corpus-derived state is isolated at:
 ```text
 workspaces/.state/workspace-<workspace_id>/
 ├── <workspace_id>.db
-├── cache/
-├── vectors/
+├── emails/<email-sha256>/
+│   ├── email_message_full.txt
+│   └── email_message.txt
+├── documents/<document-sha256>/
+│   ├── source/
+│   └── transforms/
+├── vectors/text/<fingerprint>/
 ├── logs/review_queue.csv
 ├── runtime/
 └── search-accuracy-tests/     # preserved by wipe state
@@ -48,7 +55,7 @@ is regenerable.
 Run the full ordered pipeline:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest all
+uv run pocket-advisor.py --workspace <workspace_id> ingest all
 ```
 
 The order is `discover`, `emails`, `pdfs`, `thread`, `summaries`, `embed`,
@@ -57,13 +64,13 @@ collection. A single stage may be run when all prerequisite artifacts
 already exist:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest discover
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest emails
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest pdfs
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest thread
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest summaries
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest embed
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest transactions
+uv run pocket-advisor.py --workspace <workspace_id> ingest discover
+uv run pocket-advisor.py --workspace <workspace_id> ingest emails
+uv run pocket-advisor.py --workspace <workspace_id> ingest pdfs
+uv run pocket-advisor.py --workspace <workspace_id> ingest thread
+uv run pocket-advisor.py --workspace <workspace_id> ingest summaries
+uv run pocket-advisor.py --workspace <workspace_id> ingest embed
+uv run pocket-advisor.py --workspace <workspace_id> ingest transactions
 ```
 
 Discovery owns blob-index refresh; there is no separate operational
@@ -75,16 +82,18 @@ Every full `ingest all` run persists its completion report as JSON under
 the workspace's `logs/ingest-runs/`. Re-display a saved report later with:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest report          # latest
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest report <path>   # specific record
+uv run pocket-advisor.py --workspace <workspace_id> ingest report          # latest
+uv run pocket-advisor.py --workspace <workspace_id> ingest report <path>   # specific record
 ```
 
 After ingestion, inspect the selected workspace's
-`logs/review_queue.csv`. Email cache folders contain
-`email_message_full.txt` (envelope plus lossless body) and
-`email_message.txt` (envelope plus authored body). Standalone PDF
-artifacts live in collection-level `pdf-original/`, `pdf-ocr/`, and
-`pdf-to-text/` folders under that workspace's cache.
+`logs/review_queue.csv`. Each email's content-addressed folder
+(`emails/<sha256>/`) contains `email_message_full.txt` (envelope plus
+lossless body) and `email_message.txt` (envelope plus authored body). Each
+unique PDF document's folder (`documents/<sha256>/`) contains its verified
+`source/` copy plus recipe-addressed OCR/text products under
+`transforms/`; every email attachment or native occurrence of the same
+bytes shares that one document folder rather than getting its own copy.
 
 ## Transactions
 
@@ -94,8 +103,8 @@ Ingestion parses, validates, and links the selected workspace's
 statements:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest transactions
-uv run ./pocket-advisor.py --workspace <workspace_id> transactions report
+uv run pocket-advisor.py --workspace <workspace_id> ingest transactions
+uv run pocket-advisor.py --workspace <workspace_id> transactions report
 ```
 
 Reconciliation overrides and counterparty mappings remain in the workspace
@@ -110,9 +119,9 @@ selected workspace state root. It preserves that workspace's
 data, and every other workspace untouched:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> wipe state
-uv run ./pocket-advisor.py --workspace <workspace_id> db init
-uv run ./pocket-advisor.py --workspace <workspace_id> ingest all
+uv run pocket-advisor.py --workspace <workspace_id> wipe state
+uv run pocket-advisor.py --workspace <workspace_id> db init
+uv run pocket-advisor.py --workspace <workspace_id> ingest all
 ```
 
 The command requires interactive confirmation unless `--yes` is supplied.
@@ -131,8 +140,8 @@ Inspect and resolve the selected workspace's Stage-1 blob index without
 walking or rebuilding collection roots:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> blob-index list-sources
-uv run ./pocket-advisor.py --workspace <workspace_id> blob-index lookup \
+uv run pocket-advisor.py --workspace <workspace_id> blob-index list-sources
+uv run pocket-advisor.py --workspace <workspace_id> blob-index lookup \
   --source <collection_id> --sha256 <64-hex-digest>
 ```
 
@@ -144,7 +153,7 @@ only and deliberately skips the final content rehash.
 Run the full native verifier after ingestion or suspected drift:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> verify
+uv run pocket-advisor.py --workspace <workspace_id> verify
 ```
 
 It checks SQLite and foreign keys, both FTS5 indexes with their native
@@ -157,9 +166,9 @@ List or explicitly delete only the selected workspace's model-specific
 vector caches:
 
 ```bash
-uv run ./pocket-advisor.py --workspace <workspace_id> wipe list
-uv run ./pocket-advisor.py --workspace <workspace_id> wipe index --text <slug>
-uv run ./pocket-advisor.py --workspace <workspace_id> wipe index --all-inactive
+uv run pocket-advisor.py --workspace <workspace_id> wipe list
+uv run pocket-advisor.py --workspace <workspace_id> wipe index --text <slug>
+uv run pocket-advisor.py --workspace <workspace_id> wipe index --all-inactive
 ```
 
 Deleting the active index requires `--force`, stops that workspace's
@@ -174,10 +183,10 @@ preserved workspace test data under
 (`expectations/*.yaml`, `results/<utc>__<label>.json`):
 
 ```bash
-uv run ./pocket-advisor.py --workspace <id> accuracy generate
-uv run ./pocket-advisor.py --workspace <id> accuracy run [--label L] [--expectations F] [--top-k N]
-uv run ./pocket-advisor.py --workspace <id> accuracy compare --last N
-uv run ./pocket-advisor.py --workspace <id> accuracy list
+uv run pocket-advisor.py --workspace <id> accuracy generate
+uv run pocket-advisor.py --workspace <id> accuracy run [--label L] [--expectations F] [--top-k N]
+uv run pocket-advisor.py --workspace <id> accuracy compare --last N
+uv run pocket-advisor.py --workspace <id> accuracy list
 ```
 
 Expectations anchor only on durable identities — Message-IDs
@@ -195,7 +204,7 @@ reproducible comparison.
 for test_file in modules/tests/test_*.py; do
   uv run python "$test_file"
 done
-uv run ./pocket-advisor.py test
+uv run pocket-advisor.py test
 git diff --check
 git status --short
 ```

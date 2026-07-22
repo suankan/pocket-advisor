@@ -10,8 +10,10 @@ database (index / statistics / linking engine) and the filesystem
 mixed-storage layout under which some bulk text still lives inside the
 database. `docs/design.md` remains authoritative for system-wide
 architecture; the locked workspace state boundary and path prefix are
-defined in `docs/features/workspace-scoped-state.md`; the retrieval and
-dual-index design are defined in `docs/features/embedding-design.md`.
+defined in `docs/storage/workspace-scoped-state.md`; the retrieval and
+dual-index design are defined in
+`docs/ingestion/chunking-and-embedding.md` and
+`docs/retrieval/hybrid-retrieval-and-ranking.md`.
 
 > Context note: the solution is repositioning from an source /
 > local / law / integrity framing toward general-purpose RAG. That
@@ -74,7 +76,7 @@ workspace collection mounts.
    cross-store atomicity.** SQLite rows carry source digests; filesystem
    files carry content identity. Missing or stale files are retried and
    artifacts are rebuilt from the current verified cache. This reuses
-   `docs/features/embedding-design.md` decision 9 ("derived-state
+   `docs/ingestion/chunking-and-embedding.md` decision 9 ("derived-state
    convergence replaces false cross-store atomicity").
 7. **Migration is full re-ingest only.** There is no in-place backfill
    of existing databases. The engine refuses legacy state (fresh-schema

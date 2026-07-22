@@ -9,7 +9,7 @@ old one). thread_link_method records linkage confidence per email:
 'reference' (real headers) | 'subject_heuristic' | 'singleton'.
 
 Message-ID is a real header value, not an identity: two distinct emails
-may legitimately share one (`docs/features/ingestion-design-v2.md`).
+may legitimately share one (`docs/ingestion/ingestion-design-v2.md`).
 Container binding therefore never merges two emails rows into one
 container just because their Message-ID strings match — a later email
 reusing an already-claimed Message-ID gets its own container (see

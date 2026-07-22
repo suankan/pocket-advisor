@@ -1,7 +1,7 @@
 """Embedding identity, chunking, payloads, and vector-cache paths.
 
 Execution lives in the external oMLX Inference Server
-(`docs/features/embedding-design-v2.md`); this package owns fingerprints,
+(`docs/inference/inference-serving.md`); this package owns fingerprints,
 chunk/payload derivation, index paths, and the readiness dispatcher.
 """
 from modules.embedding.backends import (EMBED_EXECUTION_RECIPE,

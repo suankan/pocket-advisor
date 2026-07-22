@@ -101,7 +101,8 @@ class InferenceClient:
         if not texts:
             return [], 0
         data = self._post(
-            self.embed_endpoint, {"input": texts}, EMBED_TIMEOUT_SEC)
+            self.embed_endpoint,
+            {"model": "embedding", "input": texts}, EMBED_TIMEOUT_SEC)
         rows = sorted(data.get("data", []),
                       key=lambda item: int(item.get("index", 0)))
         if len(rows) != len(texts):
@@ -133,7 +134,8 @@ class InferenceClient:
             return []
         data = self._post(
             self.rerank_endpoint,
-            {"query": question,
+            {"model": "reranker",
+             "query": question,
              "documents": [text_by_id[key] for key in ids]},
             RERANK_TIMEOUT_SEC)
         results = sorted(
@@ -148,6 +150,7 @@ class InferenceClient:
         data = self._post(
             self.generate_endpoint,
             {
+                "model": "summariser",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},

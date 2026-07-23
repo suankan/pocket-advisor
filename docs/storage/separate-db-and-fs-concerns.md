@@ -1,228 +1,174 @@
 # Separate DB and Filesystem Concerns
 
-Status: **proposed design**. Active work lives in `docs/work-in-progress.md`;
-ordered unfinished work lives in `docs/roadmap.md`; shipped history lives in
-`docs/changelog.md`. This document locks the storage architecture only.
+Status: **locked for implementation 2026-07-24** (proposed 2026-07-20;
+operator-agreed revision 2026-07-23 folded in — the earlier draft's
+chunk-span-file store and keep-shadows-in-DB mechanism are superseded and
+removed). Active context lives in `docs/work-in-progress.md` while this is
+being built.
 
-This document defines the engine-native separation between the SQLite
-database (index / statistics / linking engine) and the filesystem
-(content-addressed derived-text cache). It supersedes the implicit
-mixed-storage layout under which some bulk text still lives inside the
-database. `docs/design.md` remains authoritative for system-wide
-architecture; the locked workspace state boundary and path prefix are
-defined in `docs/storage/workspace-scoped-state.md`; the retrieval and
-dual-index design are defined in
-`docs/ingestion/chunking-and-embedding.md` and
-`docs/retrieval/hybrid-retrieval-and-ranking.md`.
+This document locks the storage architecture only: the SQLite database
+becomes strictly an index / statistics / linking engine; every piece of
+bulk derived text either lives on the filesystem or is not stored at all.
+`docs/design.md` remains authoritative for system-wide architecture; the
+workspace state boundary is `docs/storage/workspace-scoped-state.md`; the
+dual-index retrieval design is `docs/ingestion/chunking-and-embedding.md`
+and `docs/retrieval/hybrid-retrieval-and-ranking.md`.
 
-> Context note: the solution is repositioning from an source /
-> local / law / integrity framing toward general-purpose RAG. That
-> repositioning is **out of scope here** and will be its own feature
-> design. This document only locks the uniform-text storage model that
-> the repositioning implies: there is no special "content" text class,
-> no "navigation-only" text class, and no integrity-grade "source
-> quote" concept. All derived text is uniform, retrievable content.
+## Scope rule (the three categories)
 
-## Objective
+Every RAG-side value gets exactly one of three treatments:
 
-Use the database strictly as an index, statistics, and linking engine,
-and the filesystem as the content-addressed store for every derived
-text artifact:
+1. **Derived searchable text → contentless index, never stored.** Chunk
+   text, payload shadows, transliteration shadows, summary text as FTS
+   input. The engine only ever *matches* or *displays* these; matching
+   needs only the inverted index, display re-derives from artifacts.
+2. **Bulk derived artifacts → filesystem, pointer + digest in DB.** Email
+   bodies, PDF text products, summary text files, per-entity vectors.
+3. **Relational metadata → stays fully in the DB.** Identity (hashes,
+   ids), offsets, envelope fields, thread edges, provenance, digests,
+   logs. Anything the engine joins, filters, groups, or constrains on is
+   a relational column — this category is what makes categories 1 and 2
+   rebuildable, so it can never be hollowed out.
 
-```text
-FS content-addressed cache (documents, emails, summaries, chunk spans)
-            |
-   path pointers + digests in SQLite
-            |
-   SQLite indexes (FTS, relational) + statistics + linking
-            |
-      retrieval / workers
-```
+Rule of thumb for future data types: *matched-or-displayed only → index +
+artifact; ever joined/filtered/grouped/constrained → relational column.*
 
-The corpus is owned and operated locally. There are no user-specific
-indexes, ACLs, or multi-tenant retrieval paths, and — per the
-2026-07-18 decision in `docs/design.md` — no content-access-control concept
-anywhere in the engine: retrieval visibility is governed solely by
-workspace collection mounts.
+Storage uniformity does not change content semantics: system invariant 6
+(`docs/design.md` — generated summaries are navigation, never citable
+content) is untouched by this design and may only be revisited by its own
+dedicated design.
 
 ## Locked decisions
 
-1. **SQLite holds links, indexes, statistics, and metadata only.** No
-   bulk message, summary, or chunk text is stored in the database. The
-   database is the relational source of truth for *structure*, not for
-   *content*.
-2. **All derived text is a uniform filesystem content-addressed cache.**
-   Document text, email text, thread summaries, and chunk spans are all
-   the same kind of artifact: regenerable derived text addressed by
-   content/identity. There is no distinction between "content" text and
-   "navigation" text.
-3. **Parallel worker pools write the filesystem directly.** Only a cheap
-   link-row commit touches SQLite. This respects SQLite's write
-   serialization (one writer at a time; the "database is locked"
-   constraint the existing summary-concurrency and embed-dispatcher
-   designs already work around) — bulk artifact writes happen off the
-   transactional path, and the main thread settles the small linking
-   rows.
-4. **`thread_summaries.summary_text` and `chunks.text` move to the
-   filesystem.** Database rows retain a relative `text_path` pointer plus
-   `char_start` / `char_end` (for chunk spans) and a `source_digest` so
-   convergence and `verify` still function.
-5. **Enriched search shadows (`payload_shadow`,
-   `translit_shadow`) are DB-side derived indexes, not bulk text.** They
-   stay in the database as search structures. (See the FTS TODO in the
-   Deferred section — the FTS mechanism itself is to be redesigned; the
-   shadow columns are derived indexes, not stored document content.)
-6. **Consistency is achieved by derived-state convergence, not by
-   cross-store atomicity.** SQLite rows carry source digests; filesystem
-   files carry content identity. Missing or stale files are retried and
-   artifacts are rebuilt from the current verified cache. This reuses
-   `docs/ingestion/chunking-and-embedding.md` decision 9 ("derived-state
-   convergence replaces false cross-store atomicity").
-7. **Migration is full re-ingest only.** There is no in-place backfill
-   of existing databases. The engine refuses legacy state (fresh-schema
-   only); moving to the new storage layout happens on a complete
-   `wipe state` + re-ingest. This keeps the migration path simple and
-   avoids partial-state hazards.
+1. **SQLite holds links, indexes, statistics, and metadata only.** After
+   this change no bulk derived text remains as a readable column: not
+   `chunks.text`, not `payload_shadow`, not `translit_shadow`, not
+   `thread_summaries.summary_text`.
+2. **Chunks become offset-only rows; no chunk files.** Chunking is a
+   deterministic function of `(parent artifact, chunk_chars,
+   chunk_overlap)` and every row carries `char_start`/`char_end`, so
+   readers slice the parent artifact on demand. No `chunks/` file store
+   is created — ~10k tiny files, their verify surface, and their hash
+   checks never come into existence. Chunk *identity* stays relational:
+   the vector cache (`vecs/<chunk_id>.npy`, `vectors_ids.npy`), FTS
+   rowids, and incremental embedding convergence all key on chunk id.
+3. **Summary text moves to the filesystem.**
+   `summaries/<thread_id>/summary.txt`, written with `write_verified`.
+   The `thread_summaries` row keeps `source_digest`, `prompt_version`,
+   `is_stale`, `generated_at`, and gains `summary_sha256` (content digest
+   of the summary text) so vector-filename binding, verification, and
+   staleness never require reading the file.
+4. **Both FTS tables become contentless.** `content=''` with
+   `contentless_delete=1` (SQLite ≥3.43; the bundled runtime is 3.53).
+   The AFTER INSERT/UPDATE/DELETE triggers are deleted; producing code
+   feeds the index explicitly at creation/deletion time with computed
+   values (chunk text slice, translit shadow, enriched payload; summary
+   text), which are then discarded. `snippet()`/`highlight()` are unused
+   in the codebase, so nothing is lost. A payload-recipe change or index
+   corruption is handled by drop-and-refeed from artifacts — the
+   convergence pattern, not a migration.
+5. **Payloads and shadows are computed on demand, never stored.**
+   `enriched_payload` and `proper_noun_shadow` become pure functions
+   applied at FTS-feed time and at embedding-dispatch time to the sliced
+   chunk text plus the relational envelope row. The payload recipe
+   remains a vector-fingerprint field.
+6. **A body-slicing reader is the one new primitive.** For email chunks:
+   read `email_message.txt`, split at the first `\n\n` (the locked
+   envelope/body separator, `modules/emailbody/artifacts.py`), slice the
+   body region by the row's offsets. For document chunks: slice the
+   extracted-text product directly. This reader backs rerank input,
+   result snippets, FTS feeding, and embedding payloads.
+7. **Consistency stays derived-state convergence** (unchanged principle):
+   SQLite rows carry digests; files carry content identity; missing or
+   stale files are retried and indexes rebuilt from the verified cache.
+8. **Migration is full re-ingest only.** No in-place backfill. The fresh
+   schema refuses a legacy database (detection: a `chunks` table with a
+   `text` column is a prior generation) and points at `wipe state`.
 
-## Current state vs target
+## Target state
 
-| Artifact | Current home | Target home | DB change |
-|---|---|---|---|
-| `email_message.txt`, `email_message_full.txt` | **FS** `emails/<sha256>/` | FS (unchanged) | DB keeps relative path pointers (`emails.body_text_path`, `body_full_text_path`) — already the case |
-| PDF / document text `documents/<sha256>/` | **FS** | FS (unchanged) | DB keeps `extracted_text_path` — already the case |
-| `thread_summaries.summary_text` | **DB** (`database.py:163`) | **FS** `summaries/<thread_id>/summary.txt` | DB keeps `text_path` pointer + `source_digest` + `generator_model` + `prompt_version` + `is_stale` |
-| `chunks.text` (chunk span) | **DB** (`database.py:179`) | **FS** content-addressed chunk store | DB keeps `text_path` + `char_start` / `char_end` + `source_type` + shadows |
-| `payload_shadow`, `translit_shadow` | **DB** columns | DB (stay) — derived indexes, not bulk text | unchanged |
-| vectors / index matrices | **FS** `vectors/` | FS (unchanged) | — |
-| FTS (`chunks_fts`, `thread_summaries_fts`) | **DB** virtual tables over `text` / `summary_text` | DB (stay as indexes) — **TODO redesign** (see Deferred) | must no longer depend on in-DB text |
+| Artifact | Home | DB keeps |
+|---|---|---|
+| Email bodies (`email_message*.txt`) | FS (unchanged) | path pointers (unchanged) |
+| PDF text products | FS (unchanged) | `extracted_text_path` (unchanged) |
+| Summary text | **FS `summaries/<thread_id>/summary.txt`** | `summary_sha256` + digest/version/staleness |
+| Chunk text | **nowhere** (sliced on demand) | parent id + `chunk_index` + `char_start`/`char_end` |
+| Payload / translit shadows | **nowhere** (computed on demand) | — |
+| FTS | DB, **contentless** inverted index only | index itself |
+| Vectors / matrices | FS (unchanged) | — |
 
-The separation is therefore **already partially implemented**: emails,
-documents, and vectors already live on the filesystem with the database
-holding only path pointers and indexes. This design completes the
-separation by moving the remaining bulk text (`summary_text`,
-`chunks.text`) to the filesystem.
+Schema deltas (fresh Schema D, no migration):
 
-## Proposed filesystem layout
+- `chunks`: drop `text`, `payload_shadow`, `translit_shadow`; keep
+  `id, source_type, email_id, document_id, chunk_index, char_start,
+  char_end, embedded_at` and the exactly-one-parent CHECK.
+- `thread_summaries`: drop `summary_text`; add `summary_sha256 TEXT NOT
+  NULL`. (`generator_model` was already vestigial — drop it too.)
+- `chunks_fts(text, translit_shadow, payload_shadow)` and
+  `thread_summaries_fts(summary_text)` recreated with `content='',
+  contentless_delete=1`; all six FTS triggers removed.
 
-All paths live below one workspace's state root
-(`workspaces/.state/workspace-<workspace_id>/`):
+## Call-site migration map (verified against code 2026-07-24)
 
-```text
-emails/<sha256>/
-    email_message_full.txt
-    email_message.txt
-documents/<sha256>/
-    source/
-    transforms/
-summaries/<thread_id>/
-    summary.txt
-    digest.sidecar          # optional; source_digest also lives in DB
-chunks/<email_id|document_id>/<chunk_index>.txt   # content-addressed span
-vectors/text/<fingerprint>/
-    ...                     # unchanged; already FS
-```
+**Writers:**
 
-- `emails/<sha256>/` and `documents/<sha256>/` are unchanged from the
-  current layout (`modules/config.py:57–212`).
-- `summaries/<thread_id>/summary.txt` is the new home for thread
-  summary text. The DB `thread_summaries` row keeps a `text_path`
-  pointer and the existing `source_digest`, `generator_model`,
-  `prompt_version`, `is_stale` fields; `summary_text` as an inline
-  column is removed.
-- Chunk spans move to the filesystem addressed by
-  `(email_id | document_id, chunk_index)`. The DB `chunks` row keeps a
-  `text_path` pointer plus `char_start` / `char_end`. Note that chunk
-  spans are reconstructable from `email_message.txt` /
-  `extracted_text_path` via `chunk_text()` (`modules/embedding/chunks.py:17`),
-  so the filesystem copy is a regenerable cache, not a integrity-bound
-  original.
+- `modules/embedding/chunks.py` — `sync_email_chunks` /
+  `sync_document_chunks`: stop storing text/shadows; insert offset rows
+  and explicitly feed `chunks_fts`. `sync_payloads` becomes an FTS
+  refeed pass (delete + reinsert affected rowids) on recipe change.
+- `modules/pipeline/summaries.py` (settlement) — write
+  `summaries/<thread_id>/summary.txt` via `write_verified`; upsert row
+  with `summary_sha256`; feed `thread_summaries_fts` explicitly.
+- `modules/pipeline/embed.py` — `thread_vector_filename` takes the
+  stored `summary_sha256` instead of summary text; summary embedding
+  payload reads the FS file.
 
-## Call-site migration map
+**Readers:**
 
-These are the concrete readers and writers that change when bulk text
-leaves the database. They are listed so the implementation can be
-scoped and reviewed; no code is changed by this document.
+- `modules/retrieval.py` — `_rerank` (chunk text at line ~424 query,
+  summary text at ~309) and result `snippet` fields (~394, ~418): use the
+  slicing reader / summary file. `_thread_packet` (~524): read summary
+  file; drop `generator_model`.
+- `modules/ingest_report.py` — summary rows (~256) and vector-filename
+  check (~300): use `summary_sha256`; the `payload_shadow IS NOT NULL`
+  enriched-coverage metric (~267) is replaced by FTS rowid-count parity
+  against `chunks`.
+- `modules/maintenance.py` — FTS parity keeps working via rowid counts
+  (~142–157); summary/vector reconciliation (~509) uses `summary_sha256`
+  and file-hash verification of `summary.txt`; `'integrity-check'` is
+  unavailable for contentless tables and is dropped from `_verify_sqlite`
+  for these two indexes (rowid parity + rebuild-on-suspicion replace it).
+- `modules/daemon.py` / accuracy — unaffected except through the shared
+  retrieval path.
 
-**Writers (currently INSERT/UPSERT inline text):**
-- `modules/pipeline/summaries.py::_settle` — writes `summary_text` to
-  the DB; must instead write `summaries/<thread_id>/summary.txt` and
-  upsert a `text_path` pointer (+ digest/model/version).
-- `modules/embedding/chunks.py::sync_email_chunks` /
-  `sync_document_chunks` — write `text` into the `chunks` row; must
-  instead write the span file and upsert `text_path` + offsets.
-- `modules/pipeline/embed.py` — derives vector filenames from
-  `summary_text` / `chunks.text`; must derive them from the path /
-  digest instead.
+## Acceptance criteria
 
-**Readers (currently `SELECT text` / `summary_text`):**
-- `modules/retrieval.py::_rerank` — reads `chunks.text` (line 306) and
-  `thread_summaries.summary_text` (line 310); swap for filesystem reads
-  via the path pointer.
-- `modules/retrieval.py::_thread_packet` — reads `summary_text`
-  (lines 524–527); swap for a filesystem read.
-- `modules/ingest_report.py` — reads `thread_summaries.summary_text`
-  (line 256) for the search snapshot; swap for a filesystem read.
-- `modules/maintenance.py` — reads `summary_text` (lines 508–513) for
-  vector reconciliation; swap for a filesystem read.
+1. After `wipe state` + `ingest all`, no table contains chunk text,
+   shadows, or summary text; `email.json`-era artifacts, text products,
+   `summaries/*/summary.txt`, and vectors carry all bulk content.
+2. Search results (leaf FTS, leaf dense, summary FTS, summary dense,
+   fused + reranked) are rank-identical to the pre-change engine on the
+   same corpus; snippets and packets are byte-identical.
+3. The accuracy suite scores are unchanged on the test workspace
+   (`accuracy compare` against a pre-change record).
+4. A payload-recipe bump refeeds FTS and re-embeds without re-chunking;
+   chunk ids and offsets are stable across the operation.
+5. `verify` validates summary files by hash, FTS parity by rowid count,
+   and flags a missing/corrupt summary file as retryable derived state.
+6. A legacy database (with `chunks.text`) is refused with a clear
+   `wipe state` pointer.
+7. An interrupted run leaves no half-fed FTS state that convergence
+   cannot repair by refeed.
+8. All tests use temporary synthetic fixtures; the native suite and
+   `pocket-advisor test` pass.
 
-**Explicit exceptions (internal tooling, not consumer reads):**
-- `modules/maintenance.py::verify_workspace` and
-  `modules/ingest_report.py` are allowed direct database access. They
-  are observability / integrity tooling, not RAG read-path consumers,
-  and reconcile filesystem digests against database pointers.
+## Non-goals
 
-## Migration
-
-Migration is **full re-ingest only** (decision 7). There is no
-in-place backfill:
-
-1. `wipe state` removes the workspace's derived state (database, cache,
-   vectors, runtime).
-2. A complete `ingest all` regenerates every artifact on the filesystem
-   and settles the linking rows in the fresh database.
-
-This is consistent with the engine's fresh-schema-only rule: the
-database refuses legacy state rather than migrating it, and a workspace
-rebuild is an operator-owned `wipe state` + re-ingest.
-
-## Industry alignment
-
-The separation here matches the dominant 2025–2026 production RAG
-pattern: the database is the **index + metadata + pointer layer**, while
-bulk document text lives in a separate store (local filesystem or object
-storage such as S3). Decoupled ingestion/query clusters share the same
-underlying object storage while keeping the transactional database lean.
-
-SQLite's write serialization is a named production hazard: synchronous
-insertion of documents in the same transaction as embedding generation
-caused multi-second latency spikes until the workload was decoupled.
-Keeping bulk artifact writes on the filesystem and committing only cheap
-link rows directly addresses that — parallel worker pools write files,
-the main thread settles rows.
-
-This also aligns with the "filesystem is the database" direction
-emerging in agentic infrastructure (e.g. SQLite-backed virtual
-filesystems): content-addressed filesystem stores behind a thin
-interface are a first-class storage primitive, and this engine already
-follows that pattern for emails and vectors. This design completes it.
-
-## Deferred / out of scope
-
-- **FTS redesign (TODO decision).** The current `chunks_fts` and
-  `thread_summaries_fts` virtual tables (`modules/database.py:347–399`)
-  are defined `USING fts5(text, ...)` / `USING fts5(summary_text, ...)`
-  over in-database text, populated by triggers. Since decision 1 forbids
-  any text in the database, FTS must be re-pointed to filesystem-backed
-  text (for example an external-content FTS index over file paths, or a
-  separate index store). This document locks only the principle "no
-  text stays in the database"; the concrete new FTS mechanism is an
-  explicit **TODO decision** and is not specified here.
-- **Solution repositioning to general-purpose RAG.** The source /
-  integrity / local framing of `docs/design.md` and `AGENTS.md` is left
-  unchanged by this document. Its revision is a separate future feature
-  design.
-- **RAG API contract.** A RAG read-path interface is documented
-  elsewhere and is out of scope here.
-- **No code, no schema migration scripts, no `AGENTS.md` edits, and no
-  `roadmap.md` / `work-in-progress.md` / `changelog.md` transitions** accompany
-  this proposed design until implementation is committed.
+- A `chunks/` span-file store (explicitly rejected 2026-07-23).
+- Removing relational metadata (category 3) from the database.
+- Changing chunk identity, offsets, vector fingerprints, or chunking
+  config semantics.
+- Changing summary semantics (navigation-only) or the answering contract.
+- In-place migration of existing databases.
+- The FTS engine swap / scale-out portability itself (this design keeps
+  the seam clean for it; see `docs/retrieval/corpus-api.md`).

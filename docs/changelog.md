@@ -4,6 +4,33 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-23 — New design docs: Corpus API proposal, thread-summaries consolidation
+
+No code changes. Two documents added out of the architecture review:
+
+- `docs/retrieval/corpus-api.md` (**proposed**, operator-agreed direction):
+  a canonical `email.json` manifest per email (headers, body references,
+  attachment identities — a manifest beside the text artifacts, not a body
+  container; the relational index stays per the storage scope rule), and
+  one typed `Corpus` facade with two interface families — deterministic
+  SQL-backed getters and semantic model-engaging getters. Stepping stone
+  to the RAG gateway. Roadmap item 3.
+- `docs/ingestion/email-thread-summaries.md` (**implemented design,
+  consolidated**): one-place explanation of what email-thread summaries
+  are (email-only by construction — eligibility is a count of emails per
+  thread; renamed from `thread-summaries.md` the same day to say so), why
+  they exist (thread-grain recall channel), their digest-gated lifecycle,
+  the two fences that keep them navigation-only, and the operator-review
+  concerns recorded 2026-07-23. Carries three roadmapped TODOs: runtime
+  summarization methods on the retrieval engine (TODO 1), a
+  summary-ablation accuracy methodology with a thread-grain question class
+  and an explicit keep-or-retire outcome rule (TODO 2), and a code-wide
+  `thread` → `email_thread` terminology rename to stop the collision with
+  Python threading (TODO 3 — notes the fresh-schema cutover and
+  preserved-test-data implications).
+- `docs/design.md` feature index and `docs/roadmap.md` items 3–4 updated
+  accordingly.
+
 ## 2026-07-23 — Full design/code alignment audit
 
 No functional code changes (two stale docstring comments only). Audited
@@ -73,7 +100,8 @@ changes.
 
 No functional code changes (docstring path references only). Restructured the
 flat `docs/features/` list into seven concern folders mirroring the canonical
-RAG pipeline split, per the plan recorded in `docs/design-split-plan.md`.
+RAG pipeline split, per a working plan document (`design-split-plan.md`,
+since deleted as it instructed once the restructuring stabilized).
 The folders live directly under `docs/` (the intermediate `features/` level
 is removed entirely):
 

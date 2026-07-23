@@ -29,6 +29,7 @@ the integrity rules here.
 | Thread-summary generation concurrency | `summary-generation-concurrency.md` |
 | Ingest reporting and timing | `ingest-all-reporting.md` |
 | Ingestion performance | `ingestion-performance.md` |
+| Email-thread summaries (what/why/lifecycle + open TODOs) | `email-thread-summaries.md` |
 | Bank transaction domain rules (non-RAG rider) | `transaction-domain-design.md` |
 | Transaction-stage convergence | `transaction-stage-convergence.md` |
 
@@ -38,6 +39,7 @@ the integrity rules here.
 |---|---|
 | Hybrid search, RRF fusion, rerank, packet expansion | `hybrid-retrieval-and-ranking.md` |
 | Warm retrieval daemon | `query-daemon.md` |
+| Corpus API: JSON artifacts + two-interface facade (proposed) | `corpus-api.md` |
 
 **Generation pipeline** (`docs/generation/`) — *not yet implemented*
 

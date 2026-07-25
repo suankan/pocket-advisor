@@ -54,7 +54,7 @@ the integrity rules here.
 |---|---|
 | Inference serving (oMLX client, endpoints) | `docs/inference/inference-serving.md` |
 | Per-workspace state and CLI scoping | `docs/storage/workspace-scoped-state.md` |
-| DB-as-index vs. filesystem-as-content split (proposed) | `docs/storage/separate-db-and-fs-concerns.md` |
+| DB-as-index vs. filesystem-as-content split | `docs/storage/separate-db-and-fs-concerns.md` |
 | Retrieval-expectation accuracy | `docs/benchmarks/accuracy-testing.md` |
 | RAG metrics checklist (draft candidate) | `docs/benchmarks/rag-metrics-and-evaluation.md` |
 | venv-to-uv runtime migration | `docs/platform/uv-migration.md` |

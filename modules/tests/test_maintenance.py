@@ -15,6 +15,7 @@ from modules.database import Database  # noqa: E402
 from modules.embedding import (current_fingerprint, index_paths,  # noqa: E402
                                thread_index_paths,
                                thread_vector_filename)
+from modules.integrity import sha256_bytes, write_verified  # noqa: E402
 from modules.maintenance import (MaintenanceError, format_sources,  # noqa: E402
                                  lookup_blob, verify_workspace)
 from modules.pipeline.base import PipelineContext  # noqa: E402
@@ -62,18 +63,30 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
     email = ctx.conn.execute(
         "SELECT id, thread_id FROM emails WHERE message_id='<maintenance@test>'"
     ).fetchone()
-    ctx.conn.execute(
-        "INSERT INTO chunks(source_type, email_id, chunk_index, text, "
-        "payload_shadow) VALUES ('email_body', ?, 0, 'verified content', "
-        "'Subject: Maintenance fixture verified content')",
+    cur = ctx.conn.execute(
+        "INSERT INTO chunks(source_type, email_id, chunk_index, char_start, "
+        "char_end) VALUES ('email_body', ?, 0, 0, 16)",
         (email["id"],),
     )
     ctx.conn.execute(
-        "INSERT INTO thread_summaries(thread_id, summary_text, source_digest, "
-        "generator_model, prompt_version, generated_at) "
-        "VALUES (?, 'fixture summary', 'digest', 'fake', 1, 't')",
-        (email["thread_id"],),
+        "INSERT INTO chunks_fts(rowid, text, translit_shadow, "
+        "payload_shadow) VALUES (?, 'verified content', '', "
+        "'Subject: Maintenance fixture verified content')",
+        (cur.lastrowid,),
     )
+    summary_text = "fixture summary"
+    summary_sha256 = write_verified(
+        ctx.config.summary_path(int(email["thread_id"])),
+        summary_text.encode("utf-8"))
+    ctx.conn.execute(
+        "INSERT INTO thread_summaries(thread_id, summary_sha256, "
+        "source_digest, prompt_version, generated_at) "
+        "VALUES (?, ?, 'digest', 1, 't')",
+        (email["thread_id"], summary_sha256),
+    )
+    ctx.conn.execute(
+        "INSERT INTO thread_summaries_fts(rowid, summary_text) "
+        "VALUES (?, ?)", (email["thread_id"], summary_text))
     ctx.conn.commit()
 
     fingerprint = current_fingerprint(ctx.config)
@@ -87,7 +100,7 @@ def _write_index(ctx: PipelineContext) -> tuple[str, Path]:
 
     thread = thread_index_paths(ctx.config, fingerprint)
     thread.vecs_dir.mkdir(parents=True)
-    vector_name = thread_vector_filename(email["thread_id"], "fixture summary")
+    vector_name = thread_vector_filename(email["thread_id"], summary_sha256)
     np.save(thread.vecs_dir / vector_name,
             np.array([0, 1, 0, 0], dtype=np.float32))
     np.save(thread.vectors_npy,

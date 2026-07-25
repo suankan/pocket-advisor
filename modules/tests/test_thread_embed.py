@@ -16,6 +16,8 @@ from modules.database import Database  # noqa: E402
 from modules.emailbody import body_text  # noqa: E402
 from modules.embedding import (EMBED_EXECUTION_RECIPE, PAYLOAD_RECIPE,  # noqa: E402
                                index_paths)
+from modules.chunk_reader import ChunkReader  # noqa: E402
+from modules.embedding.chunks import chunk_payload  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.embed import EmbedStage  # noqa: E402
 from modules.pipeline.thread import ThreadStage  # noqa: E402
@@ -201,53 +203,81 @@ def main() -> int:
                           return_value=backend):
             estats = EmbedStage(ctx).run()
         assert estats.get("new_chunks") == 6, estats
-        assert estats.get("payloads_updated") == 6, estats
+        # Producers feed chunks_fts directly at chunk creation; the
+        # convergence-pass refeed only fires on a payload-recipe change or
+        # a count mismatch, neither true here.
+        assert estats.get("payloads_updated") == 0, estats
         assert estats.get("embedded") == 6, estats
         assert estats.get("failed") == 0, estats
         assert estats.get("index_size") == 6, estats
 
-        payloads = conn.execute(
-            """SELECT chunks.text, chunks.char_start, chunks.char_end,
-                      chunks.payload_shadow, chunks.source_type,
-                      emails.message_id
-                 FROM chunks LEFT JOIN emails ON emails.id = chunks.email_id
+        # Chunks are offset-only rows; text/payload are re-derived through
+        # the chunk reader, never read back from storage (chunks_fts is
+        # contentless — it matches, it does not return column values).
+        reader = ChunkReader(conn, cfg)
+        rows = conn.execute(
+            """SELECT chunks.id, chunks.source_type, chunks.email_id,
+                      chunks.document_id, chunks.char_start,
+                      chunks.char_end, emails.message_id, emails.date_utc,
+                      emails.date_raw, emails.from_name, emails.from_addr,
+                      emails.to_addrs, emails.subject,
+                      COALESCE(
+                        (SELECT filename FROM attachments
+                          WHERE document_id = documents.id
+                          ORDER BY id LIMIT 1),
+                        (SELECT relpath FROM document_sources
+                          WHERE document_id = documents.id
+                          ORDER BY id LIMIT 1)) AS document_name
+                 FROM chunks
+                 LEFT JOIN emails ON emails.id = chunks.email_id
+                 LEFT JOIN documents ON documents.id = chunks.document_id
                 ORDER BY chunks.id""").fetchall()
-        reply_chunk = next(row for row in payloads
-                           if row["message_id"] == "<b@x>")
-        assert reply_chunk["text"] == \
-            "Reply text про Ксению и договор."
-        assert reply_chunk["payload_shadow"].startswith(
+        payloads = [chunk_payload(row, reader.chunk_text(row))
+                    for row in rows]
+        reply_row = next(row for row in rows
+                         if row["message_id"] == "<b@x>")
+        reply_text = reader.chunk_text(reply_row)
+        assert reply_text == "Reply text про Ксению и договор."
+        reply_payload = chunk_payload(reply_row, reply_text)
+        assert reply_payload.startswith(
             "From: bob@y\nDate: 2024-01-02T10:00:00+00:00\n"
             "Subject: Re: Settlement\nTo: alice@x\n\n")
         message_path = tmp / conn.execute(
             "SELECT body_text_path FROM emails WHERE id = ?",
             (b,)).fetchone()[0]
         authored = body_text(message_path.read_bytes(), source=message_path)
-        assert authored[reply_chunk["char_start"]:
-                        reply_chunk["char_end"]] == reply_chunk["text"]
-        attachment_chunk = next(
-            row for row in payloads
+        assert authored[reply_row["char_start"]:
+                        reply_row["char_end"]] == reply_text
+
+        attachment_row, attachment_payload = next(
+            (row, payload) for row, payload in zip(rows, payloads)
             if row["source_type"] == "document_text"
-            and row["payload_shadow"].startswith("Document: s.pdf"))
-        assert attachment_chunk["payload_shadow"] == \
+            and payload.startswith("Document: s.pdf"))
+        assert attachment_payload == \
             "Document: s.pdf\n\nStatement line items text."
-        document_chunk = next(
-            row for row in payloads
+        document_row, document_payload = next(
+            (row, payload) for row, payload in zip(rows, payloads)
             if row["source_type"] == "document_text"
-            and row["payload_shadow"].startswith("Document: notice.pdf"))
-        assert document_chunk["payload_shadow"] == \
+            and payload.startswith("Document: notice.pdf"))
+        assert document_payload == \
             "Document: notice.pdf\n\nNative filing content."
-        assert set(backend.embedded_texts) == {
-            row["payload_shadow"] for row in payloads}
+        assert set(backend.embedded_texts) == set(payloads)
+
         fts_envelope = conn.execute(
             "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts"
             " MATCH 'Settlement'").fetchone()[0]
         assert fts_envelope >= 3
 
-        shadow = conn.execute(
-            "SELECT translit_shadow FROM chunks WHERE email_id = ? AND"
-            " source_type = 'email_body'", (b,)).fetchone()[0]
-        assert "Kseni" in shadow, shadow   # proper-noun shadow present
+        # translit_shadow (proper-noun fallback) is only ever searchable,
+        # never re-read — confirm via a transliterated MATCH instead of a
+        # column select.
+        translit_hits = conn.execute(
+            "SELECT chunks_fts.rowid FROM chunks_fts"
+            " JOIN chunks ON chunks.id = chunks_fts.rowid"
+            " WHERE chunks_fts MATCH 'translit_shadow:Kseni*'"
+            " AND chunks.email_id = ?"
+            " AND chunks.source_type = 'email_body'", (b,)).fetchall()
+        assert translit_hits, "expected proper-noun shadow to be searchable"
 
         paths = index_paths(cfg, FINGERPRINT)
         matrix = np.load(paths.vectors_npy)

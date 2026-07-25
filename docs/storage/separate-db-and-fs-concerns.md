@@ -1,10 +1,12 @@
 # Separate DB and Filesystem Concerns
 
-Status: **locked for implementation 2026-07-24** (proposed 2026-07-20;
-operator-agreed revision 2026-07-23 folded in — the earlier draft's
-chunk-span-file store and keep-shadows-in-DB mechanism are superseded and
-removed). Active context lives in `docs/work-in-progress.md` while this is
-being built.
+Status: **implemented 2026-07-26** (proposed 2026-07-20; operator-agreed
+revision 2026-07-23 folded in — the earlier draft's chunk-span-file store
+and keep-shadows-in-DB mechanism are superseded and removed; locked for
+implementation 2026-07-24, shipped 2026-07-26 — see
+`docs/changelog.md`). All acceptance criteria verified, including the
+operator-run `wipe state` + `ingest all` + `verify` + `accuracy compare`
+pass on the test workspace.
 
 This document locks the storage architecture only: the SQLite database
 becomes strictly an index / statistics / linking engine; every piece of

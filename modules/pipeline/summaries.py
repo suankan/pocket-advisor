@@ -5,6 +5,7 @@ from pathlib import Path
 
 from modules.domain import StageStats
 from modules.embedding.dispatch import shared_dispatcher
+from modules.integrity import write_verified
 from modules.pipeline.base import Stage
 from modules.pipeline.summary_dispatch import (
     EmailThreadsSummaryDispatcher, SummaryOutcome)
@@ -46,12 +47,21 @@ class ThreadSummaryStage(Stage):
 
         keep_ids = {job.thread_id for job in work} | \
             {job.thread_id for job in broken}
+        # The contentless FTS index has no sync triggers: every row
+        # delete mirrors an index delete in the same transaction.
         if keep_ids:
             marks = ",".join("?" for _ in keep_ids)
+            params = tuple(sorted(keep_ids))
+            self.conn.execute(
+                f"DELETE FROM thread_summaries_fts WHERE rowid NOT IN"
+                f" ({marks})", params)
             self.conn.execute(
                 f"DELETE FROM thread_summaries WHERE thread_id NOT IN"
-                f" ({marks})", tuple(sorted(keep_ids)))
+                f" ({marks})", params)
         else:
+            self.conn.execute(
+                "INSERT INTO thread_summaries_fts(thread_summaries_fts)"
+                " VALUES ('delete-all')")
             self.conn.execute("DELETE FROM thread_summaries")
 
         existing_stale = [job.thread_id for job in stale
@@ -148,26 +158,38 @@ class ThreadSummaryStage(Stage):
             perf.failed_threads += 1
             return
 
+        # Summary text is a filesystem artifact; the row carries only its
+        # content digest. File first, then row + FTS feed in one
+        # transaction — a crash in between leaves a current file with a
+        # stale row, which the next run's digest check regenerates.
+        summary_sha256 = write_verified(
+            self.config.summary_path(outcome.job.thread_id),
+            outcome.summary_text.encode("utf-8"))
         self.conn.execute(
             """INSERT INTO thread_summaries
-               (thread_id, summary_text, source_digest,
-                generator_model, prompt_version, is_stale, generated_at)
-               VALUES (?, ?, ?, ?, ?, 0, ?)
+               (thread_id, summary_sha256, source_digest,
+                prompt_version, is_stale, generated_at)
+               VALUES (?, ?, ?, ?, 0, ?)
                ON CONFLICT(thread_id) DO UPDATE SET
-                 summary_text=excluded.summary_text,
+                 summary_sha256=excluded.summary_sha256,
                  source_digest=excluded.source_digest,
-                 generator_model=excluded.generator_model,
                  prompt_version=excluded.prompt_version,
                  is_stale=0,
                  generated_at=excluded.generated_at""",
-            (outcome.job.thread_id, outcome.summary_text,
-             outcome.job.source_digest, "",
-              SUMMARY_PROMPT_VERSION, now_iso()))
+            (outcome.job.thread_id, summary_sha256,
+             outcome.job.source_digest, SUMMARY_PROMPT_VERSION, now_iso()))
+        self.conn.execute(
+            "DELETE FROM thread_summaries_fts WHERE rowid = ?",
+            (outcome.job.thread_id,))
+        self.conn.execute(
+            "INSERT INTO thread_summaries_fts(rowid, summary_text)"
+            " VALUES (?, ?)",
+            (outcome.job.thread_id, outcome.summary_text))
         self.conn.commit()
         if embed_dispatcher is not None:
             embed_dispatcher.submit_summary(
                 outcome.job.thread_id, outcome.summary_text,
-                at_readiness=True)
+                summary_sha256, at_readiness=True)
         perf.completed_threads += 1
         if metrics.strategy == "thread":
             perf.one_shot_threads += 1

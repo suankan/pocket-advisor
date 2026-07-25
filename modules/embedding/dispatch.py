@@ -24,11 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from modules.chunk_reader import ChunkReader
 from modules.embedding.backends import (atomic_publish_array,
                                         current_fingerprint, get_backend,
                                         index_paths, thread_index_paths,
                                         thread_vector_filename,
                                         validated_vector)
+from modules.embedding.chunks import CHUNK_ENVELOPE_SQL, chunk_payload
 from modules.inference import (INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable,
                                estimate_tokens)
 from modules.telemetry import NOT_RUN, PARTIAL
@@ -127,10 +129,11 @@ class EmbedDispatcher:
                             f"chunk:{chunk_id}", f"chunk {chunk_id}",
                             at_readiness)
 
-    def submit_summary(self, thread_id: int, summary_text: str, *,
+    def submit_summary(self, thread_id: int, summary_text: str,
+                       summary_sha256: str, *,
                        at_readiness: bool = False) -> bool:
         target = self.thread_paths.vecs_dir / thread_vector_filename(
-            thread_id, summary_text)
+            thread_id, summary_sha256)
         return self._submit(summary_text, target, "summary",
                             f"thread:{thread_id}", f"thread {thread_id}",
                             at_readiness)
@@ -138,20 +141,31 @@ class EmbedDispatcher:
     def submit_pending_leaves(self, conn, *, source_type: str | None = None,
                               document_id: int | None = None,
                               at_readiness: bool = False) -> int:
-        """Dispatch every chunk without a vector in the current cache."""
-        sql = ("SELECT id, payload_shadow FROM chunks"
-               " WHERE payload_shadow IS NOT NULL")
+        """Dispatch every chunk without a vector in the current cache.
+        Payloads are derived on demand — chunk slice through the reader
+        plus the relational envelope — and only for actually-pending
+        chunks, so a converged corpus reads no artifacts here."""
+        sql = CHUNK_ENVELOPE_SQL
+        conds: list[str] = []
         params: list = []
         if source_type is not None:
-            sql += " AND source_type = ?"
+            conds.append("chunks.source_type = ?")
             params.append(source_type)
         if document_id is not None:
-            sql += " AND document_id = ?"
+            conds.append("chunks.document_id = ?")
             params.append(document_id)
-        sql += " ORDER BY id"
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY chunks.id"
+        reader = ChunkReader(conn, self.config)
         submitted = 0
         for row in conn.execute(sql, params).fetchall():
-            if self.submit_leaf(int(row["id"]), row["payload_shadow"],
+            if self.unavailable is not None:
+                break
+            if (self.leaf_paths.vecs_dir / f"{row['id']}.npy").is_file():
+                continue
+            payload = chunk_payload(row, reader.chunk_text(row))
+            if self.submit_leaf(int(row["id"]), payload,
                                 at_readiness=at_readiness):
                 submitted += 1
         return submitted

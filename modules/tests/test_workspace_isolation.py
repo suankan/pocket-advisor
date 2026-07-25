@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
+from modules.integrity import sha256_bytes, write_verified  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
@@ -94,15 +95,26 @@ def add_search_state(ctx: PipelineContext, token: str) -> None:
     email_row = ctx.conn.execute(
         "SELECT id, thread_id FROM emails WHERE message_id='<shared@test>'"
     ).fetchone()
+    cur = ctx.conn.execute(
+        "INSERT INTO chunks (source_type, email_id, chunk_index, char_start,"
+        " char_end) VALUES ('email_body', ?, 0, 0, ?)",
+        (email_row["id"], len(token)))
     ctx.conn.execute(
-        "INSERT INTO chunks (source_type, email_id, chunk_index, text,"
-        " payload_shadow) VALUES ('email_body', ?, 0, ?, ?)",
-        (email_row["id"], token, token))
+        "INSERT INTO chunks_fts (rowid, text, translit_shadow,"
+        " payload_shadow) VALUES (?, ?, '', ?)",
+        (cur.lastrowid, token, token))
+    summary_text = f"summary {token}"
+    summary_sha256 = write_verified(
+        ctx.config.summary_path(int(email_row["thread_id"])),
+        summary_text.encode("utf-8"))
     ctx.conn.execute(
-        "INSERT INTO thread_summaries (thread_id, summary_text, source_digest,"
-        " generator_model, prompt_version, generated_at)"
-        " VALUES (?, ?, ?, 'fake-local', 1, 't')",
-        (email_row["thread_id"], f"summary {token}", f"digest-{token}"))
+        "INSERT INTO thread_summaries (thread_id, summary_sha256,"
+        " source_digest, prompt_version, generated_at)"
+        " VALUES (?, ?, ?, 1, 't')",
+        (email_row["thread_id"], summary_sha256, f"digest-{token}"))
+    ctx.conn.execute(
+        "INSERT INTO thread_summaries_fts (rowid, summary_text)"
+        " VALUES (?, ?)", (email_row["thread_id"], summary_text))
     vector = ctx.config.vectors_dir / "text" / "fake" / "vectors.npy"
     vector.parent.mkdir(parents=True, exist_ok=True)
     vector.write_bytes(token.encode())

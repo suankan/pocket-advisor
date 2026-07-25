@@ -22,6 +22,7 @@ from modules.pipeline.summary_dispatch import (  # noqa: E402
     EmailThreadsSummaryDispatcher, SummaryOutcome)
 from modules.pipeline.thread import ThreadStage  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
+from modules.summary_reader import read_summary_text  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
 from test_embedding_design import (FINGERPRINT, REGISTRY_YAML,  # noqa: E402
@@ -105,10 +106,10 @@ def main() -> int:
         thread_id = conn.execute(
             "SELECT thread_id FROM emails WHERE id=?", (first,)).fetchone()[0]
         summary = conn.execute(
-            "SELECT summary_text, prompt_version FROM thread_summaries"
+            "SELECT prompt_version FROM thread_summaries"
             " WHERE thread_id=?", (thread_id,)).fetchone()
         assert summary["prompt_version"] == 2
-        assert summary["summary_text"] == \
+        assert read_summary_text(cfg, thread_id) == \
             "navearlyfact navmiddlefact navlatefact"
 
         perf = ctx.telemetry.summaries

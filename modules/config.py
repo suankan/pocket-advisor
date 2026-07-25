@@ -175,6 +175,15 @@ class Config:
         return self.state_dir / "documents"
 
     @property
+    def summaries_dir(self) -> Path:
+        return self.state_dir / "summaries"
+
+    def summary_path(self, thread_id: int) -> Path:
+        """One thread's generated summary text artifact; its content
+        digest lives in thread_summaries.summary_sha256."""
+        return self.summaries_dir / str(thread_id) / "summary.txt"
+
+    @property
     def logs_dir(self) -> Path:
         return self.state_dir / "logs"
 

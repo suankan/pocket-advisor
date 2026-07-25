@@ -25,6 +25,7 @@ from modules.pipeline.summaries import ThreadSummaryStage  # noqa: E402
 from modules.pipeline.thread import ThreadStage  # noqa: E402
 from modules.review import ReviewLog  # noqa: E402
 from modules.retrieval import SearchOptions, run_search  # noqa: E402
+from modules.summary_reader import read_summary_text  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
 
@@ -169,8 +170,9 @@ def main() -> int:
             "SELECT * FROM thread_summaries WHERE thread_id=?",
             (thread_id,)).fetchone()
         assert not summary["is_stale"]
-        assert "Opening note" in summary["summary_text"]
-        assert "Headerless follow-up" in summary["summary_text"]
+        summary_text = read_summary_text(cfg, thread_id)
+        assert "Opening note" in summary_text
+        assert "Headerless follow-up" in summary_text
         assert summary["prompt_version"] == 2
 
         # Stable rerun: same thread id and no summary model load.

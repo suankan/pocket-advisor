@@ -52,7 +52,7 @@ from modules.ocr import (
     pdf_recipes,
     request_interrupt,
 )
-from modules.embedding.chunks import sync_document_chunks, sync_payloads
+from modules.embedding.chunks import sync_document_chunks
 from modules.embedding.dispatch import shared_dispatcher
 from modules.pdf_transforms import (OCR_CHILD_JOBS, PdfTransformCache,
                                     TextProduct, TransformRequest,
@@ -88,15 +88,14 @@ class PdfTextStage(Stage):
 
     def _dispatch_document(self, document_id: int) -> None:
         """Readiness dispatch (inference-serving.md decision 5): the moment
-        a document's text product is published its leaf chunks are cut and
-        handed to the run-wide dispatcher — no waiting here. Best-effort:
-        any failure leaves pending gaps for `ingest embed` and never fails
-        this stage's publication."""
+        a document's text product is published its leaf chunks are cut,
+        fed into chunks_fts, and handed to the run-wide dispatcher — no
+        waiting here. Best-effort: any failure leaves pending gaps for
+        `ingest embed` and never fails this stage's publication."""
         if not self.config.embed_text:
             return
         try:
             sync_document_chunks(self.conn, self.config, document_id)
-            sync_payloads(self.conn, document_id=document_id)
             self.conn.commit()
             shared_dispatcher(self.ctx).submit_pending_leaves(
                 self.conn, document_id=document_id, at_readiness=True)

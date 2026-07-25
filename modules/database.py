@@ -1,4 +1,4 @@
-"""SQLite schema and connections — fresh Schema C, NO migration chain.
+"""SQLite schema and connections — fresh Schema D, NO migration chain.
 
 Ingestion design v2 (`docs/ingestion/ingestion-design-v2.md`) replaces the
 `item_kind`-conflated `items` table and the email-owned attachment cache
@@ -8,8 +8,15 @@ as a wipe + full re-ingest, so this module carries no legacy migrations.
 A database created by an earlier engine generation is detected and refused
 with a pointer to `wipe state` — never silently half-upgraded.
 
+Schema D applies the DB/filesystem storage split
+(`docs/storage/separate-db-and-fs-concerns.md`): the database holds links,
+indexes, statistics, and metadata only. Chunks are offset-only rows sliced
+from parent artifacts on demand; summary text lives on the filesystem with
+its content digest here; both FTS tables are contentless inverted indexes
+fed explicitly by producing code — no content columns, no sync triggers.
+
 Schema continuity: threads / chunks / chunks_fts and the transactions
-family keep their established names; `chunks`/`statements` now reference
+family keep their established names; `chunks`/`statements` reference
 `email_id`/`document_id` instead of `item_id`.
 """
 import sqlite3
@@ -157,32 +164,42 @@ CREATE TABLE IF NOT EXISTS threads (
     item_count             INTEGER DEFAULT 0
 );
 
+-- Summary text lives at `summaries/<thread_id>/summary.txt`;
+-- summary_sha256 is its content digest, so vector-filename binding,
+-- verification, and staleness never require reading the file.
 CREATE TABLE IF NOT EXISTS thread_summaries (
     thread_id       INTEGER PRIMARY KEY REFERENCES threads(id)
                     ON DELETE CASCADE,
-    summary_text    TEXT NOT NULL,
+    summary_sha256  TEXT NOT NULL,
     source_digest   TEXT NOT NULL,
-    generator_model TEXT NOT NULL,
     prompt_version  INTEGER NOT NULL,
     is_stale        INTEGER NOT NULL DEFAULT 0,
     generated_at    TEXT NOT NULL
 );
 
 -- source_type distinguishes email-body chunks from document-text chunks;
--- exactly one of email_id/document_id is set.
+-- exactly one of email_id/document_id is set. Offset-only rows: chunking
+-- is deterministic over (parent artifact, chunk_chars, chunk_overlap) and
+-- char_start/char_end are str (code-point) offsets into the chunked text
+-- (`modules/chunk_reader.py`); readers slice the parent artifact on demand.
 CREATE TABLE IF NOT EXISTS chunks (
     id               INTEGER PRIMARY KEY,
     source_type      TEXT NOT NULL,
     email_id         INTEGER REFERENCES emails(id),
     document_id      INTEGER REFERENCES documents(id),
     chunk_index      INTEGER NOT NULL,
-    text             TEXT NOT NULL,
-    char_start       INTEGER,
-    char_end         INTEGER,
+    char_start       INTEGER NOT NULL,
+    char_end         INTEGER NOT NULL,
     embedded_at      TEXT,
-    translit_shadow  TEXT,
-    payload_shadow   TEXT,
     CHECK ((email_id IS NOT NULL) + (document_id IS NOT NULL) = 1)
+);
+
+-- Which payload recipe last fed a contentless FTS index (relational
+-- metadata backing the drop-and-refeed convergence in
+-- `modules/embedding/chunks.py:sync_payloads`).
+CREATE TABLE IF NOT EXISTS fts_feed_state (
+    fts_table      TEXT PRIMARY KEY,
+    payload_recipe TEXT NOT NULL
 );
 
 -- R-04b structured transactions
@@ -341,62 +358,26 @@ CREATE INDEX IF NOT EXISTS idx_source_blob_source
     ON source_blob_index(source_id);
 """
 
-# chunks_fts is contentless-synced to chunks via triggers. `text` remains the
-# pure source quote; payload_shadow carries the envelope-enriched search
-# payload, while translit_shadow preserves the proper-noun fallback.
+# Both FTS tables are contentless inverted indexes: matching needs only
+# the index, display re-derives from artifacts. Producing code feeds them
+# explicitly (rowid + computed values, discarded after indexing) in the
+# same transaction as the owning row; there are no sync triggers.
+# `contentless_delete=1` (SQLite >= 3.43) lets ordinary DELETE statements
+# remove index entries. Repair is always drop + refeed from artifacts.
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     text,
     translit_shadow,
     payload_shadow,
-    content='chunks',
-    content_rowid='id'
+    content='',
+    contentless_delete=1
 );
-
-CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text, translit_shadow, payload_shadow)
-    VALUES (new.id, new.text, new.translit_shadow, new.payload_shadow);
-END;
-CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(
-        chunks_fts, rowid, text, translit_shadow, payload_shadow)
-    VALUES ('delete', old.id, old.text, old.translit_shadow,
-            old.payload_shadow);
-END;
-CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-    INSERT INTO chunks_fts(
-        chunks_fts, rowid, text, translit_shadow, payload_shadow)
-    VALUES ('delete', old.id, old.text, old.translit_shadow,
-            old.payload_shadow);
-    INSERT INTO chunks_fts(rowid, text, translit_shadow, payload_shadow)
-    VALUES (new.id, new.text, new.translit_shadow, new.payload_shadow);
-END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS thread_summaries_fts USING fts5(
     summary_text,
-    content='thread_summaries',
-    content_rowid='thread_id'
+    content='',
+    contentless_delete=1
 );
-
-CREATE TRIGGER IF NOT EXISTS thread_summaries_ai
-AFTER INSERT ON thread_summaries BEGIN
-    INSERT INTO thread_summaries_fts(rowid, summary_text)
-    VALUES (new.thread_id, new.summary_text);
-END;
-CREATE TRIGGER IF NOT EXISTS thread_summaries_ad
-AFTER DELETE ON thread_summaries BEGIN
-    INSERT INTO thread_summaries_fts(
-        thread_summaries_fts, rowid, summary_text)
-    VALUES ('delete', old.thread_id, old.summary_text);
-END;
-CREATE TRIGGER IF NOT EXISTS thread_summaries_au
-AFTER UPDATE ON thread_summaries BEGIN
-    INSERT INTO thread_summaries_fts(
-        thread_summaries_fts, rowid, summary_text)
-    VALUES ('delete', old.thread_id, old.summary_text);
-    INSERT INTO thread_summaries_fts(rowid, summary_text)
-    VALUES (new.thread_id, new.summary_text);
-END;
 """
 
 # Tables/columns that only an earlier pipeline generation created. Their
@@ -525,19 +506,31 @@ class Database:
         if "chunks" in tables:
             columns = {row["name"] for row in
                        conn.execute("PRAGMA table_info(chunks)")}
-            required = {"payload_shadow", "email_id", "document_id"}
+            # A stored chunk text column is the pre-storage-split
+            # generation (Schema C): bulk derived text lived in the DB.
+            if "text" in columns:
+                raise LegacyDatabaseError(
+                    self.path, self.workspace_id,
+                    "chunks carries a stored text column (pre"
+                    " DB/filesystem-split generation)")
+            required = {"email_id", "document_id", "char_start", "char_end"}
             missing = required - columns
             if missing:
                 raise LegacyDatabaseError(
                     self.path, self.workspace_id,
                     "chunks missing " + ", ".join(sorted(missing)))
-        if "chunks_fts" in tables:
+        if "thread_summaries" in tables:
             columns = {row["name"] for row in
-                       conn.execute("PRAGMA table_info(chunks_fts)")}
-            if "payload_shadow" not in columns:
+                       conn.execute("PRAGMA table_info(thread_summaries)")}
+            if "summary_text" in columns:
                 raise LegacyDatabaseError(
                     self.path, self.workspace_id,
-                    "chunks_fts missing payload_shadow")
+                    "thread_summaries carries stored summary text (pre"
+                    " DB/filesystem-split generation)")
+            if "summary_sha256" not in columns:
+                raise LegacyDatabaseError(
+                    self.path, self.workspace_id,
+                    "thread_summaries missing summary_sha256")
 
     def _require_workspace_binding(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(

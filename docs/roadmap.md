@@ -29,12 +29,6 @@ generated thread summary as content.
 Docs exist for these; none is implemented. Each stays a draft until picked
 up through the normal design → work-in-progress → changelog lifecycle.
 
-- **DB/filesystem storage split** — **picked up 2026-07-24**, active
-  context in `docs/work-in-progress.md`.
-  `docs/storage/separate-db-and-fs-concerns.md` (locked for
-  implementation): summaries to FS, chunks offset-only with on-demand
-  slicing, both FTS indexes contentless, shadows computed not stored;
-  migration is wipe + re-ingest only.
 - **RAG gateway** — `docs/generation/rag-gateway.md`: expose the engine as
   an OpenAI-compatible `/v1/chat/completions` service so standard chat UIs
   can query the corpus. Draft proposal; depends on (or subsumes) the local

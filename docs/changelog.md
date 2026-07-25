@@ -4,6 +4,54 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — DB/filesystem storage split shipped
+
+`docs/storage/separate-db-and-fs-concerns.md` implemented in full (locked
+2026-07-24, picked up the same day). SQLite is now strictly an index /
+statistics / linking engine; every piece of bulk derived text lives on the
+filesystem or isn't stored at all.
+
+- **Slicing reader** — `modules/chunk_reader.py` (`ChunkReader`) slices
+  chunk text on demand from the parent artifact (email body region or
+  extracted document text) given a chunk row + config; offsets are
+  code-point based. `modules/summary_reader.py` (`read_summary_text`)
+  reads the parallel summary file.
+- **Schema D** (`modules/database.py`) — dropped `chunks.text` and the
+  payload/translit shadow columns; dropped `thread_summaries.summary_text`
+  and `generator_model`, added `summary_sha256`; both FTS tables
+  (`chunks_fts`, `thread_summaries_fts`) are now contentless
+  (`content='', contentless_delete=1`) with no triggers; legacy-schema
+  detection refuses a database with a stored `chunks.text` or
+  `thread_summaries.summary_text` column and points at `wipe state`.
+  Added `fts_feed_state` to back a drop-and-refeed convergence pass in
+  place of migrations.
+- **Producers** — `modules/embedding/chunks.py` feeds `chunks_fts`
+  explicitly at insert time from a computed slice + shadows;
+  `sync_payloads` is a convergence pass keyed on `fts_feed_state` and
+  rowid/index count parity, not a per-chunk recompute.
+  `modules/pipeline/summaries.py` writes
+  `summaries/<thread_id>/summary.txt` via `write_verified`, stores
+  `summary_sha256`, and feeds `thread_summaries_fts` explicitly (including
+  the staleness-sweep deletion path). `thread_vector_filename`
+  (`modules/embedding/backends.py`) now keys on `summary_sha256` instead
+  of summary text.
+- **Consumers** — `modules/retrieval.py`, `modules/pipeline/embed.py`,
+  `modules/ingest_report.py`, `modules/maintenance.py` all read through
+  `ChunkReader`/`read_summary_text`; the `payload_shadow` coverage metric
+  is replaced by FTS rowid-count parity; `maintenance.py` gained
+  `_verify_summaries` (hash-verifies every current summary file) and
+  dropped the unsupported `'integrity-check'` command for both contentless
+  indexes.
+- **Migration is wipe + re-ingest only**, as designed — no in-place
+  backfill path exists or was needed.
+
+Verification: full native suite and `pocket-advisor test` green,
+`git diff --check` clean, and an operator-run `wipe state` + `ingest all`
++ `verify` + `accuracy run`/`compare` pass confirmed rank-identical search
+results and unchanged accuracy scores against the pre-change record on the
+test workspace (acceptance criteria 1–8, `separate-db-and-fs-concerns.md`).
+Roadmap item 3 bullet removed; design doc locked to **implemented**.
+
 ## 2026-07-23 — New design docs: Corpus API proposal, thread-summaries consolidation
 
 No code changes. Two documents added out of the architecture review:

@@ -18,6 +18,7 @@ from modules.database import Database  # noqa: E402
 from modules.embedding import (current_fingerprint, index_paths,
                                thread_index_paths,
                                thread_vector_filename)  # noqa: E402
+from modules.integrity import sha256_bytes  # noqa: E402
 from modules.ingest_report import (Finding, StageRun, build_report,
                                    build_snapshot, format_report,
                                    load_report, persist_report,
@@ -138,20 +139,32 @@ def populate(ctx: PipelineContext) -> None:
            VALUES (1, 1, 4, 'broken.pdf', 'application/pdf', 0,
                    '2026-07-18T00:00:00Z')""",
     )
+    summary_sha256 = sha256_bytes("generated navigation".encode("utf-8"))
     conn.execute(
         """INSERT INTO thread_summaries(
-             thread_id, summary_text, source_digest, generator_model,
+             thread_id, summary_sha256, source_digest,
              prompt_version, generated_at)
-           VALUES (1, 'generated navigation', 'digest', 'fixture', 1,
-                   '2026-07-18T00:00:00Z')""")
+           VALUES (1, ?, 'digest', 1, '2026-07-18T00:00:00Z')""",
+        (summary_sha256,))
+    conn.execute(
+        "INSERT INTO thread_summaries_fts(rowid, summary_text)"
+        " VALUES (1, 'generated navigation')")
     conn.executemany(
         """INSERT INTO chunks(
-             id, source_type, email_id, document_id, chunk_index, text,
+             id, source_type, email_id, document_id, chunk_index,
+             char_start, char_end)
+           VALUES (?, ?, ?, ?, 0, 0, 9)""",
+        ((1, "email_body", 1, None),
+         (2, "email_body", 2, None),
+         (3, "document_text", None, 3)),
+    )
+    conn.executemany(
+        """INSERT INTO chunks_fts(rowid, text, translit_shadow,
              payload_shadow)
-           VALUES (?, ?, ?, ?, 0, ?, ?)""",
-        ((1, "email_body", 1, None, "email one", "From: fixture\nemail one"),
-         (2, "email_body", 2, None, "email two", "From: fixture\nemail two"),
-         (3, "document_text", None, 3, "pdf content", "Document: x\npdf")),
+           VALUES (?, ?, '', ?)""",
+        ((1, "email one", "From: fixture\nemail one"),
+         (2, "email two", "From: fixture\nemail two"),
+         (3, "pdf content", "Document: x\npdf")),
     )
     conn.execute(
         """INSERT INTO accounts(
@@ -204,7 +217,8 @@ def build_indexes(ctx: PipelineContext) -> None:
     leaf.meta_json.write_text(json.dumps({
         **fingerprint, "count": 3, "built_at": "fixture"}),
         encoding="utf-8")
-    filename = thread_vector_filename(1, "generated navigation")
+    filename = thread_vector_filename(
+        1, sha256_bytes("generated navigation".encode("utf-8")))
     np.save(thread.vecs_dir / filename, np.ones(3, dtype=np.float32))
     np.save(thread.vectors_npy, np.ones((1, 3), dtype=np.float32))
     np.save(thread.vectors_ids_npy, np.asarray([1], dtype=np.int64))

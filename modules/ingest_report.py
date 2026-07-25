@@ -253,7 +253,7 @@ def _search_snapshot(
     conn = ctx.conn
     leaf_chunks = _scalar(conn, "SELECT count(*) FROM chunks")
     current_summaries = conn.execute(
-        "SELECT thread_id, summary_text FROM thread_summaries "
+        "SELECT thread_id, summary_sha256 FROM thread_summaries "
         "WHERE is_stale = 0 ORDER BY thread_id").fetchall()
     values: dict[str, Any] = {
         "leaf_chunks": leaf_chunks,
@@ -262,9 +262,6 @@ def _search_snapshot(
         "document_chunks": _scalar(
             conn,
             "SELECT count(*) FROM chunks WHERE source_type = 'document_text'"),
-        "payloads_current": _scalar(
-            conn, "SELECT count(*) FROM chunks "
-                  "WHERE payload_shadow IS NOT NULL AND payload_shadow != ''"),
         "leaf_fts": _scalar(conn, "SELECT count(*) FROM chunks_fts"),
         "summary_fts": _scalar(
             conn, "SELECT count(*) FROM thread_summaries_fts"),
@@ -278,8 +275,6 @@ def _search_snapshot(
         "index_issues": [],
     }
     issues: list[str] = []
-    if values["payloads_current"] != leaf_chunks:
-        issues.append("payload_count_mismatch")
     if values["leaf_fts"] != leaf_chunks:
         issues.append("leaf_fts_count_mismatch")
     if values["summary_fts"] != _scalar(
@@ -297,7 +292,7 @@ def _search_snapshot(
         int(row[0]) for row in conn.execute("SELECT id FROM chunks")}
     summary_ids = {int(row["thread_id"]) for row in current_summaries}
     summary_files = {
-        thread_vector_filename(int(row["thread_id"]), row["summary_text"])
+        thread_vector_filename(int(row["thread_id"]), row["summary_sha256"])
         for row in current_summaries}
     leaf_count, leaf_current, leaf_issues = _index_status(
         leaf_paths, leaf_ids, fingerprint)

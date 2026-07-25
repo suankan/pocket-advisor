@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,12 +138,11 @@ def _verify_sqlite(ctx: PipelineContext, report: VerificationReport) -> None:
             report,
             f"foreign key: table={row[0]} rowid={row[1]} parent={row[2]}")
 
-    for table in ("chunks_fts", "thread_summaries_fts"):
-        try:
-            ctx.conn.execute(
-                f"INSERT INTO {table}({table}) VALUES('integrity-check')")
-        except sqlite3.DatabaseError as exc:
-            _problem(report, f"{table} integrity: {exc}")
+    # Both FTS tables are contentless (content=''): fts5's
+    # 'integrity-check' special command requires a content table to
+    # cross-check against and is unavailable here. Rowid-count parity
+    # below is the substitute; a mismatch or corruption is repaired by
+    # drop-and-refeed from artifacts, never a rebuild-from-content.
     leaf_rows = int(ctx.conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
     leaf_fts = int(ctx.conn.execute(
         "SELECT count(*) FROM chunks_fts").fetchone()[0])
@@ -506,9 +504,9 @@ def _verify_vectors(ctx: PipelineContext, report: VerificationReport) -> None:
     fingerprint = current_fingerprint(ctx.config)
     chunks = {int(row[0]) for row in ctx.conn.execute("SELECT id FROM chunks")}
     summaries = {
-        int(row["thread_id"]): str(row["summary_text"])
+        int(row["thread_id"]): str(row["summary_sha256"])
         for row in ctx.conn.execute(
-            "SELECT thread_id, summary_text FROM thread_summaries "
+            "SELECT thread_id, summary_sha256 FROM thread_summaries "
             "WHERE is_stale=0")
     }
     _verify_namespace(
@@ -553,16 +551,54 @@ def _verify_transactions(ctx: PipelineContext, report: VerificationReport) -> No
         _problem(report, "transactions: manifest output counts mismatch")
 
 
+def _verify_summaries(ctx: PipelineContext, report: VerificationReport) -> None:
+    """Hash-verify every current summary file against its stored digest.
+    Both FTS tables are contentless, so this — not a content-table
+    integrity-check — is what confirms summary text on disk still matches
+    the row that indexed it. A missing or corrupt file is retryable
+    derived state: the next summaries stage run regenerates it."""
+    checked = 0
+    for row in ctx.conn.execute(
+            "SELECT thread_id, summary_sha256 FROM thread_summaries"
+            " WHERE is_stale = 0"):
+        path = ctx.config.summary_path(int(row["thread_id"]))
+        if not path.is_file():
+            _problem(
+                report,
+                f"thread {row['thread_id']}: missing summary artifact"
+                f" {path}")
+            continue
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            _problem(
+                report,
+                f"thread {row['thread_id']}: cannot hash {path}: {exc}")
+            continue
+        if actual != row["summary_sha256"]:
+            _problem(
+                report,
+                f"thread {row['thread_id']}: summary hash mismatch {path}")
+            continue
+        checked += 1
+    report.checks["summaries_verified"] = checked
+
+
 def verify_workspace(ctx: PipelineContext) -> VerificationReport:
     """Run deep, read-only workspace integrity checks.
 
-    FTS ``integrity-check`` uses SQLite's special maintenance command but does
-    not change indexed content. Content roots are only read and hashed.
+    Both chunks_fts and thread_summaries_fts are contentless (content=''):
+    fts5's ``integrity-check`` special command needs a content table to
+    cross-check against and is unavailable here — rowid-count parity
+    (`_verify_sqlite`) plus summary-file hash verification
+    (`_verify_summaries`) substitute. Content roots are only read and
+    hashed.
     """
     report = VerificationReport(workspace_id=ctx.workspace.id)
     _verify_sqlite(ctx, report)
     _verify_originals(ctx, report)
     _verify_artifacts(ctx, report)
+    _verify_summaries(ctx, report)
     _verify_vectors(ctx, report)
     _verify_transactions(ctx, report)
     return report

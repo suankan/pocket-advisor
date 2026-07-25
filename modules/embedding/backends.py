@@ -107,9 +107,12 @@ def thread_index_paths(config: Config, fp: dict) -> IndexPaths:
         vecs_dir=d / "vecs")
 
 
-def thread_vector_filename(thread_id: int, summary_text: str) -> str:
-    digest = hashlib.sha256(summary_text.encode("utf-8")).hexdigest()[:12]
-    return f"{thread_id}__{digest}.npy"
+def thread_vector_filename(thread_id: int, summary_sha256: str) -> str:
+    """Binds a thread vector to its summary content. `summary_sha256` is
+    the stored digest of the summary file's bytes — identical to hashing
+    the summary text directly, so filenames survived the storage split
+    without re-embedding anything."""
+    return f"{thread_id}__{summary_sha256[:12]}.npy"
 
 
 # -- vector validation and atomic publication --------------------------------

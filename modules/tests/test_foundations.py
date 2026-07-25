@@ -212,8 +212,9 @@ def test_database(tmp: Path) -> None:
     except sqlite3.IntegrityError:
         pass
 
-    # Attached-email lineage belongs to an attachment occurrence; FTS triggers
-    # still fire for email chunks.
+    # Attached-email lineage belongs to an attachment occurrence. Chunks
+    # are offset-only rows; chunks_fts is contentless with no sync
+    # triggers, so producing code feeds it explicitly at insert time.
     conn.execute("INSERT INTO emails (sha256, message_id, ingested_at)"
                  " VALUES (?, '<m1>', 't')", ("f1" * 32,))
     conn.execute("INSERT INTO emails (sha256, message_id, ingested_at)"
@@ -221,10 +222,14 @@ def test_database(tmp: Path) -> None:
     conn.execute(
         "INSERT INTO attachments(email_id, child_email_id, filename, ordinal,"
         " ingested_at) VALUES (1, 2, 'forwarded.eml', 0, 't')")
-    conn.execute("INSERT INTO chunks (source_type, email_id, chunk_index,"
-                 " text, payload_shadow) VALUES"
-                 " ('email_body', 1, 0, 'hello content',"
-                 "  'Subject: envelopeonlyterm\\n\\nhello content')")
+    cur = conn.execute(
+        "INSERT INTO chunks (source_type, email_id, chunk_index,"
+        " char_start, char_end) VALUES ('email_body', 1, 0, 0, 13)")
+    conn.execute(
+        "INSERT INTO chunks_fts(rowid, text, translit_shadow,"
+        " payload_shadow) VALUES (?, ?, ?, ?)",
+        (cur.lastrowid, "hello content", "",
+         "Subject: envelopeonlyterm\n\nhello content"))
     hit = conn.execute("SELECT rowid FROM chunks_fts WHERE chunks_fts"
                        " MATCH 'content'").fetchone()
     assert hit is not None
@@ -232,6 +237,12 @@ def test_database(tmp: Path) -> None:
         "SELECT rowid FROM chunks_fts WHERE chunks_fts"
         " MATCH 'envelopeonlyterm'").fetchone()
     assert envelope_hit is not None
+    # Contentless: matching works but no column value is retrievable.
+    assert conn.execute(
+        "SELECT text FROM chunks_fts WHERE rowid=?",
+        (cur.lastrowid,)).fetchone()[0] is None
+    conn.execute("DELETE FROM chunks_fts WHERE rowid=?", (cur.lastrowid,))
+    conn.execute("DELETE FROM chunks WHERE id=?", (cur.lastrowid,))
     conn.close()
 
     # A database is permanently bound to the selected workspace.
@@ -322,6 +333,59 @@ def test_legacy_database_detection(tmp: Path) -> None:
     except LegacyDatabaseError as exc:
         assert "emails missing" in str(exc)
         assert "sha256" in str(exc)
+
+    # Tier 3b: the immediately-prior generation (pre storage-split, Schema
+    # C) reused THIS schema's own `chunks`/`thread_summaries` table names
+    # with stored bulk text columns — refused by column-shape detection,
+    # same as tier 3.
+    pre_split = tmp / "state" / "pre-storage-split.db"
+    raw = sqlite3.connect(pre_split)
+    raw.execute(
+        "CREATE TABLE workspace_metadata (singleton INTEGER PRIMARY KEY"
+        " CHECK (singleton = 1), workspace_id TEXT NOT NULL)")
+    raw.execute(
+        "INSERT INTO workspace_metadata (singleton, workspace_id)"
+        " VALUES (1, 'w')")
+    raw.execute(
+        "CREATE TABLE emails (id INTEGER PRIMARY KEY, sha256 TEXT)")
+    raw.execute(
+        "CREATE TABLE documents (id INTEGER PRIMARY KEY, sha256 TEXT)")
+    raw.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, email_id INTEGER,"
+        " document_id INTEGER, text TEXT)")
+    raw.commit()
+    raw.close()
+    try:
+        Database(pre_split, "w").open()
+        raise AssertionError("stored chunks.text must be refused")
+    except LegacyDatabaseError as exc:
+        assert "chunks carries a stored text column" in str(exc)
+
+    pre_split_summaries = tmp / "state" / "pre-storage-split-summaries.db"
+    raw = sqlite3.connect(pre_split_summaries)
+    raw.execute(
+        "CREATE TABLE workspace_metadata (singleton INTEGER PRIMARY KEY"
+        " CHECK (singleton = 1), workspace_id TEXT NOT NULL)")
+    raw.execute(
+        "INSERT INTO workspace_metadata (singleton, workspace_id)"
+        " VALUES (1, 'w')")
+    raw.execute(
+        "CREATE TABLE emails (id INTEGER PRIMARY KEY, sha256 TEXT)")
+    raw.execute(
+        "CREATE TABLE documents (id INTEGER PRIMARY KEY, sha256 TEXT)")
+    raw.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, email_id INTEGER,"
+        " document_id INTEGER, char_start INTEGER, char_end INTEGER)")
+    raw.execute(
+        "CREATE TABLE thread_summaries (thread_id INTEGER PRIMARY KEY,"
+        " summary_text TEXT)")
+    raw.commit()
+    raw.close()
+    try:
+        Database(pre_split_summaries, "w").open()
+        raise AssertionError("stored summary_text must be refused")
+    except LegacyDatabaseError as exc:
+        assert "thread_summaries carries stored summary text" in str(exc)
 
     # Tier 4: a database created by the current Database.open() (full
     # valid schema) succeeds, and reopening it with the same

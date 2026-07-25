@@ -16,11 +16,13 @@ from typing import Any
 
 import numpy as np
 
+from modules.chunk_reader import ChunkReader
 from modules.embedding import (chunking_fields_changed, current_fingerprint,
                                get_backend, index_paths, meta_fingerprint,
                                thread_index_paths)
 from modules.inference import InferenceClient
 from modules.pipeline.base import PipelineContext
+from modules.summary_reader import read_summary_text
 
 
 def _make_reranker(config) -> Any | None:
@@ -297,20 +299,25 @@ def _rerank(ctx: PipelineContext, question: str,
             keys: list[str], reranker: Any | None) -> list[str]:
     if not keys or reranker is None:
         return keys
+    reader = ChunkReader(ctx.conn, ctx.config)
     text_by_key: dict[str, str] = {}
     for key in keys:
         kind, raw_id = key.split(":", 1)
         if kind == "c":
             row = ctx.conn.execute(
-                "SELECT text FROM chunks WHERE id=?", (int(raw_id),)
-            ).fetchone()
+                """SELECT source_type, email_id, document_id,
+                          char_start, char_end
+                     FROM chunks WHERE id=?""", (int(raw_id),)).fetchone()
+            text = reader.chunk_text(row) if row else None
         else:
-            row = ctx.conn.execute(
-                "SELECT summary_text AS text FROM thread_summaries"
-                " WHERE thread_id=? AND is_stale=0", (int(raw_id),)
-            ).fetchone()
-        if row:
-            text_by_key[key] = " ".join(row["text"].split())[
+            has_summary = ctx.conn.execute(
+                "SELECT 1 FROM thread_summaries"
+                " WHERE thread_id=? AND is_stale=0",
+                (int(raw_id),)).fetchone()
+            text = read_summary_text(ctx.config, int(raw_id)) \
+                if has_summary else None
+        if text is not None:
+            text_by_key[key] = " ".join(text.split())[
                 :ctx.config.rerank_text_chars]
     ranked = reranker.rerank(question, text_by_key)
     return ranked + [key for key in keys if key not in ranked]
@@ -368,7 +375,7 @@ def _representative_occurrence(
     return None, None
 
 
-def _email_chunk_match(conn, chunk_row) -> dict:
+def _email_chunk_match(conn, chunk_row, snippet: str) -> dict:
     email_id = int(chunk_row["email_id"])
     row = conn.execute(
         """SELECT thread_id, message_id, subject, date_utc, from_name,
@@ -391,11 +398,11 @@ def _email_chunk_match(conn, chunk_row) -> dict:
         "attachment_name": None,
         "collection": collection_row["collection_id"]
         if collection_row else None,
-        "snippet": chunk_row["text"][:600],
+        "snippet": snippet[:600],
     }
 
 
-def _document_chunk_match(conn, chunk_row) -> dict:
+def _document_chunk_match(conn, chunk_row, snippet: str) -> dict:
     document_id = int(chunk_row["document_id"])
     doc = conn.execute(
         "SELECT doc_date FROM documents WHERE id = ?",
@@ -415,20 +422,22 @@ def _document_chunk_match(conn, chunk_row) -> dict:
         "from": None,
         "attachment_name": filename,
         "collection": collection,
-        "snippet": chunk_row["text"][:600],
+        "snippet": snippet[:600],
     }
 
 
-def _chunk_match(conn, chunk_id: int) -> dict | None:
+def _chunk_match(conn, chunk_id: int, reader: ChunkReader) -> dict | None:
     row = conn.execute(
-        """SELECT chunks.id AS chunk_id, chunks.text, chunks.source_type,
-                  chunks.email_id, chunks.document_id
+        """SELECT chunks.id AS chunk_id, chunks.source_type,
+                  chunks.email_id, chunks.document_id,
+                  chunks.char_start, chunks.char_end
              FROM chunks WHERE chunks.id=?""", (chunk_id,)).fetchone()
     if not row:
         return None
+    snippet = reader.chunk_text(row)
     if row["email_id"] is not None:
-        return _email_chunk_match(conn, row)
-    return _document_chunk_match(conn, row)
+        return _email_chunk_match(conn, row, snippet)
+    return _document_chunk_match(conn, row, snippet)
 
 
 def _message_rows(conn, thread_id: int, visible_emails: set[int]):
@@ -520,10 +529,12 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
                    remaining: int) -> tuple[dict, int]:
     thread = ctx.conn.execute(
         "SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
-    summary = ctx.conn.execute(
-        "SELECT summary_text, generator_model, prompt_version"
-        " FROM thread_summaries WHERE thread_id=? AND is_stale=0",
+    summary_row = ctx.conn.execute(
+        "SELECT prompt_version FROM thread_summaries"
+        " WHERE thread_id=? AND is_stale=0",
         (thread_id,)).fetchone() if include_summary else None
+    summary_text = read_summary_text(ctx.config, thread_id) \
+        if summary_row is not None else None
     matched_emails = {int(match["email_id"]) for match in matches}
     messages, remaining = _expand_messages(
         ctx, thread_id, matched_emails, visible_emails, remaining,
@@ -537,10 +548,9 @@ def _thread_packet(ctx: PipelineContext, thread_id: int,
         "last_date": thread["last_date"],
         "item_count": thread["item_count"],
         "summary_hit": summary_hit,
-        "generated_summary": summary["summary_text"] if summary else None,
-        "summary_model": summary["generator_model"] if summary else None,
+        "generated_summary": summary_text,
         "summary_prompt_version":
-            summary["prompt_version"] if summary else None,
+            summary_row["prompt_version"] if summary_row else None,
         "message_id": matches[0]["message_id"] if matches else None,
         "matches": matches,
         "messages": messages,
@@ -700,13 +710,14 @@ def run_search(ctx: PipelineContext, question: str,
     selected_set: set[tuple[str, int]] = set()
     matched_emails: set[int] = set()
     matched_documents: set[int] = set()
+    chunk_reader = ChunkReader(ctx.conn, ctx.config)
     for key in keys:
         kind, raw_id = key.split(":", 1)
         if kind == "t":
             entry = ("thread", int(raw_id))
             summary_hits.add(entry[1])
         else:
-            match = _chunk_match(ctx.conn, int(raw_id))
+            match = _chunk_match(ctx.conn, int(raw_id), chunk_reader)
             if not match:
                 continue
             if match["email_id"] is not None:

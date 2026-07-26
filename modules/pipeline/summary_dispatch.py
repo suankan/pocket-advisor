@@ -12,7 +12,8 @@ Design (``docs/ingestion/summary-generation-concurrency.md``):
   per-task ``_GenerationMetrics`` and a fresh ``SummariesTimings``; it never
   touches the database connection, ``Progress``, or ``ReviewLog``.
 * Settlement — the DB upsert, commit, summary-embed dispatch, telemetry
-  merge, and progress bar — runs on the main thread after ``drain()``.
+  merge, and progress bar — runs on the main thread as ``drain()`` observes
+  each completion.
 * The pool, availability latch, and drain/abandon/close lifecycle come from
   the shared ``BoundedInferenceDispatcher`` (``modules/dispatch.py``), whose
   registry lets a process interrupt abandon in-flight generation through the

@@ -558,6 +558,15 @@ class WorkerPoolProgress:
             self._status[worker_id] = note or "working"
             self._emit(force=True)
 
+    def add_total(self, inc: int = 1) -> None:
+        """Grow a streaming producer's honest denominator."""
+        if inc < 0:
+            raise ValueError("total increment must be non-negative")
+        with self._lock:
+            self.total += inc
+            if self._active:
+                self._emit(force=True)
+
     def finish(self, worker_id: int, note: str = "") -> None:
         now = time.monotonic()
         with self._lock:

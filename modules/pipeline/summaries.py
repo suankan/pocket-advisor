@@ -113,7 +113,12 @@ class ThreadSummaryStage(Stage):
         dispatcher = EmailThreadsSummaryDispatcher(self.ctx, generator)
         for job in stale:
             dispatcher.submit(job)
-        done, failed, skipped, outcomes = dispatcher.drain(progress)
+        done, failed, skipped, _outcomes = dispatcher.drain(
+            progress,
+            on_complete=lambda outcome: self._settle(
+                outcome, embed_dispatcher, stats, perf),
+            idle_callback=self.ctx.idle_callback,
+        )
         progress.done()
         dispatcher.close()
 
@@ -124,9 +129,6 @@ class ThreadSummaryStage(Stage):
                 " oMLX",
                 skipped_threads=skipped,
                 endpoint=self.config.summarisation_endpoint)
-
-        for outcome in outcomes:
-            self._settle(outcome, embed_dispatcher, stats, perf)
 
         self.conn.commit()
         stats.inc("generated", done)

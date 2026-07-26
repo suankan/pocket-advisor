@@ -42,6 +42,18 @@ class _FakeDispatcher(BoundedInferenceDispatcher):
         return _Outcome(note, error, skipped)
 
 
+class _TimedDispatcher(BoundedInferenceDispatcher):
+    thread_name_prefix = "timed-dispatch"
+
+    def submit(self, note: str, delay: float):
+        self._submit_task(self._task, note, delay)
+
+    @staticmethod
+    def _task(note: str, delay: float):
+        time.sleep(delay)
+        return _Outcome(note)
+
+
 def _await(predicate, what, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -128,6 +140,24 @@ def test_drain_is_a_barrier_not_a_reset():
     assert d.pending_count == 0
     d.close()
     print("  drain is a barrier: instance reusable, counters cumulative")
+
+
+def test_completion_callback_is_completion_order():
+    """Coordinator settlement must not wait behind submission order."""
+    d = _TimedDispatcher(max_in_flight=2)
+    d.submit("slow", 0.12)
+    d.submit("fast", 0.01)
+    settled: list[str] = []
+    idle_ticks: list[int] = []
+    _, _, _, outcomes = d.drain(
+        on_complete=lambda outcome: settled.append(outcome.note),
+        idle_callback=lambda: idle_ticks.append(1),
+    )
+    assert settled == ["fast", "slow"], settled
+    assert [outcome.note for outcome in outcomes] == ["slow", "fast"]
+    assert idle_ticks
+    d.close()
+    print("  completion callbacks settle fast producers immediately")
 
 
 def test_abandon_drops_queued_work():
@@ -219,6 +249,7 @@ def main():
     test_outcome_classification()
     test_escaped_exception_still_settles()
     test_drain_is_a_barrier_not_a_reset()
+    test_completion_callback_is_completion_order()
     test_abandon_drops_queued_work()
     test_cancel_all_reaches_every_live_dispatcher()
     test_abandoned_inflight_does_not_hold_interpreter()

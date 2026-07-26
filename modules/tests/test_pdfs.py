@@ -33,7 +33,8 @@ from modules.pdf_transforms import TransformResult  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
-from modules.pipeline.pdfs import PdfTextStage  # noqa: E402
+from modules.pipeline.pdfs import (PdfTextStage,  # noqa: E402
+                                   StreamingPdfProducer)
 from modules.review import ReviewLog, now_iso  # noqa: E402
 from modules.telemetry import PerformanceTelemetry  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
@@ -233,13 +234,20 @@ def check_completion_driven_dispatch() -> None:
             with patch.object(pdfs_mod, "run_transform",
                               side_effect=fake_transform), \
                  patch.object(
-                     stage, "_worker_topology",
-                     side_effect=lambda count: (min(2, count), 2)), \
-                 patch.object(
                      pdfs_mod, "shared_dispatcher",
                      return_value=RecordingDispatcher()):
                 stats = StageStats()
-                stage._ocr_pending(stats)
+                producer = StreamingPdfProducer(stage, stats)
+                docs = stage._pdf_documents()
+                assert [doc.document_id for doc in docs] == [
+                    document_ids["slow"], document_ids["fast"]]
+                producer.offer(docs[0])
+                assert slow_started.wait(timeout=1.0)
+                # Input grows after workers have already started.
+                producer.offer(docs[1])
+                producer.poll(block=True)
+                assert fast_dispatched.is_set()
+                producer.close()
             assert fast_dispatched.is_set()
             assert slow_finished.is_set()
             assert {item[0] for item in dispatch_observations} == \

@@ -167,17 +167,50 @@ class EmailStage(Stage):
             progress.step(note=cand.filename)
             self._process_candidate(cand, stats)
         progress.done()
-        compaction = compact_authored_bodies(self.conn,
-                                             self.config.project_root)
-        for key, value in compaction.stats.items():
-            stats.inc(key, value)
-        self._write_readable_messages(compaction.authored_bodies)
-        self.conn.commit()
-        if self.config.embed_text:
-            self._dispatch_embeddings(stats)
+        self.publish_authored_bodies(stats, final=True)
         return stats
 
-    def _dispatch_embeddings(self, stats: StageStats) -> None:
+    def publish_authored_bodies(
+            self, stats: StageStats, *, final: bool) -> set[int]:
+        """Publish dependency-ready email text.
+
+        Parentless messages are stable immediately. Replies wait for the
+        email-input close barrier so Message-ID ambiguity and parent arrival
+        cannot make chunk identity depend on discovery order.
+        """
+        email_ids: set[int] | None = None
+        if not final:
+            email_ids = {
+                int(row["id"]) for row in self.conn.execute(
+                    """SELECT emails.id FROM emails
+                        WHERE emails.in_reply_to IS NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM chunks
+                             WHERE chunks.email_id = emails.id
+                               AND chunks.source_type = 'email_body')
+                        ORDER BY emails.id""").fetchall()
+            }
+            if not email_ids:
+                return set()
+        compaction = compact_authored_bodies(
+            self.conn, self.config.project_root, email_ids=email_ids)
+        if final:
+            for key, value in compaction.stats.items():
+                stats.inc(key, value)
+        self._write_readable_messages(
+            compaction.authored_bodies, partial=not final)
+        self.conn.commit()
+        published_ids = set(compaction.authored_bodies)
+        if self.config.embed_text:
+            if final:
+                self._dispatch_embeddings(stats)
+            else:
+                self._dispatch_embeddings(stats, published_ids)
+        return published_ids
+
+    def _dispatch_embeddings(
+            self, stats: StageStats,
+            email_ids: set[int] | None = None) -> None:
         """Readiness dispatch (inference-serving.md decision 5): authored
         bodies are final once compaction has run, so their leaf chunks are
         cut, fed into chunks_fts, and handed to the run-wide dispatcher
@@ -185,14 +218,16 @@ class EmailStage(Stage):
         stage (or end-of-run) drains, and an unreachable endpoint just
         leaves entities pending for `ingest embed`."""
         stats.inc("chunks_created",
-                  sync_email_chunks(self.conn, self.config))
+                  sync_email_chunks(self.conn, self.config, email_ids))
         self.conn.commit()
         stats.inc("embeds_dispatched", shared_dispatcher(
             self.ctx).submit_pending_leaves(
-                self.conn, source_type="email_body", at_readiness=True))
+                self.conn, source_type="email_body", email_ids=email_ids,
+                at_readiness=True))
 
-    def _write_readable_messages(self,
-                                 authored_bodies: dict[int, str]) -> None:
+    def _write_readable_messages(
+            self, authored_bodies: dict[int, str], *,
+            partial: bool = False) -> None:
         """Render headers plus the final Stage 2b authored body.
 
         This runs after compaction. The authored derivation persists only as
@@ -208,6 +243,10 @@ class EmailStage(Stage):
         for row in rows:
             authored = authored_bodies.get(int(row["id"]))
             if authored is None:
+                # Streaming publication intentionally supplies only the
+                # dependency-ready subset. The final barrier supplies all.
+                if partial:
+                    continue
                 raise SystemExit(
                     f"authored body derivation missing for email {row['id']}")
             message_path = root / row["body_text_path"]

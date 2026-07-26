@@ -252,7 +252,10 @@ def find_quote_start(child_full: str,
 
 
 def compact_authored_bodies(conn: sqlite3.Connection,
-                            project_root: Path) -> CompactionResult:
+                            project_root: Path,
+                            *,
+                            email_ids: set[int] | None = None,
+                            ) -> CompactionResult:
     """Sub-step 2b: derive every authored body from its full body.
 
     The full body is written by sub-step 2a and is REQUIRED — in this
@@ -289,6 +292,9 @@ def compact_authored_bodies(conn: sqlite3.Connection,
     planned_email_ids: list[int] = []
     authored_bodies: dict[int, str] = {}
     for row in rows:
+        email_id = int(row["id"])
+        if email_ids is not None and email_id not in email_ids:
+            continue
         full = full_texts[row["id"]]
         parent = by_mid.get(row["in_reply_to"])
         start, method = (None, None)
@@ -299,7 +305,7 @@ def compact_authored_bodies(conn: sqlite3.Connection,
 
         should_compact = parent is not None and start is not None
         target = full[:start].rstrip() if should_compact else full
-        authored_bodies[int(row["id"])] = target
+        authored_bodies[email_id] = target
         authored_path = project_root / row["body_text_path"]
         current = None
         if authored_path.is_file():

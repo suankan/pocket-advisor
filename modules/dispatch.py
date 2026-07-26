@@ -22,7 +22,7 @@ shared implementation, not a shared queue.
 import threading
 import weakref
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any, Protocol
@@ -274,7 +274,9 @@ class BoundedInferenceDispatcher:
 
     # -- draining ----------------------------------------------------------
 
-    def drain(self, progress: Any = None
+    def drain(self, progress: Any = None, *,
+              on_complete: Callable[[DispatchResult], None] | None = None,
+              idle_callback: Callable[[], None] | None = None,
               ) -> tuple[int, int, int, list[DispatchResult]]:
         """Wait for every in-flight task. Returns
         (done, failed, skipped, outcomes) in submission order.
@@ -285,24 +287,40 @@ class BoundedInferenceDispatcher:
         """
         futures, self._futures = self._futures, []
         done = failed = skipped = 0
-        outcomes: list[DispatchResult] = []
+        indexed = {future: index for index, future in enumerate(futures)}
+        ordered: list[DispatchResult | None] = [None] * len(futures)
+        pending = set(futures)
         try:
-            for future in futures:
-                outcome = future.result()
-                outcomes.append(outcome)
-                if progress is not None:
-                    progress.step(note=outcome.note)
-                if outcome.skipped:
-                    skipped += 1
-                elif outcome.error is not None:
-                    failed += 1
-                else:
-                    done += 1
+            while pending:
+                completed = {future for future in pending if future.done()}
+                if not completed:
+                    if idle_callback is not None:
+                        idle_callback()
+                    completed, _ = wait(
+                        pending, timeout=0.05,
+                        return_when=FIRST_COMPLETED)
+                    if not completed:
+                        continue
+                for future in sorted(completed, key=indexed.__getitem__):
+                    pending.remove(future)
+                    outcome = future.result()
+                    ordered[indexed[future]] = outcome
+                    if progress is not None:
+                        progress.step(note=outcome.note)
+                    if on_complete is not None:
+                        on_complete(outcome)
+                    if outcome.skipped:
+                        skipped += 1
+                    elif outcome.error is not None:
+                        failed += 1
+                    else:
+                        done += 1
         except BaseException:
             if self._pool is not None:
                 self._pool.shutdown(wait=False, cancel_futures=True)
                 self._pool = None
             raise
+        outcomes = [item for item in ordered if item is not None]
         return done, failed, skipped, outcomes
 
     def abandon(self) -> None:

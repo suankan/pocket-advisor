@@ -8,6 +8,7 @@ sequencing lives in cli.py alone.
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 from modules.config import Config
@@ -35,6 +36,9 @@ class PipelineContext:
     # submit and move on, never blocking the pipeline; the embed stage
     # (or end-of-run) drains it (inference-serving.md decision 5).
     embed_dispatcher: Any = None
+    # Streaming `ingest all` services other producer completions while a
+    # bounded inference dispatcher is waiting. Named-stage runs leave it null.
+    idle_callback: Callable[[], None] | None = None
     # Convenience alias for the process-scoped logging facade, which the
     # CLI configures before any stage runs. Code without a ctx reaches the
     # same object through modules.logs.get_log().

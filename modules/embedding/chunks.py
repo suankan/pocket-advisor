@@ -87,7 +87,8 @@ def _mark_feed_recipe(conn) -> None:
         (PAYLOAD_RECIPE,))
 
 
-def sync_email_chunks(conn, config: Config) -> int:
+def sync_email_chunks(conn, config: Config,
+                      email_ids: set[int] | None = None) -> int:
     """Create chunk rows for any authored email body that has none yet,
     feeding chunks_fts in the same transaction. Chunks are immutable once
     created (source docs never change; changed source = integrity alarm
@@ -95,13 +96,22 @@ def sync_email_chunks(conn, config: Config) -> int:
     created = 0
     root = config.project_root
     chunk_args = (config.chunk_chars, config.chunk_overlap)
-    emails = conn.execute(
+    sql = (
         """SELECT id, body_text_path, date_utc, date_raw, from_name,
                   from_addr, to_addrs, subject
              FROM emails
            WHERE body_text_path IS NOT NULL AND NOT EXISTS
              (SELECT 1 FROM chunks c WHERE c.email_id = emails.id
-              AND c.source_type = 'email_body')""").fetchall()
+              AND c.source_type = 'email_body')""")
+    params: tuple[int, ...] = ()
+    if email_ids is not None:
+        if not email_ids:
+            return 0
+        marks = ",".join("?" for _ in email_ids)
+        sql += f" AND emails.id IN ({marks})"
+        params = tuple(sorted(email_ids))
+    sql += " ORDER BY emails.id"
+    emails = conn.execute(sql, params).fetchall()
     for row in emails:
         path = root / row["body_text_path"]
         text = message_body_text(path.read_bytes(), source=path)

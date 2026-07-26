@@ -292,7 +292,7 @@ def _run_ingest(
         utc_now: Callable[[], datetime],
         dashboard: Any,
 ) -> int:
-    """Execute one named stage or the complete ordered pipeline."""
+    """Execute one named stage or the concurrent full-ingest pipeline."""
     pipeline_started = clock()
     started_at = utc_now().isoformat()
     try:
@@ -343,38 +343,25 @@ def _run_ingest(
         from modules.telemetry import HOT_STAGE_NAMES
 
         stages: list[StageRun] = []
+        stage_started_at: dict[str, float] = {}
         start_log_id = int(ctx.conn.execute(
             "SELECT coalesce(max(id), 0) FROM ingestion_log").fetchone()[0])
 
-        def execute(name: str) -> None:
-            stage_started = clock()
+        def begin(name: str) -> None:
+            if name in stage_started_at:
+                return
+            stage_started_at[name] = clock()
             dashboard.stage_started(name)
             if name in HOT_STAGE_NAMES:
                 ctx.telemetry.mark_entered(name)
-            try:
-                stats = _execute_stage(ctx, name)
-            except BaseException as exc:
-                _cancel_runtime_work()
-                duration = round(clock() - stage_started, 6)
-                stages.append(StageRun(
-                    name=name,
-                    outcome="failed",
-                    duration_seconds=duration,
-                    stats={},
-                    reason=_stage_failure_reason(exc),
-                ))
-                dashboard.stage_finished(
-                    name,
-                    outcome="failed",
-                    duration=duration,
-                    result=_stage_failure_reason(exc),
-                )
-                raise
+
+        def complete(name: str, stats: StageStats) -> None:
             if name in HOT_STAGE_NAMES:
                 # Seals partial as measured; a stage-recorded deliberate
                 # not_applicable gate is preserved.
                 ctx.telemetry.mark_measured(name)
-            duration = round(clock() - stage_started, 6)
+            duration = round(
+                clock() - stage_started_at.get(name, pipeline_started), 6)
             stages.append(StageRun(
                 name=name,
                 outcome="completed",
@@ -389,6 +376,9 @@ def _run_ingest(
             )
 
         def skip(name: str, reason: str) -> None:
+            get_log().notice(
+                f"{name}: skipped ({reason})",
+                stage=name, reason=reason)
             if name in HOT_STAGE_NAMES:
                 ctx.telemetry.mark_not_applicable(name)
             stages.append(StageRun(
@@ -405,34 +395,51 @@ def _run_ingest(
                 result=reason,
             )
 
-        # summaries always runs: its staleness maintenance must see every
-        # ingest even when generation is disabled (the stage gates the
-        # generative pass on ingestion.summarize_threads itself).
+        # Full ingestion is a streaming DAG. Named stages retain their
+        # ordered-prefix execution above.
         try:
-            for name in (
-                    "discover", "emails", "pdfs", "thread", "summaries"):
-                execute(name)
-            if ctx.config.embed_text:
-                execute("embed")
-            else:
-                reason = "ingestion.embed_text=false"
-                get_log().notice(f"embed: skipped ({reason})",
-                                 stage="embed", reason=reason)
-                skip("embed", reason)
-            has_bank_collections = any(
-                collection.is_bank_transactions
-                for collection in ctx.workspace.collections)
-            from modules.pipeline.transactions import has_transaction_state
-            if has_bank_collections or has_transaction_state(ctx):
-                execute("transactions")
-            else:
-                reason = "no mounted bank-transactions collections"
-                get_log().notice(
-                    f"transactions: skipped ({reason})",
-                    stage="transactions", reason=reason)
-                skip("transactions", reason)
+            from modules.pipeline.concurrent import ConcurrentIngest
+            ConcurrentIngest(
+                ctx,
+                execute_stage=lambda name: _execute_stage(
+                    ctx, name,
+                    force_transactions=(
+                        force_transactions and name == "transactions")),
+                stage_started=begin,
+                stage_completed=complete,
+                stage_skipped=skip,
+            ).run()
         except BaseException as pipeline_exc:
-            failed_stage = stages[-1].name
+            from modules.pipeline.concurrent import ConcurrentPipelineFailure
+            if isinstance(pipeline_exc, ConcurrentPipelineFailure):
+                failed_stage = pipeline_exc.stage
+                failure_exc = pipeline_exc.cause
+            else:
+                failed_stage = next(
+                    (name for name in STAGE_ORDER
+                     if name in stage_started_at
+                     and name not in {item.name for item in stages}),
+                    "discover")
+                failure_exc = pipeline_exc
+            _cancel_runtime_work()
+            if failed_stage not in {item.name for item in stages}:
+                duration = round(
+                    clock() - stage_started_at.get(
+                        failed_stage, pipeline_started), 6)
+                reason = _stage_failure_reason(failure_exc)
+                stages.append(StageRun(
+                    name=failed_stage,
+                    outcome="failed",
+                    duration_seconds=duration,
+                    stats={},
+                    reason=reason,
+                ))
+                dashboard.stage_finished(
+                    failed_stage,
+                    outcome="failed",
+                    duration=duration,
+                    result=reason,
+                )
             completed_names = {item.name for item in stages}
             for name in STAGE_ORDER:
                 if name not in completed_names:
@@ -449,6 +456,7 @@ def _run_ingest(
                         duration=None,
                         result=f"pipeline stopped at {failed_stage}",
                     )
+            stages.sort(key=lambda item: STAGE_ORDER.index(item.name))
             try:
                 ctx.conn.rollback()
             except Exception:
@@ -456,7 +464,7 @@ def _run_ingest(
             ended_at = utc_now().isoformat()
             pipeline_seconds = clock() - pipeline_started
             dashboard_state = "interrupted" \
-                if isinstance(pipeline_exc, KeyboardInterrupt) else "failed"
+                if isinstance(failure_exc, KeyboardInterrupt) else "failed"
             try:
                 _finalize_ingest_report(
                     ctx,
@@ -477,8 +485,9 @@ def _run_ingest(
                     f"{report_exc}")
                 dashboard.terminal_failure(message, state=dashboard_state)
                 get_log().error(message, exc_info=report_exc)
-            raise
+            raise failure_exc
 
+        stages.sort(key=lambda item: STAGE_ORDER.index(item.name))
         ended_at = utc_now().isoformat()
         pipeline_seconds = clock() - pipeline_started
         try:

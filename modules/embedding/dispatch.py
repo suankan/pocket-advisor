@@ -142,6 +142,7 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
 
     def submit_pending_leaves(self, conn, *, source_type: str | None = None,
                               document_id: int | None = None,
+                              email_ids: set[int] | None = None,
                               at_readiness: bool = False) -> int:
         """Dispatch every chunk without a vector in the current cache.
         Payloads are derived on demand — chunk slice through the reader
@@ -156,6 +157,12 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
         if document_id is not None:
             conds.append("chunks.document_id = ?")
             params.append(document_id)
+        if email_ids is not None:
+            if not email_ids:
+                return 0
+            marks = ",".join("?" for _ in email_ids)
+            conds.append(f"chunks.email_id IN ({marks})")
+            params.extend(sorted(email_ids))
         if conds:
             sql += " WHERE " + " AND ".join(conds)
         sql += " ORDER BY chunks.id"

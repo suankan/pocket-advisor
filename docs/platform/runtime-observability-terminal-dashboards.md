@@ -2,6 +2,7 @@
 
 Status: **implemented 2026-07-26**. Initial design commit `32aba8f`;
 implementation commit `4d7021a`; locked implementation described below.
+Persistent-final-state and single-interrupt amendment in progress 2026-07-26.
 
 Implementation map:
 
@@ -101,14 +102,27 @@ often without forcing a terminal write on every item.
 
 ### Completion and failure
 
-The live surface stops before the existing final report is rendered. This
-leaves the final report and exact report path as stable scrollback instead of
-hiding them in a transient dashboard.
+Rich owns the complete interactive `ingest all` lifetime. The display is
+non-transient: after the pipeline and read-only report audit finish, the last
+frame remains above the returned shell prompt. That final frame retains the
+seven pipeline rows and replaces active-work detail with the report's compact
+performance, workspace-snapshot, findings, review/report path, and execution
+log information. No second plain-text report, banner, or log footer is printed
+around it.
 
-On pipeline failure the dashboard first paints the failed/not-run state, then
-stops so the existing incomplete report and exception semantics remain intact.
-`KeyboardInterrupt` and unexpected unwinds also stop Rich cleanly; no cursor or
-alternate-screen state is left behind.
+This follows Rich 14.1.0's documented `Live` contract: the final frame of a
+non-transient display remains when `stop()` returns, and an oversized final
+frame is rendered as `visible` once clearing is no longer required. The live
+phase remains cropped to the terminal height.
+
+On pipeline failure or `KeyboardInterrupt`, the dashboard paints
+failed/not-run or interrupted state, performs only bounded coordinator
+cleanup, publishes any safe aggregate report it can build, and stops Rich
+exactly once. The first Ctrl+C sets the process interruption flag, terminates
+active OCR process groups, cancels queued inference jobs, and allows in-flight
+inference worker threads to be abandoned as daemon workers. They cannot hold
+interpreter shutdown behind a remote HTTP timeout. Exit code remains 130, with
+no traceback, cursor damage, or second interrupt required.
 
 ## Architecture
 
@@ -119,12 +133,18 @@ alternate-screen state is left behind.
 third-party capture, and lifecycle. The dashboard neither reads nor tails the
 JSON log.
 
-When the dashboard is active, the logging facade's terminal-facing
-`.interactive()` and `.error()` messages are offered to the dashboard's bounded
-event panel. They are still recorded exactly once through the normal logging
-path. File-only `.info()` and `.debug()` remain invisible. This small routing
-seam prevents stdout/stderr writes from corrupting Rich without coupling log
-records to UI frames.
+The old `.interactive()` logging method is retired. Operator notices use
+`.notice()`: the event is recorded once, while terminal presentation goes
+through Rich—into the active dashboard's bounded event panel, or through a
+plain-capable Rich `Console` when no dashboard owns the command. `.error()`
+uses the same Rich presentation boundary and remains an error-level structured
+record. File-only `.info()` and `.debug()` remain invisible.
+
+The final report is not sent through notice logging. The typed report is
+rendered by the dashboard and recorded file-only at aggregate granularity;
+non-TTY fallback uses the existing plain formatter. This prevents a multiline
+report from being reinterpreted as recent events or printed above the live
+region.
 
 Stage summaries are represented primarily in the pipeline table. They may also
 appear briefly as recent events; this is useful feedback, not the durable
@@ -139,8 +159,14 @@ Stages remain UI-agnostic.
 
 The dashboard starts before the database is opened, receives
 `stage_started()` / `stage_finished()` transitions around `_execute_stage()`,
-and is stopped before `_finalize_ingest_report()`. Stop is idempotent so every
-return/unwind path can call it safely.
+and remains active through `_finalize_ingest_report()`. The finalized typed
+report is installed directly into the presentation model before `Live.stop()`.
+Stop is idempotent so every return/unwind path can call it safely.
+
+The generic CLI banner/footer are suppressed only when this Rich surface owns
+interactive full-ingest output; their run/workspace/log identity is already
+present in the dashboard. Non-TTY execution keeps the stable plain report and
+correlation lines.
 
 ### D3. Existing progress objects become dashboard data sources
 
@@ -167,14 +193,15 @@ it deliberately after each command gets a purpose-built surface.
 ### D4. Activation and non-TTY contract
 
 The dashboard activates only when both stdout and stderr are TTYs. This avoids
-stealing `.interactive()` stdout from a pipe merely because stderr happens to
+stealing notice output from a pipe merely because stderr happens to
 be attached to a terminal.
 
 When either stream is not a TTY:
 
 - no `Live` object is constructed;
 - progress widgets retain bounded plain-line output;
-- `.interactive()` remains stdout and `.error()` remains stderr;
+- `.notice()` uses a Rich `Console` on stdout and `.error()` uses one on
+  stderr, both with terminal control disabled automatically;
 - the command remains suitable for redirection, CI, and captured tests.
 
 `TERM=dumb` and Rich's normal terminal capability detection disable colour
@@ -202,13 +229,17 @@ Automated tests must prove:
    skipped, failed, and not-run states with honest timing/results;
 2. `Progress`, `WorkerPoolProgress`, and `QueuePanel` register with the active
    dashboard instead of the legacy compositor;
-3. interactive/error messages become bounded events while their structured
+3. notice/error messages become bounded events while their structured
    logging records remain unchanged;
 4. non-TTY output and named-stage ingestion do not activate Rich;
 5. a synthetic TTY render contains the workspace/run identity, pipeline,
    active work, queue pressure, recent event, and stage result;
-6. stop is idempotent and an exception leaves the terminal renderer closed;
-7. existing progress, logging, CLI timing/failure-report, and dispatch tests
+6. a finalized report remains as the non-transient last Rich frame and no
+   duplicate plain report/banner/footer is emitted;
+7. one Ctrl+C abandons queued and in-flight-waiting inference work, closes
+   Rich, and returns 130 without a traceback or second signal;
+8. stop is idempotent and an exception leaves the terminal renderer closed;
+9. existing progress, logging, CLI timing/failure-report, and dispatch tests
    remain green.
 
 Before handoff, run the full repository verification required by `AGENTS.md`.

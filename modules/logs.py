@@ -51,9 +51,12 @@ THIRD_PARTY_LOGGERS = ("httpx", "httpcore")
 _MODULES_ROOT = PROJECT_ROOT / "modules"
 _FIELDS_KEY = "_pa_fields"
 # Schema fields a call site may not overwrite with a keyword argument.
+# `exc_info` is reserved too: it is a parameter of `.error()`, so reaching
+# any other method with it means the caller wanted a traceback and would
+# otherwise have silently got a stringified field instead.
 RESERVED_FIELDS = frozenset({
     "timestamp", "run_id", "worker_thread", "caller", "level", "message",
-    "exception_type", "exception_message", "traceback",
+    "exception_type", "exception_message", "traceback", "exc_info",
 })
 _LEVEL_NAMES = {
     logging.DEBUG: "debug",
@@ -202,14 +205,23 @@ class JsonlHandler(logging.Handler):
 
 def _check_fields(fields: dict[str, Any]) -> None:
     collisions = sorted(RESERVED_FIELDS & fields.keys())
-    if collisions:
-        raise ValueError(
-            "log fields may not overwrite schema fields: "
-            + ", ".join(collisions))
+    if not collisions:
+        return
+    hint = ""
+    if "exc_info" in collisions:
+        hint = " — pass an exception to .error(msg, exc_info=exc)"
+    raise ValueError(
+        "log fields may not overwrite schema fields: "
+        + ", ".join(collisions) + hint)
 
 
 class Log:
-    """Four methods; the destination is the method, not a flag."""
+    """Four methods; the destination is the method, not a flag.
+
+    `message` is positional-only (`/`) so a caller passing `message=` as a
+    keyword field gets the same clean ValueError as every other reserved
+    name, instead of Python's "multiple values for argument" TypeError.
+    """
 
     def __init__(self, logger: logging.Logger, run_id: str,
                  path: Path | None):
@@ -217,22 +229,23 @@ class Log:
         self.run_id = run_id
         self.path = path
 
-    def interactive(self, message: str, **fields: Any) -> None:
+    def interactive(self, message: str, /, **fields: Any) -> None:
         """Operator-facing output: terminal and file."""
         _write_terminal(message, sys.stdout)
         self._record(INTERACTIVE, message, fields)
 
-    def error(self, message: str, *, exc_info: BaseException | None = None,
+    def error(self, message: str, /, *,
+              exc_info: BaseException | None = None,
               **fields: Any) -> None:
         """A failure: stderr and file, never suppressed by level."""
         _write_terminal(message, sys.stderr)
         self._record(logging.ERROR, message, fields, exc_info=exc_info)
 
-    def info(self, message: str, **fields: Any) -> None:
+    def info(self, message: str, /, **fields: Any) -> None:
         """A recorded event: file only, deliberately not terminal."""
         self._record(logging.INFO, message, fields)
 
-    def debug(self, message: str, **fields: Any) -> None:
+    def debug(self, message: str, /, **fields: Any) -> None:
         """Diagnostic detail: file only, and only under LOG_LEVEL=debug.
 
         Fields are validated before the level check even though nothing is
@@ -303,7 +316,7 @@ class NullLog(Log):
                 exc_info: BaseException | None = None) -> None:
         _check_fields(fields)
 
-    def debug(self, message: str, **fields: Any) -> None:
+    def debug(self, message: str, /, **fields: Any) -> None:
         _check_fields(fields)
 
 

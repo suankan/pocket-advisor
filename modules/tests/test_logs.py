@@ -145,22 +145,34 @@ def check_reserved_fields(root: Path) -> None:
     config = _config(root)
     with Capture():
         with setup_logging(config, run_id=RUN_ID) as log:
-            # `message` is the positional parameter, so Python rejects it
-            # before validation can — loud either way, different type.
-            try:
-                log.info("collision", message="x")
-            except TypeError:
-                pass
-            else:
-                raise AssertionError("expected TypeError for message")
+            # Every reserved name fails the same way, `message` included:
+            # it is positional-only, so it lands in **fields rather than
+            # tripping Python's "multiple values" TypeError first.
+            methods = [("interactive", log.interactive), ("error", log.error),
+                       ("info", log.info), ("debug", log.debug)]
+            for name in sorted(RESERVED_FIELDS):
+                for method_name, method in methods:
+                    if name == "exc_info" and method_name == "error":
+                        continue   # a real parameter there, not a field
+                    try:
+                        method("collision", **{name: "x"})
+                    except ValueError as exc:
+                        assert name in str(exc)
+                    else:
+                        raise AssertionError(
+                            f"expected ValueError for {name} "
+                            f"via .{method_name}()")
 
-            for name in sorted(RESERVED_FIELDS - {"message"}):
-                try:
-                    log.info("collision", **{name: "x"})
-                except ValueError as exc:
-                    assert name in str(exc)
-                else:
-                    raise AssertionError(f"expected ValueError for {name}")
+            # Reaching for a traceback with the wrong method must fail
+            # loudly rather than emitting a stringified field.
+            try:
+                log.info("failed", exc_info=RuntimeError("boom"))
+            except ValueError as exc:
+                assert ".error(msg, exc_info=exc)" in str(exc)
+            else:
+                raise AssertionError("expected ValueError for exc_info")
+            # .error() takes it as a real parameter, so it still works.
+            log.error("failed", exc_info=RuntimeError("boom"))
             # A debug call below its level must validate too, so a latent
             # collision cannot hide until someone raises LOG_LEVEL.
             try:

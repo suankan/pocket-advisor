@@ -173,6 +173,25 @@ greppable. A kwarg colliding with a schema field name is rejected loudly at
 call time. `.error(..., exc_info=exc)` adds `exception_type`,
 `exception_message`, and `traceback`.
 
+**D5c. `message` is positional-only; `exc_info` is reserved.**
+Two collisions would otherwise be mishandled, both silently or confusingly:
+
+- `message` is the methods' own parameter name, so `log.info("x",
+  message="y")` would raise Python's `TypeError: got multiple values for
+  argument` before validation could produce a useful error. Declaring it
+  positional-only (`def info(self, message: str, /, **fields)`) puts a
+  `message=` kwarg into `**fields`, where it fails like every other
+  reserved name. This is what positional-only parameters exist for — the
+  stdlib uses the same trick in `dict.update(self, /, **kwargs)`. Renaming
+  the parameter would also work but would trade a clear name for nothing.
+- `exc_info` is a real parameter of `.error()` only. Passing it to any
+  other method (`log.info("failed", exc_info=exc)` — an easy reach for the
+  wrong method) would otherwise emit a stringified field named `exc_info`
+  and quietly lose the traceback the caller asked for. It is therefore a
+  reserved name, and the rejection names `.error()` as the fix. On
+  `.error()` itself the parameter captures it before validation ever sees
+  it, so the legitimate call is unaffected.
+
 One JSON object per line, no pretty-printing.
 
 **D5a. Why RFC 3339 with milliseconds, as the single time field.**

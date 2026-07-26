@@ -78,5 +78,11 @@ class Stage(ABC):
     def execute(self) -> StageStats:
         """run() + the stage's one-line summary."""
         stats = self.run()
-        print(f"{self.name}: {stats}")
+        # The counters go out as queryable fields, not only as text in the
+        # message, so a run's numbers can be aggregated across runs. Built
+        # as one dict so a counter named "stage" would shadow rather than
+        # raise; a counter named after a schema field is rejected loudly by
+        # the facade, which is the intended outcome.
+        self.log.interactive(f"{self.name}: {stats}",
+                             **{"stage": self.name, **stats.counts})
         return stats

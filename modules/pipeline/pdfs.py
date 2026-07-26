@@ -59,7 +59,6 @@ from modules.pdf_transforms import (OCR_CHILD_JOBS, PdfTransformCache,
                                     TransformResult, run_transform)
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
-from modules.progress import Progress, WorkerPoolProgress
 from modules.review import now_iso
 
 
@@ -100,14 +99,16 @@ class PdfTextStage(Stage):
             shared_dispatcher(self.ctx).submit_pending_leaves(
                 self.conn, document_id=document_id, at_readiness=True)
         except Exception as exc:
-            print(f"pdfs: readiness dispatch skipped for document"
-                  f" {document_id}: {type(exc).__name__}: {exc}")
+            self.log.interactive(
+                f"pdfs: readiness dispatch skipped for document"
+                f" {document_id}: {type(exc).__name__}: {exc}",
+                severity="warning", document_id=document_id, exc_type=type(exc).__name__)
 
     # -- 3.1 collect corpora-native PDFs ------------------------------------
 
     def _collect_native(self, stats: StageStats) -> None:
         candidates = load_candidates(self.conn, DocumentType.PDF)
-        progress = Progress("collect pdfs", total=len(candidates))
+        progress = self.log.progress("collect pdfs", total=len(candidates))
         for cand in candidates:
             progress.step(note=cand.filename)
             try:
@@ -324,7 +325,7 @@ class PdfTextStage(Stage):
             # Coordinator publication is deterministic by document_id.
             publish_total = sum(
                 1 for doc in pending if doc.sha256 not in requests)
-            publish = Progress("pdf publish", total=publish_total) \
+            publish = self.log.progress("pdf publish", total=publish_total) \
                 if publish_total else None
             for doc in sorted(pending, key=lambda item: item.document_id):
                 product = products.get(doc.sha256)
@@ -386,8 +387,8 @@ class PdfTextStage(Stage):
         results_lock = threading.Lock()
         peak_lock = threading.Lock()
         active = peak = 0
-        progress = WorkerPoolProgress(
-            "pdf to text", worker_count=workers, total=len(requests))
+        progress = self.log.worker_pool(
+            "pdf to text", workers=workers, total=len(requests))
 
         def _worker(worker_id: int) -> None:
             nonlocal active, peak

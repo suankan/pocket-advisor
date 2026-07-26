@@ -31,7 +31,6 @@ from modules.config import IGNORED_FILENAMES
 from modules.integrity import sha256_file
 from modules.domain import Candidate, CandidateStatus, DocumentType, StageStats
 from modules.pipeline.base import Stage
-from modules.progress import Progress
 from modules.review import now_iso
 from modules.workspace import Collection
 
@@ -68,7 +67,7 @@ class DiscoverStage(Stage):
             jobs.extend((coll, path) for path in _iter_files(coll.root))
 
         found: dict[str, list[FoundFile]] = defaultdict(list)
-        progress = Progress(self.name, total=len(jobs))
+        progress = self.log.progress(self.name, total=len(jobs))
         for coll, path in jobs:
             progress.step(note=path.name)
             relpath = str(path.relative_to(coll.root)).replace("\\", "/")

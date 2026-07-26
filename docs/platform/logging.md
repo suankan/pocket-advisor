@@ -85,6 +85,13 @@ screen, and therefore everything reconstructable from the file afterwards.
 It replaces every pipeline `print()` one-for-one, so terminal output keeps
 its exact current shape.
 
+One deliberate exception: pipeline errors that previously went to **stdout**
+now go to stderr, because `.error()` is the method that fits them and stderr
+is where a failure belongs. Measured on a real `ingest all`, this moves
+exactly two lines (the summary-generation and summaries endpoint failures);
+no line is lost. A consumer redirecting only stdout now sees errors on the
+terminal instead of silently in the file, which is the better default.
+
 `.info()` is deliberately **file-only**. This is a refinement of the
 original two-level sketch, and it is what makes the facade worth having:
 there are many events worth recording (a stage entered, a dispatch queued,
@@ -454,9 +461,11 @@ Then, on the test workspace, `ingest all` under both `LOG_LEVEL=info` and
 4. `.debug()` and `httpx`/`httpcore` records appear only under
    `LOG_LEVEL=debug`; terminal output is byte-identical between the two
    levels.
-5. Interactive stdout is byte-identical to before the change apart from
-   the D7 banner and footer (diff a captured run), and progress bars show
-   no redraw corruption on a TTY.
+5. Interactive stdout is unchanged from before the change apart from the
+   D7 banner and footer, the `Run id:` report line, and the two error
+   lines D2 moves to stderr (diff a captured run; no line may be lost from
+   stdout and stderr combined). Progress bars show no redraw corruption on
+   a TTY.
 6. Replaying only the `level: "interactive"` records of a run reproduces
    that run's terminal transcript.
 7. `wipe state` preserves `execution-logs/` and says so.

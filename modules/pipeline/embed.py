@@ -33,7 +33,6 @@ from modules.embedding.chunks import (chunk_text, sync_document_chunks,
                                       sync_email_chunks, sync_payloads)
 from modules.embedding.dispatch import EmbedDispatcher
 from modules.pipeline.base import Stage
-from modules.progress import Progress
 from modules.summary_reader import read_summary_text
 
 __all__ = ["EmbedStage", "chunk_text"]
@@ -124,8 +123,9 @@ class EmbedStage(Stage):
             return
         pending = dispatcher.pending_count
         if pending:
-            print(f"embed: waiting for {pending} in-flight readiness"
-                  " dispatches…")
+            self.log.interactive(
+                f"embed: waiting for {pending} in-flight readiness"
+                " dispatches…", pending_dispatches=pending)
         dispatcher.drain()
         dispatcher.close()
         self.ctx.embed_dispatcher = None
@@ -149,7 +149,8 @@ class EmbedStage(Stage):
                     int(row["thread_id"]), summary_text,
                     row["summary_sha256"]):
                 submitted += 1
-        progress = Progress("embed pending entities", total=submitted)
+        progress = self.log.progress(
+            "embed pending entities", total=submitted)
         try:
             done, failed, skipped, outcomes = dispatcher.drain(progress)
         finally:
@@ -166,7 +167,8 @@ class EmbedStage(Stage):
         for outcome in outcomes:
             if outcome.error is None:
                 continue
-            print(f"  embed FAIL {outcome.note}: {outcome.error}")
+            self.log.error(f"  embed FAIL {outcome.note}: {outcome.error}",
+                           entity=outcome.note, reason=outcome.error)
             self.review.flag(
                 outcome.review_key, self.name, "error", outcome.error)
         self.conn.commit()
@@ -188,11 +190,17 @@ class EmbedStage(Stage):
             meta = json.loads(paths.meta_json.read_text())
             old = meta_fingerprint(meta)
             if chunking_fields_changed(old, fingerprint):
-                print("embed: WARNING chunking config changed (chars"
-                      f" {old['chunk_chars']}->{fingerprint['chunk_chars']},"
-                      f" overlap {old['chunk_overlap']}->"
-                      f"{fingerprint['chunk_overlap']}) but existing chunks"
-                      " were NOT rebuilt — no automated re-chunk pipeline.")
+                self.log.interactive(
+                    "embed: WARNING chunking config changed (chars"
+                    f" {old['chunk_chars']}->{fingerprint['chunk_chars']},"
+                    f" overlap {old['chunk_overlap']}->"
+                    f"{fingerprint['chunk_overlap']}) but existing chunks"
+                    " were NOT rebuilt — no automated re-chunk pipeline.",
+                    severity="warning",
+                    old_chunk_chars=old["chunk_chars"],
+                    new_chunk_chars=fingerprint["chunk_chars"],
+                    old_chunk_overlap=old["chunk_overlap"],
+                    new_chunk_overlap=fingerprint["chunk_overlap"])
             if old["chunk_chars"] != fingerprint["chunk_chars"] \
                     or old["chunk_overlap"] != fingerprint["chunk_overlap"]:
                 meta["chunk_chars"] = fingerprint["chunk_chars"]

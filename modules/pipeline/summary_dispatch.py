@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from modules.embedding.dispatch import _LIVE
 from modules.inference import INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable
+from modules.logs import get_log
 from modules.pipeline.summaries_core import (
     _GenerationMetrics, _ThreadWork, _generate_thread_summary)
 from modules.progress import Progress
@@ -106,7 +107,7 @@ class EmailThreadsSummaryDispatcher:
         if self.unavailable is not None:
             return
         self.unavailable = message
-        print(f"summary generation: {message}")
+        get_log().error(f"summary generation: {message}")
 
     def drain(self, progress: Progress | None = None
               ) -> tuple[int, int, int, list[SummaryOutcome]]:

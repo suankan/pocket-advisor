@@ -58,7 +58,6 @@ from modules.embedding.chunks import sync_email_chunks
 from modules.embedding.dispatch import shared_dispatcher
 from modules.pipeline.base import Stage
 from modules.pipeline.discover import load_candidates, set_candidate_status
-from modules.progress import Progress
 from modules.review import now_iso
 from modules.workspace import Collection
 
@@ -163,7 +162,7 @@ class EmailStage(Stage):
     def run(self) -> StageStats:
         stats = StageStats()
         candidates = load_candidates(self.conn, DocumentType.EMAIL)
-        progress = Progress("parse emails", total=len(candidates))
+        progress = self.log.progress("parse emails", total=len(candidates))
         for cand in candidates:
             progress.step(note=cand.filename)
             self._process_candidate(cand, stats)

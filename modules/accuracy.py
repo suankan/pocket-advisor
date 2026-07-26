@@ -37,7 +37,7 @@ import yaml
 from modules.integrity import write_verified
 from modules.emailbody import body_text as message_body_text
 from modules.pipeline.base import PipelineContext
-from modules.progress import Progress
+from modules.logs import get_log
 from modules.question_generation import (QUESTION_MAX_INPUT_TOKENS,
                                          QUESTION_PROMPT_VERSION,
                                          QuestionGenerator, accept_question,
@@ -277,7 +277,8 @@ def generate_expectations(
 
     entries: list[dict] = []
     rejected = 0
-    progress = Progress("generate questions", total=len(candidates))
+    progress = get_log().progress(
+        "generate questions", total=len(candidates))
     try:
         for candidate in candidates:
             progress.start(note=candidate.entry_id)
@@ -409,7 +410,7 @@ def run_expectations(ctx: PipelineContext, entries: list[dict],
 
     questions = []
     elapsed_all: list[float] = []
-    progress = Progress("accuracy run", total=len(entries))
+    progress = get_log().progress("accuracy run", total=len(entries))
     try:
         for entry in entries:
             is_scored = not _is_todo(entry) and _validate_anchors(ctx.conn, entry)

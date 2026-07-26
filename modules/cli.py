@@ -200,7 +200,12 @@ def _finalize_ingest_report(
     format_report(report, None)
     report.report_seconds = round(clock() - report_started, 6)
     path = persist_report(report, ctx.config)
-    print(format_report(report, path))
+    # One record for the whole block, not thirty: the file mirrors what the
+    # operator saw, at the same granularity (logging.md D2).
+    ctx.log.interactive(format_report(report, path),
+                        status=report.status,
+                        pipeline_seconds=report.pipeline_seconds,
+                        report_path=str(path))
 
 
 def run_ingest(

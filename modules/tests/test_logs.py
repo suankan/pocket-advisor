@@ -306,6 +306,40 @@ def check_concurrent_writes(root: Path) -> None:
         assert sorted(r["sequence"] for r in mine) == list(range(per_thread))
 
 
+def check_third_party_capture(root: Path) -> None:
+    """httpx/httpcore diagnostics join the same stream under debug — the
+    detail the motivating RemoteProtocolError incident lacked — and are
+    absent at info, where they would be noise."""
+    quiet = _config(root)
+    with Capture():
+        with setup_logging(quiet, run_id=RUN_ID) as log:
+            quiet_path = log.path
+            logging.getLogger("httpx").debug("connection closed by peer")
+    assert not [r for r in _records(quiet_path)
+                if "connection closed" in r["message"]]
+
+    noisy = Config(project_root=root, workspaces_dir=root / "workspaces",
+                   workspace_id="test", logging_level="debug")
+    with Capture() as captured:
+        with setup_logging(noisy, run_id=RUN_ID) as log:
+            noisy_path = log.path
+            logging.getLogger("httpcore").debug("receive_response_body")
+
+    captured_records = [r for r in _records(noisy_path)
+                        if r["message"] == "receive_response_body"]
+    assert len(captured_records) == 1, _records(noisy_path)
+    record = captured_records[0]
+    # Correlated by the same run_id as our own records...
+    assert record["run_id"] == RUN_ID
+    # ...but attributed to the library, since the frame is not ours.
+    assert record["caller"].startswith("httpcore."), record["caller"]
+    # Third-party debug is file-only: never terminal noise.
+    assert "receive_response_body" not in captured.out + captured.err
+
+    # Handlers are removed on exit, so a later run cannot inherit them.
+    assert logging.getLogger("httpcore").handlers == []
+
+
 def check_null_log_before_setup() -> None:
     """Importing a module must never require logging to be configured."""
     log = get_log()
@@ -374,6 +408,7 @@ def main() -> int:
         check_worker_pool_factory(root)
         check_quiet_bar_still_releases(root)
         check_concurrent_writes(root)
+        check_third_party_capture(root)
         check_level_resolution(root, {})
         check_log_path_collision(root)
     print("test_logs: all ok")

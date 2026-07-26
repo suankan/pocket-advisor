@@ -33,6 +33,7 @@ from modules.embedding.backends import (atomic_publish_array,
 from modules.embedding.chunks import CHUNK_ENVELOPE_SQL, chunk_payload
 from modules.inference import (INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable,
                                estimate_tokens)
+from modules.logs import get_log
 from modules.telemetry import NOT_RUN, PARTIAL
 
 
@@ -74,15 +75,20 @@ def drain_leftover(ctx) -> None:
         return
     pending = dispatcher.pending_count
     if pending:
-        print(f"embedding: waiting for {pending} in-flight readiness"
-              " dispatches…")
+        get_log().interactive(
+            f"embedding: waiting for {pending} in-flight readiness"
+            " dispatches…", pending_dispatches=pending)
     done, failed, skipped, _ = dispatcher.drain()
     if done or failed or skipped:
-        print(f"embedding: {done} published, {failed} failed,"
-              f" {skipped} left pending (readiness dispatch)")
+        get_log().interactive(
+            f"embedding: {done} published, {failed} failed,"
+            f" {skipped} left pending (readiness dispatch)",
+            published=done, failed=failed, skipped=skipped)
     if dispatcher.unavailable is not None and (failed or skipped):
-        print(f"embedding: {failed + skipped} entities left un-embedded —"
-              " run 'ingest embed' after starting oMLX")
+        get_log().error(
+            f"embedding: {failed + skipped} entities left un-embedded —"
+            " run 'ingest embed' after starting oMLX",
+            un_embedded=failed + skipped, reason=dispatcher.unavailable)
     dispatcher.close()
     ctx.embed_dispatcher = None
 
@@ -251,7 +257,7 @@ class EmbedDispatcher:
             if self.unavailable is not None:
                 return
             self.unavailable = message
-        print(f"embed dispatch: {message}")
+        get_log().error(f"embed dispatch: {message}")
 
     # -- draining ----------------------------------------------------------
 

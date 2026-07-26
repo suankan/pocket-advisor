@@ -10,7 +10,6 @@ from modules.pipeline.base import Stage
 from modules.pipeline.summary_dispatch import (
     EmailThreadsSummaryDispatcher, SummaryOutcome)
 from modules.pipeline.summaries_core import _GenerationMetrics, _ThreadWork
-from modules.progress import Progress
 from modules.review import now_iso
 from modules.summarization import (SUMMARY_PROMPT_VERSION,
                                     get_summary_generator)
@@ -96,16 +95,19 @@ class ThreadSummaryStage(Stage):
             return stats
         perf.new_tiers()
 
-        print(f"summaries: {len(stale)} stale"
-              f" {'thread' if len(stale) == 1 else 'threads'} —"
-              f" {self.config.summarisation_endpoint}")
+        self.log.interactive(
+            f"summaries: {len(stale)} stale"
+            f" {'thread' if len(stale) == 1 else 'threads'} —"
+            f" {self.config.summarisation_endpoint}",
+            stale_threads=len(stale),
+            endpoint=self.config.summarisation_endpoint)
         generator = get_summary_generator(self.config)
         # Each finished summary's vector is dispatched at readiness
         # (design decision 5) without waiting — the embed stage drains;
         # embed_text=false disables all embedding.
         embed_dispatcher = shared_dispatcher(self.ctx) \
             if self.config.embed_text else None
-        progress = Progress(
+        progress = self.log.progress(
             "generate thread summaries", total=len(stale))
 
         dispatcher = EmailThreadsSummaryDispatcher(self.ctx, generator)
@@ -116,9 +118,12 @@ class ThreadSummaryStage(Stage):
         dispatcher.close()
 
         if skipped and dispatcher.unavailable is not None:
-            print(f"summaries: {dispatcher.unavailable} — {skipped} threads"
-                  " left un-summarized; rerun 'ingest all' after starting"
-                  " oMLX")
+            self.log.error(
+                f"summaries: {dispatcher.unavailable} — {skipped} threads"
+                " left un-summarized; rerun 'ingest all' after starting"
+                " oMLX",
+                skipped_threads=skipped,
+                endpoint=self.config.summarisation_endpoint)
 
         for outcome in outcomes:
             self._settle(outcome, embed_dispatcher, stats, perf)

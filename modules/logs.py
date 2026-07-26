@@ -115,7 +115,15 @@ def _rfc3339(created: float) -> str:
 
 def _caller(record: logging.LogRecord) -> str:
     """`module.function_name` for our own records; the stdlib logger name
-    for captured third-party ones (e.g. `httpx._client.send`)."""
+    for captured third-party ones (e.g. `httpx._client.send`).
+
+    Attribution follows the logger identity, not the file location: a
+    foreign logger is named after its library wherever it happens to be
+    called from, which is both stabler and what a query on this field
+    means to ask.
+    """
+    if record.name != LOGGER_NAME:
+        return f"{record.name}.{record.funcName}"
     try:
         relative = Path(record.pathname).resolve().relative_to(_MODULES_ROOT)
     except (ValueError, OSError, TypeError):

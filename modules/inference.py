@@ -17,6 +17,8 @@ import threading
 
 import numpy as np
 
+from modules.logs import get_log
+
 INFERENCE_MAX_IN_FLIGHT = 8
 CONNECT_TIMEOUT_SEC = 5.0
 EMBED_TIMEOUT_SEC = 300.0
@@ -173,6 +175,12 @@ class InferenceClient:
         try:
             response = self._http.post(url, json=payload, timeout=timeout)
         except (httpx.TransportError, OSError) as exc:
+            # The failure that motivated structured logging: previously one
+            # summary string reached the operator with no request context,
+            # no connection detail, and no stack.
+            get_log().debug(
+                "inference request failed", endpoint=url,
+                failure=f"{type(exc).__name__}: {exc}")
             raise InferenceUnavailable(
                 f"inference endpoint unreachable at {url} —"
                 f" ({type(exc).__name__}: {exc})") from exc

@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import IO
+from typing import IO, Any
 
 _WINDOW_SECS = 30.0
 
@@ -43,7 +43,7 @@ def _fmt_secs(s: float) -> str:
 class Progress:
     def __init__(self, label: str, total: int | None = None,
                  min_interval: float = 0.5, quiet_every: float = 15.0,
-                 stream: IO[str] | None = None):
+                 stream: IO[str] | None = None, observer: Any = None):
         self.label = label
         self.total = total or None   # 0 -> None (no percentage)
         self.stream = stream if stream is not None else sys.stderr
@@ -58,6 +58,9 @@ class Progress:
         self._active = False
         self._finished = False
         self._lock = threading.Lock()
+        self._observer = observer
+        if observer is not None:
+            observer.attach(self)
         if self.tty:
             threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -98,12 +101,29 @@ class Progress:
     def done(self, note: str = "") -> None:
         with self._lock:
             self._finished = True
-            if self.n == 0 and self.total is None:
-                return   # nothing was processed: stay quiet
-            self._emit(note or self._last_note, final=True)
-            if self.tty:
-                self.stream.write("\n")
-                self.stream.flush()
+            elapsed = time.monotonic() - self.t0
+            if not (self.n == 0 and self.total is None):
+                # nothing processed and no total: stay quiet, but still
+                # release the bar so later output is not routed to it.
+                self._emit(note or self._last_note, final=True)
+                if self.tty:
+                    self.stream.write("\n")
+                    self.stream.flush()
+        self._release(elapsed)
+
+    def _release(self, elapsed: float) -> None:
+        """Hand one lifecycle summary to the observer and detach.
+
+        Called outside the lock: the observer records to file, and must
+        never be able to re-enter drawing while it is held.
+        """
+        if self._observer is None:
+            return
+        observer, self._observer = self._observer, None
+        observer.detach(
+            self, label=self.label, completed=self.n, total=self.total,
+            elapsed_seconds=round(elapsed, 3),
+            rate_per_second=round(self.n / elapsed, 3) if elapsed > 0 else 0.0)
 
     # -- internals ----------------------------------------------------
 
@@ -169,7 +189,7 @@ class WorkerPoolProgress:
 
     def __init__(self, label: str, worker_count: int, total: int,
                  min_interval: float = 0.25, quiet_every: float = 15.0,
-                 stream: IO[str] | None = None):
+                 stream: IO[str] | None = None, observer: Any = None):
         if worker_count < 1:
             raise ValueError("worker_count must be positive")
         self.label = label
@@ -190,6 +210,9 @@ class WorkerPoolProgress:
         self._done_each = [0] * worker_count
         self._busy = [False] * worker_count
         self._job_started: list[float | None] = [None] * worker_count
+        self._observer = observer
+        if observer is not None:
+            observer.attach(self)
         if self.tty:
             threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -226,13 +249,27 @@ class WorkerPoolProgress:
     def done(self, note: str = "") -> None:
         with self._lock:
             self._finished = True
-            if self.completed == 0 and self.total == 0:
-                return
-            for i in range(self.worker_count):
-                self._busy[i] = False
-                self._job_started[i] = None
-                self._status[i] = "idle"
-            self._emit(force=True, final=True)
+            elapsed = time.monotonic() - self.t0
+            if not (self.completed == 0 and self.total == 0):
+                for i in range(self.worker_count):
+                    self._busy[i] = False
+                    self._job_started[i] = None
+                    self._status[i] = "idle"
+                self._emit(force=True, final=True)
+        self._release(elapsed)
+
+    def _release(self, elapsed: float) -> None:
+        """One lifecycle summary to the observer, then detach. Called
+        outside the lock so the observer can never re-enter drawing."""
+        if self._observer is None:
+            return
+        observer, self._observer = self._observer, None
+        observer.detach(
+            self, label=self.label, completed=self.completed,
+            total=self.total, workers=self.worker_count,
+            elapsed_seconds=round(elapsed, 3),
+            rate_per_second=(round(self.completed / elapsed, 3)
+                             if elapsed > 0 else 0.0))
 
     def _check_worker(self, worker_id: int) -> None:
         if worker_id < 0 or worker_id >= self.worker_count:

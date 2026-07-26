@@ -251,6 +251,42 @@ class Log:
         self._logger.log(level, message, exc_info=exc_info,
                          extra={_FIELDS_KEY: fields}, stacklevel=3)
 
+    # -- progress widgets -------------------------------------------------
+    # Constructed here so call sites never import modules/progress.py:
+    # registration (and therefore redraw-safe terminal output) and the
+    # lifecycle record come along automatically.
+
+    def progress(self, label: str, total: int | None = None,
+                 **kwargs: Any) -> Any:
+        from modules.progress import Progress
+        return Progress(label, total=total,
+                        observer=_ProgressObserver(self), **kwargs)
+
+    def worker_pool(self, label: str, workers: int, total: int,
+                    **kwargs: Any) -> Any:
+        from modules.progress import WorkerPoolProgress
+        return WorkerPoolProgress(label, worker_count=workers, total=total,
+                                  observer=_ProgressObserver(self), **kwargs)
+
+
+class _ProgressObserver:
+    """Bridges a progress bar's lifecycle to the facade.
+
+    Attaching routes terminal output through the bar; detaching emits one
+    summary record. The thousands of intermediate redraws produce nothing —
+    they are UI frames, not events.
+    """
+
+    def __init__(self, log: Log):
+        self._log = log
+
+    def attach(self, bar: Any) -> None:
+        register_progress(bar)
+
+    def detach(self, bar: Any, *, label: str, **stats: Any) -> None:
+        unregister_progress(bar)
+        self._log.info(f"{label}: finished", stage_label=label, **stats)
+
 
 class NullLog(Log):
     """What `get_log()` returns before `setup_logging()` runs.

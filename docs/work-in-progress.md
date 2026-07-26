@@ -17,8 +17,8 @@ Design: `docs/platform/logging.md` — **locked for implementation
 2026-07-26** (two review rounds folded in). Roadmap item 1. Read the design
 doc first; this section carries only the active context.
 
-Progress: step 1 done (`modules/logs.py` + `modules/tests/test_logs.py`,
-16/16 suite green). Steps 2–8 not started.
+Progress: steps 1–2 done (`modules/logs.py`, `modules/tests/test_logs.py`,
+progress observer hook). Steps 3–8 not started. 16/16 suite green.
 
 Four review findings reshaped the first draft — do not resurrect the
 originals:
@@ -32,10 +32,10 @@ originals:
    API stays the three requested methods, but this buys `httpx`/`httpcore`
    DEBUG capture (which explains the `RemoteProtocolError`), `exc_info`,
    and `QueueHandler` thread-safety.
-3. **`"YYYYMMDD HH:MM:SS"` alone is not ingestible** — no timezone, not
-   RFC3339, second resolution loses ordering across the 10
-   `pdf-transform` workers. Both `_timestamp` (epoch micros) and the human
-   string are emitted (D5a).
+3. **`"YYYYMMDD HH:MM:SS"` is not ingestible** — no timezone, not
+   RFC 3339, second resolution loses ordering across the 10
+   `pdf-transform` workers. Superseded by finding 6 below: one RFC 3339
+   UTC-millis `timestamp` field (D5a).
 4. **Repo-root `logs/` was dropped** for
    `workspaces/.state/workspace-<id>/execution-logs/` (D7) — these records
    carry case data (the motivating transcript logs an account number), and
@@ -83,5 +83,3 @@ Implementation order is the design doc's 8 steps (logs.py + tests →
 progress registration → entrypoint wiring → wipe preservation → report
 `run_id` correlation with `REPORT_SCHEMA_VERSION` 4→5 → call-site
 migration → third-party capture → verification).
-
-Not started — no code written yet.

@@ -191,6 +191,78 @@ def check_progress_routing(root: Path) -> None:
     assert len(_records(path)) == 3
 
 
+def check_progress_factories(root: Path) -> None:
+    """Facade-built bars self-register, and record once — not per step."""
+    config = _config(root)
+    stream = io.StringIO()   # non-TTY: plain lines, no redraw
+    with Capture() as captured:
+        with setup_logging(config, run_id=RUN_ID) as log:
+            path = log.path
+            bar = log.progress("parse emails", total=3, stream=stream,
+                               quiet_every=0.0)
+            for n in range(3):
+                bar.step(note=f"item {n}")
+            # While the bar is live, interactive output must go through it
+            # rather than print() — otherwise it shreds the redraw line.
+            log.interactive("emails: WARNING one attachment skipped")
+            bar.done()
+            # Released on done(): later output is no longer routed to it.
+            log.interactive("emails: 3 parsed")
+
+    drawn = stream.getvalue()
+    assert "emails: WARNING one attachment skipped" in drawn
+    assert "emails: 3 parsed" not in drawn
+    assert "emails: 3 parsed" in captured.out
+
+    records = _records(path)
+    levels = [r["level"] for r in records]
+    # One interactive (the warning), one lifecycle info, one interactive.
+    assert levels == ["interactive", "info", "interactive"], levels
+    lifecycle = records[1]
+    assert lifecycle["stage_label"] == "parse emails"
+    assert lifecycle["completed"] == 3
+    assert lifecycle["total"] == 3
+    assert lifecycle["elapsed_seconds"] >= 0.0
+    assert "rate_per_second" in lifecycle
+
+
+def check_worker_pool_factory(root: Path) -> None:
+    """The multi-worker bar records workers and its own totals."""
+    config = _config(root)
+    stream = io.StringIO()
+    with Capture():
+        with setup_logging(config, run_id=RUN_ID) as log:
+            path = log.path
+            pool = log.worker_pool("pdf to text", workers=3, total=6,
+                                   stream=stream, quiet_every=0.0)
+            for worker in range(3):
+                for _ in range(2):
+                    pool.begin(worker, "doc")
+                    pool.finish(worker)
+            pool.done()
+
+    lifecycle = [r for r in _records(path) if r["level"] == "info"]
+    assert len(lifecycle) == 1, lifecycle
+    assert lifecycle[0]["stage_label"] == "pdf to text"
+    assert lifecycle[0]["workers"] == 3
+    assert lifecycle[0]["completed"] == 6
+
+
+def check_quiet_bar_still_releases(root: Path) -> None:
+    """A bar that processed nothing draws nothing but must still detach —
+    otherwise it keeps capturing terminal output for the rest of the run."""
+    config = _config(root)
+    stream = io.StringIO()
+    with Capture() as captured:
+        with setup_logging(config, run_id=RUN_ID) as log:
+            bar = log.progress("discover", stream=stream)
+            bar.done()
+            log.interactive("after the quiet bar")
+
+    assert stream.getvalue() == ""
+    assert "after the quiet bar" in captured.out
+
+
 def check_concurrent_writes(root: Path) -> None:
     """Ten workers produce ten complete, parseable, attributed lines each."""
     config = _config(root)
@@ -286,6 +358,9 @@ def main() -> int:
         check_exc_info(root)
         check_reserved_fields(root)
         check_progress_routing(root)
+        check_progress_factories(root)
+        check_worker_pool_factory(root)
+        check_quiet_bar_still_releases(root)
         check_concurrent_writes(root)
         check_level_resolution(root, {})
         check_log_path_collision(root)

@@ -59,6 +59,7 @@ the integrity rules here.
 | RAG metrics checklist (draft candidate) | `docs/benchmarks/rag-metrics-and-evaluation.md` |
 | venv-to-uv runtime migration | `docs/platform/uv-migration.md` |
 | Structured execution logging | `docs/platform/logging.md` |
+| Live ingestion terminal dashboard | `docs/platform/runtime-observability-terminal-dashboards.md` |
 
 ## System boundaries
 

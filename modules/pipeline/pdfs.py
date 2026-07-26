@@ -37,7 +37,8 @@ import queue
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -318,34 +319,41 @@ class PdfTextStage(Stage):
             # Resumed/idempotent path: product already on disk under current
             # recipes but documents row not yet pointed at it.
             perf.duplicate_reuses = max(0, len(pending) - needed)
-            results = self._run_transforms(requests)
-            self._publish_transform_results(
-                results, requests, recipes, caches, products, errors)
 
-            # Coordinator publication is deterministic by document_id.
+            # Settle products that are already durable, plus source-integrity
+            # failures discovered before admission, without holding either
+            # behind fresh OCR work.
             publish_total = sum(
                 1 for doc in pending if doc.sha256 not in requests)
             publish = self.log.progress("pdf publish", total=publish_total) \
                 if publish_total else None
             for doc in sorted(pending, key=lambda item: item.document_id):
+                if doc.sha256 in requests:
+                    continue
                 product = products.get(doc.sha256)
                 error = errors.get(doc.sha256)
-                if product is None:
-                    self._record_document_error(
-                        doc, error or "PDF transform failed", stats)
-                else:
-                    try:
-                        self._publish_document(
-                            doc, product, recipes.combined, stats)
-                    except (IntegrityError, OSError, ValueError) as exc:
-                        self._record_document_error(
-                            doc, f"{type(exc).__name__}: {exc}", stats)
-                    else:
-                        self._dispatch_document(doc.document_id)
-                if publish is not None and doc.sha256 not in requests:
+                self._settle_document(
+                    doc, product, error, recipes.combined, stats)
+                if publish is not None:
                     publish.step(note=doc.label)
             if publish is not None:
                 publish.done()
+
+            docs_by_sha = {doc.sha256: doc for doc in pending}
+
+            def _publish_completion(
+                    request: TransformRequest,
+                    result: TransformResult) -> None:
+                product, error = self._publish_transform_result(
+                    request, result, recipes, caches[request.source_sha256])
+                self._settle_document(
+                    docs_by_sha[request.source_sha256], product, error,
+                    recipes.combined, stats)
+
+            # The main thread consumes futures in completion order. It
+            # publishes and dispatches each document before waiting for the
+            # next result, while other workers continue their transforms.
+            self._run_transforms(requests, _publish_completion)
 
         perf.timings_seconds.transform_wall += \
             time.monotonic() - transform_started
@@ -367,64 +375,63 @@ class PdfTextStage(Stage):
 
     def _run_transforms(
             self, requests: dict[str, TransformRequest],
-    ) -> dict[str, TransformResult]:
-        """Byte-ordered work-stealing pool; workers never touch SQLite."""
+            on_complete: Callable[
+                [TransformRequest, TransformResult], None],
+    ) -> None:
+        """Run a byte-ordered pool and publish completions on the caller.
+
+        Worker threads only produce temporary transform results. The calling
+        coordinator invokes ``on_complete`` as each future settles, retaining
+        sole ownership of SQLite and final publication paths.
+        """
         perf = self.ctx.telemetry.pdfs
         workers, budget = self._worker_topology(len(requests))
         perf.resources.configured_worker_count = workers
         perf.resources.configured_per_child_jobs = OCR_CHILD_JOBS
         perf.resources.configured_global_cpu_budget = budget
         if not requests:
-            return {}
+            return
 
-        work: queue.Queue[TransformRequest | None] = queue.Queue()
-        for request in requests.values():
-            work.put(request)
-        for _ in range(workers):
-            work.put(None)
-
-        results: dict[str, TransformResult] = {}
-        results_lock = threading.Lock()
+        worker_ids: queue.Queue[int] = queue.Queue()
+        for worker_id in range(workers):
+            worker_ids.put(worker_id)
         peak_lock = threading.Lock()
         active = peak = 0
         progress = self.log.worker_pool(
             "pdf to text", workers=workers, total=len(requests))
 
-        def _worker(worker_id: int) -> None:
+        def _worker(request: TransformRequest) -> TransformResult:
             nonlocal active, peak
-            while True:
-                if is_interrupted():
-                    # Stop pulling new work; drain sentinels so the pool
-                    # can shut down without waiting on queued PDFs.
-                    while True:
-                        item = work.get()
-                        if item is None:
-                            return
-                request = work.get()
-                if request is None:
-                    return
+            if is_interrupted():
+                raise InterruptedError("PDF transform interrupted")
+            worker_id = worker_ids.get()
+            note = f"transform {request.source_sha256[:12]}"
+            progress.begin(worker_id, note)
+            try:
                 with peak_lock:
                     active += 1
                     peak = max(peak, active)
-                note = f"transform {request.source_sha256[:12]}"
-                progress.begin(worker_id, note)
                 try:
-                    result = run_transform(request)
+                    return run_transform(request)
                 finally:
                     with peak_lock:
                         active -= 1
-                with results_lock:
-                    results[request.source_sha256] = result
+            finally:
                 progress.finish(worker_id, note)
+                worker_ids.put(worker_id)
 
         executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pdf-transform")
-        futures = [
-            executor.submit(_worker, worker_id)
-            for worker_id in range(workers)]
+        futures = {
+            executor.submit(_worker, request): request
+            for request in requests.values()}
         try:
-            for future in futures:
-                future.result()
+            for future in as_completed(futures):
+                request = futures[future]
+                result = future.result()
+                perf.timings_seconds.queue_wait_total += \
+                    result.queue_wait_seconds
+                on_complete(request, result)
         except BaseException:
             request_interrupt()
             cancel_active_commands()
@@ -439,58 +446,62 @@ class PdfTextStage(Stage):
             progress.done()
 
         perf.resources.observed_peak_workers = peak
-        for result in results.values():
-            perf.timings_seconds.queue_wait_total += result.queue_wait_seconds
-        return results
 
-    def _publish_transform_results(
-            self, results: dict[str, TransformResult],
-            requests: dict[str, TransformRequest], recipes: PdfRecipes,
-            caches: dict[str, PdfTransformCache],
-            products: dict[str, TextProduct | None],
-            errors: dict[str, str]) -> None:
+    def _publish_transform_result(
+            self, request: TransformRequest, result: TransformResult,
+            recipes: PdfRecipes, cache: PdfTransformCache,
+    ) -> tuple[TextProduct | None, str | None]:
+        """Verify and publish one completed worker result on the coordinator."""
         perf = self.ctx.telemetry.pdfs
-        # Deterministic coordinator order by document id, not death race.
-        ordered = sorted(
-            requests.values(), key=lambda request: request.document_id)
-        for request in ordered:
-            source_sha = request.source_sha256
-            result = results.get(source_sha)
-            if result is None:
-                perf.failed_transforms += 1
-                errors[source_sha] = "RuntimeError: worker returned no result"
-                continue
-            cache = caches[source_sha]
-            perf.timings_seconds.ocr_process_total += result.ocr_seconds
-            perf.timings_seconds.text_process_total += result.text_seconds
-            if result.direct_original_fallback:
-                perf.direct_original_fallbacks += 1
-            if result.used_cached_ocr and result.error is None:
-                perf.text_only_rebuilds += 1
-            cached_ocr = request.cached_ocr
-            try:
-                if cached_ocr is not None:
-                    ocr_product = cached_ocr
-                elif result.derivative_temp is not None:
-                    ocr_product = cache.publish_ocr(
-                        source_sha, recipes.ocr, result.derivative_temp,
-                        result.warning, False)
-                elif result.error is None:
-                    ocr_product = cache.publish_ocr(
-                        source_sha, recipes.ocr, None, result.warning, True)
-                else:
-                    ocr_product = None
-                if result.error is not None:
-                    raise RuntimeError(result.error)
-                if ocr_product is None or result.text_temp is None:
-                    raise RuntimeError("transform produced no publishable text")
-                products[source_sha] = cache.publish_text(
-                    source_sha, recipes, ocr_product, result.text_temp)
-            except (IntegrityError, OSError, RuntimeError, ValueError) as exc:
-                perf.failed_transforms += 1
-                errors[source_sha] = f"{type(exc).__name__}: {exc}"
+        source_sha = request.source_sha256
+        perf.timings_seconds.ocr_process_total += result.ocr_seconds
+        perf.timings_seconds.text_process_total += result.text_seconds
+        if result.direct_original_fallback:
+            perf.direct_original_fallbacks += 1
+        if result.used_cached_ocr and result.error is None:
+            perf.text_only_rebuilds += 1
+        cached_ocr = request.cached_ocr
+        try:
+            if cached_ocr is not None:
+                ocr_product = cached_ocr
+            elif result.derivative_temp is not None:
+                ocr_product = cache.publish_ocr(
+                    source_sha, recipes.ocr, result.derivative_temp,
+                    result.warning, False)
+            elif result.error is None:
+                ocr_product = cache.publish_ocr(
+                    source_sha, recipes.ocr, None, result.warning, True)
             else:
-                perf.successful_transforms += 1
+                ocr_product = None
+            if result.error is not None:
+                raise RuntimeError(result.error)
+            if ocr_product is None or result.text_temp is None:
+                raise RuntimeError("transform produced no publishable text")
+            product = cache.publish_text(
+                source_sha, recipes, ocr_product, result.text_temp)
+        except (IntegrityError, OSError, RuntimeError, ValueError) as exc:
+            perf.failed_transforms += 1
+            return None, f"{type(exc).__name__}: {exc}"
+        perf.successful_transforms += 1
+        return product, None
+
+    def _settle_document(
+            self, doc: _PendingPdf, product: TextProduct | None,
+            error: str | None, extraction_method: str,
+            stats: StageStats) -> None:
+        """Commit one ready document, then dispatch its chunks immediately."""
+        if product is None:
+            self._record_document_error(
+                doc, error or "PDF transform failed", stats)
+            return
+        try:
+            self._publish_document(
+                doc, product, extraction_method, stats)
+        except (IntegrityError, OSError, ValueError) as exc:
+            self._record_document_error(
+                doc, f"{type(exc).__name__}: {exc}", stats)
+        else:
+            self._dispatch_document(doc.document_id)
 
     def _record_ocr_warning(self, doc: _PendingPdf, warning: str | None,
                             stats: StageStats) -> None:

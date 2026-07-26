@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import zipfile
 from email.message import EmailMessage
 from io import BytesIO
@@ -25,13 +27,14 @@ import modules.ocr as ocr  # noqa: E402
 import modules.pipeline.pdfs as pdfs_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
-from modules.integrity import sha256_bytes  # noqa: E402
-from modules.domain import CandidateStatus, DocumentType  # noqa: E402
+from modules.integrity import sha256_bytes, write_verified  # noqa: E402
+from modules.domain import CandidateStatus, DocumentType, StageStats  # noqa: E402
+from modules.pdf_transforms import TransformResult  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
 from modules.pipeline.pdfs import PdfTextStage  # noqa: E402
-from modules.review import ReviewLog  # noqa: E402
+from modules.review import ReviewLog, now_iso  # noqa: E402
 from modules.telemetry import PerformanceTelemetry  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
@@ -145,7 +148,116 @@ def build_fixtures(ws_dir: Path) -> None:
     (statements / "hybrid.pdf").write_bytes(HYBRID)
 
 
+def check_completion_driven_dispatch() -> None:
+    """A fast PDF publishes and dispatches while a slow peer still runs."""
+    with tempfile.TemporaryDirectory(prefix="pa_pdf_completion_") as td:
+        tmp = Path(td)
+        ws_dir = tmp / "workspaces"
+        (ws_dir / "corpora" / "mail").mkdir(parents=True)
+        (ws_dir / "corpora" / "statements").mkdir(parents=True)
+        (ws_dir / "workspace-config.yaml").write_text(REGISTRY_YAML)
+
+        base = Config(project_root=tmp, workspaces_dir=ws_dir,
+                      embed_text=True)
+        registry = Registry.load(base)
+        workspace = registry.require_workspace("matter-x")
+        cfg = base.for_workspace(workspace.id)
+        conn = Database(cfg.db_path, workspace.id).open()
+        ctx = PipelineContext(
+            config=cfg, registry=registry, workspace=workspace, conn=conn,
+            review=ReviewLog(conn, cfg.review_queue_csv))
+
+        document_ids: dict[str, int] = {}
+        for name, raw in (
+                ("slow", b"%PDF-slow-transform-with-more-bytes"),
+                ("fast", b"%PDF-fast")):
+            sha = sha256_bytes(raw)
+            source = cfg.document_artifacts(sha).source_path(f"{name}.pdf")
+            write_verified(source, raw)
+            cur = conn.execute(
+                "INSERT INTO documents"
+                " (sha256, media_kind, content_type, size_bytes, is_skipped,"
+                "  ingested_at) VALUES (?, 'pdf', 'application/pdf', ?, 0, ?)",
+                (sha, len(raw), now_iso()))
+            document_ids[name] = int(cur.lastrowid)
+        conn.commit()
+
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        slow_finished = threading.Event()
+        fast_dispatched = threading.Event()
+        coordinator_thread = threading.current_thread()
+        dispatch_observations: list[tuple[int, threading.Thread, int]] = []
+
+        def fake_transform(request):
+            request.work_dir.mkdir(parents=True, exist_ok=True)
+            derivative = request.work_dir / "ocr.pdf"
+            text_path = request.work_dir / "output.txt"
+            derivative.write_bytes(b"%PDF-derived")
+            if request.document_id == document_ids["slow"]:
+                slow_started.set()
+                release_slow.wait(timeout=3.0)
+                slow_finished.set()
+            else:
+                assert slow_started.wait(timeout=1.0)
+            text_path.write_text(STATEMENT_TEXT, encoding="utf-8")
+            now = time.monotonic()
+            return TransformResult(
+                document_id=request.document_id,
+                source_sha256=request.source_sha256,
+                derivative_temp=derivative, text_temp=text_path,
+                warning=None, direct_original_fallback=False,
+                used_cached_ocr=False, ocr_seconds=0.01,
+                text_seconds=0.01, queue_wait_seconds=0.0,
+                started_at=now, finished_at=now, error=None)
+
+        class RecordingDispatcher:
+            def submit_pending_leaves(
+                    self, active_conn, *, document_id: int,
+                    at_readiness: bool) -> int:
+                chunks = int(active_conn.execute(
+                    "SELECT COUNT(*) FROM chunks"
+                    " WHERE document_id = ? AND"
+                    " source_type = 'document_text'",
+                    (document_id,)).fetchone()[0])
+                dispatch_observations.append(
+                    (document_id, threading.current_thread(), chunks))
+                if document_id == document_ids["fast"]:
+                    if not slow_finished.is_set():
+                        fast_dispatched.set()
+                    release_slow.set()
+                return chunks
+
+        stage = PdfTextStage(ctx)
+        try:
+            with patch.object(pdfs_mod, "run_transform",
+                              side_effect=fake_transform), \
+                 patch.object(
+                     stage, "_worker_topology",
+                     side_effect=lambda count: (min(2, count), 2)), \
+                 patch.object(
+                     pdfs_mod, "shared_dispatcher",
+                     return_value=RecordingDispatcher()):
+                stats = StageStats()
+                stage._ocr_pending(stats)
+            assert fast_dispatched.is_set()
+            assert slow_finished.is_set()
+            assert {item[0] for item in dispatch_observations} == \
+                set(document_ids.values())
+            assert all(item[1] is coordinator_thread
+                       for item in dispatch_observations)
+            assert all(item[2] > 0 for item in dispatch_observations)
+            assert stats.get("ocr_ok") == 2, stats
+            assert ctx.telemetry.pdfs.successful_transforms == 2
+        finally:
+            release_slow.set()
+            conn.close()
+
+
 def main() -> int:
+    check_completion_driven_dispatch()
+    print("  completion-driven PDF dispatch")
+
     with tempfile.TemporaryDirectory(prefix="pa_pdfs_") as td:
         tmp = Path(td)
         ws_dir = tmp / "workspaces"

@@ -39,9 +39,10 @@ No throughput change is intended or claimed.
 
 Verified against the implementation on 2026-07-26:
 
-- **Producers already dispatch at readiness.** `docs/inference/inference-serving.md`
+- **Producers dispatch at readiness.** `docs/inference/inference-serving.md`
   decision 5 is implemented. `modules/pipeline/pdfs.py` dispatches **per
-  document** the moment each text product publishes, mid-OCR-loop;
+  document** as each worker completion is published, while slower PDF
+  transforms continue;
   `modules/pipeline/summaries.py` dispatches per generated summary;
   `modules/pipeline/emails.py` dispatches at end of stage. The dispatcher is
   run-wide (`PipelineContext.embed_dispatcher`), so vectors publish

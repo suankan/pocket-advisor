@@ -1,7 +1,7 @@
 # PDF-to-Text Pipeline Design
 
-Status: **shipped 2026-07-19**. Completion-driven publication amendment in
-progress 2026-07-26. Replaces the nested OCR worker topology on top of the
+Status: **shipped 2026-07-19**, completion-driven publication amendment
+shipped 2026-07-26. Replaces the nested OCR worker topology on top of the
 shipped graph-owned product layout in
 `docs/ingestion/ingestion-design-v2.md`.
 
@@ -113,6 +113,14 @@ final-product, chunk, and vector-dispatch writer; transform workers never
 publish durable state. A cached current product or a pre-transform source
 integrity failure is likewise settled before fresh transforms begin rather
 than being held behind them.
+
+`PdfTextStage._run_transforms()` submits byte-ordered requests to its bounded
+`ThreadPoolExecutor` and consumes them with `as_completed()`. Its completion
+callback runs on the coordinator thread and performs canonical transform
+publication, document metadata commit, chunk synchronization, and readiness
+dispatch. The gated regression in `modules/tests/test_pdfs.py` parks a slow
+worker and verifies the fast document has chunks and reaches the real
+dispatcher seam on the coordinator before the slow transform is released.
 
 If OCRmyPDF emits a derivative with a non-zero validation warning, the
 coordinator may still attempt the authoritative `pdftotext` gate according to

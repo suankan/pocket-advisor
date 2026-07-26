@@ -4,6 +4,46 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Concurrent streaming ingestion
+
+Design `4240232`; implementation `d75862f`; documentation lock `73e89c6`.
+Feature doc:
+`docs/ingestion/concurrent-streaming-pipeline.md`.
+
+Full `ingest all` is now a single-coordinator streaming dataflow instead of a
+serial stage barrier. Discovery, email parsing, PDF-to-text production, and
+embedding overlap as soon as their real inputs exist.
+
+- Discovery hashes on a producer thread and sends typed file/collection
+  events to the coordinator. Safe new candidates are parsed immediately while
+  complete blob-index snapshots and changed-path integrity decisions remain
+  collection-close operations.
+- Parentless email bodies are compacted, chunked, and dispatched to the
+  run-wide plain-text embedding queue during parsing. Replies wait only for the
+  email-input close barrier needed for import-order-independent parent
+  resolution. Recursive email attachments expose PDFs to OCR immediately.
+- A run-scoped, CPU-bounded PDF producer accepts native and attached documents
+  incrementally. Each completed transform is verified, published, chunked, and
+  dispatched for embedding on the coordinator before slower PDFs finish.
+- Thread reconstruction and bounded summary generation begin when email input
+  closes, without waiting for outstanding PDFs. Summary completions settle in
+  completion order and dispatch their vectors immediately while the
+  coordinator continues polling PDF outcomes.
+- SQLite, review state, canonical artifacts, and chunk/FTS publication remain
+  coordinator-owned. The final embed stage is a producer-close barrier,
+  missing-vector convergence, and deterministic matrix rebuild. Named-stage
+  commands retain ordered-prefix behavior.
+- Rich 14.1.0 now presents overlapping logical stage intervals and growing
+  worker/queue totals truthfully; report durations are per-stage wall
+  intervals and are intentionally non-additive.
+
+Verification: every native `modules/tests/test_*.py` suite passes; aggregate
+`uv run pocket-advisor.py test` reports 21/21. Gated regressions prove early
+email dispatch before discovery closes, immediate attached-PDF offering,
+PDF settlement during summary inference, completion-driven PDF publication
+with growing input, coordinator-only durable writes, and order-independent
+reply compaction. `git diff --check` passes.
+
 ## 2026-07-26 — Persistent Rich ingest completion and one-signal exit
 
 Design `8d03a7d`; implementation `69e34d3`. Feature docs:

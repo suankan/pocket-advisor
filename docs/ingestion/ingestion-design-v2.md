@@ -134,7 +134,7 @@ mirror.
 
 ## Pipeline shape
 
-### Stage 2 — parse once, flatten relationships
+### Email parse — parse once, flatten relationships
 
 Stage 2 walks every discovered email and recursively parses attached emails
 and ZIP members. It writes each email's two readable artifacts once, upserts
@@ -144,18 +144,21 @@ registered as document/source rows through the same document identity model.
 That includes directly mounted bank statements, which may acquire email
 attachment occurrences later without changing their document identity.
 
-This stage is responsible for complete graph construction before PDF work
-begins: it must not make Stage 3 rediscover attachments by crawling cache
-folders. Existing native headers and parent-child attached-email references
-remain available to Stage 4 for thread reconstruction.
+The parser must not make PDF production rediscover attachments by crawling
+cache folders. Under `ingest all`, every newly registered PDF document ID is
+offered directly to the run-scoped PDF producer; named-stage ingestion may
+still construct the complete graph before running the PDF stage. Existing
+native headers and parent-child attached-email references remain available for
+thread reconstruction after email input closes.
 
-### Stage 3 hand-off — unique PDF documents
+### PDF hand-off — unique PDF documents
 
-Once the graph is complete, Stage 3 selects pending **unique PDF document
-IDs**, never email-owned attachment paths. The detailed transform queue,
-worker lifecycle, and product publication are locked in
-`docs/ingestion/pdf-to-text-pipeline-design.md`. Stage 3 must not rediscover
-attachments by crawling a cache folder.
+Full ingestion offers each newly registered **unique PDF document ID** to the
+run-scoped transform producer immediately, never an email-owned attachment
+path. Named-stage ingestion selects the same IDs after its ordered prefix.
+The streaming hand-off is locked in
+`docs/ingestion/concurrent-streaming-pipeline.md`; transform lifecycle and
+publication remain locked in `docs/ingestion/pdf-to-text-pipeline-design.md`.
 
 ## Fresh-schema cutover
 

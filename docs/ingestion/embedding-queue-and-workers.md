@@ -7,6 +7,12 @@ embedding behind a queue so it starts before all documents are ready")
 describes behavior that already shipped — see "What already exists" below.
 The residual, real gap was observability, not throughput.
 
+**2026-07-26 streaming supersession.** The earlier rejection of discovery-led
+cross-stage streaming described the then-current implementation, not a system
+invariant. `docs/ingestion/concurrent-streaming-pipeline.md` now deliberately
+introduces that dataflow while preserving one coordinator as the sole
+SQLite/final-artifact writer.
+
 Implementation map:
 
 - `modules/dispatch.py` — `BoundedInferenceDispatcher`, `QueueSnapshot`,
@@ -314,14 +320,7 @@ Small, contained, and done as part of this work:
   of eagerly in `submit_pending_leaves` would reduce it, but `ChunkReader`
   holds the SQLite connection and its thread-safety would have to be
   established first.
-- **Incremental email-body dispatch.** The emails stage dispatches once, after
-  the corpus-wide `compact_authored_bodies` pass, because an email's authored
-  body depends on its `In-Reply-To` parent being registered and import-order
-  independence is a locked acceptance criterion. An order-independent partial
-  rule exists (dispatch immediately when an email has no `In-Reply-To`, or its
-  parent is already registered; defer the rest), but the measured profile puts
-  the win in seconds.
-- **Cross-stage streaming** (discovery feeding parse feeding embed as one
-  continuous pipeline) and multiple SQLite writers.
+- **Multiple SQLite writers.** Cross-stage streaming is now designed, but
+  relational and canonical publication remains coordinator-owned.
 - **A general multi-region terminal UI.** `LiveDisplay` owns one bottom
   region with a flat panel list; nested or scrolling regions are out of scope.

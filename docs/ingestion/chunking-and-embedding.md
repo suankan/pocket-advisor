@@ -161,11 +161,16 @@ SQLite triggers in the same manner as `chunks_fts`.
 
 ## Pipeline
 
-The complete ordered pipeline is:
+The public logical stages are:
 
 ```text
 discover -> emails -> pdfs -> thread -> summaries -> embed -> transactions
 ```
+
+Named-stage ingestion runs that ordered prefix. During `ingest all`, the same
+logical stages overlap through the streaming DAG locked in
+`docs/ingestion/concurrent-streaming-pipeline.md`; the final embed stage is a
+producer-close/convergence barrier, not the first point at which vectors run.
 
 ### Thread stage
 

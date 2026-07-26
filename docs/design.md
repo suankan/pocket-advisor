@@ -23,6 +23,7 @@ the integrity rules here.
 
 | Concern | Doc |
 |---|---|
+| Concurrent full-ingest streaming DAG | `concurrent-streaming-pipeline.md` |
 | Content-addressed email/document graph | `ingestion-design-v2.md` |
 | PDF text pipeline | `pdf-to-text-pipeline-design.md` |
 | Chunking, embedding, thread-summary indexing | `chunking-and-embedding.md` |
@@ -136,10 +137,10 @@ These are different relationships and must never be conflated.
 
 ## 1. Ingestion pipeline
 
-### Staged ingestion
+### Streaming full ingestion and ordered named stages
 
-`ingest all` is the sole full-pipeline orchestration and runs these stages in
-order:
+`ingest all` is the sole full-pipeline orchestration. Its public logical stages
+remain:
 
 1. **discover** — walk the selected workspace's mounted collections once,
    hash originals, populate candidates, and refresh the blob index;
@@ -161,8 +162,8 @@ order:
 4. **thread** — reconstruct complete threads and direct reply relationships;
 5. **summaries** — maintain staleness and generate local-LLM navigation
    summaries for complete multi-message threads;
-6. **embed** — chunk source text and maintain separate leaf and
-   thread-summary indexes;
+6. **embed** — settle the run-long readiness queue, converge gaps, and
+   maintain separate leaf and thread-summary indexes;
 7. **transactions** — parse, validate, reconcile, and link statements from
    mounted collections marked `ingestion-type: bank-transactions`. The locked
    convergence design in
@@ -170,11 +171,20 @@ order:
    skips an unchanged, independently verified transaction graph while retaining
    a complete atomic rebuild for every relevant input or rule change.
 
+For `ingest all`, these are overlapping logical lifetimes rather than a serial
+execution order. Discovery feeds email/native-document registration; email
+parsing feeds the run-scoped PDF producer and leaf embedding; PDF completions
+feed leaf embedding; thread reconstruction and summary generation begin when
+email input closes and may overlap remaining PDFs; the embed stage closes only
+after every text/summary producer closes. The exact event protocol and narrow
+email-compaction barrier are locked in
+`docs/ingestion/concurrent-streaming-pipeline.md`.
+
 Stages implement the common `Stage` interface, receive one explicit
-`PipelineContext`, never parse CLI arguments, never call one another, and
-return `StageStats`. CLI orchestration owns ordering: `ingest all` runs the
-full gated pipeline, and a named stage such as `ingest pdfs` runs the ordered
-prefix through that stage so prerequisites are always satisfied.
+`PipelineContext`, never parse CLI arguments, and return `StageStats`.
+CLI orchestration owns composition. A named stage such as `ingest pdfs`
+retains the ordered prefix through that stage so prerequisites are always
+satisfied; only `ingest all` uses the streaming DAG.
 
 Stages are idempotent and resumable. A failure is loud and reviewable while
 independent work continues where integrity permits. Summary-staleness maintenance

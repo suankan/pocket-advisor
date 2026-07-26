@@ -5,6 +5,11 @@ shipped 2026-07-26. Replaces the nested OCR worker topology on top of the
 shipped graph-owned product layout in
 `docs/ingestion/ingestion-design-v2.md`.
 
+The run-scoped, incrementally fed producer lifecycle for `ingest all` is
+specified by `docs/ingestion/concurrent-streaming-pipeline.md`; the worker and
+publication invariants below apply unchanged. Named-stage ingestion retains
+the batch entrypoint.
+
 ## Purpose
 
 Stage 3 must transform each pending unique PDF document efficiently without

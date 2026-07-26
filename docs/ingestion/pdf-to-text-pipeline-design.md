@@ -1,7 +1,8 @@
 # PDF-to-Text Pipeline Design
 
-Status: **shipped 2026-07-19** (implementation pending commit). Replaces the
-nested OCR worker topology on top of the shipped graph-owned product layout in
+Status: **shipped 2026-07-19**. Completion-driven publication amendment in
+progress 2026-07-26. Replaces the nested OCR worker topology on top of the
+shipped graph-owned product layout in
 `docs/ingestion/ingestion-design-v2.md`.
 
 ## Purpose
@@ -96,12 +97,22 @@ coordinator can terminate its complete child tree on interruption or timeout.
 
 ### Coordinator publication
 
-The coordinator accepts worker results in a deterministic document order. It
-validates the expected source/recipe identity, hashes and read-verifies each
-temporary output, atomically moves validated products into the document
-namespace, then commits database/review state. It records incomplete/failing
-documents without blocking independent documents. Downstream chunking begins
-only after the required document text product is durably current.
+The coordinator accepts worker results in completion order. As soon as one
+worker returns, the coordinator validates the expected source/recipe identity,
+hashes and read-verifies that document's temporary outputs, atomically
+publishes its products, and commits database/review state. A completed text
+product is then chunked and its pending leaf embeddings are submitted to the
+run-wide embedding dispatcher before the coordinator waits for another PDF
+result. Slow documents therefore cannot hold already-complete document text or
+embedding work behind a whole-pool barrier.
+
+Completion order affects only scheduling and interactive observation. Durable
+identity, product paths, row contents, and final convergence remain
+deterministic. The coordinator is still the sole SQLite, review-log,
+final-product, chunk, and vector-dispatch writer; transform workers never
+publish durable state. A cached current product or a pre-transform source
+integrity failure is likewise settled before fresh transforms begin rather
+than being held behind them.
 
 If OCRmyPDF emits a derivative with a non-zero validation warning, the
 coordinator may still attempt the authoritative `pdftotext` gate according to
@@ -134,6 +145,9 @@ it improves observability; it need not preserve previous report contracts.
 - Workers run `ocrmypdf --jobs 1` only, dynamically drain byte-bounded work,
   and never write SQLite or final state. Coordinator failure/retry/cancellation
   fixtures prove that no partial product becomes visible.
+- With at least one slow and one fast PDF transform, the fast document's text
+  is durably published and its embeddings are submitted while the slow
+  transform is still running; no pool-wide result barrier remains.
 - Recipe changes independently re-run OCR or text extraction as required; a
   clean unchanged run performs no OCR or text work.
 - PDF products remain verifiable through the graph without a
@@ -144,7 +158,8 @@ it improves observability; it need not preserve previous report contracts.
 
 ## Explicitly deferred
 
-- Cross-stage OCR/GPU overlap and multiple SQLite writers.
+- Multiple SQLite writers. OCR workers and asynchronous embedding workers may
+  overlap, but all SQLite writes remain coordinator-owned.
 - Hardlinks, cross-workspace transform reuse, and any path-based product
   identity.
 - A claim that maximum CPU workers is always optimal; the configured default

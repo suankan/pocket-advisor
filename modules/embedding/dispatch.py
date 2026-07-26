@@ -86,6 +86,7 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
 
     thread_name_prefix = "embed-dispatch"
     unavailable_label = "embed dispatch"
+    queue_label = "embed queue"
 
     def __init__(self, ctx, *, backend=None, fingerprint=None):
         super().__init__(max_in_flight=INFERENCE_MAX_IN_FLIGHT)

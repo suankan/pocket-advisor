@@ -22,6 +22,7 @@ shared implementation, not a shared queue.
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from modules.logs import get_log
@@ -55,13 +56,51 @@ def cancel_all() -> None:
         dispatcher.abandon()
 
 
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    """A consistent read of one dispatcher's live queue state.
+
+    Taken under the dispatcher lock so the derived figures can never
+    disagree with each other — a display reading the counters
+    independently could otherwise show a negative in-flight count.
+    """
+
+    label: str
+    queued: int         # submitted, not yet picked up by a worker
+    in_flight: int      # inside a worker right now
+    done: int           # completed successfully
+    failed: int         # completed with an error, flagged for review
+    skipped: int        # endpoint down — left pending, not failed
+
+    @property
+    def submitted(self) -> int:
+        return self.queued + self.in_flight + self.settled
+
+    @property
+    def settled(self) -> int:
+        return self.done + self.failed + self.skipped
+
+    @property
+    def idle(self) -> bool:
+        return self.queued == 0 and self.in_flight == 0
+
+
 class BoundedInferenceDispatcher:
-    """Bounded async fan-out: pool lifecycle, availability latch, draining."""
+    """Bounded async fan-out: pool lifecycle, availability latch, draining.
+
+    Live counters are maintained by the workers themselves rather than
+    observed at ``drain()``. Readiness dispatch is drained long after the
+    work happens — at the embed stage — so drain-time accounting cannot
+    show queue state while a run is in flight
+    (``docs/ingestion/embedding-queue-and-workers.md`` decision 4).
+    """
 
     #: Worker-thread name prefix for this fan-out.
     thread_name_prefix: str = "inference-dispatch"
     #: Subject of the one-line warning when the endpoint goes down.
     unavailable_label: str = "inference dispatch"
+    #: How this fan-out's queue names itself in the live display.
+    queue_label: str = "inference queue"
 
     def __init__(self, *, max_in_flight: int):
         self.unavailable: str | None = None
@@ -69,11 +108,30 @@ class BoundedInferenceDispatcher:
         self._pool: ThreadPoolExecutor | None = None
         self._max = max(1, max_in_flight)
         self._futures: list[Future] = []
+        # Live counters, all mutated under _lock. Cumulative across the
+        # dispatcher's whole life: drain() is a barrier, not a reset, so
+        # these survive the readiness -> convergence transition.
+        self._submitted = 0
+        self._started = 0
+        self._done = 0
+        self._failed = 0
+        self._skipped = 0
         _LIVE.add(self)
 
     @property
     def pending_count(self) -> int:
         return sum(1 for future in self._futures if not future.done())
+
+    def snapshot(self) -> QueueSnapshot:
+        with self._lock:
+            return QueueSnapshot(
+                label=self.queue_label,
+                queued=self._submitted - self._started,
+                in_flight=(self._started - self._done - self._failed
+                           - self._skipped),
+                done=self._done,
+                failed=self._failed,
+                skipped=self._skipped)
 
     # -- submission --------------------------------------------------------
 
@@ -87,7 +145,36 @@ class BoundedInferenceDispatcher:
             self._pool = ThreadPoolExecutor(
                 max_workers=self._max,
                 thread_name_prefix=self.thread_name_prefix)
-        self._futures.append(self._pool.submit(fn, *args))
+        with self._lock:
+            self._submitted += 1
+        self._futures.append(self._pool.submit(self._run_task, fn, args))
+
+    def _run_task(self, fn, args) -> DispatchResult:
+        """Wrap one worker call in its live accounting.
+
+        The base does this rather than asking each worker to bracket itself,
+        so a new dispatcher cannot silently under-report by forgetting a
+        counter on one early-return path.
+        """
+        with self._lock:
+            self._started += 1
+        try:
+            outcome = fn(*args)
+        except BaseException:
+            # Workers are expected to return a typed failure rather than
+            # raise; if one escapes, the item is still settled — drain()
+            # re-raises it to the caller.
+            with self._lock:
+                self._failed += 1
+            raise
+        with self._lock:
+            if outcome.skipped:
+                self._skipped += 1
+            elif outcome.error is not None:
+                self._failed += 1
+            else:
+                self._done += 1
+        return outcome
 
     def _mark_unavailable(self, message: str) -> None:
         """Latch the endpoint as down. First caller wins; the warning prints

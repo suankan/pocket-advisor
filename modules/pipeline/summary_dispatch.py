@@ -51,6 +51,7 @@ class EmailThreadsSummaryDispatcher(BoundedInferenceDispatcher):
 
     thread_name_prefix = "summary-gen"
     unavailable_label = "summary generation"
+    queue_label = "summary queue"
 
     def __init__(self, ctx, generator, *,
                  max_in_flight: int = INFERENCE_MAX_IN_FLIGHT):

@@ -2,10 +2,15 @@
 
 Design decision 5 (`docs/inference/inference-serving.md`): the moment a
 producer publishes an inference-ready artifact its embedding payloads are
-dispatched asynchronously to the inference endpoint. There is no internal
-queue — a bounded pool keeps at most ``INFERENCE_MAX_IN_FLIGHT`` requests
-open (matching oMLX's continuous-batching concurrency) and a saturated pool
-gives the submitting producer backpressure.
+dispatched asynchronously to the inference endpoint. A bounded pool keeps at
+most ``INFERENCE_MAX_IN_FLIGHT`` requests in flight, matching oMLX's
+continuous-batching concurrency; queued work above that is not bounded and
+does not block the producer, which submits and moves on
+(`docs/ingestion/embedding-queue-and-workers.md` decision 7).
+
+Leaf chunks and thread summaries share this one queue. The ``leaf``/
+``summary`` split is a telemetry label selecting a counter bucket, not a
+second pool.
 
 Producer dispatch is best-effort: an unreachable endpoint prints one
 warning, stops dispatching for the run, and leaves entities pending —
@@ -16,13 +21,9 @@ Every published vector follows the atomic write-verify-publish discipline,
 so an interrupt at any point leaves durable gaps the next `ingest embed`
 fills.
 """
-import threading
 import time
-import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from modules.chunk_reader import ChunkReader
 from modules.embedding.backends import (atomic_publish_array,
@@ -31,24 +32,11 @@ from modules.embedding.backends import (atomic_publish_array,
                                         thread_vector_filename,
                                         validated_vector)
 from modules.embedding.chunks import CHUNK_ENVELOPE_SQL, chunk_payload
+from modules.dispatch import BoundedInferenceDispatcher
 from modules.inference import (INFERENCE_MAX_IN_FLIGHT, InferenceUnavailable,
                                estimate_tokens)
 from modules.logs import get_log
 from modules.telemetry import NOT_RUN, PARTIAL
-
-
-class LiveDispatcher(Protocol):
-    """Any dispatcher that holds in-flight inference work and can abandon
-    its queued items on interrupt. Both ``EmbedDispatcher`` and
-    ``EmailThreadsSummaryDispatcher`` register here so ``cancel_all()``
-    covers every inference fan-out through one hook."""
-
-    def abandon(self) -> None: ...
-
-
-# Live dispatchers, so an interrupted or failed run can abandon queued
-# work instead of blocking process exit on thousands of pending requests.
-_LIVE: "weakref.WeakSet[LiveDispatcher]" = weakref.WeakSet()
 
 
 def shared_dispatcher(ctx) -> "EmbedDispatcher":
@@ -56,14 +44,6 @@ def shared_dispatcher(ctx) -> "EmbedDispatcher":
     if ctx.embed_dispatcher is None:
         ctx.embed_dispatcher = EmbedDispatcher(ctx)
     return ctx.embed_dispatcher
-
-
-def cancel_all() -> None:
-    """Abandon every live dispatcher's queued work (interrupt/failure
-    path): in-flight requests finish, queued ones are dropped as durable
-    pending gaps for the next `ingest embed`."""
-    for dispatcher in list(_LIVE):
-        dispatcher.abandon()
 
 
 def drain_leftover(ctx) -> None:
@@ -101,10 +81,14 @@ class DispatchOutcome:
     skipped: bool          # endpoint down — left pending, not failed
 
 
-class EmbedDispatcher:
+class EmbedDispatcher(BoundedInferenceDispatcher):
     """Bounded async fan-out from payload text to published vector."""
 
+    thread_name_prefix = "embed-dispatch"
+    unavailable_label = "embed dispatch"
+
     def __init__(self, ctx, *, backend=None, fingerprint=None):
+        super().__init__(max_in_flight=INFERENCE_MAX_IN_FLIGHT)
         self.config = ctx.config
         self.telemetry = ctx.telemetry.embed
         self.fingerprint = fingerprint if fingerprint is not None \
@@ -116,15 +100,6 @@ class EmbedDispatcher:
         self.thread_paths = thread_index_paths(ctx.config, self.fingerprint)
         self.backend = backend if backend is not None \
             else get_backend(ctx.config)
-        self.unavailable: str | None = None
-        self._lock = threading.Lock()
-        self._pool: ThreadPoolExecutor | None = None
-        self._futures: list[Future] = []
-        _LIVE.add(self)
-
-    @property
-    def pending_count(self) -> int:
-        return sum(1 for future in self._futures if not future.done())
 
     # -- submission --------------------------------------------------------
 
@@ -180,17 +155,13 @@ class EmbedDispatcher:
                 review_key: str, note: str, at_readiness: bool) -> bool:
         if self.unavailable is not None or target.is_file():
             return False
-        if self._pool is None:
-            self._pool = ThreadPoolExecutor(
-                max_workers=INFERENCE_MAX_IN_FLIGHT,
-                thread_name_prefix="embed-dispatch")
         if at_readiness:
             queue = getattr(self.telemetry.queues, queue_name)
             with self._lock:
                 self._mark_entered()
                 queue.dispatched_at_readiness += 1
-        self._futures.append(self._pool.submit(
-            self._task, text, target, queue_name, review_key, note))
+        self._submit_task(
+            self._task, text, target, queue_name, review_key, note)
         return True
 
     # -- execution ---------------------------------------------------------
@@ -252,50 +223,3 @@ class EmbedDispatcher:
         if self.telemetry.state == NOT_RUN:
             self.telemetry.state = PARTIAL
 
-    def _mark_unavailable(self, message: str) -> None:
-        with self._lock:
-            if self.unavailable is not None:
-                return
-            self.unavailable = message
-        get_log().error(f"embed dispatch: {message}")
-
-    # -- draining ----------------------------------------------------------
-
-    def drain(self, progress=None) -> tuple[int, int, int,
-                                            list[DispatchOutcome]]:
-        """Wait for every in-flight dispatch. Returns
-        (published, failed, left_pending, outcomes)."""
-        futures, self._futures = self._futures, []
-        done = failed = skipped = 0
-        outcomes: list[DispatchOutcome] = []
-        try:
-            for future in futures:
-                outcome = future.result()
-                outcomes.append(outcome)
-                if progress is not None:
-                    progress.step(note=outcome.note)
-                if outcome.skipped:
-                    skipped += 1
-                elif outcome.error is not None:
-                    failed += 1
-                else:
-                    done += 1
-        except BaseException:
-            if self._pool is not None:
-                self._pool.shutdown(wait=False, cancel_futures=True)
-                self._pool = None
-            raise
-        return done, failed, skipped, outcomes
-
-    def abandon(self) -> None:
-        """Drop queued dispatches without waiting; in-flight requests
-        finish and publish. Everything dropped is a durable pending gap."""
-        self._futures = []
-        if self._pool is not None:
-            self._pool.shutdown(wait=False, cancel_futures=True)
-            self._pool = None
-
-    def close(self) -> None:
-        if self._pool is not None:
-            self._pool.shutdown(wait=True)
-            self._pool = None

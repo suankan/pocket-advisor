@@ -237,7 +237,8 @@ def run_ingest(
             # Named stage: run every prerequisite through the target
             # (discover … stage). Gates for embed/transactions apply only to
             # `ingest all`; an explicit named stage always executes its chain.
-            from modules.embedding.dispatch import cancel_all, drain_leftover
+            from modules.dispatch import cancel_all
+            from modules.embedding.dispatch import drain_leftover
             try:
                 for name in _stage_prefix(stage):
                     _execute_stage(
@@ -269,7 +270,7 @@ def run_ingest(
                 stats = _execute_stage(ctx, name)
             except BaseException as exc:
                 request_interrupt()
-                from modules.embedding.dispatch import cancel_all
+                from modules.dispatch import cancel_all
                 cancel_all()
                 stages.append(StageRun(
                     name=name,
@@ -825,7 +826,7 @@ def _dispatch(handler: Callable[[argparse.Namespace], Any],
         # Queued readiness embeds are abandoned as durable pending gaps so
         # exit is prompt — the next `ingest embed` fills them.
         try:
-            from modules.embedding.dispatch import cancel_all
+            from modules.dispatch import cancel_all
             cancel_all()
         except Exception:
             pass

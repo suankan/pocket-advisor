@@ -1,7 +1,7 @@
 # Live Ingestion Pipeline Terminal Dashboard
 
 Status: **implemented 2026-07-26**. Initial design commit `32aba8f`;
-locked implementation described below.
+implementation commit `4d7021a`; locked implementation described below.
 
 Implementation map:
 

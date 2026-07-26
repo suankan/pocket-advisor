@@ -4,6 +4,44 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Live ingestion pipeline terminal dashboard
+
+Design `32aba8f`; implementation `4d7021a`. Feature doc:
+`docs/platform/runtime-observability-terminal-dashboards.md`.
+
+`ingest all` now presents one purpose-built Rich dashboard over the real
+seven-stage pipeline instead of a sequence of independent redraw bars. Rich is
+the official package from `rich.readthedocs.io`, pinned to the documented
+`14.1.0` release.
+
+- **One run model** (`modules/runtime_dashboard.py`) shows workspace/run
+  identity, total elapsed time, honest stage completion, per-stage
+  state/duration/result, current work, inference pressure, and a bounded recent
+  event area. Spinners, colour, and glyphs are redundant with visible state
+  words; long results/events ellipsize for narrow terminals.
+- **Truth stays with its owner**: CLI orchestration publishes stage
+  transitions, existing progress objects publish task/worker/queue snapshots,
+  and structured execution logging remains the durable record. Interactive and
+  error records route into the live event area without changing JSONL schema or
+  being recorded twice.
+- **No invented workload percentage**: the header labels its 0–7 measure as
+  stages; task percentage/ETA appears only with a real denominator, and a
+  producer-fed inference queue shows pressure rather than a misleading ETA.
+- **Real Rich lifetime**: activation requires both stdout and stderr TTYs;
+  default-stream widgets correctly join the dashboard after `Live` installs
+  its file proxies; explicit streams and non-TTY commands keep the legacy/plain
+  renderer. The transient live region stops before the stable final report.
+- **Failure isolation**: setup/render shutdown is presentation-only and
+  idempotent; pipeline failure/not-run states remain distinct, and no cursor or
+  live region survives an unwind.
+
+Verification: all 20 native suites and aggregate `pocket-advisor test` pass.
+A real PTY `uv run pocket-advisor.py --workspace test ingest all` completed in
+1m07s (run `0be09cd6-0fea-4572-972f-cc8770a0d042`), exercised real summary
+queue pressure and an oMLX `RemoteProtocolError`, continued through embed and
+transactions, cleared the dashboard, and rendered the expected
+`INGEST COMPLETE WITH FINDINGS` report.
+
 ## 2026-07-26 — Inference dispatch queues and live observability
 
 Design `64ccb4b`; implemented across `491e012`, `2f80477`, `ff702b7`,

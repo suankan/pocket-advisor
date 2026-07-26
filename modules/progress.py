@@ -1,7 +1,7 @@
 """Terminal progress reporting for long pipeline stages (no deps).
 
-On a TTY: one self-updating line on stderr (carriage-return redraw)
-with count, percentage, rate, ETA and the current item; a 1s heartbeat
+On a TTY: one self-updating line on stderr with count, percentage,
+rate, ETA and the current item; a 1s heartbeat
 keeps elapsed ticking even while one slow item (e.g. a multi-minute
 OCR) is being processed, so a busy stage never looks hung. When output
 is piped/logged (non-TTY): a plain line every `quiet_every` seconds so
@@ -21,6 +21,19 @@ work would otherwise show absurd numbers.
 
 `WorkerPoolProgress` draws a header plus one live line per concurrent
 worker, each coming with current/total against the shared job pool.
+
+On a TTY every widget renders through one `LiveDisplay`, the sole owner of
+the bottom region, so a persistent panel (the inference queue rows) can stay
+pinned below a stage's bar without the two shredding each other. Off a TTY
+nothing composites and each widget writes its own periodic line exactly as
+before.
+
+Locking rule, for anything added here: **the display lock is innermost.** A
+widget may call into the display while holding its own lock; the display
+must never call back into a widget's lock. `lines()` therefore returns a
+cached list and takes no lock, while `refresh()` takes the widget lock and
+is only ever called from outside the display lock. Breaking this deadlocks
+the heartbeat against `step()`.
 """
 import sys
 import threading
@@ -29,6 +42,130 @@ from collections import deque
 from typing import IO, Any
 
 _WINDOW_SECS = 30.0
+
+# Panels sort by this; transient stage widgets first, persistent queue rows
+# last, so the pinned rows hold position while stage bars come and go.
+ORDER_STAGE = 0
+ORDER_PERSISTENT = 100
+
+
+class LiveDisplay:
+    """Sole owner of the terminal's bottom region on a TTY.
+
+    Holds an ordered list of panels. A panel supplies `lines()` (cached, no
+    locking) and `refresh()` (recompute under its own lock); it never writes
+    to the stream itself.
+    """
+
+    def __init__(self, stream: IO[str]):
+        self.stream = stream
+        self._lock = threading.RLock()
+        self._panels: list[Any] = []
+        self._lines_drawn = 0
+        self._heartbeat = None
+
+    # -- panel registry -------------------------------------------------
+
+    def register(self, panel: Any) -> None:
+        with self._lock:
+            if panel not in self._panels:
+                self._panels.append(panel)
+                self._panels.sort(
+                    key=lambda p: getattr(p, "display_order", ORDER_STAGE))
+            if self._heartbeat is None:
+                self._heartbeat = threading.Thread(
+                    target=self._tick, daemon=True)
+                self._heartbeat.start()
+
+    def unregister(self, panel: Any) -> None:
+        with self._lock:
+            if panel in self._panels:
+                self._panels.remove(panel)
+            self._draw()
+
+    def finalize(self, panel: Any, lines: list[str]) -> None:
+        """Scroll one panel's last state permanently above the live region,
+        then drop it. This is how a finished stage bar leaves its summary
+        behind while pinned panels keep drawing."""
+        with self._lock:
+            self._clear()
+            for line in lines:
+                self.stream.write(line + "\n")
+            if panel in self._panels:
+                self._panels.remove(panel)
+            self._draw()
+
+    # -- drawing ---------------------------------------------------------
+
+    def redraw(self) -> None:
+        with self._lock:
+            self._draw()
+
+    def println(self, message: str) -> None:
+        """A real log line above the live region."""
+        with self._lock:
+            self._clear()
+            self.stream.write(message + "\n")
+            self._draw()
+
+    def _collect(self) -> list[str]:
+        lines: list[str] = []
+        for panel in self._panels:
+            lines.extend(panel.lines())
+        return lines
+
+    def _draw(self) -> None:
+        lines = self._collect()
+        if self._lines_drawn:
+            self.stream.write(f"\033[{self._lines_drawn}A")
+        for line in lines:
+            self.stream.write("\r\033[2K" + line + "\n")
+        # The block can shrink (a stage bar left): wipe the remainder so no
+        # stale line survives below the new block.
+        leftover = self._lines_drawn - len(lines)
+        if leftover > 0:
+            for _ in range(leftover):
+                self.stream.write("\r\033[2K\n")
+            self.stream.write(f"\033[{leftover}A")
+        self._lines_drawn = len(lines)
+        self.stream.flush()
+
+    def _clear(self) -> None:
+        if self._lines_drawn <= 0:
+            return
+        self.stream.write(f"\033[{self._lines_drawn}A")
+        for _ in range(self._lines_drawn):
+            self.stream.write("\r\033[2K\n")
+        self.stream.write(f"\033[{self._lines_drawn}A")
+        self._lines_drawn = 0
+
+    def _tick(self) -> None:
+        """One heartbeat for every panel, so elapsed keeps ticking while a
+        slow item is in flight.
+
+        `refresh()` is called outside the display lock and redraws through
+        its own panel lock — see the locking rule in the module docstring.
+        """
+        while True:
+            time.sleep(1.0)
+            with self._lock:
+                panels = list(self._panels)
+            for panel in panels:
+                panel.refresh()
+
+
+_displays: dict[int, LiveDisplay] = {}
+_displays_lock = threading.Lock()
+
+
+def display_for(stream: IO[str]) -> LiveDisplay:
+    """The one display owning `stream`'s bottom region."""
+    with _displays_lock:
+        display = _displays.get(id(stream))
+        if display is None:
+            display = LiveDisplay(stream)
+            _displays[id(stream)] = display
+        return display
 
 
 def _fmt_secs(s: float) -> str:
@@ -53,16 +190,33 @@ class Progress:
         self.t0 = time.monotonic()
         self._window: deque[tuple[float, int]] = deque([(self.t0, 0)])
         self._last_emit = 0.0
-        self._last_len = 0
         self._last_note = ""
         self._active = False
         self._finished = False
         self._lock = threading.Lock()
+        self._cached: list[str] = []
+        self._display = display_for(self.stream) if self.tty else None
         self._observer = observer
         if observer is not None:
             observer.attach(self)
-        if self.tty:
-            threading.Thread(target=self._heartbeat, daemon=True).start()
+        if self._display is not None:
+            self._display.register(self)
+
+    # -- panel protocol ---------------------------------------------------
+
+    display_order = ORDER_STAGE
+
+    def lines(self) -> list[str]:
+        """Cached; takes no lock (see the module's locking rule)."""
+        return self._cached
+
+    def refresh(self) -> None:
+        """Heartbeat entry point: retick elapsed while an item is in
+        flight, so a busy stage never looks hung."""
+        with self._lock:
+            if self._finished or not self._active:
+                return
+            self._emit(self._last_note)
 
     def step(self, note: str = "", inc: int = 1) -> None:
         now = time.monotonic()
@@ -92,9 +246,9 @@ class Progress:
     def println(self, msg: str) -> None:
         """A real (newline-terminated) log line while the bar is active."""
         with self._lock:
-            if self.tty and self._last_len:
-                self.stream.write("\r" + " " * self._last_len + "\r")
-                self._last_len = 0
+            if self._display is not None:
+                self._display.println(msg)
+                return
             self.stream.write(msg + "\n")
             self.stream.flush()
 
@@ -102,13 +256,17 @@ class Progress:
         with self._lock:
             self._finished = True
             elapsed = time.monotonic() - self.t0
-            if not (self.n == 0 and self.total is None):
+            if self.n == 0 and self.total is None:
                 # nothing processed and no total: stay quiet, but still
                 # release the bar so later output is not routed to it.
+                if self._display is not None:
+                    self._display.unregister(self)
+            else:
                 self._emit(note or self._last_note, final=True)
-                if self.tty:
-                    self.stream.write("\n")
-                    self.stream.flush()
+                if self._display is not None:
+                    # Scroll the final line permanently above the live
+                    # region; pinned panels keep drawing below it.
+                    self._display.finalize(self, self._cached)
         self._release(elapsed)
 
     def _release(self, elapsed: float) -> None:
@@ -126,17 +284,6 @@ class Progress:
             rate_per_second=round(self.n / elapsed, 3) if elapsed > 0 else 0.0)
 
     # -- internals ----------------------------------------------------
-
-    def _heartbeat(self) -> None:
-        """TTY only: redraw once a second so elapsed keeps ticking while
-        one slow item is in flight (liveness signal)."""
-        while True:
-            time.sleep(1.0)
-            with self._lock:
-                if self._finished:
-                    return
-                if self._active:
-                    self._emit(self._last_note)
 
     def _rate(self, now: float) -> float:
         while len(self._window) > 2 and \
@@ -169,12 +316,11 @@ class Progress:
         if note and not final:
             bits.append(f"— {str(note)[:48]}")
         msg = " ".join(bits)
-        if self.tty:
-            pad = " " * max(0, self._last_len - len(msg))
-            self.stream.write("\r" + msg + pad)
-            self._last_len = len(msg)
-        else:
-            self.stream.write(msg + "\n")
+        self._cached = [msg]
+        if self._display is not None:
+            self._display.redraw()
+            return
+        self.stream.write(msg + "\n")
         self.stream.flush()
 
 
@@ -202,7 +348,6 @@ class WorkerPoolProgress:
         self.t0 = time.monotonic()
         self._window: deque[tuple[float, int]] = deque([(self.t0, 0)])
         self._last_emit = 0.0
-        self._lines_drawn = 0
         self._active = False
         self._finished = False
         self._lock = threading.Lock()
@@ -210,11 +355,26 @@ class WorkerPoolProgress:
         self._done_each = [0] * worker_count
         self._busy = [False] * worker_count
         self._job_started: list[float | None] = [None] * worker_count
+        self._cached: list[str] = []
+        self._display = display_for(self.stream) if self.tty else None
         self._observer = observer
         if observer is not None:
             observer.attach(self)
-        if self.tty:
-            threading.Thread(target=self._heartbeat, daemon=True).start()
+        if self._display is not None:
+            self._display.register(self)
+
+    # -- panel protocol ---------------------------------------------------
+
+    display_order = ORDER_STAGE
+
+    def lines(self) -> list[str]:
+        return self._cached
+
+    def refresh(self) -> None:
+        with self._lock:
+            if self._finished or not self._active:
+                return
+            self._emit(force=True)
 
     def begin(self, worker_id: int, note: str) -> None:
         with self._lock:
@@ -240,22 +400,27 @@ class WorkerPoolProgress:
 
     def println(self, msg: str) -> None:
         with self._lock:
-            self._clear_block()
+            if self._display is not None:
+                self._display.println(msg)
+                return
             self.stream.write(msg + "\n")
             self.stream.flush()
-            if self.tty and not self._finished:
-                self._emit(force=True)
 
     def done(self, note: str = "") -> None:
         with self._lock:
             self._finished = True
             elapsed = time.monotonic() - self.t0
-            if not (self.completed == 0 and self.total == 0):
+            if self.completed == 0 and self.total == 0:
+                if self._display is not None:
+                    self._display.unregister(self)
+            else:
                 for i in range(self.worker_count):
                     self._busy[i] = False
                     self._job_started[i] = None
                     self._status[i] = "idle"
                 self._emit(force=True, final=True)
+                if self._display is not None:
+                    self._display.finalize(self, self._cached)
         self._release(elapsed)
 
     def _release(self, elapsed: float) -> None:
@@ -275,15 +440,6 @@ class WorkerPoolProgress:
         if worker_id < 0 or worker_id >= self.worker_count:
             raise ValueError(f"worker_id out of range: {worker_id}")
 
-    def _heartbeat(self) -> None:
-        while True:
-            time.sleep(1.0)
-            with self._lock:
-                if self._finished:
-                    return
-                if self._active:
-                    self._emit(force=True)
-
     def _rate(self, now: float) -> float:
         while len(self._window) > 2 and \
                 now - self._window[0][0] > _WINDOW_SECS:
@@ -291,15 +447,6 @@ class WorkerPoolProgress:
         t_old, n_old = self._window[0]
         dt = now - t_old
         return (self.completed - n_old) / dt if dt > 0 else 0.0
-
-    def _clear_block(self) -> None:
-        if not self.tty or self._lines_drawn <= 0:
-            return
-        self.stream.write(f"\033[{self._lines_drawn}A")
-        for _ in range(self._lines_drawn):
-            self.stream.write("\r\033[2K\n")
-        self.stream.write(f"\033[{self._lines_drawn}A")
-        self._lines_drawn = 0
 
     def _worker_progress(self, index: int) -> tuple[int, int]:
         """(current, total) for one worker against the shared job pool.
@@ -360,13 +507,9 @@ class WorkerPoolProgress:
             return
         self._last_emit = now
         lines = self._format_lines(final=final)
-        if self.tty:
-            if self._lines_drawn:
-                self.stream.write(f"\033[{self._lines_drawn}A")
-            for line in lines:
-                self.stream.write("\r\033[2K" + line + "\n")
-            self._lines_drawn = len(lines)
-            self.stream.flush()
+        self._cached = lines
+        if self._display is not None:
+            self._display.redraw()
             return
         self.stream.write("\n".join(lines) + "\n")
         self.stream.flush()

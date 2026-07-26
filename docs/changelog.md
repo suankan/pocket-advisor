@@ -4,6 +4,57 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Structured execution logging
+
+`docs/platform/logging.md` implemented in full (proposed, reviewed twice,
+locked, and built the same day). `modules/logs.py` is now the single entry
+point for all operator-facing output — structured records, terminal lines,
+and progress bars alike — over a stdlib `logging` engine.
+
+- **Four methods, destination by method** (`modules/logs.py`):
+  `.interactive()` (terminal + file), `.error()` (stderr + file, with
+  `exc_info`), `.info()` and `.debug()` (file only). `.info()` being
+  file-only is what lets instrumentation grow without degrading the
+  terminal; `LOG_LEVEL` gates volume, not destination.
+- **One JSON-lines file per invocation** at
+  `workspaces/.state/workspace-<id>/execution-logs/<YYYYMMDD-HHMMSS>.jsonl`.
+  Six fields: `timestamp` (RFC 3339, UTC, millis), `run_id`,
+  `worker_thread` (thread name), `caller`, `level`, `message`, plus
+  free-form keyword fields. Reserved names — including `exc_info`, whose
+  misuse silently dropped tracebacks — are rejected at call time.
+- **Reachability without a ctx**: `get_log()` is configured once by
+  `setup_logging()` at the CLI entrypoint, so `modules/inference.py` — the
+  layer whose failure motivated this work — can record the endpoint and
+  transport exception. `PipelineContext.log` aliases the same object.
+- **Progress bars are facade-owned** (`log.progress()`,
+  `log.worker_pool()`): nine call sites across seven modules no longer
+  import `modules/progress.py`. Bars emit one lifecycle record on `done()`,
+  never per-redraw, and terminal output routes through the live bar so no
+  redraw is shredded.
+- **`httpx`/`httpcore` captured at DEBUG** under `LOG_LEVEL=debug` only,
+  correlated by the same `run_id`.
+- **`run_id` correlation**: announced once as a terminal banner and repeated
+  in a `finally` footer, and carried on `IngestRunReport`
+  (`REPORT_SCHEMA_VERSION` 4 → 5) so a saved report pivots to its log.
+- **Preserved across `wipe state`** via `PRESERVED_STATE_NAMES`: the record
+  of what went wrong must outlive the recovery step.
+
+Verification: native suite 16/16 and `pocket-advisor test` 16/16; two real
+`ingest all` runs against a dead endpoint. Under `LOG_LEVEL=debug`, 85
+`httpcore` records placed the motivating `RemoteProtocolError` at
+connection level, per-thread and per-millisecond across four `summary-gen`
+workers. Replaying a run's `interactive` records reproduced its terminal
+transcript exactly; report and log `run_id` matched; terminal output was
+structurally identical between `info` and `debug`. One measured behaviour
+change: two pipeline error lines moved from stdout to stderr, where
+`.error()` puts them — nothing was lost from the two combined. `wipe state`
+preservation and the `KeyboardInterrupt` path are covered by unit test
+rather than end to end (the former is destructive and was not authorised;
+a real SIGINT was absorbed by the app's existing interrupt handling).
+
+Roadmap item 1 removed; remaining items renumbered and cross-references
+repaired.
+
 ## 2026-07-26 — DB/filesystem storage split shipped
 
 `docs/storage/separate-db-and-fs-concerns.md` implemented in full (locked

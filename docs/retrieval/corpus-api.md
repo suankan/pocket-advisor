@@ -1,7 +1,7 @@
 # Corpus API: JSON Email Artifacts and the Two-Interface Documents Facade
 
 Status: **proposed design** (2026-07-23, operator-agreed direction; not
-implemented). Roadmap item 4. This document locks the target shape for two
+implemented). Roadmap item 3. This document locks the target shape for two
 agreed changes: a stable per-email JSON artifact schema, and one typed
 facade class exposing the corpus through two interface families. It is the
 architectural stepping stone toward `docs/generation/rag-gateway.md` — the

@@ -6,21 +6,7 @@ shipped history in `docs/changelog.md`; locked architecture in
 folders under `docs/` (`ingestion/`, `retrieval/`, `generation/`,
 `inference/`, `storage/`, `benchmarks/`, `platform/`).
 
-## 1. Structured execution logging
-
-`docs/platform/logging.md` (proposed, not implemented): `modules/logs.py`
-becomes the single entry point for all operator-facing output —
-`.interactive()`/`.error()`/`.info()`/`.debug()` plus the progress-bar
-factories — over a stdlib `logging` engine gated by `LOG_LEVEL`. Writes one
-JSON-lines file per execution to
-`workspaces/.state/workspace-<id>/execution-logs/`, run-stitched by a
-per-invocation UUID (shown as a terminal banner and footer) and preserved
-across `wipe state`. Terminal output keeps its exact current shape; the
-file is a complete replay of it. Captures `httpx`/`httpcore` diagnostics at
-debug level. Target: direct ingestion into a local OpenObserve instance.
-Query daemon is out of scope.
-
-## 2. Transaction parser coverage
+## 1. Transaction parser coverage
 
 This operational follow-up is independent. It does not gate generic end-to-end
 platform validation or the local answering pass.
@@ -30,7 +16,7 @@ platform validation or the local answering pass.
   continues to flag every unsupported statement loudly and honestly; rerun
   `ingest transactions` for an affected workspace after each parser lands.
 
-## 3. Local answering pass
+## 2. Local answering pass
 
 The retrieval layer returns delimited result packets; the answering
 pass (locked constraints in `docs/generation/local-answering-pass.md`)
@@ -38,7 +24,7 @@ feeds them through the shared inference client to a local model that
 produces a cited answer, shows readable source material, and never cites a
 generated thread summary as content.
 
-## 4. Proposed designs awaiting implementation
+## 3. Proposed designs awaiting implementation
 
 Docs exist for these; none is implemented. Each stays a draft until picked
 up through the normal design → work-in-progress → changelog lifecycle.
@@ -68,7 +54,7 @@ up through the normal design → work-in-progress → changelog lifecycle.
   key and saved-record verdict labels need a deliberate migration
   decision.
 
-## 5. Experiments and watchlist
+## 4. Experiments and watchlist
 
 - **Envelope payload A/B** — compare the shipped `envelope-v1` recipe with a
   plain-payload index through the native retrieval-expectation suite to

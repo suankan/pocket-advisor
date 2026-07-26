@@ -58,7 +58,7 @@ the integrity rules here.
 | Retrieval-expectation accuracy | `docs/benchmarks/accuracy-testing.md` |
 | RAG metrics checklist (draft candidate) | `docs/benchmarks/rag-metrics-and-evaluation.md` |
 | venv-to-uv runtime migration | `docs/platform/uv-migration.md` |
-| Structured execution logging (proposed) | `docs/platform/logging.md` |
+| Structured execution logging | `docs/platform/logging.md` |
 
 ## System boundaries
 

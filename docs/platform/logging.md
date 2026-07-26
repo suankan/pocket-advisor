@@ -1,11 +1,17 @@
 # Structured Execution Logging
 
-Status: **locked for implementation 2026-07-26** — roadmap item 1 in
-`docs/roadmap.md`. Proposed 2026-07-26; revised the same day after design
-review (reachability without `ctx`, stdlib-logging engine, ingestible
-timestamps, case-data location), then again to unify the interactive
-channel into the same facade and collapse the duplicated schema fields.
-Active context lives in `docs/work-in-progress.md` while this is built.
+Status: **implemented 2026-07-26**. Proposed 2026-07-26; revised the same
+day after design review (reachability without `ctx`, stdlib-logging engine,
+ingestible timestamps, case-data location), then again to unify the
+interactive channel into the same facade and collapse the duplicated schema
+fields; locked and built the same day. See `docs/changelog.md`.
+
+Two verification items are covered by unit test rather than end-to-end:
+`wipe state` preservation (running it against a real workspace is
+destructive and was not authorised) and the `KeyboardInterrupt` path (a
+real SIGINT to the CLI was absorbed by the app's existing interrupt
+handling and the run completed normally — pre-existing behaviour, outside
+this design's scope).
 
 ## Problem
 

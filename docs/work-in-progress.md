@@ -11,17 +11,6 @@ See the lifecycle workflow in `AGENTS.md`.
 
 ## Current work items
 
-### Completion-driven PDF publication and embedding dispatch
-
-The live dashboard exposed a real scheduling barrier: PDF transform workers
-stored results in memory, but the coordinator waited for the entire worker
-pool before publishing any completed PDF text. Consequently PDF chunk creation
-and readiness embedding dispatch could not begin until the slowest transform
-finished.
-
-Implement the amendment in
-`docs/ingestion/pdf-to-text-pipeline-design.md`: consume transform completions
-on the coordinator, publish/commit/chunk/dispatch each document immediately,
-and retain workers as temp-output-only processes with no SQLite or final-path
-writes. Add a gated timing regression proving a fast PDF dispatches while a
-slow PDF is still transforming, then run the full repository verification.
+None. Completion-driven PDF publication and readiness embedding dispatch
+shipped 2026-07-26 — see `docs/changelog.md` and
+`docs/ingestion/pdf-to-text-pipeline-design.md`.

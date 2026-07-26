@@ -4,6 +4,34 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Completion-driven PDF embedding dispatch
+
+Design `1337fa2`; implementation `2199aea`. Feature doc:
+`docs/ingestion/pdf-to-text-pipeline-design.md`.
+
+PDF readiness dispatch now means actual transform readiness. Previously,
+workers accumulated temporary results in memory and the coordinator waited
+for the entire OCR pool before publishing any PDF text. Fast documents were
+therefore held behind the slowest PDF even though the run-wide embedding
+dispatcher itself was already asynchronous.
+
+- `PdfTextStage` submits byte-ordered transform futures to the bounded pool
+  and consumes them in completion order. The main coordinator publishes each
+  verified text product, commits document metadata, creates chunks, and calls
+  readiness embedding dispatch before waiting for the next result.
+- Transform workers still write only private temporary outputs. SQLite,
+  review records, canonical paths, chunk rows, and dispatch submission remain
+  coordinator-owned; durable final state remains deterministic even though
+  scheduling order is intentionally completion-driven.
+- Cached current products and source-integrity failures are settled before
+  fresh OCR starts instead of being held behind it.
+- A gated regression parks one slow PDF worker and proves a faster document
+  has chunks and reaches `submit_pending_leaves(..., at_readiness=True)` on
+  the coordinator thread before the slow transform is released.
+
+Verification: every native `modules/tests/test_*.py` suite passes; aggregate
+`uv run pocket-advisor.py test` reports 20/20; `git diff --check` passes.
+
 ## 2026-07-26 — Live ingestion pipeline terminal dashboard
 
 Design `32aba8f`; implementation `4d7021a`. Feature doc:

@@ -6,7 +6,22 @@ shipped history in `docs/changelog.md`; locked architecture in
 folders under `docs/` (`ingestion/`, `retrieval/`, `generation/`,
 `inference/`, `storage/`, `benchmarks/`, `platform/`).
 
-## 1. Transaction parser coverage
+## 1. Inference dispatch queues and live observability
+
+Design: `docs/ingestion/embedding-queue-and-workers.md` (proposed
+2026-07-26). Make inference dispatch pressure continuously visible on
+stdout — the embedding queue growing as producers submit and draining as
+workers complete — which today is invisible until the embed stage drains.
+
+Structural work it requires: one `EmbedDispatcher` instance per run
+instead of the current readiness/convergence handoff, a shared
+`BoundedInferenceDispatcher` base under both dispatchers, worker-side
+completion counters, and a `LiveDisplay` that owns the stderr bottom
+region so a persistent queue row can coexist with stage progress bars.
+
+Observability only; no throughput change is intended or claimed.
+
+## 2. Transaction parser coverage
 
 This operational follow-up is independent. It does not gate generic end-to-end
 platform validation or the local answering pass.
@@ -16,7 +31,7 @@ platform validation or the local answering pass.
   continues to flag every unsupported statement loudly and honestly; rerun
   `ingest transactions` for an affected workspace after each parser lands.
 
-## 2. Local answering pass
+## 3. Local answering pass
 
 The retrieval layer returns delimited result packets; the answering
 pass (locked constraints in `docs/generation/local-answering-pass.md`)
@@ -24,7 +39,7 @@ feeds them through the shared inference client to a local model that
 produces a cited answer, shows readable source material, and never cites a
 generated thread summary as content.
 
-## 3. Proposed designs awaiting implementation
+## 4. Proposed designs awaiting implementation
 
 Docs exist for these; none is implemented. Each stays a draft until picked
 up through the normal design → work-in-progress → changelog lifecycle.
@@ -54,7 +69,7 @@ up through the normal design → work-in-progress → changelog lifecycle.
   key and saved-record verdict labels need a deliberate migration
   decision.
 
-## 4. Experiments and watchlist
+## 5. Experiments and watchlist
 
 - **Envelope payload A/B** — compare the shipped `envelope-v1` recipe with a
   plain-payload index through the native retrieval-expectation suite to

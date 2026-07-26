@@ -1,6 +1,6 @@
 # Design Document: Pocket Advisor RAG Gateway
 
-**Status:** Draft / Proposed — **not implemented**; roadmap item 3 in
+**Status:** Draft / Proposed — **not implemented**; roadmap item 4 in
 `docs/roadmap.md`. Kept as a candidate for future revision; nothing below
 describes current code.
 

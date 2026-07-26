@@ -1,9 +1,12 @@
 """Self-test: command-scoped workspace grammar and orchestration."""
+import atexit
 import contextlib
 import io
+import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +23,12 @@ from modules.statement_parsers import ParserConflict  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 WS = ("--workspace", "matter-x")
 
+# `cli.main()` opens a per-invocation execution log under the selected
+# workspace's state, so the fake selection carries a real Config bound to a
+# scratch tree — never the repo's own workspaces/.state.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="pa-test-cli-"))
+atexit.register(shutil.rmtree, _SCRATCH, True)
+
 
 class FakeConnection:
     def __init__(self):
@@ -35,10 +44,15 @@ class FakeConnection:
         pass
 
 
-def fake_selection(*, embed: bool = True, bank: bool = False):
+def fake_selection(*, embed: bool = True, bank: bool = False,
+                   root: Path | None = None):
+    base = root or _SCRATCH
     collections = (SimpleNamespace(is_bank_transactions=bank),)
     workspace = SimpleNamespace(id="matter-x", collections=collections)
-    config = SimpleNamespace(
+    config = Config(
+        project_root=base,
+        workspaces_dir=base / "workspaces",
+        workspace_id="matter-x",
         embed_text=embed,
         summarize_threads=True,
         default_top_k=15,
@@ -336,7 +350,8 @@ def test_native_query_seam() -> None:
     # Auto mode uses the workspace-local daemon without opening a second DB;
     # --no-daemon preserves the exact cold path above.
     warm_selection = fake_selection(embed=False, bank=False)
-    warm_selection.config.daemon_auto = True
+    # Config is frozen: rebind rather than mutate, as the engine does.
+    warm_selection.config = replace(warm_selection.config, daemon_auto=True)
     response = {
         "ok": True,
         "result": {"question": "warm", "results": [], "warnings": [],
@@ -377,13 +392,65 @@ def test_workspace_free_dispatch() -> None:
     parse_must_fail(["fetch-model"])
 
 
+def test_execution_log_wiring(tmp: Path) -> None:
+    """Every workspace-scoped invocation opens one execution log, announces
+    its run id once, and says where the file is even when it fails."""
+    import json
+
+    selection = fake_selection(root=tmp)
+
+    def run(handler_result) -> tuple[str, list[dict], int]:
+        before = set(selection.config.execution_logs_dir.glob("*.jsonl")) \
+            if selection.config.execution_logs_dir.exists() else set()
+        stderr = io.StringIO()
+        with patch.object(cli, "_resolve_selection", return_value=selection), \
+                patch.object(cli, "_handle_verify", side_effect=handler_result), \
+                contextlib.redirect_stderr(stderr):
+            code = cli.main([*WS, "verify"])
+        after = set(selection.config.execution_logs_dir.glob("*.jsonl"))
+        new = (after - before).pop()
+        records = [json.loads(line)
+                   for line in new.read_text().splitlines() if line.strip()]
+        return stderr.getvalue(), records, code
+
+    # Success: banner and footer bracket the run, both naming the run id.
+    text, records, code = run(lambda _args: 0)
+    assert code == 0
+    banner = [ln for ln in text.splitlines()
+              if ln.startswith("pocket-advisor: run ")]
+    footer = [ln for ln in text.splitlines() if ln.startswith("Run log:")]
+    assert len(banner) == 1 and len(footer) == 1, text
+    run_id = banner[0].split("run ")[1].split(" —")[0]
+    assert "workspace matter-x" in banner[0]
+    assert run_id in footer[0]
+    # A quiet command records nothing, but the file still exists so the
+    # footer never points at a path that is not there.
+    assert records == []
+
+    # Ctrl+C: the run id still gets a footer, and the log says why it ended.
+    text, records, code = run(KeyboardInterrupt)
+    assert code == 130
+    assert [ln for ln in text.splitlines() if ln.startswith("Run log:")]
+    assert [r for r in records
+            if r["level"] == "error" and "KeyboardInterrupt" in r["message"]]
+
+    # A workspace-free action has nowhere to write and must not fail.
+    with patch.object(cli, "_handle_test", return_value=0), \
+            contextlib.redirect_stderr(io.StringIO()) as free:
+        assert cli.main(["test"]) == 0
+    assert "pocket-advisor: run " not in free.getvalue()
+
+
 def test_ingest_report_display(tmp: Path) -> None:
     from modules.ingest_report import (Finding, IngestRunReport, StageRun,
                                        format_report, latest_report_path,
                                        load_report, persist_report)
     from modules.telemetry import PerformanceTelemetry
 
-    config = SimpleNamespace(project_root=tmp, logs_dir=tmp / "logs")
+    # One real Config for both halves: the report is persisted where the
+    # CLI dispatch below will look for it.
+    selection = fake_selection(root=tmp)
+    config = selection.config
     report = IngestRunReport(
         schema_version=4,
         workspace_id="matter-x",
@@ -410,9 +477,6 @@ def test_ingest_report_display(tmp: Path) -> None:
 
     # CLI dispatch: `ingest report` (and --last) render the saved record;
     # an explicit path works too; stray report flags on real stages fail.
-    selection = fake_selection()
-    selection.config.project_root = tmp
-    selection.config.logs_dir = tmp / "logs"
     with patch.object(cli, "_resolve_selection", return_value=selection):
         for arguments in ([*WS, "ingest", "report"],
                           [*WS, "ingest", "report", "--last"],
@@ -505,6 +569,8 @@ def main() -> int:
     test_workspace_free_dispatch()
     with tempfile.TemporaryDirectory(prefix="pa_cli_report_") as td:
         test_ingest_report_display(Path(td))
+    with tempfile.TemporaryDirectory() as td:
+        test_execution_log_wiring(Path(td))
     with tempfile.TemporaryDirectory(prefix="pa_cli_") as td:
         test_unknown_workspace_has_no_side_effect(Path(td))
     test_entrypoint_bootstrap()

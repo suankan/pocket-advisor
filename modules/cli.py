@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from typing import Any
 from modules.config import Config
 from modules.database import Database
 from modules.domain import StageStats
+from modules.logs import get_log, setup_logging
 from modules.ocr import request_interrupt
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import ReviewLog
@@ -805,6 +807,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _dispatch(handler: Callable[[argparse.Namespace], Any],
+              args: argparse.Namespace) -> int:
+    try:
+        return int(handler(args) or 0)
+    except KeyboardInterrupt:
+        # Ctrl+C already unwinds the pipeline cleanly via the interrupt flag;
+        # suppress the traceback and exit with the conventional SIGINT code.
+        # Queued readiness embeds are abandoned as durable pending gaps so
+        # exit is prompt — the next `ingest embed` fills them.
+        try:
+            from modules.embedding.dispatch import cancel_all
+            cancel_all()
+        except Exception:
+            pass
+        # Recorded, not printed: an interrupted run is exactly the one whose
+        # log needs to say why it stopped. Terminal routing goes through any
+        # live progress bar, so no redraw line is left half-drawn.
+        get_log().error("KeyboardInterrupt — interrupted")
+        return 130
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -820,17 +843,24 @@ def main(argv: list[str] | None = None) -> int:
             f"{label}: --workspace is not accepted for this "
             "workspace-free action")
     handler: Callable[[argparse.Namespace], Any] = args.handler
-    try:
-        return int(handler(args) or 0)
-    except KeyboardInterrupt:
-        # Ctrl+C already unwinds the pipeline cleanly via the interrupt flag;
-        # suppress the traceback and exit with the conventional SIGINT code.
-        # Queued readiness embeds are abandoned as durable pending gaps so
-        # exit is prompt — the next `ingest embed` fills them.
+
+    selection: RuntimeSelection | None = getattr(args, "selection", None)
+    if selection is None:
+        # Workspace-free action: execution logs are workspace-scoped, so
+        # there is nowhere to write one. The null facade keeps terminal
+        # output working (modules/logs.py D6).
+        return _dispatch(handler, args)
+
+    run_id = str(uuid.uuid4())
+    with setup_logging(selection.config, run_id=run_id) as log:
+        # Banner and footer on stderr, once each: the operator gets the
+        # token to query by, without 36 characters of UUID on every line
+        # (logging.md D7). stderr keeps piped stdout clean.
+        print(f"pocket-advisor: run {run_id} — "
+              f"workspace {selection.workspace.id}", file=sys.stderr)
         try:
-            from modules.embedding.dispatch import cancel_all
-            cancel_all()
-        except Exception:
-            pass
-        print("\nKeyboardInterrupt — interrupted", file=sys.stderr)
-        return 130
+            return _dispatch(handler, args)
+        finally:
+            # `finally`, so the runs worth correlating — the failed and the
+            # interrupted ones — still say where their log is.
+            print(f"Run log:    {log.path} (run {run_id})", file=sys.stderr)

@@ -17,8 +17,9 @@ Design: `docs/platform/logging.md` — **locked for implementation
 2026-07-26** (two review rounds folded in). Roadmap item 1. Read the design
 doc first; this section carries only the active context.
 
-Progress: steps 1–2 done (`modules/logs.py`, `modules/tests/test_logs.py`,
-progress observer hook). Steps 3–8 not started. 16/16 suite green.
+Progress: steps 1–3 done (facade, progress observer hook, entrypoint
+wiring with banner/footer + `PipelineContext.log`). Steps 4–8 not started.
+16/16 suite green.
 
 Four review findings reshaped the first draft — do not resurrect the
 originals:

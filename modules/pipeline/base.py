@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 from modules.config import Config
 from modules.domain import StageStats
+from modules.logs import Log, get_log
 from modules.review import ReviewLog
 from modules.telemetry import PerformanceTelemetry
 from modules.workspace import Registry, Workspace
@@ -34,6 +35,10 @@ class PipelineContext:
     # submit and move on, never blocking the pipeline; the embed stage
     # (or end-of-run) drains it (inference-serving.md decision 5).
     embed_dispatcher: Any = None
+    # Convenience alias for the process-scoped logging facade, which the
+    # CLI configures before any stage runs. Code without a ctx reaches the
+    # same object through modules.logs.get_log().
+    log: Log = field(default_factory=get_log)
 
 
 class Stage(ABC):
@@ -61,6 +66,10 @@ class Stage(ABC):
     @property
     def registry(self) -> Registry:
         return self.ctx.registry
+
+    @property
+    def log(self) -> Log:
+        return self.ctx.log
 
     @abstractmethod
     def run(self) -> StageStats:

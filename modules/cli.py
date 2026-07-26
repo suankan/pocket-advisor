@@ -14,7 +14,7 @@ from modules.config import Config
 from modules.database import Database
 from modules.domain import StageStats
 from modules.logs import get_log, setup_logging
-from modules.ocr import request_interrupt
+from modules.ocr import cancel_active_commands, request_interrupt
 from modules.pipeline.base import PipelineContext, Stage
 from modules.review import ReviewLog
 from modules.workspace import Registry, Workspace
@@ -165,6 +165,20 @@ def _stage_failure_reason(exc: BaseException) -> str:
     return f"{name}: {category}" if category else name
 
 
+def _cancel_runtime_work() -> None:
+    """One idempotent cancellation path for failures and the first Ctrl+C."""
+    request_interrupt()
+    try:
+        cancel_active_commands()
+    except Exception:
+        pass
+    try:
+        from modules.dispatch import cancel_all
+        cancel_all()
+    except Exception:
+        pass
+
+
 def _finalize_ingest_report(
         ctx: PipelineContext,
         *,
@@ -175,7 +189,9 @@ def _finalize_ingest_report(
         start_log_id: int,
         failed_stage: str | None,
         clock: Callable[[], float],
-) -> None:
+        dashboard: Any,
+        dashboard_state: str | None = None,
+) -> tuple[Any, Path]:
     """Build, persist, and render the required full-ingest report."""
     from modules.ingest_report import (build_report, format_report,
                                        persist_report)
@@ -200,12 +216,28 @@ def _finalize_ingest_report(
     format_report(report, None)
     report.report_seconds = round(clock() - report_started, 6)
     path = persist_report(report, ctx.config)
-    # One record for the whole block, not thirty: the file mirrors what the
-    # operator saw, at the same granularity (logging.md D2).
-    ctx.log.interactive(format_report(report, path),
-                        status=report.status,
-                        pipeline_seconds=report.pipeline_seconds,
-                        report_path=str(path))
+    rendered = format_report(report, path)
+    if dashboard.install_report(
+            report, path, ctx.log.path, state=dashboard_state):
+        # Rich owns human presentation. Preserve one aggregate structured
+        # record without re-routing the multiline report through its event
+        # panel or printing it above Live.
+        ctx.log.info(
+            rendered,
+            status=report.status,
+            pipeline_seconds=report.pipeline_seconds,
+            report_path=str(path),
+        )
+    else:
+        # Non-TTY fallback: Rich Console strips terminal control while
+        # retaining the stable plain report contract.
+        ctx.log.notice(
+            rendered,
+            status=report.status,
+            pipeline_seconds=report.pipeline_seconds,
+            report_path=str(path),
+        )
+    return report, path
 
 
 def run_ingest(
@@ -226,6 +258,12 @@ def run_ingest(
         enabled=stage == "all",
     )
     dashboard.start()
+    if stage == "all" and not dashboard.enabled and get_log().run_id:
+        print(
+            f"pocket-advisor: run {get_log().run_id} — "
+            f"workspace {selection.workspace.id}",
+            file=sys.stderr,
+        )
     try:
         return _run_ingest(
             stage,
@@ -237,6 +275,12 @@ def run_ingest(
         )
     finally:
         dashboard.stop()
+        if stage == "all" and not dashboard.enabled and get_log().run_id:
+            print(
+                f"Run log:    {get_log().path} "
+                f"(run {get_log().run_id})",
+                file=sys.stderr,
+            )
 
 
 def _run_ingest(
@@ -256,13 +300,21 @@ def _run_ingest(
     except BaseException as exc:
         if stage == "all":
             elapsed = clock() - pipeline_started
-            print(
-                "\nINGEST INCOMPLETE — workspace "
-                f"{selection.workspace.id} — pipeline {elapsed:.1f}s\n\n"
-                "This run\n"
-                f"  database       failed     {elapsed:.1f}s   "
-                f"{type(exc).__name__}\n\n"
-                "Run report: unavailable (database did not open safely)")
+            message = (
+                "database failed before ingestion could start"
+                f" ({type(exc).__name__}, {elapsed:.1f}s);"
+                " run report unavailable")
+            if dashboard.enabled:
+                dashboard.terminal_failure(message)
+            else:
+                print(
+                    "\nINGEST INCOMPLETE — workspace "
+                    f"{selection.workspace.id} — pipeline {elapsed:.1f}s\n\n"
+                    "This run\n"
+                    f"  database       failed     {elapsed:.1f}s   "
+                    f"{type(exc).__name__}\n\n"
+                    "Run report: unavailable"
+                    " (database did not open safely)")
         raise
     try:
         if stage != "all":
@@ -302,9 +354,7 @@ def _run_ingest(
             try:
                 stats = _execute_stage(ctx, name)
             except BaseException as exc:
-                request_interrupt()
-                from modules.dispatch import cancel_all
-                cancel_all()
+                _cancel_runtime_work()
                 duration = round(clock() - stage_started, 6)
                 stages.append(StageRun(
                     name=name,
@@ -366,8 +416,8 @@ def _run_ingest(
                 execute("embed")
             else:
                 reason = "ingestion.embed_text=false"
-                get_log().interactive(f"embed: skipped ({reason})",
-                                      stage="embed", reason=reason)
+                get_log().notice(f"embed: skipped ({reason})",
+                                 stage="embed", reason=reason)
                 skip("embed", reason)
             has_bank_collections = any(
                 collection.is_bank_transactions
@@ -377,11 +427,11 @@ def _run_ingest(
                 execute("transactions")
             else:
                 reason = "no mounted bank-transactions collections"
-                get_log().interactive(
+                get_log().notice(
                     f"transactions: skipped ({reason})",
                     stage="transactions", reason=reason)
                 skip("transactions", reason)
-        except BaseException:
+        except BaseException as pipeline_exc:
             failed_stage = stages[-1].name
             completed_names = {item.name for item in stages}
             for name in STAGE_ORDER:
@@ -405,7 +455,8 @@ def _run_ingest(
                 pass
             ended_at = utc_now().isoformat()
             pipeline_seconds = clock() - pipeline_started
-            dashboard.stop("failed")
+            dashboard_state = "interrupted" \
+                if isinstance(pipeline_exc, KeyboardInterrupt) else "failed"
             try:
                 _finalize_ingest_report(
                     ctx,
@@ -416,17 +467,20 @@ def _run_ingest(
                     start_log_id=start_log_id,
                     failed_stage=failed_stage,
                     clock=clock,
+                    dashboard=dashboard,
+                    dashboard_state=dashboard_state,
                 )
             except BaseException as report_exc:
-                print(
+                message = (
                     "ingest report failed while preserving the original "
                     f"pipeline error: {type(report_exc).__name__}: "
                     f"{report_exc}")
+                dashboard.terminal_failure(message, state=dashboard_state)
+                get_log().error(message, exc_info=report_exc)
             raise
 
         ended_at = utc_now().isoformat()
         pipeline_seconds = clock() - pipeline_started
-        dashboard.stop("complete")
         try:
             _finalize_ingest_report(
                 ctx,
@@ -437,12 +491,15 @@ def _run_ingest(
                 start_log_id=start_log_id,
                 failed_stage=None,
                 clock=clock,
+                dashboard=dashboard,
             )
         except Exception as exc:
-            print(
-                "\nINGEST REPORT FAILED — stages completed and their state "
+            message = (
+                "INGEST REPORT FAILED — stages completed and their state "
                 "may be committed — "
                 f"{type(exc).__name__}: {exc}")
+            dashboard.terminal_failure(message, state="report failed")
+            get_log().error(message, exc_info=exc)
             return 1
         return 0
     finally:
@@ -889,14 +946,10 @@ def _dispatch(handler: Callable[[argparse.Namespace], Any],
         # suppress the traceback and exit with the conventional SIGINT code.
         # Queued readiness embeds are abandoned as durable pending gaps so
         # exit is prompt — the next `ingest embed` fills them.
-        try:
-            from modules.dispatch import cancel_all
-            cancel_all()
-        except Exception:
-            pass
-        # Recorded, not printed: an interrupted run is exactly the one whose
-        # log needs to say why it stopped. Terminal routing goes through any
-        # live progress bar, so no redraw line is left half-drawn.
+        _cancel_runtime_work()
+        # An interrupted run is exactly the one whose log needs to say why it
+        # stopped. Terminal presentation still goes through Rich, so no redraw
+        # line is left half-drawn.
         get_log().error("KeyboardInterrupt — interrupted")
         return 130
 
@@ -926,14 +979,21 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = str(uuid.uuid4())
     with setup_logging(selection.config, run_id=run_id) as log:
+        dashboard_owns_metadata = (
+            args.command == "ingest"
+            and getattr(args, "stage", None) == "all"
+        )
         # Banner and footer on stderr, once each: the operator gets the
         # token to query by, without 36 characters of UUID on every line
         # (logging.md D7). stderr keeps piped stdout clean.
-        print(f"pocket-advisor: run {run_id} — "
-              f"workspace {selection.workspace.id}", file=sys.stderr)
+        if not dashboard_owns_metadata:
+            print(f"pocket-advisor: run {run_id} — "
+                  f"workspace {selection.workspace.id}", file=sys.stderr)
         try:
             return _dispatch(handler, args)
         finally:
             # `finally`, so the runs worth correlating — the failed and the
             # interrupted ones — still say where their log is.
-            print(f"Run log:    {log.path} (run {run_id})", file=sys.stderr)
+            if not dashboard_owns_metadata:
+                print(f"Run log:    {log.path} (run {run_id})",
+                      file=sys.stderr)

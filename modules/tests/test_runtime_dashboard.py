@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -33,6 +34,49 @@ def rendered(dashboard: IngestDashboard, *, width: int = 120) -> str:
     Console(file=stream, width=width, color_system=None).print(
         dashboard.render())
     return stream.getvalue()
+
+
+def final_report():
+    queue = lambda processed: SimpleNamespace(  # noqa: E731
+        processed_entities=processed)
+    performance = SimpleNamespace(
+        summaries=SimpleNamespace(
+            state="measured", pending_threads=0, generation_calls=2,
+            total_input_tokens=120),
+        embed=SimpleNamespace(
+            state="measured",
+            queues=SimpleNamespace(leaf=queue(8), summary=queue(2)),
+            verified_cache_publications=10),
+        pdfs=SimpleNamespace(
+            state="measured", pending_occurrences=3, unique_transforms=2,
+            pending_admission_bytes=4096,
+            resources=SimpleNamespace(
+                configured_worker_count=2,
+                configured_per_child_jobs=1)),
+    )
+    snapshot = SimpleNamespace(
+        sources={
+            "originals": 9, "emails": 5, "pdfs": 4, "other": 0},
+        documents={
+            "pdf_readable": 4, "pdf_total": 4, "pdf_failed": 0,
+            "native_pdf_occurrences": 3, "attached_pdf_occurrences": 2},
+        threads={
+            "total": 3, "summaries_current": 2,
+            "summaries_eligible": 2, "summaries_stale": 0},
+        search={
+            "embedding_enabled": True, "leaf_vectors": 8,
+            "summary_vectors": 2, "index_issues": []},
+        transactions={"enabled": False},
+    )
+    return SimpleNamespace(
+        status="COMPLETE WITH FINDINGS",
+        performance=performance,
+        snapshot=snapshot,
+        findings=[
+            SimpleNamespace(
+                severity="warning", category="candidate_pending", count=1)],
+        report_seconds=0.25,
+    )
 
 
 def check_stage_model_and_render() -> None:
@@ -67,6 +111,8 @@ def check_stage_model_and_render() -> None:
 
 def check_widgets_and_event_routing(root: Path) -> None:
     out, err = FakeTTY(), FakeTTY()
+    report_path = root / "logs" / "ingest-runs" / "run.json"
+    log_path = root / "execution-logs" / "run.jsonl"
     dashboard = IngestDashboard(
         "matter-x", RUN_ID, STAGES, stdout=out, stderr=err)
     dashboard.start()
@@ -93,7 +139,7 @@ def check_widgets_and_event_routing(root: Path) -> None:
         )
         with setup_logging(config, run_id=RUN_ID) as log:
             path = log.path
-            log.interactive("email parse warning", candidate_id=7)
+            log.notice("email parse warning", candidate_id=7)
             log.error("embedding endpoint failed", endpoint="local")
 
         text = rendered(dashboard)
@@ -110,17 +156,32 @@ def check_widgets_and_event_routing(root: Path) -> None:
             if line.strip()
         ]
         assert [record["level"] for record in records] == [
-            "interactive", "error"]
+            "notice", "error"]
         assert records[0]["candidate_id"] == 7
         assert records[1]["endpoint"] == "local"
 
         bar.done()
         pool.done()
         queue.close()
+
+        assert dashboard.install_report(
+            final_report(), report_path, log_path)
+        final = rendered(dashboard)
+        for expected in (
+                "COMPLETE WITH FINDINGS", "Pipeline", "Performance",
+                "Workspace now", "9 originals", "Findings",
+                "candidate_pending=1", str(report_path), str(log_path)):
+            assert expected in final, (expected, final)
     finally:
-        dashboard.stop("complete")
-        dashboard.stop("complete")
+        dashboard.stop()
+        dashboard.stop()
     assert active_dashboard() is None
+    # Rich 14.1's non-transient Live contract leaves the final frame on the
+    # terminal after stop; it is not cleared and replaced by a plain report.
+    persisted = err.getvalue()
+    assert "Workspace now" in persisted
+    assert "Execution log" in persisted
+    assert log_path.name in persisted
     print("  widgets compose, log records survive routing, stop is idempotent")
 
 

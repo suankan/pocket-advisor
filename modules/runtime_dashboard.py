@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, IO, Iterable
 
 from rich.console import Console, ConsoleOptions, Group, RenderResult
@@ -90,6 +91,9 @@ class IngestDashboard:
         self._lock = threading.RLock()
         self._live: Live | None = None
         self._started = False
+        self._report: Any | None = None
+        self._report_path: Path | None = None
+        self._log_path: Path | None = None
 
     def start(self) -> None:
         """Start Rich and publish this dashboard process-wide.
@@ -107,7 +111,7 @@ class IngestDashboard:
                 self,
                 console=console,
                 refresh_per_second=self.refresh_per_second,
-                transient=True,
+                transient=False,
                 vertical_overflow="crop",
             )
             live.start(refresh=True)
@@ -130,7 +134,7 @@ class IngestDashboard:
         self.run_state = "running"
 
     def stop(self, state: str | None = None) -> None:
-        """Stop and clear Rich. Idempotent on every exit path."""
+        """Stop Rich and retain its final frame. Idempotent on every path."""
         global _active_dashboard
         if state is not None:
             self.run_state = state
@@ -143,6 +147,7 @@ class IngestDashboard:
         live, self._live = self._live, None
         if live is not None:
             try:
+                live.refresh()
                 live.stop()
             except Exception:
                 pass
@@ -199,6 +204,45 @@ class IngestDashboard:
                 if line:
                     self._events.append((level, line))
 
+    def install_report(
+        self,
+        report: Any,
+        report_path: Path,
+        log_path: Path | None,
+        *,
+        state: str | None = None,
+    ) -> bool:
+        """Install the typed final report in the last Rich frame.
+
+        Returns whether Rich owns the terminal. A disabled dashboard lets the
+        CLI use the stable plain formatter instead.
+        """
+        if not self.enabled:
+            return False
+        with self._lock:
+            self._report = report
+            self._report_path = report_path
+            self._log_path = log_path
+            self._widgets.clear()
+            self.run_state = state or report.status.lower()
+            if self.finished is None:
+                self.finished = time.monotonic()
+        live = self._live
+        if live is not None:
+            try:
+                live.refresh()
+            except Exception:
+                pass
+        return True
+
+    def terminal_failure(self, message: str, *, state: str = "failed") -> None:
+        """Leave a useful Rich last frame when no typed report is available."""
+        self.write_event(message, error=True)
+        with self._lock:
+            self.run_state = state
+            if self.finished is None:
+                self.finished = time.monotonic()
+
     # -- Rich rendering --------------------------------------------------
 
     def __rich_console__(
@@ -222,7 +266,19 @@ class IngestDashboard:
             events = list(self._events)
             run_state = self.run_state
             finished = self.finished
+            report = self._report
+            report_path = self._report_path
+            log_path = self._log_path
 
+        if report is not None:
+            return Group(
+                self._header(stages, run_state, finished, final=True),
+                self._pipeline(stages),
+                self._performance_panel(report),
+                self._workspace_panel(report),
+                self._findings_panel(report, events),
+                self._artifact_footer(report, report_path, log_path),
+            )
         return Group(
             self._header(stages, run_state, finished),
             self._pipeline(stages),
@@ -243,6 +299,8 @@ class IngestDashboard:
         stages: list[StageView],
         run_state: str,
         finished: float | None,
+        *,
+        final: bool = False,
     ) -> Panel:
         completed = sum(
             stage.state in {"completed", "skipped"} for stage in stages)
@@ -256,7 +314,7 @@ class IngestDashboard:
         )
         progress.add_task("pipeline stages", total=len(stages),
                           completed=completed)
-        current = next(
+        current = "finished" if final else next(
             (stage.name for stage in stages if stage.state == "running"),
             "finalising" if completed == len(stages) else "initialising",
         )
@@ -361,6 +419,175 @@ class IngestDashboard:
             padding=(0, 1),
         )
 
+    def _performance_panel(self, report: Any) -> Panel:
+        performance = report.performance
+        rows = Table.grid(expand=True)
+        rows.add_column(width=14, no_wrap=True)
+        rows.add_column(ratio=1, overflow="ellipsis")
+
+        summaries = performance.summaries
+        summary_detail = summaries.state
+        if summaries.state in {"measured", "partial"}:
+            summary_detail += (
+                f" · {summaries.pending_threads} pending"
+                f" · {summaries.generation_calls} calls"
+                f" · {summaries.total_input_tokens} input tokens")
+        rows.add_row(Text("summaries", style="bold"), summary_detail)
+
+        embed = performance.embed
+        embed_detail = embed.state
+        if embed.state in {"measured", "partial"}:
+            embed_detail += (
+                f" · {embed.queues.leaf.processed_entities} leaf"
+                f" + {embed.queues.summary.processed_entities} summary"
+                f" processed · {embed.verified_cache_publications} published")
+        rows.add_row(Text("embed", style="bold"), embed_detail)
+
+        pdfs = performance.pdfs
+        pdf_detail = pdfs.state
+        if pdfs.state in {"measured", "partial"}:
+            pdf_detail += (
+                f" · {pdfs.pending_occurrences} docs"
+                f" / {pdfs.unique_transforms} unique"
+                f" · {pdfs.pending_admission_bytes}B"
+                f" · workers={pdfs.resources.configured_worker_count}"
+                f"×jobs={pdfs.resources.configured_per_child_jobs}")
+        rows.add_row(Text("pdfs", style="bold"), pdf_detail)
+        return Panel(
+            rows, title="[bold]Performance[/bold]", title_align="left",
+            border_style="magenta", padding=(0, 1))
+
+    def _workspace_panel(self, report: Any) -> Panel:
+        snapshot = report.snapshot
+        if snapshot is None:
+            body: Any = Text("Workspace snapshot unavailable.", style="dim")
+        else:
+            rows = Table.grid(expand=True)
+            rows.add_column(width=14, no_wrap=True)
+            rows.add_column(ratio=1, overflow="ellipsis")
+            sources = snapshot.sources
+            docs = snapshot.documents
+            threads = snapshot.threads
+            search = snapshot.search
+            transactions = snapshot.transactions
+            rows.add_row(
+                Text("Sources", style="bold"),
+                f"{sources['originals']} originals · {sources['emails']}"
+                f" emails · {sources['pdfs']} PDFs · {sources['other']} other")
+            occurrences = (
+                docs["native_pdf_occurrences"]
+                + docs["attached_pdf_occurrences"])
+            rows.add_row(
+                Text("PDFs", style="bold"),
+                f"{docs['pdf_readable']}/{docs['pdf_total']} readable"
+                f" · {docs['pdf_failed']} failed · {occurrences} occurrences"
+                f" ({docs['native_pdf_occurrences']} native +"
+                f" {docs['attached_pdf_occurrences']} attached)")
+            rows.add_row(
+                Text("Threads", style="bold"),
+                f"{threads['total']} · {threads['summaries_current']}/"
+                f"{threads['summaries_eligible']} eligible summaries current"
+                f" · {threads['summaries_stale']} stale")
+            if search["embedding_enabled"]:
+                consistency = "indexes consistent" \
+                    if not search["index_issues"] \
+                    else f"{len(search['index_issues'])} index issues"
+                rows.add_row(
+                    Text("Search", style="bold"),
+                    f"{search['leaf_vectors']} leaf +"
+                    f" {search['summary_vectors']} navigation vectors"
+                    f" · {consistency}")
+            else:
+                rows.add_row(
+                    Text("Search", style="bold"),
+                    f"{search['leaf_chunks']} leaf chunks"
+                    " · embedding disabled")
+            if transactions.get("enabled"):
+                rows.add_row(
+                    Text("Transactions", style="bold"),
+                    f"{transactions['statements']} statements ·"
+                    f" {transactions['transactions']} rows ·"
+                    f" {transactions['balance_ok']} balance-ok ·"
+                    f" {transactions['balance_failed']} failed")
+                rows.add_row(
+                    Text("Assertions", style="bold"),
+                    f"{transactions['assertions_passed']} passed ·"
+                    f" {transactions['assertions_failed']} failed ·"
+                    f" {transactions['assertions_unassessed']} unassessed")
+                coverage = transactions["coverage"]
+                rows.add_row(
+                    Text("Coverage", style="bold"),
+                    f"{transactions['transfer_links']} links ·"
+                    f" {coverage['external']} external ·"
+                    f" {coverage['coverage_unknown']} unknown ·"
+                    f" {coverage['single_account_unverifiable']}"
+                    " single-account unverifiable ·"
+                    f" {coverage['suspicious']} suspicious")
+            else:
+                rows.add_row(
+                    Text("Transactions", style="bold"),
+                    "skipped · no mounted bank collections")
+            body = rows
+        return Panel(
+            body, title="[bold]Workspace now[/bold]", title_align="left",
+            border_style="blue", padding=(0, 1))
+
+    def _findings_panel(
+        self, report: Any, events: list[tuple[str, str]],
+    ) -> Panel:
+        rows: list[Any] = []
+        if report.findings:
+            styles = {
+                "error": "bold red",
+                "warning": "yellow",
+                "info": "cyan",
+            }
+            for finding in report.findings:
+                rows.append(Text.assemble(
+                    (f"{finding.severity.upper():7} ",
+                     styles.get(finding.severity, "")),
+                    f"{finding.category}={finding.count}",
+                ))
+        else:
+            rows.append(Text("none", style="green"))
+        errors = [message for level, message in events if level == "error"]
+        for message in errors[-2:]:
+            rows.append(Text.assemble(
+                ("event   ", "bold red"),
+                Text(message, overflow="ellipsis", no_wrap=True),
+            ))
+        return Panel(
+            Group(*rows), title="[bold]Findings[/bold]", title_align="left",
+            border_style="yellow", padding=(0, 1))
+
+    def _artifact_footer(
+        self,
+        report: Any,
+        report_path: Path | None,
+        log_path: Path | None,
+    ) -> Table:
+        table = Table.grid(expand=True)
+        table.add_column(width=15, no_wrap=True)
+        # Final artifact paths are actionable, not decoration. The last Rich
+        # frame is rendered as visible on stop, so fold instead of truncating.
+        table.add_column(ratio=1, overflow="fold")
+        if report_path is not None:
+            table.add_row(
+                Text("Review queue", style="dim"),
+                Text(str(report_path.parent.parent / "review_queue.csv"),
+                     style="dim"))
+            table.add_row(
+                Text("Run report", style="dim"),
+                Text(str(report_path), style="dim"))
+        if log_path is not None:
+            table.add_row(
+                Text("Execution log", style="dim"),
+                Text(str(log_path), style="dim"))
+        table.add_row(
+            Text("Report audit", style="dim"),
+            Text(_fmt_secs(report.report_seconds), style="dim"))
+        return table
+
 
 def _stage_status(state: str) -> tuple[str, Any]:
     if state == "running":
@@ -377,12 +604,15 @@ def _stage_status(state: str) -> tuple[str, Any]:
 
 
 def _run_style(state: str) -> str:
+    if state.startswith("complete"):
+        return "bold green"
     return {
         "starting": "yellow",
         "running": "bold cyan",
-        "complete": "bold green",
         "failed": "bold red",
+        "incomplete": "bold red",
         "interrupted": "bold red",
+        "report failed": "bold red",
     }.get(state, "bold")
 
 

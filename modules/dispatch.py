@@ -3,11 +3,11 @@
 Both inference fan-outs — embedding publication
 (``modules/embedding/dispatch.py``) and summary generation
 (``modules/pipeline/summary_dispatch.py``) — are the same machine: a bounded
-``ThreadPoolExecutor`` sized to an endpoint's in-flight budget, a list of
-futures, an ``unavailable`` latch that stops dispatching once an endpoint is
-known down, and one drain/abandon/close lifecycle. Only the work differs —
-the embedding worker publishes its own vector, while summary generation
-settles on the main thread after ``drain()``.
+daemon worker pool sized to an endpoint's in-flight budget, a list of futures,
+an ``unavailable`` latch that stops dispatching once an endpoint is known
+down, and one drain/abandon/close lifecycle. Only the work differs — the
+embedding worker publishes its own vector, while summary generation settles
+on the main thread after ``drain()``.
 
 This module owns that shared machine and the live-dispatcher registry, so an
 interrupt abandons every fan-out through one ``cancel_all()`` hook and
@@ -21,8 +21,10 @@ shared implementation, not a shared queue.
 """
 import threading
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
+from queue import Empty, Queue
 from typing import Any, Protocol
 
 from modules.logs import get_log
@@ -48,10 +50,78 @@ class LiveDispatcher(Protocol):
 _LIVE: "weakref.WeakSet[LiveDispatcher]" = weakref.WeakSet()
 
 
+class _DaemonWorkerPool:
+    """Small Future-compatible pool whose workers cannot delay process exit.
+
+    Inference is remote, best-effort producer work. On Ctrl+C queued work is
+    cancelled and an in-flight HTTP call may be abandoned as a durable pending
+    gap; it must not keep the interpreter alive until a remote timeout. Normal
+    ``shutdown(wait=True)`` still joins every worker.
+    """
+
+    def __init__(self, max_workers: int, *, thread_name_prefix: str):
+        self._work: Queue[
+            tuple[Future, Callable, tuple[Any, ...]] | None] = Queue()
+        self._closed = False
+        self._lock = threading.Lock()
+        self._threads = [
+            threading.Thread(
+                target=self._worker,
+                name=f"{thread_name_prefix}_{index}",
+                daemon=True,
+            )
+            for index in range(max_workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit(self, fn: Callable, *args: Any) -> Future:
+        future: Future = Future()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot submit after pool shutdown")
+            self._work.put((future, fn, args))
+        return future
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if cancel_futures:
+                while True:
+                    try:
+                        item = self._work.get_nowait()
+                    except Empty:
+                        break
+                    if item is not None:
+                        item[0].cancel()
+            for _ in self._threads:
+                self._work.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            item = self._work.get()
+            if item is None:
+                return
+            future, fn, args = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args)
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+
 def cancel_all() -> None:
     """Abandon every live dispatcher's queued work (interrupt/failure path):
-    in-flight requests finish, queued ones are dropped as durable pending
-    gaps for the next run."""
+    queued work is dropped as durable pending gaps and in-flight requests may
+    finish without holding interpreter shutdown."""
     for dispatcher in list(_LIVE):
         dispatcher.abandon()
 
@@ -105,7 +175,7 @@ class BoundedInferenceDispatcher:
     def __init__(self, *, max_in_flight: int):
         self.unavailable: str | None = None
         self._lock = threading.Lock()
-        self._pool: ThreadPoolExecutor | None = None
+        self._pool: _DaemonWorkerPool | None = None
         self._max = max(1, max_in_flight)
         self._futures: list[Future] = []
         # Live counters, all mutated under _lock. Cumulative across the
@@ -143,8 +213,8 @@ class BoundedInferenceDispatcher:
         spawns threads.
         """
         if self._pool is None:
-            self._pool = ThreadPoolExecutor(
-                max_workers=self._max,
+            self._pool = _DaemonWorkerPool(
+                self._max,
                 thread_name_prefix=self.thread_name_prefix)
         # Before taking the lock: the panel reads snapshot(), so creating it
         # here would nest the display lock inside this one.
@@ -236,8 +306,10 @@ class BoundedInferenceDispatcher:
         return done, failed, skipped, outcomes
 
     def abandon(self) -> None:
-        """Drop queued tasks without waiting; in-flight ones finish.
-        Everything dropped is a durable pending gap."""
+        """Drop queued tasks without waiting; abandon in-flight daemon work.
+
+        Everything not published is a durable pending gap for the next run.
+        """
         self._futures = []
         self._close_panel()
         if self._pool is not None:

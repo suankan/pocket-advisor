@@ -95,7 +95,7 @@ class ThreadSummaryStage(Stage):
             return stats
         perf.new_tiers()
 
-        self.log.interactive(
+        self.log.notice(
             f"summaries: {len(stale)} stale"
             f" {'thread' if len(stale) == 1 else 'threads'} —"
             f" {self.config.summarisation_endpoint}",

@@ -65,14 +65,14 @@ def check_schema_and_destinations(root: Path) -> None:
     with Capture() as captured:
         with setup_logging(config, run_id=RUN_ID) as log:
             path = log.path
-            log.interactive("emails: 56 parsed", new_emails=56)
+            log.notice("emails: 56 parsed", new_emails=56)
             log.error("endpoint unreachable", endpoint="http://127.0.0.1")
             log.info("dispatch queued", entity_id=7)
             log.debug("payload rendered", chars=1500)
 
     records = _records(path)
     # .debug() is a no-op at the default level: three records, not four.
-    assert [r["level"] for r in records] == ["interactive", "error", "info"], \
+    assert [r["level"] for r in records] == ["notice", "error", "info"], \
         [r["level"] for r in records]
 
     for record in records:
@@ -94,7 +94,7 @@ def check_schema_and_destinations(root: Path) -> None:
     assert records[1]["endpoint"] == "http://127.0.0.1"
     assert records[2]["entity_id"] == 7
 
-    # Destination matrix: interactive → stdout, error → stderr,
+    # Destination matrix: notice → Rich stdout, error → Rich stderr,
     # info/debug → file only.
     assert "emails: 56 parsed" in captured.out
     assert "endpoint unreachable" not in captured.out
@@ -112,12 +112,12 @@ def check_debug_level(root: Path) -> None:
     with Capture() as captured:
         with setup_logging(config, run_id=RUN_ID) as log:
             path = log.path
-            log.interactive("visible")
+            log.notice("visible")
             log.info("recorded")
             log.debug("diagnostic", chars=10)
 
     levels = [r["level"] for r in _records(path)]
-    assert levels == ["interactive", "info", "debug"], levels
+    assert levels == ["notice", "info", "debug"], levels
     assert "diagnostic" not in captured.out + captured.err
     assert "visible" in captured.out
 
@@ -148,7 +148,7 @@ def check_reserved_fields(root: Path) -> None:
             # Every reserved name fails the same way, `message` included:
             # it is positional-only, so it lands in **fields rather than
             # tripping Python's "multiple values" TypeError first.
-            methods = [("interactive", log.interactive), ("error", log.error),
+            methods = [("notice", log.notice), ("error", log.error),
                        ("info", log.info), ("debug", log.debug)]
             for name in sorted(RESERVED_FIELDS):
                 for method_name, method in methods:
@@ -191,10 +191,10 @@ def check_progress_routing(root: Path) -> None:
         with setup_logging(config, run_id=RUN_ID) as log:
             path = log.path
             register_progress(bar)
-            log.interactive("through the bar")
+            log.notice("through the bar")
             log.error("also through the bar")
             unregister_progress(bar)
-            log.interactive("straight to stdout")
+            log.notice("straight to stdout")
 
     assert bar.lines == ["through the bar", "also through the bar"], bar.lines
     assert "through the bar" not in captured.out
@@ -214,12 +214,12 @@ def check_progress_factories(root: Path) -> None:
                                quiet_every=0.0)
             for n in range(3):
                 bar.step(note=f"item {n}")
-            # While the bar is live, interactive output must go through it
+            # While the bar is live, notice output must go through it
             # rather than print() — otherwise it shreds the redraw line.
-            log.interactive("emails: WARNING one attachment skipped")
+            log.notice("emails: WARNING one attachment skipped")
             bar.done()
             # Released on done(): later output is no longer routed to it.
-            log.interactive("emails: 3 parsed")
+            log.notice("emails: 3 parsed")
 
     drawn = stream.getvalue()
     assert "emails: WARNING one attachment skipped" in drawn
@@ -228,8 +228,8 @@ def check_progress_factories(root: Path) -> None:
 
     records = _records(path)
     levels = [r["level"] for r in records]
-    # One interactive (the warning), one lifecycle info, one interactive.
-    assert levels == ["interactive", "info", "interactive"], levels
+    # One notice (the warning), one lifecycle info, one notice.
+    assert levels == ["notice", "info", "notice"], levels
     lifecycle = records[1]
     assert lifecycle["stage_label"] == "parse emails"
     assert lifecycle["completed"] == 3
@@ -269,7 +269,7 @@ def check_quiet_bar_still_releases(root: Path) -> None:
         with setup_logging(config, run_id=RUN_ID) as log:
             bar = log.progress("discover", stream=stream)
             bar.done()
-            log.interactive("after the quiet bar")
+            log.notice("after the quiet bar")
 
     assert stream.getvalue() == ""
     assert "after the quiet bar" in captured.out
@@ -346,7 +346,7 @@ def check_null_log_before_setup() -> None:
     assert isinstance(log, Log)
     assert log.path is None
     with Capture() as captured:
-        log.interactive("still visible")
+        log.notice("still visible")
         log.error("still visible on stderr")
         log.info("discarded")
         log.debug("discarded")

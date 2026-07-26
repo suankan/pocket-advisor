@@ -4,14 +4,11 @@ Status: **implemented 2026-07-26**. Proposed 2026-07-26; revised the same
 day after design review (reachability without `ctx`, stdlib-logging engine,
 ingestible timestamps, case-data location), then again to unify the
 interactive channel into the same facade and collapse the duplicated schema
-fields; locked and built the same day. See `docs/changelog.md`.
-
-Two verification items are covered by unit test rather than end-to-end:
-`wipe state` preservation (running it against a real workspace is
-destructive and was not authorised) and the `KeyboardInterrupt` path (a
-real SIGINT to the CLI was absorbed by the app's existing interrupt
-handling and the run completed normally — pre-existing behaviour, outside
-this design's scope).
+fields; locked and built the same day. The terminal presentation boundary was
+amended later that day for the persistent Rich ingest dashboard: the old
+`.interactive()` method became `.notice()`, and Rich now owns every notice and
+error render. See `docs/changelog.md` and
+`docs/platform/runtime-observability-terminal-dashboards.md`.
 
 ## Problem
 
@@ -81,15 +78,15 @@ front of both. Destination is a property of the *method*, not a flag:
 
 | Method | Terminal | JSON record | Gated |
 |---|---|---|---|
-| `.interactive(msg, **f)` | yes (via active bar, D3) | yes, `level: "interactive"` | never |
+| `.notice(msg, **f)` | yes (via active bar, D3) | yes, `level: "notice"` | never |
 | `.error(msg, exc_info=…, **f)` | yes (stderr) | yes, `level: "error"` | never |
 | `.info(msg, **f)` | **no** | yes, `level: "info"` | never |
 | `.debug(msg, **f)` | no | yes, `level: "debug"` | yes — `debug` only |
 
-`.interactive()` is the human channel: everything the operator sees on
-screen, and therefore everything reconstructable from the file afterwards.
-It replaces every pipeline `print()` one-for-one, so terminal output keeps
-its exact current shape.
+`.notice()` is the recorded operator-notice channel. It emits one structured
+record and presents the message through Rich: in the active ingest dashboard's
+bounded event panel, through an active legacy progress widget, or through a
+plain-capable Rich `Console` when neither owns the terminal.
 
 One deliberate exception: pipeline errors that previously went to **stdout**
 now go to stderr, because `.error()` is the method that fits them and stderr
@@ -106,10 +103,12 @@ you can only choose between "on screen and in the file" and "nowhere", and
 the interactive output degrades as instrumentation grows. `LOG_LEVEL`
 still gates volume; it no longer decides *destination*.
 
-Multi-line presentation blocks — the final report from
-`modules/ingest_report.py:format_report()` — are one `.interactive()` call
-producing **one** record with the block intact in `message`, not thirty
-records. The file mirrors what the operator saw, at the same granularity.
+The full-ingest final report is a deliberate exception. On a TTY its typed
+model is installed directly into the persistent Rich dashboard and one
+file-only `.info()` record preserves the aggregate plain rendering. A non-TTY
+run sends the same aggregate block through `.notice()`. It is never split into
+one record per line and never injected into the dashboard's recent-event
+panel.
 
 ### D3. Progress bars are constructed by the facade
 
@@ -132,14 +131,14 @@ facade. Two things follow automatically:
 - **No redraw corruption.** A bare `print()` during a carriage-return
   redraw shreds the line — `Progress.println()`
   (`modules/progress.py:89-96`) exists for exactly this. Because the facade
-  knows which bar is live, `.interactive()` and `.error()` route through
+  knows which bar is live, `.notice()` and `.error()` route through
   `println()` while one is active and to `print()`/stderr otherwise. Call
   sites never think about it.
 - **Lifecycle records, not redraw records.** A bar emits one `.info()`
   record on `done()` carrying label, total, elapsed, and rate. The
   thousands of intermediate redraws produce nothing — they are UI frames,
   not events. `progress.println(...)` (used for per-item warnings at
-  `modules/accuracy.py:293,421,432,449`) becomes `.interactive()`, so those
+  `modules/accuracy.py:293,421,432,449`) becomes `.notice()`, so those
   *are* recorded.
 
 `modules/progress.py`'s only edit is register/deregister on
@@ -152,7 +151,7 @@ Level resolves once at process start, highest precedence first:
 `"info"`. An unrecognized value warns to stderr and falls back to `info`
 rather than failing a long ingest over a typo.
 
-- `LOG_LEVEL=info` (default) — `.interactive()`, `.error()`, `.info()`
+- `LOG_LEVEL=info` (default) — `.notice()`, `.error()`, `.info()`
   records are written. `.debug()` emits nothing: no record, no formatting,
   no file write. It does still validate its fields (D5) before the level
   check — `**fields` has already built the dict by the time the call runs,
@@ -177,8 +176,8 @@ overrides it per-invocation.
 | `run_id` | string (UUID4) | `"3fae1b2c-…"` | One per CLI invocation; stitches every record from that execution. |
 | `worker_thread` | string | `"pdf-transform_3"` | `threading.current_thread().name`. |
 | `caller` | string | `"pipeline.summaries.run"` | `module.function_name`, derived from the record's own frame metadata — call sites never pass it, so it cannot drift on a rename. |
-| `level` | string | `"error"` | `"interactive"` \| `"error"` \| `"info"` \| `"debug"`. |
-| `message` | string | `"inference endpoint unreachable"` | Free text; carries whole multi-line blocks for `.interactive()`. |
+| `level` | string | `"error"` | `"notice"` \| `"error"` \| `"info"` \| `"debug"`. |
+| `message` | string | `"inference endpoint unreachable"` | Free text; may carry the whole non-TTY final-report block as one `.notice()` record. |
 
 `**fields` kwargs (`thread_id=10`, `endpoint="http://…"`) merge into the
 same flat object — that is what makes the log queryable rather than merely
@@ -334,7 +333,7 @@ The runs worth reading are the ones that died. `modules/cli.py:825` already
 catches `KeyboardInterrupt`, and a hung endpoint is the motivating failure
 mode, so a buffered tail lost at exit would defeat the feature.
 
-The writer flushes after every `interactive`/`error`/`info` record. `debug`
+The writer flushes after every `notice`/`error`/`info` record. `debug`
 records are buffered for throughput and flushed on a 1s interval or on any
 higher-level record. `setup_logging()` returns a context manager whose
 `finally` stops the `QueueListener`, drains the queue, and prints the D7
@@ -362,7 +361,7 @@ footer; the CLI entrypoint wraps the entire dispatch — including the
   contained by D8's location.
 - A `warning` level. The WARNING tier the ingest report already models
   (`pdf_ocr_warnings`, `pdf_weak_dates`) is expressed as
-  `.interactive(msg, severity="warning")` — queryable as a field without
+  `.notice(msg, severity="warning")` — queryable as a field without
   adding a level.
 
 ## Target shape
@@ -374,7 +373,7 @@ def get_log() -> Log
 
 class Log:
     # records
-    def interactive(self, message: str, **fields: Any) -> None: ...
+    def notice(self, message: str, **fields: Any) -> None: ...
     def error(self, message: str, *, exc_info: BaseException | None = None,
               **fields: Any) -> None: ...
     def info(self, message: str, **fields: Any) -> None: ...
@@ -391,24 +390,24 @@ class Log:
 
 ## Call-site migration (this round)
 
-**Prints → `.interactive()` / `.error()`:**
+**Prints → `.notice()` / `.error()`:**
 
 | Site | Method |
 |---|---|
-| `modules/pipeline/base.py:72` (stage summary) | `.interactive()`, `stats` as fields |
-| `modules/pipeline/summaries.py:99,119` | `.interactive()` / `.error()` |
-| `modules/pipeline/summary_dispatch.py:109` | `.error(exc_info=…)` on failure, else `.interactive()` |
-| `modules/embedding/dispatch.py:77-84,254` | `.interactive()` / `.error()` |
-| `modules/pipeline/embed.py:127,169,191` | `.interactive()` / `.error()` |
-| `modules/pipeline/pdfs.py:103` | `.interactive(severity="warning")` |
+| `modules/pipeline/base.py:72` (stage summary) | `.notice()`, `stats` as fields |
+| `modules/pipeline/summaries.py:99,119` | `.notice()` / `.error()` |
+| `modules/pipeline/summary_dispatch.py:109` | `.error(exc_info=…)` on failure, else `.notice()` |
+| `modules/embedding/dispatch.py:77-84,254` | `.notice()` / `.error()` |
+| `modules/pipeline/embed.py:127,169,191` | `.notice()` / `.error()` |
+| `modules/pipeline/pdfs.py:103` | `.notice(severity="warning")` |
 | `modules/inference.py:172-176` (`_probe`) | `.error(exc_info=exc)` — the motivating gap |
-| `modules/cli.py:198` (final report block) | one `.interactive()` |
+| `modules/cli.py` (final report block) | typed Rich dashboard install + one file-only aggregate `.info()` record; non-TTY fallback uses `.notice()` |
 
 **Progress construction → facade factories** (drop the
 `from modules.progress import …` line in each): `discover.py:71`,
 `emails.py:166`, `pdfs.py:110,327,389`, `summaries.py:108`,
 `embed.py:152`, `accuracy.py:280,412`. Their `println()` calls
-(`accuracy.py:293,421,432,449`) become `.interactive()`.
+(`accuracy.py:293,421,432,449`) become `.notice()`.
 
 ## Implementation order
 
@@ -419,7 +418,7 @@ Each step leaves the suite green.
    `setup_logging()`, `get_log()`, null facade, `exc_info` handling.
    `modules/tests/test_logs.py`: schema shape and field types; destination
    matrix (`.info()` writes a record and **nothing** to the terminal;
-   `.interactive()` does both); `.debug()` under `LOG_LEVEL=info` produces
+   `.notice()` does both); `.debug()` under `LOG_LEVEL=info` produces
    **zero file writes** (assert on the file, not on display); `run_id`
    identical across every record; 10 concurrent threads produce 10×N
    valid, non-interleaved lines; kwarg collision raises; `exc_info`
@@ -427,7 +426,7 @@ Each step leaves the suite green.
    is silent and does not crash.
 2. **Progress ownership** (D3) — register/deregister in
    `modules/progress.py`; `log.progress()`/`log.worker_pool()` factories;
-   lifecycle record on `done()`. Test that an `.interactive()` call during
+   lifecycle record on `done()`. Test that a `.notice()` call during
    an active bar routes through `println()` and leaves no redraw residue,
    and that a bar emits exactly one record per run, not per step.
 3. **Wire the entrypoint** — `run_id` generation, `setup_logging()`
@@ -462,18 +461,17 @@ Then, on the test workspace, `ingest all` under both `LOG_LEVEL=info` and
    `workspaces/.state/workspace-test/execution-logs/`.
 2. Every line parses as JSON and carries all six schema fields.
 3. `run_id` is identical across every line of one file, differs between
-   runs, and matches the banner, the footer, and the persisted ingest
-   report.
+   runs, and matches the Rich header (or non-TTY banner/footer) and the
+   persisted ingest report.
 4. `.debug()` and `httpx`/`httpcore` records appear only under
    `LOG_LEVEL=debug`; terminal output is byte-identical between the two
    levels.
-5. Interactive stdout is unchanged from before the change apart from the
-   D7 banner and footer, the `Run id:` report line, and the two error
-   lines D2 moves to stderr (diff a captured run; no line may be lost from
-   stdout and stderr combined). Progress bars show no redraw corruption on
-   a TTY.
-6. Replaying only the `level: "interactive"` records of a run reproduces
-   that run's terminal transcript.
+5. On a TTY, Rich exclusively presents the full-ingest lifetime and retains
+   the typed final report as its last frame. Non-TTY output retains the stable
+   plain report. Progress bars show no redraw corruption.
+6. Notice records reproduce discrete operator notices. The typed final
+   dashboard is reproducible from the persisted ingest report rather than
+   inferred from redraw or notice records.
 7. `wipe state` preserves `execution-logs/` and says so.
-8. Ctrl+C mid-stage still leaves a complete, valid `.jsonl` whose last
-   records describe the interruption, and still prints the footer.
+8. One Ctrl+C mid-stage leaves a complete, valid `.jsonl`, closes Rich, and
+   exits 130 even when an inference request remains blocked.

@@ -100,7 +100,7 @@ class PdfTextStage(Stage):
             shared_dispatcher(self.ctx).submit_pending_leaves(
                 self.conn, document_id=document_id, at_readiness=True)
         except Exception as exc:
-            self.log.interactive(
+            self.log.notice(
                 f"pdfs: readiness dispatch skipped for document"
                 f" {document_id}: {type(exc).__name__}: {exc}",
                 severity="warning", document_id=document_id, exc_type=type(exc).__name__)

@@ -254,6 +254,55 @@ def test_orchestration() -> None:
         assert executed == expected, (stage, executed)
 
 
+def test_dashboard_lifetime_includes_report() -> None:
+    """Rich must not stop and clear before the final report is installed."""
+    lifecycle: list[str] = []
+
+    class Dashboard:
+        enabled = True
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            lifecycle.append("start")
+
+        def stop(self, *_args):
+            lifecycle.append("stop")
+
+        def stage_started(self, name):
+            lifecycle.append(f"stage:{name}")
+
+        def stage_finished(self, *_args, **_kwargs):
+            pass
+
+        def install_report(self, *_args, **_kwargs):
+            lifecycle.append("install")
+            return True
+
+        def terminal_failure(self, *_args, **_kwargs):
+            lifecycle.append("failure")
+
+    selection = fake_selection(embed=False, bank=False)
+    context = fake_context(embed=False, bank=False)
+
+    def finalize(*_args, dashboard, **_kwargs):
+        assert "stop" not in lifecycle
+        lifecycle.append("report")
+        dashboard.install_report(None, None, None)
+
+    with patch("modules.runtime_dashboard.IngestDashboard", Dashboard), \
+            patch.object(cli, "_open_context", return_value=context), \
+            patch.object(cli, "_execute_stage", return_value=StageStats()), \
+            patch.object(cli, "_finalize_ingest_report",
+                         side_effect=finalize):
+        assert cli.run_ingest("all", selection) == 0
+
+    assert lifecycle[0] == "start", lifecycle
+    assert lifecycle[-3:] == ["report", "install", "stop"], lifecycle
+    assert context.conn.closed
+
+
 def test_ingest_reporting_failures_and_timings() -> None:
     fixed_now = lambda: datetime(2026, 7, 18, tzinfo=timezone.utc)
     assert cli._stage_failure_reason(
@@ -564,6 +613,7 @@ def test_entrypoint_bootstrap() -> None:
 def main() -> int:
     test_grammar()
     test_orchestration()
+    test_dashboard_lifetime_includes_report()
     test_ingest_reporting_failures_and_timings()
     test_native_query_seam()
     test_native_maintenance_handlers()

@@ -83,6 +83,6 @@ class Stage(ABC):
         # as one dict so a counter named "stage" would shadow rather than
         # raise; a counter named after a schema field is rejected loudly by
         # the facade, which is the intended outcome.
-        self.log.interactive(f"{self.name}: {stats}",
-                             **{"stage": self.name, **stats.counts})
+        self.log.notice(f"{self.name}: {stats}",
+                        **{"stage": self.name, **stats.counts})
         return stats

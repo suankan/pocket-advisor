@@ -142,7 +142,7 @@ class EmbedStage(Stage):
             return
         pending = dispatcher.pending_count
         if pending:
-            self.log.interactive(
+            self.log.notice(
                 f"embed: waiting for {pending} in-flight readiness"
                 " dispatches…", pending_dispatches=pending)
         dispatcher.drain()
@@ -225,7 +225,7 @@ class EmbedStage(Stage):
             meta = json.loads(paths.meta_json.read_text())
             old = meta_fingerprint(meta)
             if chunking_fields_changed(old, fingerprint):
-                self.log.interactive(
+                self.log.notice(
                     "embed: WARNING chunking config changed (chars"
                     f" {old['chunk_chars']}->{fingerprint['chunk_chars']},"
                     f" overlap {old['chunk_overlap']}->"

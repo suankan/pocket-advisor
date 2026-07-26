@@ -55,12 +55,12 @@ def drain_leftover(ctx) -> None:
         return
     pending = dispatcher.pending_count
     if pending:
-        get_log().interactive(
+        get_log().notice(
             f"embedding: waiting for {pending} in-flight readiness"
             " dispatches…", pending_dispatches=pending)
     done, failed, skipped, _ = dispatcher.drain()
     if done or failed or skipped:
-        get_log().interactive(
+        get_log().notice(
             f"embedding: {done} published, {failed} failed,"
             f" {skipped} left pending (readiness dispatch)",
             published=done, failed=failed, skipped=skipped)
@@ -243,4 +243,3 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
         the record partial (sealed measured by the embed stage)."""
         if self.telemetry.state == NOT_RUN:
             self.telemetry.state = PARTIAL
-

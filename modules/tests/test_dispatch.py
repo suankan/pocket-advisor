@@ -5,6 +5,7 @@ blocks on an event, so queued/in-flight/settled can be observed at rest
 rather than raced.
 """
 import sys
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -134,10 +135,18 @@ def test_abandon_drops_queued_work():
     for i in range(4):
         d.submit(f"item {i}")
     _await(lambda: d.snapshot().in_flight == 1, "one worker to start")
+    pool = d._pool
+    assert pool is not None
+    assert all(thread.daemon for thread in pool._threads)
+    started = time.monotonic()
     d.abandon()
+    assert time.monotonic() - started < 0.5
+    assert any(thread.is_alive() for thread in pool._threads), (
+        "the test must prove abandon returns while an in-flight worker is"
+        " still parked")
     d.gate.set()
     assert d.pending_count == 0
-    print("  abandon drops queued work without waiting")
+    print("  abandon drops queued work; daemon in-flight work cannot hold exit")
 
 
 def test_cancel_all_reaches_every_live_dispatcher():
@@ -150,6 +159,51 @@ def test_cancel_all_reaches_every_live_dispatcher():
     b.gate.set()
     assert a.pending_count == 0 and b.pending_count == 0
     print("  cancel_all reaches every registered dispatcher")
+
+
+def test_abandoned_inflight_does_not_hold_interpreter():
+    """One SIGINT returns 130 even with a remote-style call still blocked."""
+    code = """\
+import os
+import signal
+import threading
+import time
+from modules.cli import _dispatch
+from modules.dispatch import BoundedInferenceDispatcher
+
+class Blocked(BoundedInferenceDispatcher):
+    def __init__(self):
+        super().__init__(max_in_flight=1)
+        self.started = threading.Event()
+        self.gate = threading.Event()
+    def begin(self):
+        self._submit_task(self.work)
+    def work(self):
+        self.started.set()
+        self.gate.wait(60)
+
+blocked = Blocked()
+blocked.begin()
+assert blocked.started.wait(1)
+threading.Timer(
+    0.1, lambda: os.kill(os.getpid(), signal.SIGINT)
+).start()
+code = _dispatch(lambda _args: time.sleep(60), object())
+print(f"exit={code}")
+raise SystemExit(code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=3.0,
+        check=False,
+    )
+    assert result.returncode == 130, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "exit=130", result.stdout
+    assert "KeyboardInterrupt — interrupted" in result.stderr
+    print("  one SIGINT exits despite an abandoned in-flight request")
 
 
 def test_unavailable_latches_once():
@@ -167,6 +221,7 @@ def main():
     test_drain_is_a_barrier_not_a_reset()
     test_abandon_drops_queued_work()
     test_cancel_all_reaches_every_live_dispatcher()
+    test_abandoned_inflight_does_not_hold_interpreter()
     test_unavailable_latches_once()
     print("test_dispatch: all ok")
     return 0

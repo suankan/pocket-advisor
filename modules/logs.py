@@ -6,7 +6,7 @@ records, terminal lines, and progress bars alike
 never shadows the stdlib module it is built on.
 
     log = get_log()
-    log.interactive("emails: 56 parsed")        # terminal + file
+    log.notice("emails: 56 parsed")             # Rich terminal + file
     log.error("endpoint unreachable", exc_info=exc)   # stderr + file
     log.info("dispatch queued", entity_id=7)    # file only
     log.debug("payload rendered", chars=1500)   # file only, LOG_LEVEL=debug
@@ -36,12 +36,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from rich.console import Console
+from rich.text import Text
+
 from modules.config import PROJECT_ROOT, Config
 
 # Between INFO and WARNING: always emitted at either supported LOG_LEVEL,
 # so the human channel is never filtered away.
-INTERACTIVE = 25
-logging.addLevelName(INTERACTIVE, "INTERACTIVE")
+NOTICE = 25
+logging.addLevelName(NOTICE, "NOTICE")
 
 LOGGER_NAME = "pocket_advisor"
 # Third-party loggers captured at debug level. Deliberately explicit: a
@@ -61,7 +64,7 @@ RESERVED_FIELDS = frozenset({
 _LEVEL_NAMES = {
     logging.DEBUG: "debug",
     logging.INFO: "info",
-    INTERACTIVE: "interactive",
+    NOTICE: "notice",
     logging.ERROR: "error",
 }
 
@@ -97,7 +100,7 @@ def _active_progress() -> Any | None:
 def _write_terminal(message: str, stream: Any) -> None:
     # A full-ingest Rich dashboard is the one terminal owner. Interactive
     # messages become bounded UI events while the call's structured record is
-    # still emitted normally by Log.interactive()/error().
+    # still emitted normally by Log.notice()/error().
     from modules.runtime_dashboard import active_dashboard
     dashboard = active_dashboard()
     if dashboard is not None:
@@ -107,7 +110,14 @@ def _write_terminal(message: str, stream: Any) -> None:
     if bar is not None:
         bar.println(message)
         return
-    print(message, file=stream, flush=True)
+    # Rich remains the terminal presentation boundary even without the
+    # full-ingest dashboard. Text disables markup interpretation of corpus
+    # filenames, exception detail, and other operator-facing values.
+    terminal = bool(getattr(stream, "isatty", lambda: False)())
+    Console(file=stream).print(
+        Text(str(message)),
+        soft_wrap=not terminal,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +255,10 @@ class Log:
         self.run_id = run_id
         self.path = path
 
-    def interactive(self, message: str, /, **fields: Any) -> None:
-        """Operator-facing output: terminal and file."""
+    def notice(self, message: str, /, **fields: Any) -> None:
+        """Operator-facing notice: Rich terminal presentation plus file."""
         _write_terminal(message, sys.stdout)
-        self._record(INTERACTIVE, message, fields)
+        self._record(NOTICE, message, fields)
 
     def error(self, message: str, /, *,
               exc_info: BaseException | None = None,

@@ -1,8 +1,9 @@
 # Live Ingestion Pipeline Terminal Dashboard
 
 Status: **implemented 2026-07-26**. Initial design commit `32aba8f`;
-implementation commit `4d7021a`; locked implementation described below.
-Persistent-final-state and single-interrupt amendment in progress 2026-07-26.
+initial implementation commit `4d7021a`. Persistent-final-state and
+single-interrupt amendment: design `8d03a7d`, implementation `69e34d3`.
+The locked implementation is described below.
 
 Implementation map:
 
@@ -244,7 +245,7 @@ Automated tests must prove:
 
 Before handoff, run the full repository verification required by `AGENTS.md`.
 
-## Verification record
+## Initial verification record
 
 - All 20 native suites pass, including the new dashboard suite; the aggregate
   `uv run pocket-advisor.py test` command reports 20/20.
@@ -260,3 +261,20 @@ Before handoff, run the full repository verification required by `AGENTS.md`.
 - The live run exposed narrow-terminal wrapping in long recent events. The
   implemented renderer clips each event to one ellipsized Rich `Text` row; an
   80-column regression assertion locks that behavior.
+
+## Persistent-final-state amendment verification
+
+- All 20 native `modules/tests/test_*.py` suites pass; aggregate
+  `uv run pocket-advisor.py test` reports 20/20; `git diff --check` passes.
+- A synthetic TTY starts a real non-transient `Live`, installs a typed report,
+  stops it, and asserts that the retained terminal frame contains the
+  pipeline, performance, workspace, findings, run-report, and execution-log
+  sections.
+- A CLI lifecycle regression asserts `_finalize_ingest_report()` and
+  `install_report()` happen before the dashboard's sole `stop()`.
+- A subprocess parks an inference task, sends itself one SIGINT, and must exit
+  130 within three seconds while the worker is still blocked. The regression
+  fails with a normal non-daemon `ThreadPoolExecutor`.
+- Runtime source contains no `.interactive()` call sites. Notice/error
+  presentation is exercised through Rich while structured JSONL records retain
+  their normal durability.

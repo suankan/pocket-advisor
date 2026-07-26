@@ -4,6 +4,39 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Persistent Rich ingest completion and one-signal exit
+
+Design `8d03a7d`; implementation `69e34d3`. Feature docs:
+`docs/platform/runtime-observability-terminal-dashboards.md` and
+`docs/platform/logging.md`.
+
+Interactive `ingest all` now stays inside one official Rich 14.1.0 surface
+from startup through the shell prompt. The final ingest audit replaces active
+work in a non-transient last frame instead of clearing the dashboard and
+printing a second plain report.
+
+- The retained Rich frame contains pipeline results, performance, workspace
+  state, findings, review queue, report path, execution-log path, and report
+  audit time. The generic plain run banner and footer are suppressed while
+  that surface owns the terminal; non-TTY output retains the stable plain
+  report contract.
+- The old `.interactive()` logging API is removed. `.notice()` records
+  discrete operator notices and routes presentation through the active Rich
+  dashboard or a Rich `Console`; `.error()` uses the same terminal boundary.
+  The typed final report is installed directly and recorded once through the
+  file-only channel.
+- Failure and interrupt handling share one idempotent cancellation path:
+  active OCR process groups are terminated, queued inference work is canceled,
+  and in-flight remote calls run only on daemon workers. One Ctrl+C therefore
+  returns 130 without a traceback or a second signal, even when a request is
+  parked behind a remote timeout.
+
+Verification: every native `modules/tests/test_*.py` suite passes; aggregate
+`uv run pocket-advisor.py test` reports 20/20. A real Rich `Live` synthetic-TTY
+test proves the final frame remains after stop; a subprocess SIGINT regression
+proves blocked inference work cannot hold interpreter exit; `git diff --check`
+passes.
+
 ## 2026-07-26 — Completion-driven PDF embedding dispatch
 
 Design `1337fa2`; implementation `2199aea`. Feature doc:

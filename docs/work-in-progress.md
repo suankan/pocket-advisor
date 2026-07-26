@@ -17,7 +17,8 @@ Design: `docs/platform/logging.md` — **locked for implementation
 2026-07-26** (two review rounds folded in). Roadmap item 1. Read the design
 doc first; this section carries only the active context.
 
-Progress: step 1 in flight. Steps 2–8 not started.
+Progress: step 1 done (`modules/logs.py` + `modules/tests/test_logs.py`,
+16/16 suite green). Steps 2–8 not started.
 
 Four review findings reshaped the first draft — do not resurrect the
 originals:

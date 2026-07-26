@@ -140,8 +140,11 @@ Level resolves once at process start, highest precedence first:
 rather than failing a long ingest over a typo.
 
 - `LOG_LEVEL=info` (default) — `.interactive()`, `.error()`, `.info()`
-  records are written. `.debug()` is a true no-op: no record, no
-  formatting, no file write, no kwarg evaluation beyond the level check.
+  records are written. `.debug()` emits nothing: no record, no formatting,
+  no file write. It does still validate its fields (D5) before the level
+  check — `**fields` has already built the dict by the time the call runs,
+  so the check costs nothing, and skipping it would let a name collision
+  lurk undetected until someone raised `LOG_LEVEL`.
 - `LOG_LEVEL=debug` — all four are written, and `httpx`/`httpcore` DEBUG is
   attached. **Terminal output is identical to `info`** — raising the level
   never adds screen noise, only file detail.
@@ -227,6 +230,12 @@ logging to be configured, and a test that prints must not crash.
 Writes go through `QueueHandler` → `QueueListener` → a single writer
 thread, so ten concurrent workers never contend on the file handle and a
 slow disk never stalls a pipeline stage.
+
+`QueueHandler.prepare()` must be overridden to hand the record over
+untouched. The stdlib default formats the message and discards `exc_info`,
+`stack_info`, and `args` so records survive pickling to another process;
+this queue is in-process, so that trade is pure loss — it would strip every
+traceback and bake formatted text into `message`.
 
 ### D7. Correlating the terminal session with the file
 

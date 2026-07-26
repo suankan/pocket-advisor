@@ -138,6 +138,11 @@ class Config:
     daemon_idle_sec: int = 1800
     thread_context_chars: int = 120_000
 
+    # -- logging -----------------------------------------------------------
+    # Durable default for structured execution logging; the LOG_LEVEL
+    # environment variable overrides it per invocation. Empty means unset.
+    logging_level: str = ""
+
     # -- derived paths ----------------------------------------------------
     # Every corpus-derived path requires an explicit workspace selection
     # and lives below that workspace's root. Model weights live with the
@@ -186,6 +191,13 @@ class Config:
     @property
     def logs_dir(self) -> Path:
         return self.state_dir / "logs"
+
+    @property
+    def execution_logs_dir(self) -> Path:
+        """One structured JSON-lines file per invocation. A sibling of
+        `logs_dir`, not a child: `wipe state` preserves this directory by
+        name (`docs/platform/logging.md` D8)."""
+        return self.state_dir / "execution-logs"
 
     @property
     def review_queue_csv(self) -> Path:
@@ -271,6 +283,7 @@ _YAML_KEYS: dict[str, tuple[str, _Converter]] = {
     "query.daemon_idle_sec": ("daemon_idle_sec", lambda _, v: int(v)),
     "query.thread_context_chars":
         ("thread_context_chars", lambda _, v: int(v)),
+    "logging.level": ("logging_level", lambda _, v: str(v)),
 }
 
 # Accepted-but-ignored during the transition. Warn so they do not linger

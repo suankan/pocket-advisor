@@ -1,6 +1,17 @@
 # Live Ingestion Pipeline Terminal Dashboard
 
-Status: **locked for implementation 2026-07-26**.
+Status: **implemented 2026-07-26**. Initial design commit `32aba8f`;
+locked implementation described below.
+
+Implementation map:
+
+- `modules/runtime_dashboard.py` — run/stage/event model and Rich renderer;
+- `modules/cli.py` — full-ingest lifetime and stage transitions;
+- `modules/progress.py` — dashboard snapshots for task, worker-pool, and
+  inference-queue widgets;
+- `modules/logs.py` — terminal-event routing while structured records continue;
+- `modules/tests/test_runtime_dashboard.py` — render, routing, proxy, and
+  fallback coverage.
 
 ## Goal
 
@@ -142,6 +153,13 @@ Rich renders their current state. Worker threads only mutate widget state; the
 Rich refresh thread is the only terminal painter. This removes competing
 terminal ownership without making pipeline stages depend on Rich.
 
+Rich `Live.start()` replaces the process's default stdout/stderr with its own
+file proxies. Their TTY answer is not the original terminal's answer, so a
+widget created with its default stream joins the already-active dashboard by
+run scope rather than re-checking that proxy. An explicitly supplied stream
+keeps its caller-requested legacy/plain renderer. This distinction is covered
+against a real started `Live`, not only against a hand-built stream fake.
+
 The existing `LiveDisplay` stays as the compatibility renderer for other TTY
 commands in this first delivery. A later all-CLI dashboard project can retire
 it deliberately after each command gets a purpose-built surface.
@@ -164,8 +182,12 @@ without changing content.
 
 ### D5. Dependency and failure isolation
 
-Rich is a normal runtime dependency, pinned through `pyproject.toml` and
-`uv.lock`.
+Rich is the official Textualize package documented at
+`https://rich.readthedocs.io/en/latest/introduction.html`, pinned to
+`rich==14.1.0` — the exact version identified by those docs during
+implementation — through `pyproject.toml` and `uv.lock`. The implementation
+uses its public `Console`, `Live`, `Panel`, `Table`, `Text`, `Progress`,
+progress-column, and `Spinner` APIs.
 
 Presentation must not be able to invalidate ingestion. Dashboard construction
 or rendering failure disables the dashboard and falls back to the existing
@@ -190,3 +212,20 @@ Automated tests must prove:
    remain green.
 
 Before handoff, run the full repository verification required by `AGENTS.md`.
+
+## Verification record
+
+- All 20 native suites pass, including the new dashboard suite; the aggregate
+  `uv run pocket-advisor.py test` command reports 20/20.
+- A real PTY run of
+  `uv run pocket-advisor.py --workspace test ingest all` completed in 1m07s
+  with run id `0be09cd6-0fea-4572-972f-cc8770a0d042`.
+- That run exercised the complete dashboard-to-report lifetime and a real
+  failure path: four summary calls remained visibly in flight until oMLX
+  closed their chunked responses; the dashboard surfaced the
+  `RemoteProtocolError`, later stages continued, Rich restored the cursor and
+  cleared its transient region, and the stable final report correctly rendered
+  `INGEST COMPLETE WITH FINDINGS`.
+- The live run exposed narrow-terminal wrapping in long recent events. The
+  implemented renderer clips each event to one ellipsized Rich `Text` row; an
+  80-column regression assertion locks that behavior.

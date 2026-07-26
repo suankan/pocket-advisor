@@ -1,4 +1,4 @@
-"""Terminal progress reporting for long pipeline stages (no deps).
+"""Terminal progress reporting for long pipeline stages.
 
 On a TTY: one self-updating line on stderr with count, percentage,
 rate, ETA and the current item; a 1s heartbeat
@@ -185,6 +185,7 @@ class QueuePanel:
     def __init__(self, source: Any, *, stream: IO[str] | None = None,
                  min_interval: float = 0.25, quiet_every: float = 15.0):
         self.source = source        # callable -> QueueSnapshot
+        default_stream = stream is None
         self.stream = stream if stream is not None else sys.stderr
         self.tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.interval = min_interval if self.tty else quiet_every
@@ -194,7 +195,15 @@ class QueuePanel:
         self._last_emit = 0.0
         self._closed = False
         self._lock = threading.Lock()
-        self._display = display_for(self.stream) if self.tty else None
+        from modules.runtime_dashboard import active_dashboard
+        # Rich Live replaces sys.stderr with a FileProxy whose isatty() is
+        # false. Default-stream widgets still belong to the active dashboard;
+        # an explicitly supplied stream retains its caller-requested renderer.
+        self._dashboard = active_dashboard() if default_stream else None
+        self._display = display_for(self.stream) \
+            if self.tty and self._dashboard is None else None
+        if self._dashboard is not None:
+            self._dashboard.register_widget(self)
         if self._display is not None:
             self._display.register(self)
 
@@ -216,6 +225,9 @@ class QueuePanel:
             if self._closed:
                 return
             self._closed = True
+            if self._dashboard is not None:
+                self._dashboard.unregister_widget(self)
+                return
             if self._display is not None:
                 self._display.unregister(self)
                 return
@@ -263,11 +275,32 @@ class QueuePanel:
             return
         line = self._compose(snapshot)
         self._cached = [line]
+        if self._dashboard is not None:
+            return
         if self._display is not None:
             self._display.redraw()
             return
         self.stream.write(line + "\n")
         self.stream.flush()
+
+    def dashboard_state(self) -> dict[str, Any]:
+        """Immutable-enough state for the Rich render thread."""
+        with self._lock:
+            snapshot = self.source()
+            now = time.monotonic()
+            elapsed = now - self.t0
+            return {
+                "kind": "queue",
+                "label": snapshot.label,
+                "queued": snapshot.queued,
+                "in_flight": snapshot.in_flight,
+                "done": snapshot.done,
+                "failed": snapshot.failed,
+                "pending": snapshot.skipped,
+                "rate": (self._rate(now, snapshot.settled)
+                         if elapsed >= 1.0 else 0.0),
+                "elapsed": elapsed,
+            }
 
 
 def _fmt_secs(s: float) -> str:
@@ -285,6 +318,7 @@ class Progress:
                  stream: IO[str] | None = None, observer: Any = None):
         self.label = label
         self.total = total or None   # 0 -> None (no percentage)
+        default_stream = stream is None
         self.stream = stream if stream is not None else sys.stderr
         self.tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.interval = min_interval if self.tty else quiet_every
@@ -297,10 +331,15 @@ class Progress:
         self._finished = False
         self._lock = threading.Lock()
         self._cached: list[str] = []
-        self._display = display_for(self.stream) if self.tty else None
+        from modules.runtime_dashboard import active_dashboard
+        self._dashboard = active_dashboard() if default_stream else None
+        self._display = display_for(self.stream) \
+            if self.tty and self._dashboard is None else None
         self._observer = observer
         if observer is not None:
             observer.attach(self)
+        if self._dashboard is not None:
+            self._dashboard.register_widget(self)
         if self._display is not None:
             self._display.register(self)
 
@@ -348,6 +387,9 @@ class Progress:
     def println(self, msg: str) -> None:
         """A real (newline-terminated) log line while the bar is active."""
         with self._lock:
+            if self._dashboard is not None:
+                self._dashboard.write_event(msg)
+                return
             if self._display is not None:
                 self._display.println(msg)
                 return
@@ -358,6 +400,8 @@ class Progress:
         with self._lock:
             self._finished = True
             elapsed = time.monotonic() - self.t0
+            if self._dashboard is not None:
+                self._dashboard.unregister_widget(self)
             if self.n == 0 and self.total is None:
                 # nothing processed and no total: stay quiet, but still
                 # release the bar so later output is not routed to it.
@@ -419,11 +463,32 @@ class Progress:
             bits.append(f"— {str(note)[:48]}")
         msg = " ".join(bits)
         self._cached = [msg]
+        if self._dashboard is not None:
+            return
         if self._display is not None:
             self._display.redraw()
             return
         self.stream.write(msg + "\n")
         self.stream.flush()
+
+    def dashboard_state(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.t0
+            rate = self._rate(now) if elapsed >= 1.0 else 0.0
+            eta = None
+            if self.total and rate and self.n < self.total:
+                eta = (self.total - self.n) / rate
+            return {
+                "kind": "progress",
+                "label": self.label,
+                "completed": self.n,
+                "total": self.total,
+                "elapsed": elapsed,
+                "rate": rate,
+                "eta": eta,
+                "note": self._last_note,
+            }
 
 
 class WorkerPoolProgress:
@@ -443,6 +508,7 @@ class WorkerPoolProgress:
         self.label = label
         self.worker_count = worker_count
         self.total = max(0, total)
+        default_stream = stream is None
         self.stream = stream if stream is not None else sys.stderr
         self.tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.interval = min_interval if self.tty else quiet_every
@@ -458,10 +524,15 @@ class WorkerPoolProgress:
         self._busy = [False] * worker_count
         self._job_started: list[float | None] = [None] * worker_count
         self._cached: list[str] = []
-        self._display = display_for(self.stream) if self.tty else None
+        from modules.runtime_dashboard import active_dashboard
+        self._dashboard = active_dashboard() if default_stream else None
+        self._display = display_for(self.stream) \
+            if self.tty and self._dashboard is None else None
         self._observer = observer
         if observer is not None:
             observer.attach(self)
+        if self._dashboard is not None:
+            self._dashboard.register_widget(self)
         if self._display is not None:
             self._display.register(self)
 
@@ -502,6 +573,9 @@ class WorkerPoolProgress:
 
     def println(self, msg: str) -> None:
         with self._lock:
+            if self._dashboard is not None:
+                self._dashboard.write_event(msg)
+                return
             if self._display is not None:
                 self._display.println(msg)
                 return
@@ -512,6 +586,8 @@ class WorkerPoolProgress:
         with self._lock:
             self._finished = True
             elapsed = time.monotonic() - self.t0
+            if self._dashboard is not None:
+                self._dashboard.unregister_widget(self)
             if self.completed == 0 and self.total == 0:
                 if self._display is not None:
                     self._display.unregister(self)
@@ -610,8 +686,42 @@ class WorkerPoolProgress:
         self._last_emit = now
         lines = self._format_lines(final=final)
         self._cached = lines
+        if self._dashboard is not None:
+            return
         if self._display is not None:
             self._display.redraw()
             return
         self.stream.write("\n".join(lines) + "\n")
         self.stream.flush()
+
+    def dashboard_state(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.t0
+            worker_states = []
+            for index in range(self.worker_count):
+                current, total = self._worker_progress(index)
+                started = self._job_started[index]
+                worker_states.append({
+                    "index": index + 1,
+                    "progress": f"{current}/{total}" if total else str(current),
+                    "busy": self._busy[index],
+                    "status": self._status[index],
+                    "elapsed": now - started if started is not None else 0.0,
+                })
+            rate = self._rate(now) if elapsed >= 1.0 else 0.0
+            return {
+                "kind": "workers",
+                "label": self.label,
+                "workers": self.worker_count,
+                "completed": self.completed,
+                "total": self.total,
+                "elapsed": elapsed,
+                "rate": rate,
+                "eta": (
+                    (self.total - self.completed) / rate
+                    if elapsed >= 1.0 and self.total > self.completed
+                    and rate > 0 else None
+                ),
+                "worker_states": worker_states,
+            }

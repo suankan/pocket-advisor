@@ -95,6 +95,14 @@ def _active_progress() -> Any | None:
 
 
 def _write_terminal(message: str, stream: Any) -> None:
+    # A full-ingest Rich dashboard is the one terminal owner. Interactive
+    # messages become bounded UI events while the call's structured record is
+    # still emitted normally by Log.interactive()/error().
+    from modules.runtime_dashboard import active_dashboard
+    dashboard = active_dashboard()
+    if dashboard is not None:
+        dashboard.write_event(message, error=stream is sys.stderr)
+        return
     bar = _active_progress()
     if bar is not None:
         bar.println(message)

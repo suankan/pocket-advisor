@@ -216,6 +216,38 @@ def run_ingest(
         clock: Callable[[], float] = time.monotonic,
         utc_now: Callable[[], datetime] = _utc_now,
 ) -> int:
+    """Execute ingestion with a run-scoped dashboard for ``ingest all``."""
+    from modules.runtime_dashboard import IngestDashboard
+
+    dashboard = IngestDashboard(
+        selection.workspace.id,
+        get_log().run_id,
+        PIPELINE_STAGES,
+        enabled=stage == "all",
+    )
+    dashboard.start()
+    try:
+        return _run_ingest(
+            stage,
+            selection,
+            force_transactions=force_transactions,
+            clock=clock,
+            utc_now=utc_now,
+            dashboard=dashboard,
+        )
+    finally:
+        dashboard.stop()
+
+
+def _run_ingest(
+        stage: str,
+        selection: RuntimeSelection,
+        *,
+        force_transactions: bool,
+        clock: Callable[[], float],
+        utc_now: Callable[[], datetime],
+        dashboard: Any,
+) -> int:
     """Execute one named stage or the complete ordered pipeline."""
     pipeline_started = clock()
     started_at = utc_now().isoformat()
@@ -264,6 +296,7 @@ def run_ingest(
 
         def execute(name: str) -> None:
             stage_started = clock()
+            dashboard.stage_started(name)
             if name in HOT_STAGE_NAMES:
                 ctx.telemetry.mark_entered(name)
             try:
@@ -272,24 +305,38 @@ def run_ingest(
                 request_interrupt()
                 from modules.dispatch import cancel_all
                 cancel_all()
+                duration = round(clock() - stage_started, 6)
                 stages.append(StageRun(
                     name=name,
                     outcome="failed",
-                    duration_seconds=round(clock() - stage_started, 6),
+                    duration_seconds=duration,
                     stats={},
                     reason=_stage_failure_reason(exc),
                 ))
+                dashboard.stage_finished(
+                    name,
+                    outcome="failed",
+                    duration=duration,
+                    result=_stage_failure_reason(exc),
+                )
                 raise
             if name in HOT_STAGE_NAMES:
                 # Seals partial as measured; a stage-recorded deliberate
                 # not_applicable gate is preserved.
                 ctx.telemetry.mark_measured(name)
+            duration = round(clock() - stage_started, 6)
             stages.append(StageRun(
                 name=name,
                 outcome="completed",
-                duration_seconds=round(clock() - stage_started, 6),
+                duration_seconds=duration,
                 stats=dict(stats.counts),
             ))
+            dashboard.stage_finished(
+                name,
+                outcome="completed",
+                duration=duration,
+                result=str(stats),
+            )
 
         def skip(name: str, reason: str) -> None:
             if name in HOT_STAGE_NAMES:
@@ -301,6 +348,12 @@ def run_ingest(
                 stats={},
                 reason=reason,
             ))
+            dashboard.stage_finished(
+                name,
+                outcome="skipped",
+                duration=None,
+                result=reason,
+            )
 
         # summaries always runs: its staleness maintenance must see every
         # ingest even when generation is disabled (the stage gates the
@@ -313,7 +366,8 @@ def run_ingest(
                 execute("embed")
             else:
                 reason = "ingestion.embed_text=false"
-                print(f"embed: skipped ({reason})")
+                get_log().interactive(f"embed: skipped ({reason})",
+                                      stage="embed", reason=reason)
                 skip("embed", reason)
             has_bank_collections = any(
                 collection.is_bank_transactions
@@ -323,7 +377,9 @@ def run_ingest(
                 execute("transactions")
             else:
                 reason = "no mounted bank-transactions collections"
-                print(f"transactions: skipped ({reason})")
+                get_log().interactive(
+                    f"transactions: skipped ({reason})",
+                    stage="transactions", reason=reason)
                 skip("transactions", reason)
         except BaseException:
             failed_stage = stages[-1].name
@@ -337,12 +393,19 @@ def run_ingest(
                         stats={},
                         reason=f"pipeline stopped at {failed_stage}",
                     ))
+                    dashboard.stage_finished(
+                        name,
+                        outcome="not_run",
+                        duration=None,
+                        result=f"pipeline stopped at {failed_stage}",
+                    )
             try:
                 ctx.conn.rollback()
             except Exception:
                 pass
             ended_at = utc_now().isoformat()
             pipeline_seconds = clock() - pipeline_started
+            dashboard.stop("failed")
             try:
                 _finalize_ingest_report(
                     ctx,
@@ -363,6 +426,7 @@ def run_ingest(
 
         ended_at = utc_now().isoformat()
         pipeline_seconds = clock() - pipeline_started
+        dashboard.stop("complete")
         try:
             _finalize_ingest_report(
                 ctx,

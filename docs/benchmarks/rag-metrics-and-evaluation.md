@@ -1,6 +1,6 @@
 # 📋 Production RAG Audit Checklist
 
-**Status:** Draft candidate — **not implemented**; roadmap item 3 in
+**Status:** Draft candidate — **not implemented**; roadmap item 4 in
 `docs/roadmap.md`. A generic industry checklist kept as reference material
 for a future generation-quality evaluation pass. Nothing below describes
 current code; the implemented retrieval-side accuracy harness is

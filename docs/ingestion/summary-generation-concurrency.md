@@ -1,16 +1,18 @@
 # Pocket Advisor — Thread-Summary Generation Concurrency
 
 Status: **shipped 2026-07-20** (design lock `17be322`, implementation commit
-`b884ed1`). Supersedes nothing. Companion to
+`b884ed1`); completion-order/streaming amendment `d75862f`. Supersedes
+nothing. Companion to
 `docs/inference/inference-serving.md` (which moves all inference to the
 external oMLX server). This design parallelizes the summarization *generation*
 stage only; embedding of generated summaries is already concurrent through
 `EmbedDispatcher` and is unchanged. Implementation lives in
 `modules/pipeline/summary_dispatch.py`.
 
-## Problem
+## Original problem
 
-`ingest all` runs the summaries stage serially: `modules/pipeline/summaries.py`
+Before `b884ed1`, `ingest all` ran the summaries stage serially:
+`modules/pipeline/summaries.py`
 iterates `for job in stale:` and, for each thread, blocks on a single
 `generator.generate()` HTTP call to oMLX's `/v1/chat/completions` before
 writing the database row and moving to the next thread. With 126 stale threads
@@ -18,31 +20,30 @@ on a real workspace this crawls at ~0.1 threads/s with a multi-minute ETA,
 because only one long-context 4B decode is ever in flight even though oMLX's
 continuous batching (`max_concurrent_requests=8`) could serve many.
 
-Embeddings (email bodies, PDF text, and the summaries' own vectors) are
-*already* concurrent: producers dispatch at artifact readiness via
+Embeddings (email bodies, PDF text, and the summaries' own vectors) were
+*already* concurrent: producers dispatched at artifact readiness via
 `EmbedDispatcher`, a `ThreadPoolExecutor(max_workers=INFERENCE_MAX_IN_FLIGHT)`
-(`modules/embedding/dispatch.py`). Only generation is serial.
+(`modules/embedding/dispatch.py`). Only generation was serial.
 
 ## Core idea
 
 Add a purpose-built `EmailThreadsSummaryDispatcher` that fans the generation
 loop out across a bounded pool of threads, exactly as `EmbedDispatcher` does
-for embeddings — but owning only generation concerns. The two dispatchers
-share the *pattern* (bounded pool, weakref registry, interrupt abandon,
-unavailable degradation) and the *width constant* (`INFERENCE_MAX_IN_FLIGHT`),
-not a common base class. We deliberately do **not** generalize
-`EmbedDispatcher` into a generic `InferenceDispatcher`: its `_task` is coupled
-to per-entity numpy file publication and embed-specific telemetry, whereas
-generation's "publication" is a database upsert that must stay serialized on
-the main thread. Separating the concerns keeps each dispatcher honest about
-what it owns.
+for embeddings — but owning only generation concerns. The original delivery
+shared a pattern and width constant; the later inference-queue work extracted
+that lifecycle into `BoundedInferenceDispatcher`. The task bodies and pools
+remain separate because embedding workers publish per-entity numpy files,
+whereas generation's publication is a database upsert serialized on the main
+thread.
 
 ## Locked decisions
 
-1. **Separate dispatcher, not a generic base.** A new
+1. **Separate queue, shared lifecycle base.** A purpose-built
    `EmailThreadsSummaryDispatcher` lives beside the summaries stage
-   (`modules/pipeline/summary_dispatch.py`). `EmbedDispatcher` is untouched.
-   No `InferenceDispatcher` superclass is introduced.
+   (`modules/pipeline/summary_dispatch.py`). It and `EmbedDispatcher` use
+   `BoundedInferenceDispatcher` for bounded execution, counters, cancellation,
+   and completion-driven draining, but retain separate pools and typed task
+   logic.
 
 2. **One pool task per thread.** The entire `self._generate(job, generator,
    …)` — including any internal hierarchical segment/reduce sequencing — runs
@@ -59,28 +60,27 @@ what it owns.
 4. **Only inference runs off-thread.** Workers call `generator.generate()`
    and mutate their own per-task `metrics`/`timings` objects. They never touch
    the database connection, the `Progress` bar, or the `ReviewLog`. All of
-   those run on the main thread after `drain()` resolves each future. This
-   preserves sqlite single-writer safety and `Progress` (a shared,
+   those run on the main thread as `drain()` observes each completed future.
+   This preserves sqlite single-writer safety and `Progress` (a shared,
    non-thread-safe bar) integrity.
 
 5. **Database write + summary-embed dispatch stay on the main thread.** After
-   `drain()`, the stage iterates outcomes in submission order and, for each
-   success, performs the existing `INSERT … ON CONFLICT(thread_id) DO UPDATE`
-   + `conn.commit()` and the `embed_dispatcher.submit_summary(...,
-   at_readiness=True)` call. Failure handling (rollback, `review.flag`,
-   commit, `stats.inc("failed")`) also runs on the main thread.
+   each completion, the drain callback performs the existing `INSERT … ON
+   CONFLICT(thread_id) DO UPDATE` + `conn.commit()` and the
+   `embed_dispatcher.submit_summary(..., at_readiness=True)` call. Failure
+   handling (rollback, `review.flag`, commit, `stats.inc("failed")`) also runs
+   on the main thread. Returned outcomes remain submission-ordered for callers
+   that need that stable contract.
 
 6. **Outcome shape.** Each task returns a `SummaryOutcome`
    (`thread_id`, `summary_text | None`, `error | None`, `skipped: bool`,
    carrying `job` and its `metrics`) so the main thread can finalize DB state
    and merge telemetry without re-calling the model.
 
-7. **Interrupt handling reuses the embed registry.** `EmailThreadsSummaryDispatcher`
-   registers in the *same* module-level weakref set (`_LIVE`) exported by
-   `modules/embedding/dispatch.py` that `EmbedDispatcher` uses, so the existing
-   `cancel_all()` (wired into `cli.py`'s interrupt paths) already abandons
-   in-flight generation futures. No new `cli.py` call sites are added. An
-   interrupt leaves generated-but-uncommitted work as durable pending gaps;
+7. **Interrupt handling uses the shared dispatcher registry.**
+   `EmailThreadsSummaryDispatcher` and `EmbedDispatcher` register through
+   `modules/dispatch.py`, so `cancel_all()` abandons both queued workloads.
+   An interrupt leaves generated-but-uncommitted work as durable pending gaps;
    the next `ingest all` re-summarizes stale threads.
 
 8. **Unavailable degradation mirrors embeddings.** If oMLX is unreachable
@@ -91,8 +91,10 @@ what it owns.
 
 9. **Telemetry is merged, never written from workers.** Per-task
    `metrics`/`timings` are accumulated locally on the worker and folded into
-   `ctx.telemetry.summaries` on the main thread during `drain()`. No shared
-   telemetry object is mutated from a worker thread.
+   `ctx.telemetry.summaries` by the main-thread completion callback during
+   `drain()`. An optional idle callback lets the full-ingest coordinator poll
+   PDF completions while inference is still pending. No shared telemetry
+   object is mutated from a worker thread.
 
 10. **`Progress` is driven only on the main thread.** The `progress.start(...)`
     call currently inside `_call_generator` (`summaries.py`) is removed from
@@ -114,10 +116,14 @@ what it owns.
 producers (emails/pdfs) ──► EmbedDispatcher (8-wide) ──► oMLX /embeddings
 summaries stage:
    for job in stale: dispatcher.submit(job)        # non-blocking
-   done, failed, skipped, outcomes = dispatcher.drain(progress)
-   for outcome in outcomes:                         # main thread
+   def settle(outcome):                            # main thread
        write DB row + commit
-       embed_dispatcher.submit_summary(...)        # 8-wide, already concurrent
+       embed_dispatcher.submit_summary(...)        # already concurrent
+   dispatcher.drain(                                # completion order
+       progress,
+       on_complete=settle,
+       idle_callback=poll_pdf_completions,
+   )
 ```
 
 Each thread's `_generate` runs on a worker; the stage no longer waits on any

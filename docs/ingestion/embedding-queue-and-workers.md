@@ -1,7 +1,8 @@
 # Inference Dispatch Queues and Live Observability
 
 Status: **shipped 2026-07-26**, design `64ccb4b`, implemented across
-`491e012`, `2f80477`, `ff702b7`, `e3b7e70`, `e202a52`, `0f3a1d5`.
+`491e012`, `2f80477`, `ff702b7`, `e3b7e70`, `e202a52`, `0f3a1d5`;
+cross-stage streaming amendment implemented by `d75862f`.
 Supersedes the 2026-07-26 draft of this file, whose premise ("decouple
 embedding behind a queue so it starts before all documents are ready")
 describes behavior that already shipped — see "What already exists" below.
@@ -50,11 +51,12 @@ Verified against the implementation on 2026-07-26:
   document** as each worker completion is published, while slower PDF
   transforms continue;
   `modules/pipeline/summaries.py` dispatches per generated summary;
-  `modules/pipeline/emails.py` dispatches at end of stage. The dispatcher is
-  run-wide (`PipelineContext.embed_dispatcher`), so vectors publish
-  concurrently with the pdfs, thread, and summaries stages. The `embed` stage
-  is a convergence and matrix-rebuild pass, not the point where embedding
-  begins.
+  `modules/pipeline/emails.py` dispatches dependency-ready parentless bodies
+  during parsing and the remaining replies at the email-input close barrier.
+  The dispatcher is run-wide (`PipelineContext.embed_dispatcher`), so vectors
+  publish concurrently with discovery, parsing, PDF production, and summary
+  generation. The `embed` stage is a producer-close/convergence and
+  matrix-rebuild pass, not the point where embedding begins.
 - **Leaf and summary embedding are already one queue.** `EmbedDispatcher` has
   one `ThreadPoolExecutor` and one `_futures` list; every submission goes
   through the same `_submit()`. The `leaf`/`summary` split is a telemetry
@@ -66,20 +68,16 @@ Verified against the implementation on 2026-07-26:
   `dispatched_at_readiness`, `successful_entities`, and `failed_entities`,
   updated inside the worker task under the dispatcher lock.
 
-Two ideas from the draft are rejected outright:
+Two constraints from the original observability delivery were later
+superseded:
 
-- **Discovery as a producer for embedding.** Discovery enumerates and hashes
-  candidate files; no text exists at that point. The producers of embeddable
-  text are necessarily the stages that publish text artifacts (emails 2b,
-  pdfs). Discovery could only produce *for those stages*, which is a
-  cross-stage streaming redesign already deferred by
-  `docs/ingestion/pdf-to-text-pipeline-design.md` ("cross-stage OCR/GPU
-  overlap and multiple SQLite writers") against the single-coordinator SQLite
-  invariant.
-- **A queue as a speedup.** Per `docs/ingestion/ingestion-performance.md` the
-  measured split is summaries 60%, embed 21%, pdfs 19%, everything else about
-  three seconds. Email-body embedding already overlaps the remaining 79% of
-  the pipeline. There are no seconds to recover here.
+- **Discovery does not directly produce embeddings.** It still only hashes
+  files. It now feeds a coordinator which immediately parses/registers them,
+  and those text-producing concerns feed embedding. This enables cross-stage
+  overlap without introducing a second SQLite writer.
+- **The observability queue itself was not a speedup.** The later streaming
+  orchestrator changes when producers begin and therefore can recover
+  pipeline wall time; queue rendering and counters remain observational.
 
 ## Locked decisions
 

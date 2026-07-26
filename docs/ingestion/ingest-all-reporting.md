@@ -55,6 +55,9 @@ still showing a complete, useful workspace snapshot.
    from immediately before `execute()` through its return, plus total pipeline
    time. A skipped stage records a reason, not a misleading zero duration. The
    post-run audit/render duration is reported separately from pipeline time.
+   Full-ingest stages may overlap, so each duration is that logical stage's
+   own start-to-settlement interval; stage durations are not additive and
+   their sum may exceed pipeline wall time.
 5. **Existing progress remains.** Per-item progress bars and current stage
    summary lines remain visible. The completion report is a compact final block,
    not a replacement for live progress.

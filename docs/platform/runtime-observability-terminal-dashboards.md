@@ -3,7 +3,8 @@
 Status: **implemented 2026-07-26**. Initial design commit `32aba8f`;
 initial implementation commit `4d7021a`. Persistent-final-state and
 single-interrupt amendment: design `8d03a7d`, implementation `69e34d3`.
-The locked implementation is described below.
+Concurrent-stage amendment: design `4240232`, implementation `d75862f`. The
+locked implementation is described below.
 
 Implementation map:
 
@@ -33,8 +34,10 @@ report.
 
 ## What the pipeline actually does
 
-The dashboard represents the real CLI-owned stage order rather than inventing
-a simplified job model:
+The dashboard represents the real CLI-owned logical stages and dependencies
+rather than inventing a simplified job model. In full ingestion, discover,
+email parsing, PDF production, and embedding begin together and their running
+intervals overlap:
 
 1. **Discover** walks every mounted collection once, hashes originals, updates
    ingestion candidates, and refreshes the source blob index.
@@ -55,8 +58,9 @@ a simplified job model:
    prior transaction state exists, converges an unchanged graph, or performs
    the deterministic atomic statement rebuild and reconciliation pass.
 
-Several denominators are discovered only after an earlier stage runs.
-Embedding submissions also grow throughout producer stages. Therefore the UI
+Several denominators are discovered only while producers are running.
+Embedding submissions and the PDF total also grow throughout producer
+activity. Therefore the UI
 must never present one fabricated item-level percentage or ETA for the whole
 pipeline. It may truthfully show stage completion (for example, 3 of 7 stages)
 and task-local percentages/ETAs where a real total exists.
@@ -70,8 +74,8 @@ On an interactive terminal, Rich `Live` owns one bounded region. It contains:
 - a title with workspace, run id, total elapsed time, and overall run state;
 - a seven-row pipeline table showing pending/running/completed/skipped/failed
   state, per-stage elapsed time, and the completed stage's aggregate result;
-- an active-work panel containing the current single-task progress, PDF worker
-  slots, and persistent inference queue pressure;
+- an active-work panel containing concurrent task progress, PDF worker slots,
+  and persistent inference queue pressure;
 - a small, bounded recent-events panel for warnings and useful stage messages;
 - a footer explaining the symbols and showing that the full execution record
   is still being written.
@@ -87,7 +91,8 @@ often without forcing a terminal write on every item.
 ### Honest indicators
 
 - The header progress bar is explicitly **stages**, not percent of workload.
-- A running stage has a spinner and elapsed time.
+- Every running stage has a spinner and its own elapsed time; several may be
+  running simultaneously.
 - Completed stages retain their duration and compact `StageStats` result.
 - Skipped stages show the configuration/data reason.
 - After a failure, the failing stage and all `not_run` stages remain distinct.
@@ -153,16 +158,17 @@ record.
 
 ### D2. The CLI owns dashboard lifetime and stage state
 
-Only `run_ingest(stage="all", ...)` starts the dashboard. The CLI already owns
-stage sequencing, timing, skip gates, failure classification, and final report
+Only `run_ingest(stage="all", ...)` starts the dashboard. The CLI owns logical
+stage lifecycle, timing, skip gates, failure classification, and final report
 assembly, so it is the only layer able to publish truthful pipeline-row state.
-Stages remain UI-agnostic.
+Pipeline concerns remain UI-agnostic.
 
 The dashboard starts before the database is opened, receives
-`stage_started()` / `stage_finished()` transitions around `_execute_stage()`,
-and remains active through `_finalize_ingest_report()`. The finalized typed
-report is installed directly into the presentation model before `Live.stop()`.
-Stop is idempotent so every return/unwind path can call it safely.
+`stage_started()` / `stage_finished()` transitions from the streaming
+coordinator (or around `_execute_stage()` for named-stage work), and remains
+active through `_finalize_ingest_report()`. The finalized typed report is
+installed directly into the presentation model before `Live.stop()`. Stop is
+idempotent so every return/unwind path can call it safely.
 
 The generic CLI banner/footer are suppressed only when this Rich surface owns
 interactive full-ingest output; their run/workspace/log identity is already
@@ -226,8 +232,8 @@ shutdown is best-effort and idempotent.
 
 Automated tests must prove:
 
-1. the seven stages begin pending and transition through running, completed,
-   skipped, failed, and not-run states with honest timing/results;
+1. the seven stages begin pending and transition through overlapping running,
+   completed, skipped, failed, and not-run states with honest timing/results;
 2. `Progress`, `WorkerPoolProgress`, and `QueuePanel` register with the active
    dashboard instead of the legacy compositor;
 3. notice/error messages become bounded events while their structured

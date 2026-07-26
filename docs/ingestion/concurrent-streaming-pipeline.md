@@ -1,6 +1,6 @@
 # Concurrent Streaming Ingestion Pipeline
 
-Status: **designed 2026-07-26; implementation pending**.
+Status: **shipped 2026-07-26**. Design `4240232`; implementation `d75862f`.
 
 This design supersedes the sequential cross-stage orchestration of
 `ingest all` and the earlier deferral of cross-stage streaming in
@@ -201,8 +201,9 @@ being submitted twice during the convergence sweep.
 ## D7. Transactions and logical stage reporting
 
 Transactions still require the complete discovered document set and settled
-PDF text state. They may run after PDF close while summary inference is still
-in flight; the coordinator settles queued summary outcomes afterward.
+PDF text state. The initial implementation runs them after summary and PDF
+producer close; this keeps transaction rebuilding outside both inference and
+OCR settlement without imposing a barrier between those two producers.
 
 The seven public logical stage names remain stable for reports, named-stage
 commands, logs, and the Rich dashboard:
@@ -254,4 +255,3 @@ streaming orchestrator.
    inference queues.
 10. Named-stage prefix behavior, non-TTY output, reporting, verification, and
     every existing fixture remain green.
-

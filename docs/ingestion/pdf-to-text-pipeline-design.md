@@ -72,12 +72,17 @@ not need an occurrence-local PDF/text copy.
 
 ### Configuration and admission
 
-`n_workers` is fixed at `min(logical CPU cores, pending PDF count)` — a
-deliberate political decision, not an operator-tunable knob. Benchmarking on
-the 10-core support host showed linear wall-time scaling with worker count and
-no memory pressure even on hundreds of PDFs, so every core is committed to OCR
-work. Each worker runs a single ocrmypdf child with `--jobs 1`; the pool itself
-is the sole parallelism axis.
+For the named-stage batch entrypoint, `n_workers` is fixed at
+`min(logical CPU cores, pending PDF count)`. The incrementally fed full-ingest
+producer does not know the final pending count when its first document
+arrives, so it creates a logical-CPU-capacity executor and Rich worker-slot
+panel; Python starts backing threads lazily, and final telemetry records
+`min(logical CPU cores, unique transforms)` as configured workers plus the
+observed peak. Neither topology is operator-tunable. Benchmarking on the
+10-core support host showed linear wall-time scaling with worker count and no
+memory pressure even on hundreds of PDFs, so every available core may be
+committed to OCR work. Each worker runs a single ocrmypdf child with `--jobs
+1`; the pool itself is the sole parallelism axis.
 
 The coordinator measures pending PDF byte sizes and forms byte-bounded jobs.
 Bytes are an admission-control approximation, not a prediction of OCR cost;
@@ -126,6 +131,14 @@ publication, document metadata commit, chunk synchronization, and readiness
 dispatch. The gated regression in `modules/tests/test_pdfs.py` parks a slow
 worker and verifies the fast document has chunks and reaches the real
 dispatcher seam on the coordinator before the slow transform is released.
+
+For full ingestion, `StreamingPdfProducer.offer()` applies the same
+current-product and source-integrity gates as soon as each native or attached
+document is registered. `poll()` consumes ready futures on the coordinator;
+`close()` closes input and drains the remaining futures. Its progress total
+grows as discovery and recursive MIME parsing expose documents. The same
+gated PDF regression adds a fast document after a slow worker has started and
+proves completion-driven publication still holds with growing input.
 
 If OCRmyPDF emits a derivative with a non-zero validation warning, the
 coordinator may still attempt the authoritative `pdftotext` gate according to

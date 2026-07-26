@@ -9,7 +9,10 @@ from modules.config import Config, STATE_DIRNAME
 from modules.embedding import current_fingerprint, fingerprint_slug
 from modules.workspace import Registry, Workspace
 
-PRESERVED_STATE_NAMES = frozenset({"search-accuracy-tests"})
+# Never deleted by `wipe state`: human-authored workspace test data, and
+# execution logs — post-mortem history is worthless if the recovery step
+# erases it (`docs/platform/logging.md` D8).
+PRESERVED_STATE_NAMES = frozenset({"search-accuracy-tests", "execution-logs"})
 
 
 def _dir_size(path: Path) -> int:
@@ -253,11 +256,11 @@ def wipe_state(
         print(f"  {_human(size):>8}  {entry.name}{suffix}")
     print(f"  {_human(total):>8}  total")
     if preserved:
-        print("Preserved workspace test data:")
+        print("Preserved:")
         for entry in preserved:
             print(f"  {entry.name}/")
     print("Untouched: every collection root, other workspace states, "
-          "workspace test data, and workspace user data.")
+          "workspace test data, execution logs, and workspace user data.")
 
     if not yes:
         answer = input_fn(
@@ -278,5 +281,6 @@ def wipe_state(
         print(f"wipe: deleted {state} ({_human(total)})")
     else:
         print(f"wipe: deleted regenerable contents under {state} "
-              f"({_human(total)}); preserved workspace test data")
+              f"({_human(total)}); preserved "
+              + ", ".join(entry.name for entry in preserved))
     return 0

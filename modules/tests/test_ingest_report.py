@@ -340,6 +340,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     fill_measured_telemetry(ctx)
     report = build_report(
         ctx,
+        run_id="3fae1b2c-9d4e-4c1a-8b2f-7a1e6d0c9b34",
         started_at="2026-07-18T00:00:00+00:00",
         ended_at="2026-07-18T00:00:05+00:00",
         pipeline_seconds=5.0,
@@ -362,7 +363,9 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     raw = path.read_text(encoding="utf-8")
     assert SECRET not in raw
     payload = json.loads(raw)
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
+    # The record names the execution log that explains it.
+    assert payload["run_id"] == "3fae1b2c-9d4e-4c1a-8b2f-7a1e6d0c9b34"
     assert payload["workspace_id"] == "report-test"
     assert payload["snapshot"]["search"]["leaf_vectors"] == 3
     assert payload["record_path"].endswith(".json")

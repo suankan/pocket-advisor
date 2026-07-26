@@ -452,8 +452,9 @@ def test_ingest_report_display(tmp: Path) -> None:
     selection = fake_selection(root=tmp)
     config = selection.config
     report = IngestRunReport(
-        schema_version=4,
+        schema_version=5,
         workspace_id="matter-x",
+        run_id="3fae1b2c-9d4e-4c1a-8b2f-7a1e6d0c9b34",
         started_at="2026-07-18T00:00:00+00:00",
         ended_at="2026-07-18T00:00:05+00:00",
         status="COMPLETE",

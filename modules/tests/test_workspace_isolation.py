@@ -244,6 +244,12 @@ def main() -> int:
         authored_suite = expectations / "authored.yaml"
         authored_suite.write_text("- id: durable-test\n")
         suite_before = snapshot_tree(a.config.accuracy_tests_dir)
+
+        # Execution logs are the post-mortem record of runs including the
+        # one that made a wipe necessary, so they must outlive it.
+        a.config.execution_logs_dir.mkdir(parents=True)
+        run_log = a.config.execution_logs_dir / "20260726-102548.jsonl"
+        run_log.write_text('{"level":"error","message":"why it broke"}\n')
         a.conn.close()
 
         # Without explicit approval, nothing is deleted.
@@ -265,6 +271,8 @@ def main() -> int:
         assert a_state.exists()
         assert snapshot_tree(a.config.accuracy_tests_dir) == suite_before
         assert authored_suite.read_text() == "- id: durable-test\n"
+        assert run_log.read_text() == \
+            '{"level":"error","message":"why it broke"}\n'
         assert not a.config.db_path.exists()
         for derived in (a.config.emails_dir, a.config.documents_dir,
                         a.config.vectors_dir, a.config.logs_dir,

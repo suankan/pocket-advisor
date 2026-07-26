@@ -183,6 +183,9 @@ def _finalize_ingest_report(
     report_started = clock()
     report = build_report(
         ctx,
+        # Straight off the process-scoped facade: no parameter threading,
+        # and the report cannot drift from the log it points at.
+        run_id=ctx.log.run_id,
         started_at=started_at,
         ended_at=ended_at,
         pipeline_seconds=pipeline_seconds,

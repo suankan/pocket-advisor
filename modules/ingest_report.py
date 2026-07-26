@@ -28,7 +28,7 @@ from modules.transaction_state import (TransactionStateError,
                                        load_transaction_state)
 
 
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 
 STAGE_ORDER = (
     "discover", "emails", "pdfs", "thread", "summaries", "embed",
@@ -66,6 +66,9 @@ class WorkspaceSnapshot:
 class IngestRunReport:
     schema_version: int
     workspace_id: str
+    # The execution log's run_id, so a report pivots straight to the
+    # step-by-step records of the same run (`docs/platform/logging.md` D9).
+    run_id: str
     started_at: str
     ended_at: str
     status: str
@@ -483,6 +486,7 @@ def completion_status(
 def build_report(
         ctx: PipelineContext,
         *,
+        run_id: str,
         started_at: str,
         ended_at: str,
         pipeline_seconds: float,
@@ -497,6 +501,7 @@ def build_report(
     return IngestRunReport(
         schema_version=REPORT_SCHEMA_VERSION,
         workspace_id=ctx.workspace.id,
+        run_id=run_id,
         started_at=started_at,
         ended_at=ended_at,
         status=completion_status(findings, failed_stage=failed_stage),
@@ -567,6 +572,7 @@ def load_report(path: Path) -> IngestRunReport:
         return IngestRunReport(
             schema_version=int(version),
             workspace_id=str(data["workspace_id"]),
+            run_id=str(data["run_id"]),
             started_at=str(data["started_at"]),
             ended_at=str(data["ended_at"]),
             status=str(data["status"]),
@@ -728,4 +734,8 @@ def format_report(report: IngestRunReport, record_path: Path | None) -> str:
         f"  Report audit  {_format_duration(report.report_seconds)}")
     lines.append(
         f"Run report: {record_path if record_path is not None else 'unavailable'}")
+    if report.run_id:
+        # A report read back later (`ingest report --last`) must still name
+        # the execution log that explains it.
+        lines.append(f"Run id:     {report.run_id}")
     return "\n".join(lines)

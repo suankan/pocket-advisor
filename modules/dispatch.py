@@ -116,6 +116,7 @@ class BoundedInferenceDispatcher:
         self._done = 0
         self._failed = 0
         self._skipped = 0
+        self._panel: Any = None
         _LIVE.add(self)
 
     @property
@@ -145,9 +146,25 @@ class BoundedInferenceDispatcher:
             self._pool = ThreadPoolExecutor(
                 max_workers=self._max,
                 thread_name_prefix=self.thread_name_prefix)
+        # Before taking the lock: the panel reads snapshot(), so creating it
+        # here would nest the display lock inside this one.
+        self._ensure_panel()
         with self._lock:
             self._submitted += 1
         self._futures.append(self._pool.submit(self._run_task, fn, args))
+
+    def _ensure_panel(self) -> None:
+        """The queue row appears on first submission, so a run that
+        dispatches nothing draws nothing."""
+        if self._panel is not None:
+            return
+        from modules.progress import QueuePanel
+        self._panel = QueuePanel(self.snapshot)
+
+    def _close_panel(self) -> None:
+        panel, self._panel = self._panel, None
+        if panel is not None:
+            panel.close()
 
     def _run_task(self, fn, args) -> DispatchResult:
         """Wrap one worker call in its live accounting.
@@ -222,11 +239,13 @@ class BoundedInferenceDispatcher:
         """Drop queued tasks without waiting; in-flight ones finish.
         Everything dropped is a durable pending gap."""
         self._futures = []
+        self._close_panel()
         if self._pool is not None:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._pool = None
 
     def close(self) -> None:
+        self._close_panel()
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None

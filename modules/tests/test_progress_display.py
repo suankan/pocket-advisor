@@ -183,6 +183,53 @@ def test_heartbeat_does_not_deadlock_against_step():
     print(f"  no deadlock under contention ({steps} steps)")
 
 
+def test_queue_panel_pins_under_a_stage_bar():
+    """The arrangement this whole feature exists for."""
+    from modules.dispatch import QueueSnapshot
+    from modules.progress import QueuePanel
+
+    stream = FakeTTY()
+    state = {"snap": QueueSnapshot("embed queue", 1240, 8, 3200, 12, 0)}
+    panel = QueuePanel(lambda: state["snap"], stream=stream,
+                       min_interval=0.0)
+    bar = Progress("collect pdfs", total=458, stream=stream,
+                   min_interval=0.0)
+    bar.step(note="invoice_2019.pdf")
+    panel.refresh()
+    visible = _visible(stream)
+    assert visible[0].startswith("collect pdfs:"), visible
+    assert "1240 queued" in visible[-1], visible
+    assert "8 in flight" in visible[-1], visible
+    assert "3200 done" in visible[-1], visible
+    assert "12 failed" in visible[-1], visible
+    # No percentage or ETA: the denominator is still growing.
+    assert "%" not in visible[-1], visible
+    assert "eta" not in visible[-1], visible
+
+    # The stage bar finishes; the queue row survives and stays pinned.
+    bar.done()
+    stream.truncate(0)
+    stream.seek(0)
+    state["snap"] = QueueSnapshot("embed queue", 0, 2, 4438, 12, 0)
+    panel.refresh()
+    assert "4438 done" in _visible(stream)[-1], _visible(stream)
+    panel.close()
+    print("  queue row pins under a stage bar and outlives it")
+
+
+def test_queue_panel_silent_until_first_submission():
+    from modules.dispatch import QueueSnapshot
+    from modules.progress import QueuePanel
+
+    stream = FakeTTY()
+    panel = QueuePanel(lambda: QueueSnapshot("embed queue", 0, 0, 0, 0, 0),
+                       stream=stream, min_interval=0.0)
+    panel.refresh()
+    assert panel.lines() == [], panel.lines()
+    panel.close()
+    print("  queue row stays silent with nothing dispatched")
+
+
 def main():
     test_panels_compose_in_order()
     test_shrinking_block_leaves_no_stale_line()
@@ -191,6 +238,8 @@ def main():
     test_widgets_share_one_display()
     test_non_tty_is_unchanged()
     test_heartbeat_does_not_deadlock_against_step()
+    test_queue_panel_pins_under_a_stage_bar()
+    test_queue_panel_silent_until_first_submission()
     print("test_progress_display: all ok")
     return 0
 

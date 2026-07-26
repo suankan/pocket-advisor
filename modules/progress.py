@@ -168,6 +168,108 @@ def display_for(stream: IO[str]) -> LiveDisplay:
         return display
 
 
+class QueuePanel:
+    """A pinned row showing one inference queue's live pressure.
+
+    Registered on a dispatcher's first submission and dropped when it
+    closes, so a run that dispatches nothing draws no row.
+
+    Deliberately carries no percentage and no ETA. Producers submit
+    throughout the run, so the denominator grows and both figures would be
+    actively misleading for most of it — queue depth is the honest signal
+    (`docs/ingestion/embedding-queue-and-workers.md`).
+    """
+
+    display_order = ORDER_PERSISTENT
+
+    def __init__(self, source: Any, *, stream: IO[str] | None = None,
+                 min_interval: float = 0.25, quiet_every: float = 15.0):
+        self.source = source        # callable -> QueueSnapshot
+        self.stream = stream if stream is not None else sys.stderr
+        self.tty = bool(getattr(self.stream, "isatty", lambda: False)())
+        self.interval = min_interval if self.tty else quiet_every
+        self.t0 = time.monotonic()
+        self._window: deque[tuple[float, int]] = deque([(self.t0, 0)])
+        self._cached: list[str] = []
+        self._last_emit = 0.0
+        self._closed = False
+        self._lock = threading.Lock()
+        self._display = display_for(self.stream) if self.tty else None
+        if self._display is not None:
+            self._display.register(self)
+
+    # -- panel protocol ---------------------------------------------------
+
+    def lines(self) -> list[str]:
+        return self._cached
+
+    def refresh(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._emit()
+
+    def close(self) -> None:
+        """Drop the row. Off a TTY, leave one final line behind so a piped
+        log still records what the queue did."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._display is not None:
+                self._display.unregister(self)
+                return
+            snapshot = self.source()
+            if snapshot.settled:
+                self.stream.write(self._compose(snapshot, final=True) + "\n")
+                self.stream.flush()
+
+    # -- internals --------------------------------------------------------
+
+    def _rate(self, now: float, settled: int) -> float:
+        self._window.append((now, settled))
+        while len(self._window) > 2 and \
+                now - self._window[0][0] > _WINDOW_SECS:
+            self._window.popleft()
+        t_old, n_old = self._window[0]
+        dt = now - t_old
+        return (settled - n_old) / dt if dt > 0 else 0.0
+
+    def _compose(self, snapshot: Any, *, final: bool = False) -> str:
+        now = time.monotonic()
+        rate = self._rate(now, snapshot.settled)
+        bits = [f"{snapshot.label}:"]
+        if not final:
+            bits.append(f"{snapshot.queued} queued")
+            bits.append(f"· {snapshot.in_flight} in flight")
+        bits.append(f"· {snapshot.done} done")
+        if snapshot.failed:
+            bits.append(f"· {snapshot.failed} failed")
+        if snapshot.skipped:
+            bits.append(f"· {snapshot.skipped} pending")
+        if rate:
+            bits.append(f" {rate:.1f}/s")
+        if final:
+            bits.append(f"in {_fmt_secs(now - self.t0)}")
+        return "  " + " ".join(bits)
+
+    def _emit(self) -> None:
+        now = time.monotonic()
+        if (now - self._last_emit) < self.interval:
+            return
+        self._last_emit = now
+        snapshot = self.source()
+        if snapshot.submitted == 0:
+            return
+        line = self._compose(snapshot)
+        self._cached = [line]
+        if self._display is not None:
+            self._display.redraw()
+            return
+        self.stream.write(line + "\n")
+        self.stream.flush()
+
+
 def _fmt_secs(s: float) -> str:
     s = int(s)
     if s < 60:

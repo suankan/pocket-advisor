@@ -1,6 +1,6 @@
 # Local Answering Pass
 
-Status: **not implemented** — roadmap item 3 in `docs/roadmap.md`. This stub
+Status: **not implemented** — roadmap item 2 in `docs/roadmap.md`. This stub
 holds the locked design constraints the future implementation must honor and
 anchors the Generation pipeline bucket until a full design lands.
 
@@ -32,7 +32,7 @@ generation design must not weaken these:
 
 ## Candidate future work in this bucket
 
-- The answering pass itself (roadmap item 3).
+- The answering pass itself (roadmap item 2).
 - `docs/generation/rag-gateway.md` — a draft proposal for exposing
   the engine as an OpenAI-compatible chat service; kept as a candidate for
   future revision, currently unimplemented and not part of the locked

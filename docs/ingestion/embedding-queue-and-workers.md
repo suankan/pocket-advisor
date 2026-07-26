@@ -1,10 +1,23 @@
 # Inference Dispatch Queues and Live Observability
 
-Status: **proposed** 2026-07-26; awaiting implementation. Supersedes the
-2026-07-26 draft of this file, whose premise ("decouple embedding behind a
-queue so it starts before all documents are ready") describes behavior that
-already shipped — see "What already exists" below. The residual, real gap is
-observability, not throughput.
+Status: **shipped 2026-07-26**, design `64ccb4b`, implemented across
+`491e012`, `2f80477`, `ff702b7`, `e3b7e70`, `e202a52`, `0f3a1d5`.
+Supersedes the 2026-07-26 draft of this file, whose premise ("decouple
+embedding behind a queue so it starts before all documents are ready")
+describes behavior that already shipped — see "What already exists" below.
+The residual, real gap was observability, not throughput.
+
+Implementation map:
+
+- `modules/dispatch.py` — `BoundedInferenceDispatcher`, `QueueSnapshot`,
+  the live-dispatcher registry and `cancel_all()`.
+- `modules/progress.py` — `LiveDisplay`, `QueuePanel`, and the panel
+  protocol both progress widgets now render through.
+- `modules/embedding/dispatch.py` — `EmbedDispatcher.retarget()`.
+- `modules/pipeline/embed.py` — barrier drain, dispatcher reuse, close.
+- Tests: `modules/tests/test_dispatch.py`,
+  `modules/tests/test_progress_display.py`,
+  `modules/tests/test_embed_dispatcher_reuse.py`.
 
 ## Purpose
 
@@ -159,18 +172,30 @@ Two ideas from the draft are rejected outright:
 
 ### LiveDisplay
 
-One process-scoped owner of the stderr bottom region, holding an ordered list
-of registered panels. A panel supplies `lines() -> list[str]`; it never writes
-to the stream itself.
+One owner per stream (`display_for`) of the terminal's bottom region,
+holding an ordered list of registered panels. A panel supplies
+`lines() -> list[str]`; it never writes to the stream itself.
+
+**Locking rule, load-bearing:** the display lock is innermost. A widget may
+call into the display while holding its own lock; the display must never
+call back into a widget's lock. `lines()` is therefore cached and takes no
+lock, while `refresh()` takes the widget lock and is only ever invoked from
+outside the display lock. Inverting either side deadlocks the heartbeat
+against `step()`, which `test_progress_display` hammers concurrently.
 
 - `register(panel)` / `unregister(panel)` — under the display lock.
 - `redraw()` — cursor up over the previously drawn line count, clear, write
-  every panel's current lines, record the new count. The technique already
-  exists in `WorkerPoolProgress._clear_block` and is lifted into the display.
+  every panel's current lines, record the new count. Lifted from
+  `WorkerPoolProgress`'s block technique and extended: when the block
+  shrinks (a stage bar left), the vacated lines are wiped so no stale row
+  survives below the new block.
+- `finalize(panel, lines)` — scroll a finished widget's last line
+  permanently above the live region and drop it, so pinned panels keep
+  drawing below it.
 - `println(msg)` — clear the block, write the real log line, redraw. This
-  becomes the single implementation behind both bars' existing `println`.
-- One heartbeat thread for the whole display, replacing the per-bar heartbeat
-  threads that `Progress` and `WorkerPoolProgress` each spawn today.
+  is the single implementation behind both widgets' `println`.
+- One heartbeat thread for the whole display, replacing the per-widget
+  heartbeat threads.
 
 Panel order is stable: transient stage panels first, persistent queue panels
 last, so the queue rows hold a fixed position while stage bars come and go
@@ -204,13 +229,18 @@ sliding ~30s window as `Progress`, not a lifetime average.
 
 Deliberately absent: a percentage and an ETA. The denominator grows while
 producers are still submitting, so both would be actively misleading for most
-of a run. Queue depth is the honest pressure signal. Once every producer has
-finished and the queue is only draining, a completion percentage against the
-now-fixed total may be shown.
+of a run. Queue depth is the honest pressure signal. As shipped, neither is
+shown at any point — a completion percentage once producers finish remains
+possible but was not adopted, since the panel cannot know that producers are
+done.
+
+Failed and skipped counts appear only when non-zero. Off a TTY the row
+degrades to a plain line on the existing quiet cadence plus one summary line
+at close, so a piped log still records what the queue did.
 
 ## Ancillary corrections
 
-Small, contained, and part of this work:
+Small, contained, and done as part of this work:
 
 - Delete the false backpressure sentence from `modules/embedding/dispatch.py`
   (decision 7).
@@ -218,13 +248,15 @@ Small, contained, and part of this work:
   `docs/ingestion/chunking-and-embedding.md` to one queue with two counter
   buckets.
 - Rename `EmbedQueueTelemetry.pending_entities` to `processed_entities`. The
-  field is incremented on *completion*, so the name inverts its meaning; the
-  existing validation invariant (`successful + failed == pending_entities`,
+  field is incremented on *completion*, so the name inverted its meaning; the
+  validation invariant (`successful + failed == processed_entities`,
   `modules/telemetry.py`) reads correctly only under the new name. This
-  touches `_QUEUE_COUNTS`, the saved-report loader, and
+  touched `_QUEUE_COUNTS`, the saved-report loader and renderer, and
   `docs/ingestion/ingest-all-reporting.md`. Saved-report schema change is
   permitted where it improves observability
-  (`docs/ingestion/pdf-to-text-pipeline-design.md`).
+  (`docs/ingestion/pdf-to-text-pipeline-design.md`). Live queue depth is not
+  stored in telemetry at all — it is read from the dispatcher's
+  `snapshot()`.
 
 ## Acceptance criteria
 
@@ -255,6 +287,24 @@ Small, contained, and part of this work:
 10. Vector identity, fingerprints, publication discipline, and per-entity
     failure isolation are unchanged. All tests use temporary synthetic
     fixtures; the existing suites pass.
+
+## Verification performed
+
+- All 19 self-test suites pass, including three new ones.
+- Criterion 4 was checked by mutation: deleting the barrier drain makes
+  `test_embed_dispatcher_reuse` fail. It fails on `retarget()`'s idle guard,
+  which is the stronger outcome — the race becomes a loud error rather than
+  a silent double-embed.
+- The concurrent-render arrangement (criterion 1) was driven through a
+  pseudo-terminal and replayed in-process through an ANSI interpreter: a
+  stage bar and the pinned queue row composite correctly, `println` output
+  scrolls above the live region, the stage summary is retained, and the
+  queue row is removed cleanly at close.
+- **Not verified end-to-end:** a real `ingest all` against a running oMLX
+  instance over a live workspace. Every check above uses synthetic fixtures
+  or fake terminals. The first real run is where display behavior under a
+  scrolling 24-row terminal and true multi-minute stage timing gets
+  exercised.
 
 ## Explicitly deferred
 

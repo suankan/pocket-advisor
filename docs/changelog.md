@@ -4,6 +4,60 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Inference dispatch queues and live observability
+
+Design `64ccb4b`; implemented across `491e012`, `2f80477`, `ff702b7`,
+`e3b7e70`, `e202a52`, `0f3a1d5`. Feature doc:
+`docs/ingestion/embedding-queue-and-workers.md`. Roadmap item 1.
+
+Embedding work is dispatched from three producer stages and drains across
+the whole run, but its state was invisible until the embed stage — outcomes
+were only observed when `drain()` walked futures, long after the work. This
+makes queue pressure continuously visible. **Observability only; no
+throughput change.**
+
+The draft that started this proposed decoupling embedding behind a queue so
+it would start before all documents were ready. That already shipped as
+readiness dispatch (`inference-serving.md` decision 5), and leaf/summary
+embedding was already one pool with two counter buckets, not two queues.
+Recorded as rejected so they are not re-proposed: discovery as an embedding
+producer (no text exists at discovery), a queue as a speedup (email
+embedding already overlaps 79% of the pipeline), and producer backpressure
+(would block producers and hide the very pressure being displayed — the
+docstring claiming it was false and was deleted).
+
+- **One terminal owner** (`modules/progress.py`): `LiveDisplay` composites
+  registered panels. Both progress widgets previously assumed exclusive
+  ownership of the bottom of stderr, which held only because bars were
+  strictly sequential; a run-long queue row is concurrent with them by
+  definition. A finished bar scrolls its summary permanently above the live
+  region and pinned rows keep drawing below. Per-widget heartbeat threads
+  collapse into one. Locking rule: the display lock is innermost — `lines()`
+  is cached and lock-free, `refresh()` is called only from outside it.
+- **`BoundedInferenceDispatcher`** (`modules/dispatch.py`) under both
+  fan-outs, which had duplicated pool, futures, latch, and lifecycle;
+  `summary_dispatch.py` had been importing a private `_LIVE` across a module
+  boundary and carrying an admitted "unused placeholder for symmetry" lock.
+  The pools stay separate: the embedding and summarisation endpoints are
+  independent capacity budgets.
+- **Worker-side counters** with an immutable `QueueSnapshot`, so state is
+  observable during a run rather than at drain.
+- **One embedding dispatcher per run**: the embed stage's convergence pass
+  reuses the readiness dispatcher via a barrier `drain()` instead of
+  building a second one, so counters span both phases. `retarget()` refuses
+  a non-idle dispatcher — the convergence sweep decides pending work by
+  globbing the vector directory, so an entity still being written would
+  otherwise be dispatched twice.
+- **`pending_entities` → `processed_entities`**: the field is incremented on
+  completion, so the old name inverted its meaning and made the validation
+  invariant unreadable. Saved-report schema change.
+
+Verification: 19/19 suites pass, three new. The barrier was checked by
+mutation — removing it fails the suite on the idle guard, turning a silent
+double-embed into a loud error. Concurrent rendering was driven through a
+pseudo-terminal and replayed in-process through an ANSI interpreter. Not
+verified end-to-end against a running oMLX instance over a live workspace.
+
 ## 2026-07-26 — Structured execution logging
 
 `docs/platform/logging.md` implemented in full (proposed, reviewed twice,

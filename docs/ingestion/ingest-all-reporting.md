@@ -117,7 +117,7 @@ still showing a complete, useful workspace snapshot.
     object for summaries, embed, and PDFs. Each hot stage explicitly records
     `measured`, `not_applicable`, `partial`, or `not_run`; zero never stands
     in for unavailable measurement. Embed queues carry service-execution
-    counters (`pending_entities`, `input_tokens` from service `usage`
+    counters (`processed_entities`, `input_tokens` from service `usage`
     responses, `dispatched_at_readiness`, `successful_entities`,
     `failed_entities` — `modules/telemetry.py`); the retired local-batching
     counters (buckets, microbatches, padding, bisections) are gone with the

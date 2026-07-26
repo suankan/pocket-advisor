@@ -622,9 +622,9 @@ def _performance_lines(performance: PerformanceTelemetry) -> list[str]:
         detail = ""
     lines.append(f"  summaries     {summaries.state}{detail}")
     if embed.state in (MEASURED, PARTIAL):
-        detail = (f" — {embed.queues.leaf.pending_entities} leaf +"
-                  f" {embed.queues.summary.pending_entities} summary"
-                  f" pending, {embed.verified_cache_publications} published")
+        detail = (f" — {embed.queues.leaf.processed_entities} leaf +"
+                  f" {embed.queues.summary.processed_entities} summary"
+                  f" processed, {embed.verified_cache_publications} published")
     else:
         detail = ""
     lines.append(f"  embed         {embed.state}{detail}")

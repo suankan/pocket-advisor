@@ -260,11 +260,15 @@ workspaces/.state/workspace-<workspace_id>/vectors/text/<fingerprint>/
   `retrieval.passage`/`retrieval.query` asymmetry to preserve — see
   `docs/inference/inference-serving.md` ("Why oMLX") for why this
   symmetric mode is an accepted tradeoff rather than a regression.
-- Pending passages run in independent leaf/summary queues, dispatched through
-  the bounded `InferenceClient` fan-out (at most `INFERENCE_MAX_IN_FLIGHT`
-  requests in flight — `docs/inference/inference-serving.md`
-  decision 4). A failed multi-text request retries per-entity so one bad
-  payload never discards successful peers. The retired local
+- Leaf and summary passages share **one** queue — a single bounded pool at
+  most `INFERENCE_MAX_IN_FLIGHT` requests in flight
+  (`docs/inference/inference-serving.md` decision 4). The `leaf`/`summary`
+  split is a telemetry label selecting a counter bucket, not a second pool;
+  the wording "independent leaf/summary queues" here was inaccurate and was
+  corrected on 2026-07-26. Live queue pressure is displayed while the run is
+  in flight — `docs/ingestion/embedding-queue-and-workers.md`. A failed
+  multi-text request retries per-entity so one bad payload never discards
+  successful peers. The retired local
   `bucket32-batch8-v1` tokenize/bucket/batch/bisect machinery no longer
   exists — batching, if any, happens server-side via oMLX's own continuous
   batching.

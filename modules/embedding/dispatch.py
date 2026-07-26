@@ -209,7 +209,7 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
                 self._mark_entered()
                 self.telemetry.timings_seconds.model_execution += \
                     time.monotonic() - started
-                queue.pending_entities += 1
+                queue.processed_entities += 1
                 queue.failed_entities += 1
             return DispatchOutcome(
                 review_key, note, f"{type(exc).__name__}: {exc}", False)
@@ -222,7 +222,7 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
                 self._mark_entered()
                 self.telemetry.timings_seconds.model_execution += \
                     model_seconds
-                queue.pending_entities += 1
+                queue.processed_entities += 1
                 queue.failed_entities += 1
             return DispatchOutcome(
                 review_key, note, f"{type(exc).__name__}: {exc}", False)
@@ -231,7 +231,7 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
             timings = self.telemetry.timings_seconds
             timings.model_execution += model_seconds
             timings.cache_publication += time.monotonic() - publish_started
-            queue.pending_entities += 1
+            queue.processed_entities += 1
             queue.successful_entities += 1
             queue.input_tokens += tokens
             self.telemetry.verified_cache_publications += 1

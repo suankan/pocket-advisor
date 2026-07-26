@@ -246,10 +246,10 @@ def fill_measured_telemetry(ctx: PipelineContext) -> None:
     summaries.timings_seconds.model_execution = 1.25
     embed = ctx.telemetry.embed
     embed.state = "measured"
-    embed.queues.leaf.pending_entities = 3
+    embed.queues.leaf.processed_entities = 3
     embed.queues.leaf.input_tokens = 900
     embed.queues.leaf.successful_entities = 3
-    embed.queues.summary.pending_entities = 1
+    embed.queues.summary.processed_entities = 1
     embed.queues.summary.input_tokens = 80
     embed.queues.summary.successful_entities = 1
     embed.verified_cache_publications = 4
@@ -387,7 +387,7 @@ def test_snapshot_and_record(ctx: PipelineContext) -> None:
     assert "INGEST COMPLETE WITH FINDINGS" in rendered
     assert "summaries     measured — 1 pending, 3 calls, 1200 input tokens" \
         in rendered
-    assert "embed         measured — 3 leaf + 1 summary pending, 4 published" \
+    assert "embed         measured — 3 leaf + 1 summary processed, 4 published" \
         in rendered
     assert "pdfs          measured — 2 docs / 2 unique, 4096B, workers=1" \
         "×jobs=1" in rendered
@@ -432,7 +432,7 @@ def test_telemetry_contract(ctx: PipelineContext) -> None:
     must_reject(lambda p: p["summaries"].pop("generation_calls"),
                 "missing required fields")
     must_reject(lambda p: p["embed"]["queues"]["leaf"].update(
-        pending_entities=-1), "non-negative")
+        processed_entities=-1), "non-negative")
     must_reject(lambda p: p["pdfs"]["timings_seconds"].update(
         transform_wall="fast"), "must be a number")
     must_reject(lambda p: p["summaries"].update(state="finished"),

@@ -93,9 +93,15 @@ class EmbedQueueTelemetry:
     local bucket/microbatch/bisection counters are retired.
     ``input_tokens`` comes from the service's usage responses;
     ``dispatched_at_readiness`` counts producer-stage dispatches
-    (design decision 5) versus convergence backfill."""
+    (design decision 5) versus convergence backfill.
 
-    pending_entities: int = 0
+    ``processed_entities`` counts entities that reached an outcome — it is
+    incremented on completion, so ``successful + failed`` must equal it.
+    It was called ``pending_entities`` until 2026-07-26, which inverted its
+    meaning; live queue depth is not stored here at all but read from the
+    dispatcher's ``snapshot()``."""
+
+    processed_entities: int = 0
     input_tokens: int = 0
     dispatched_at_readiness: int = 0
     successful_entities: int = 0
@@ -313,7 +319,7 @@ def _validate_summaries(obj: SummariesTelemetry) -> None:
 
 
 _QUEUE_COUNTS = (
-    "pending_entities", "input_tokens", "dispatched_at_readiness",
+    "processed_entities", "input_tokens", "dispatched_at_readiness",
     "successful_entities", "failed_entities",
 )
 
@@ -335,15 +341,15 @@ def _validate_embed(obj: EmbedTelemetry) -> None:
         queue = getattr(obj.queues, name)
         outcomes = queue.successful_entities + queue.failed_entities
         successful += queue.successful_entities
-        if obj.state == MEASURED and outcomes != queue.pending_entities:
+        if obj.state == MEASURED and outcomes != queue.processed_entities:
             raise TelemetryError(
                 f"{where}.queues.{name}: successful+failed ({outcomes}) must"
-                f" equal pending_entities ({queue.pending_entities})")
-        if obj.state == PARTIAL and outcomes > queue.pending_entities:
+                f" equal processed_entities ({queue.processed_entities})")
+        if obj.state == PARTIAL and outcomes > queue.processed_entities:
             raise TelemetryError(
                 f"{where}.queues.{name}: a partial record may not claim more"
-                f" outcomes than its {queue.pending_entities} pending"
-                " entities")
+                f" outcomes than its {queue.processed_entities}"
+                " processed entities")
     if obj.state == MEASURED \
             and obj.verified_cache_publications != successful:
         raise TelemetryError(

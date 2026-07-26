@@ -102,6 +102,26 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
         self.backend = backend if backend is not None \
             else get_backend(ctx.config)
 
+    def retarget(self, *, backend, fingerprint: dict) -> None:
+        """Point the run's one dispatcher at the readiness-verified backend
+        and the embed stage's fingerprint before the convergence pass.
+
+        Legal only while idle. The caller has just drained its barrier;
+        retargeting with work in flight would publish in-progress vectors
+        into the wrong cache directory
+        (`docs/ingestion/embedding-queue-and-workers.md` acceptance
+        criterion 4).
+        """
+        snapshot = self.snapshot()
+        if not snapshot.idle:
+            raise RuntimeError(
+                "retarget requires an idle dispatcher: "
+                f"{snapshot.queued} queued, {snapshot.in_flight} in flight")
+        self.backend = backend
+        self.fingerprint = fingerprint
+        self.leaf_paths = index_paths(self.config, fingerprint)
+        self.thread_paths = thread_index_paths(self.config, fingerprint)
+
     # -- submission --------------------------------------------------------
 
     def submit_leaf(self, chunk_id: int, payload: str, *,

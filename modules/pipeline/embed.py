@@ -55,6 +55,15 @@ class EmbedStage(Stage):
     name = "embed"
 
     def run(self) -> StageStats:
+        # One dispatcher serves the whole run; this stage is its last user,
+        # so it owns the close on every path including early return and
+        # failure (embedding-queue-and-workers.md decision 1).
+        try:
+            return self._run()
+        finally:
+            self._close_dispatcher()
+
+    def _run(self) -> StageStats:
         stats = StageStats()
         created = sync_email_chunks(self.conn, self.config)
         created += sync_document_chunks(self.conn, self.config)
@@ -115,9 +124,19 @@ class EmbedStage(Stage):
     # -- convergence backfill ------------------------------------------------
 
     def _settle_readiness_dispatch(self) -> None:
-        """Drain the run-wide readiness dispatcher first so the per-entity
-        cache reflects every in-flight publication; whatever failed or was
-        skipped simply remains a gap that the loud backfill below owns."""
+        """Barrier before the convergence sweep reads the cache.
+
+        The sweep decides what is pending by globbing the vector directory,
+        so every in-flight readiness publication must have landed first or
+        an entity still being written would be dispatched a second time.
+        `drain()` provides exactly that: it waits for every future, swaps
+        the futures list, and leaves the pool running — a barrier, not a
+        teardown. Whatever failed or was skipped simply remains a gap the
+        loud backfill below owns.
+
+        The dispatcher deliberately survives this call so its live counters
+        span the readiness→convergence transition instead of resetting.
+        """
         dispatcher = self.ctx.embed_dispatcher
         if dispatcher is None:
             return
@@ -127,8 +146,26 @@ class EmbedStage(Stage):
                 f"embed: waiting for {pending} in-flight readiness"
                 " dispatches…", pending_dispatches=pending)
         dispatcher.drain()
+
+    def _close_dispatcher(self) -> None:
+        dispatcher = self.ctx.embed_dispatcher
+        if dispatcher is None:
+            return
         dispatcher.close()
         self.ctx.embed_dispatcher = None
+
+    def _dispatcher_for(self, backend, fingerprint: dict) -> EmbedDispatcher:
+        """The run's one dispatcher, retargeted onto the verified backend
+        and this stage's fingerprint. Creates one only for a run that never
+        dispatched at readiness (a bare `ingest embed`)."""
+        dispatcher = self.ctx.embed_dispatcher
+        if dispatcher is None:
+            dispatcher = EmbedDispatcher(
+                self.ctx, backend=backend, fingerprint=fingerprint)
+            self.ctx.embed_dispatcher = dispatcher
+            return dispatcher
+        dispatcher.retarget(backend=backend, fingerprint=fingerprint)
+        return dispatcher
 
     def _converge_pending(self, stats: StageStats, fingerprint: dict,
                           thread_pending) -> None:
@@ -139,8 +176,7 @@ class EmbedStage(Stage):
         check_ready = getattr(backend, "check_ready", None)
         if check_ready is not None:
             check_ready()
-        dispatcher = EmbedDispatcher(
-            self.ctx, backend=backend, fingerprint=fingerprint)
+        dispatcher = self._dispatcher_for(backend, fingerprint)
         submitted = dispatcher.submit_pending_leaves(self.conn)
         for row in thread_pending:
             summary_text = read_summary_text(
@@ -155,7 +191,6 @@ class EmbedStage(Stage):
             done, failed, skipped, outcomes = dispatcher.drain(progress)
         finally:
             progress.done()
-            dispatcher.close()
 
         chunk_done = sum(1 for item in outcomes
                          if item.error is None and not item.skipped

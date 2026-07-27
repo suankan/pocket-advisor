@@ -1,0 +1,47 @@
+{{/*
+Probes the embedding endpoint for the vector dimension and applies the DDL
+with it interpolated (§4.4).
+
+A hook, and one that runs before every worker: halfvec(N) is a typed column,
+so N must be resolved before the first CREATE TABLE. Every worker re-probes at
+startup and treats a mismatch as fatal, so this Job failing must block the
+rollout rather than let workers come up against a wrongly-shaped index.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-schema-bootstrap
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.schemaBootstrap.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "pa.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: schema-bootstrap
+          image: {{ .Values.schemaBootstrap.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          args:
+            {{- if .Values.schemaBootstrap.dimensionOverride }}
+            # Escape hatch: skips the probe entirely. The endpoint is the
+            # authority on N, so this should stay unset.
+            - "--dimension={{ .Values.schemaBootstrap.dimensionOverride }}"
+            {{- end }}
+            {{- if .Values.schemaBootstrap.matryoshkaTruncated }}
+            - "--matryoshka-truncated"
+            {{- end }}
+          env:
+            {{- include "pa.postgresEnv" . | nindent 12 }}
+            {{- include "pa.embeddingEnv" . | nindent 12 }}
+            {{- include "pa.commonEnv" . | nindent 12 }}
+          resources:
+            requests: {cpu: "100m", memory: "64Mi"}
+            limits:   {cpu: "500m", memory: "256Mi"}

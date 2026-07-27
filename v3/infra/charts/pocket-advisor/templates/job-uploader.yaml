@@ -1,0 +1,91 @@
+{{- if .Values.uploader.enabled }}
+{{/*
+Corpus uploader: moves a directory into Tier 1, which is the sole source of
+truth (§5.1). The only writer to raw/, and the only workload that mounts a
+user filesystem.
+
+Deliberately not part of a normal install — it is operator-invoked, because
+uploading is an act, not a deployment state:
+
+  helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
+    --set uploader.enabled=true \
+    --set uploader.workspace=family-law \
+    --set uploader.collection=bank-accounts \
+    --set uploader.hostPath=/absolute/path/to/documents
+
+The mount is readOnly. Source corpora are never written, renamed or deleted,
+and that is enforced at the kernel rather than by a code-level guard.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Name carries the run so repeated uploads do not collide with a completed
+  # Job of the same name.
+  name: {{ .Release.Name }}-uploader-{{ now | date "20060102150405" }}
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: uploader
+spec:
+  backoffLimit: {{ .Values.uploader.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.uploader.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "pa.labels" . | nindent 8 }}
+      annotations:
+        {{- include "pa.metricsAnnotations" (dict "port" .Values.uploader.metricsPort) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: uploader
+          image: {{ .Values.uploader.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          args:
+            - "--workspace={{ required "uploader.workspace is required" .Values.uploader.workspace }}"
+            - "--source=/corpus"
+            - "--concurrency={{ .Values.uploader.concurrency }}"
+            {{- if .Values.uploader.forget }}
+            # Explicit removal. Absence from a later upload run never implies
+            # deletion (§5.1).
+            - "--forget={{ .Values.uploader.forget }}"
+            - "--yes"
+            {{- else }}
+            - "--collection={{ required "uploader.collection is required" .Values.uploader.collection }}"
+            {{- if .Values.uploader.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            {{- if .Values.uploader.wipe }}
+            # A corpus reset: purges Tier 2 FIRST, so a failure to reach
+            # Postgres leaves the bucket untouched (§5.1).
+            - "--wipe"
+            - "--yes"
+            {{- end }}
+            {{- end }}
+          env:
+            {{- include "pa.minioUploaderEnv" . | nindent 12 }}
+            {{- include "pa.commonEnv" . | nindent 12 }}
+            - name: METRICS_PORT
+              value: "{{ .Values.uploader.metricsPort }}"
+            {{- if or .Values.uploader.wipe .Values.uploader.forget }}
+            {{- include "pa.postgresEnv" . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: corpus
+              mountPath: /corpus
+              readOnly: true
+          resources:
+            {{- toYaml .Values.uploader.resources | nindent 12 }}
+      volumes:
+        - name: corpus
+          {{- if .Values.uploader.hostPath }}
+          hostPath:
+            path: {{ .Values.uploader.hostPath | quote }}
+            type: Directory
+          {{- else if .Values.uploader.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.uploader.existingClaim }}
+            readOnly: true
+          {{- else }}
+          {{- fail "uploader requires either uploader.hostPath or uploader.existingClaim" }}
+          {{- end }}
+{{- end }}

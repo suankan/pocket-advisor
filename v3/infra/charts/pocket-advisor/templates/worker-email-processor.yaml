@@ -1,8 +1,14 @@
+{{/*
+Email processor: unrolls MIME structures and archive containers in RAM (§5.3).
+Writes extracted children to Tier 1 under extracted/, which is the one prefix
+the worker identity is permitted to write.
+*/}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}-email-processor-worker
   labels:
+    {{- include "pa.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
     app: email-processor-worker
 spec:
@@ -13,11 +19,10 @@ spec:
   template:
     metadata:
       labels:
+        {{- include "pa.labels" . | nindent 8 }}
         app: email-processor-worker
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "{{ .Values.workers.emailProcessor.metricsPort }}"
-        prometheus.io/path: "/metrics"
+        {{- include "pa.metricsAnnotations" (dict "port" .Values.workers.emailProcessor.metricsPort) | nindent 8 }}
     spec:
       containers:
         - name: email-processor-worker
@@ -27,14 +32,10 @@ spec:
             - containerPort: {{ .Values.workers.emailProcessor.metricsPort }}
               name: metrics
           env:
-            - name: NATS_URL
-              value: "nats://{{ .Release.Name }}-nats:4222"
-            - name: MINIO_ENDPOINT
-              value: "{{ .Release.Name }}-minio:9000"
-            - name: MINIO_ACCESS_KEY
-              value: {{ .Values.minio.credentials.accessKey }}
-            - name: MINIO_SECRET_KEY
-              value: {{ .Values.minio.credentials.secretKey }}
+            {{- include "pa.natsEnv" . | nindent 12 }}
+            {{- include "pa.postgresEnv" . | nindent 12 }}
+            {{- include "pa.minioWorkerEnv" . | nindent 12 }}
+            {{- include "pa.commonEnv" . | nindent 12 }}
             - name: METRICS_PORT
               value: "{{ .Values.workers.emailProcessor.metricsPort }}"
           resources:

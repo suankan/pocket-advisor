@@ -3,6 +3,7 @@ kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-postgres
   labels:
+    {{- include "pa.labels" . | nindent 4 }}
     app.kubernetes.io/component: database
 spec:
   serviceName: {{ .Release.Name }}-postgres

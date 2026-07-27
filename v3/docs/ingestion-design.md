@@ -1,6 +1,6 @@
 # High-Throughput Event-Driven Enterprise RAG Ingestion Engine Architecture
 
-**Version:** `3.4.0`
+**Version:** `3.5.0`
 
 **Architecture Paradigm:** Event-Driven Microservices, In-Memory Pipeline Processing, 3-Tier Storage Model
 
@@ -14,6 +14,10 @@ observability — lives in this file. Its only peer is
 `v3/docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
 
+**Changes in 3.5.0:** Helm is the only deployment path (§6.2); the
+write-authority split of §5.1 is now enforced by two scoped MinIO identities
+rather than described.
+
 **Changes in 3.4.0:** implementation landed (§12 records where the code
 deliberately differs from this design).
 
@@ -22,7 +26,7 @@ deliberately differs from this design).
 * **`EmbedTextCommand` now carries a `doc_id` reference, not text** (§4.1).
   Extractors write `documents.normalized_text`; the indexer reads it back.
   Avoids NATS's 1 MB payload cap on large OCR output.
-* **Storage sized against the measured corpus** (§6.3): MinIO 10Gi → 50Gi,
+* **Storage sized against the measured corpus** (§6.4): MinIO 10Gi → 50Gi,
   PostgreSQL 5Gi → 20Gi, NATS 2Gi → 5Gi.
 * **Single-replica, no-backup storage recorded as an accepted risk**
   (§11.2) rather than an open question.
@@ -332,7 +336,7 @@ Three reasons, in order of severity:
    unspecified.
 3. The text stops crossing the wire twice (extractor → NATS → indexer →
    Postgres) and stops occupying JetStream's PVC, which sizes the queue for
-   backlog depth rather than document size (§6.3).
+   backlog depth rather than document size (§6.4).
 
 All five carry `DocumentMetadata` as their first field. `traceparent` is mandatory, not optional: a command without it produces an orphaned trace and is rejected at the consumer.
 
@@ -797,7 +801,34 @@ Legacy binary Office formats are declined rather than attempted: there is no cre
 
 ```
 
-### 6.2 Component Resource Planning
+### 6.2 Deployment Mechanism
+
+`infra/charts/pocket-advisor` is the only deployment path. There is no
+docker-compose: a second way to stand the system up is a second thing to keep
+correct, and the two drift the moment one of them is the one people actually
+use.
+
+Two Helm hooks run before any worker starts, in this order:
+
+1. **`minio-setup`** (weight -10) creates the bucket, both scoped identities
+   with their policies (§5.1), and the bucket notification (§5.2).
+2. **`schema-bootstrap`** (weight -5) probes the embedding endpoint and applies
+   the DDL with the resolved dimension (§4.4). Workers re-probe at startup and
+   refuse to run against a mismatched index, so this hook failing must block
+   the rollout rather than let them come up.
+
+The uploader and the bucket scan are **operator-invoked Jobs**, disabled by
+default and enabled per invocation (`--set uploader.enabled=true`). Uploading a
+corpus is an act, not a deployment state, and modelling it as one would re-run
+it on every `helm upgrade`.
+
+The two MinIO identities are the enforcement point for the write-authority
+split. `pa-uploader` holds `s3:*` on the bucket; `pa-worker` holds `GetObject`
+everywhere but `PutObject` only under `workspaces/*/extracted/*`, and no
+delete at all. A worker that tries to write `raw/` is refused by MinIO, not by
+a code-level guard.
+
+### 6.3 Component Resource Planning
 
 | Service Role | Min Scaling Unit | CPU req/limit (each) | Primary Bottleneck | HPA Metric |
 | --- | --- | --- | --- | --- |
@@ -814,7 +845,7 @@ Legacy binary Office formats are declined rather than attempted: there is no cre
 
 Against the stated 6-core / 8 GB budget this totals ~3.3 cores and ~3.8 GiB of **requests** (the schedulable figure), leaving headroom for burst to limits. The Document Extractor pool remains the dominant consumer by design — OCR is the bottleneck, and giving it 3 of the 6 cores is the intended allocation, which is precisely why image OCR was folded into it (§5.4) rather than given a competing pool.
 
-### 6.3 Storage Sizing
+### 6.4 Storage Sizing
 
 Sized against the actual corpus as measured 2026-07-27: **559 MB across 1101
 files — 868 `.eml`, 221 `.pdf`, 3 `.csv`.** Everything below that figure is an
@@ -1212,13 +1243,14 @@ failure is otherwise invisible.
   └── Provision NATS JetStream Streams & Retries (WorkQueue mode, MaxDeliver=3, AckWait=5m)
 
 [ Phase 2: Deployment ]
-  │── Roll out Container Bundles (Go Binaries + Pre-compiled C-Libs)
-  │── Apply MinIO bucket policy: raw/ writable ONLY by the uploader identity (§5.1)
-  └── Initialize Service Health Checks & Metrics Exporters
+  │── helm upgrade --install pocket-advisor infra/charts/pocket-advisor
+  │     hook -10: minio-setup      bucket + scoped identities + notification
+  │     hook  -5: schema-bootstrap probe endpoint, apply DDL with resolved N
+  └── Workers roll out only after both hooks succeed
 
 [ Phase 2b: Corpus Load ]
-  │── Run Uploader Job against the user's source directory (§5.1)
-  └── Run Bucket Scan to stub and dispatch every raw/ object (§5.2)
+  │── helm upgrade --set uploader.enabled=true --set uploader.hostPath=...
+  └── helm upgrade --set discovery.scan.enabled=true --set discovery.scan.workspace=...
 
 [ Phase 3: Observability & Tuning ]
   │── Trace Execution via OpenTelemetry Spans (root span = discovery)
@@ -1294,14 +1326,12 @@ to `v3/docs/retrieval-design.md`.
 
 3. **PostgreSQL write/read contention.** One instance serves both bulk ingest
    writes and query latency. Not yet a measured problem; sizing is settled
-   (§6.3) but contention is not. Revisit if `rag_query_duration_seconds`
+   (§6.4) but contention is not. Revisit if `rag_query_duration_seconds`
    degrades during ingestion runs.
-4. **Helm chart drift.** `infra/charts/pocket-advisor` predates 3.0.0: no
-   discovery, uploader, office-extractor, or query-api templates;
-   `worker-pdf-extractor.yaml` needs renaming to `document-extractor` with the
-   image subject added (§5.4); and MinIO needs the bucket-notification
-   configuration plus the `raw/` write policy (§5.1). Mechanical, but must
-   land with the code.
+4. **`cmd/query-api` has no chart template.** Everything on the write path is
+   deployed by `infra/charts/pocket-advisor`; the read path is unbuilt, so its
+   Deployment and Service are absent. Add both with the service
+   (`retrieval-design.md` §7).
 
 ---
 

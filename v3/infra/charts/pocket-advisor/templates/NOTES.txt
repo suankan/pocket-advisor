@@ -1,0 +1,57 @@
+pocket-advisor {{ .Chart.Version }} deployed as {{ .Release.Name }}.
+
+Two hooks ran before the workers:
+  - {{ .Release.Name }}-minio-setup      bucket, scoped identities, notification
+  - {{ .Release.Name }}-schema-bootstrap probed the embedding endpoint, applied the DDL
+
+Check the resolved vector dimension (the index cannot be reshaped later without
+a full re-embed):
+
+  kubectl logs -l job-name={{ .Release.Name }}-schema-bootstrap
+
+LOAD A CORPUS
+  Tier 1 is the source of truth; your folders are a staging feed into it.
+
+  helm upgrade {{ .Release.Name }} <chart> \
+    --set uploader.enabled=true \
+    --set uploader.workspace=<workspace-id> \
+    --set uploader.collection=<collection-id> \
+    --set uploader.hostPath=/absolute/path/to/documents
+
+  Add --set uploader.dryRun=true first to see what would be uploaded.
+  Re-running is free: content already in Tier 1 is skipped, not re-uploaded.
+
+  Then reconcile Tier 2 against the bucket:
+
+  helm upgrade {{ .Release.Name }} <chart> \
+    --set discovery.scan.enabled=true \
+    --set discovery.scan.workspace=<workspace-id>
+
+  The scan is exact, not best-effort: it publishes every raw/ object with no
+  documents row. Bucket notifications are the live path, so the scan is only
+  needed to catch up after a bulk upload or a dropped event.
+
+WATCH IT DRAIN
+  kubectl exec -it {{ .Release.Name }}-nats-0 -- nats stream info INGESTION
+  kubectl logs -l app=discovery -f
+
+REMOVE DOCUMENTS
+  --set uploader.forget=<sha256>   one document, cascading into Tier 2
+  --set uploader.wipe=true         the whole workspace, Tier 1 AND Tier 2
+
+  Both empty Postgres first, so a failure to reach it leaves the bucket
+  untouched rather than dangling every citation. Absence of a file from a
+  later upload run never implies deletion.
+
+{{- if not .Values.discovery.bucketNotification.enabled }}
+
+NOTE: bucket notifications are disabled. Nothing is ingested automatically —
+run the scan after every upload.
+{{- end }}
+{{- if .Values.schemaBootstrap.dimensionOverride }}
+
+WARNING: schemaBootstrap.dimensionOverride is set to
+{{ .Values.schemaBootstrap.dimensionOverride }}. The embedding endpoint was not
+consulted. If this disagrees with the served model, every worker will refuse to
+start.
+{{- end }}

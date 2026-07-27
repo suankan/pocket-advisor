@@ -1,0 +1,114 @@
+{{/*
+Creates the bucket, the two scoped identities, and the bucket notification
+that makes discovery's live path work.
+
+Runs as a post-install/post-upgrade hook before anything else, because both
+the write-authority split (§5.1) and the notification path (§5.2) have to
+exist before a single object lands.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-minio-setup
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "pa.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: {{ .Values.minio.mcImage }}
+          env:
+            - name: MC_HOST_local
+              value: "http://{{ .Values.minio.credentials.rootUser }}:{{ .Values.minio.credentials.rootPassword }}@{{ .Release.Name }}-minio:{{ .Values.minio.apiPort }}"
+            - name: BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for minio"
+              until mc ls local >/dev/null 2>&1; do sleep 2; done
+
+              mc mb --ignore-existing "local/$BUCKET"
+
+              # ---- worker identity: read anywhere, write only extracted/ ----
+              cat >/tmp/worker.json <<'POLICY'
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+                    "Resource": ["arn:aws:s3:::BUCKET_NAME"]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetObject"],
+                    "Resource": ["arn:aws:s3:::BUCKET_NAME/*"]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:PutObject"],
+                    "Resource": ["arn:aws:s3:::BUCKET_NAME/workspaces/*/extracted/*"]
+                  }
+                ]
+              }
+              POLICY
+              sed -i "s|BUCKET_NAME|$BUCKET|g" /tmp/worker.json
+
+              # ---- uploader identity: full control, including delete ----
+              cat >/tmp/uploader.json <<'POLICY'
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:*"],
+                    "Resource": [
+                      "arn:aws:s3:::BUCKET_NAME",
+                      "arn:aws:s3:::BUCKET_NAME/*"
+                    ]
+                  }
+                ]
+              }
+              POLICY
+              sed -i "s|BUCKET_NAME|$BUCKET|g" /tmp/uploader.json
+
+              mc admin policy create local pa-worker   /tmp/worker.json   2>/dev/null || \
+                mc admin policy add    local pa-worker   /tmp/worker.json
+              mc admin policy create local pa-uploader /tmp/uploader.json 2>/dev/null || \
+                mc admin policy add    local pa-uploader /tmp/uploader.json
+
+              mc admin user add local {{ .Values.minio.credentials.workerAccessKey }} {{ .Values.minio.credentials.workerSecretKey }}
+              mc admin user add local {{ .Values.minio.credentials.uploaderAccessKey }} {{ .Values.minio.credentials.uploaderSecretKey }}
+
+              mc admin policy attach local pa-worker   --user {{ .Values.minio.credentials.workerAccessKey }}   2>/dev/null || \
+                mc admin policy set local pa-worker   user={{ .Values.minio.credentials.workerAccessKey }}
+              mc admin policy attach local pa-uploader --user {{ .Values.minio.credentials.uploaderAccessKey }} 2>/dev/null || \
+                mc admin policy set local pa-uploader user={{ .Values.minio.credentials.uploaderAccessKey }}
+
+              {{- if .Values.discovery.bucketNotification.enabled }}
+              # ---- bucket notification: discovery's live path (§5.2) ----
+              # A dropped event costs a delay, not a document: the bucket scan
+              # is an exact backstop.
+              mc event add "local/$BUCKET" \
+                arn:minio:sqs::DISCOVERY:webhook \
+                --event put \
+                --prefix workspaces/ 2>/dev/null || \
+                echo "notification already registered"
+              {{- end }}
+
+              echo "minio setup complete"
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits:   {cpu: "200m", memory: "128Mi"}

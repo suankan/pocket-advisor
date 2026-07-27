@@ -1,0 +1,42 @@
+{{/*
+Office extractor: pure Go, no CGo. A separate binary from the extractor pool
+despite the topological similarity, because it is free of the C-heap lifecycle
+concerns that dominate the OCR path (§5.5, §8.3).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-office-extractor-worker
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+    app: office-extractor-worker
+spec:
+  replicas: {{ .Values.workers.officeExtractor.replicaCount }}
+  selector:
+    matchLabels:
+      app: office-extractor-worker
+  template:
+    metadata:
+      labels:
+        {{- include "pa.labels" . | nindent 8 }}
+        app: office-extractor-worker
+      annotations:
+        {{- include "pa.metricsAnnotations" (dict "port" .Values.workers.officeExtractor.metricsPort) | nindent 8 }}
+    spec:
+      containers:
+        - name: office-extractor-worker
+          image: {{ .Values.workers.officeExtractor.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.workers.officeExtractor.metricsPort }}
+              name: metrics
+          env:
+            {{- include "pa.natsEnv" . | nindent 12 }}
+            {{- include "pa.postgresEnv" . | nindent 12 }}
+            {{- include "pa.minioWorkerEnv" . | nindent 12 }}
+            {{- include "pa.commonEnv" . | nindent 12 }}
+            - name: METRICS_PORT
+              value: "{{ .Values.workers.officeExtractor.metricsPort }}"
+          resources:
+            {{- toYaml .Values.workers.officeExtractor.resources | nindent 12 }}

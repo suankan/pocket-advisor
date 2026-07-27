@@ -3,6 +3,7 @@ kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-minio
   labels:
+    {{- include "pa.labels" . | nindent 4 }}
     app.kubernetes.io/component: object-store
 spec:
   serviceName: {{ .Release.Name }}-minio
@@ -29,9 +30,23 @@ spec:
             - containerPort: {{ .Values.minio.consolePort }}
           env:
             - name: MINIO_ROOT_USER
-              value: {{ .Values.minio.credentials.accessKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-credentials
+                  key: minio-root-user
             - name: MINIO_ROOT_PASSWORD
-              value: {{ .Values.minio.credentials.secretKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-credentials
+                  key: minio-root-password
+            {{- if .Values.discovery.bucketNotification.enabled }}
+            # Bucket notification target for discovery's live path (§5.2).
+            # The event is registered against this ARN by the minio-setup Job.
+            - name: MINIO_NOTIFY_WEBHOOK_ENABLE_DISCOVERY
+              value: "on"
+            - name: MINIO_NOTIFY_WEBHOOK_ENDPOINT_DISCOVERY
+              value: "http://{{ .Release.Name }}-discovery:{{ .Values.discovery.httpPort }}/v1/notify"
+            {{- end }}
           resources:
             {{- toYaml .Values.minio.resources | nindent 12 }}
           volumeMounts:

@@ -4,32 +4,43 @@
 global:
   namespace: pocket-advisor
   environment: local
+  logLevel: info
 
 # ============================================================================
-# Tier 1: MinIO Object Storage
+# Tier 1: MinIO Object Storage — the SOLE source of truth
+#
+# User filesystems are a staging feed into this bucket, never read by the
+# system itself (ingestion-design.md §5.1).
 # ============================================================================
 minio:
   image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+  mcImage: minio/mc:RELEASE.2024-01-18T07-03-39Z
   replicaCount: 1
   apiPort: 9000
   consolePort: 9001
+  bucket: pocket-advisor
+
+  # Two scoped identities, not one. The uploader is the only writer to raw/
+  # and the only identity that may delete; workers read anywhere but write
+  # only under extracted/. Enforced by MinIO policy rather than convention
+  # (§5.1) — see templates/job-minio-setup.yaml.
   credentials:
-    accessKey: minioadmin
-    secretKey: minioadminpassword
+    rootUser: minioadmin
+    rootPassword: minioadminpassword
+    uploaderAccessKey: pa-uploader
+    uploaderSecretKey: pa-uploader-secret
+    workerAccessKey: pa-worker
+    workerSecretKey: pa-worker-secret
+
   persistence:
     enabled: true
-    # Tier 1 is the SOLE source of truth (ingestion-design.md §5.1, §6.3).
     # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children.
     # ~60x headroom: the matter is active, and re-ingestion writes new
-    # extracted/ objects without reclaiming old ones.
+    # extracted/ objects without reclaiming old ones (§6.3).
     size: 50Gi
   resources:
-    requests:
-      cpu: "200m"
-      memory: "256Mi"
-    limits:
-      cpu: "500m"
-      memory: "768Mi"
+    requests: {cpu: "200m", memory: "256Mi"}
+    limits:   {cpu: "500m", memory: "768Mi"}
 
 # ============================================================================
 # Pipeline Bus: NATS JetStream
@@ -42,16 +53,11 @@ nats:
   persistence:
     enabled: true
     # Commands carry object references and doc_ids (~1Ki each), never document
-    # text (ingestion-design.md §4.1). Sized for backlog depth, not document
-    # volume: a 100k-message backlog is ~100Mi, and WorkQueue deletes on ack.
+    # text (§4.1). Sized for backlog depth, not document volume.
     size: 5Gi
   resources:
-    requests:
-      cpu: "150m"
-      memory: "128Mi"
-    limits:
-      cpu: "300m"
-      memory: "384Mi"
+    requests: {cpu: "150m", memory: "128Mi"}
+    limits:   {cpu: "300m", memory: "384Mi"}
 
 # ============================================================================
 # Tier 2 & 3: PostgreSQL + pgvector
@@ -66,59 +72,154 @@ postgres:
     password: postgrespassword
   persistence:
     enabled: true
-    # Tier 2 + Tier 3. Steady state for the measured corpus is ~250Mi
-    # (ingestion-design.md §6.3). The headroom is for three transient
-    # operations, not the steady state: a re-embed holds two embed_model
-    # namespaces at once, REINDEX needs ~2x the index, and max_wal_size
-    # defaults to 1Gi regardless of corpus size.
+    # Steady state for the measured corpus is ~250Mi. The headroom is for
+    # three transient operations, not the steady state: a re-embed holds two
+    # embed_model namespaces at once, REINDEX needs ~2x the index, and
+    # max_wal_size defaults to 1Gi regardless of corpus size (§6.3).
     size: 20Gi
   resources:
-    requests:
-      cpu: "300m"
-      memory: "512Mi"
-    limits:
-      cpu: "1000m"
-      memory: "1536Mi"
+    requests: {cpu: "300m", memory: "512Mi"}
+    limits:   {cpu: "1000m", memory: "1536Mi"}
 
 # ============================================================================
-# Worker Pipeline Deployments (Total Budget: 6 Cores / 8 GB RAM)
+# Embedding endpoint (external REST API — the engine loads no models)
+# ============================================================================
+embedding:
+  endpoint: "http://embedding-model-service.pocket-advisor.svc.cluster.local:8080/v1/embeddings"
+  model: "jina-embeddings-v5-text-small"
+  # Optional pre-existing Secret holding the API key.
+  apiKeySecret: ""
+  apiKeySecretKey: "api-key"
+
+# ============================================================================
+# Schema bootstrap (Helm hook, runs before the workers)
+#
+# Probes the endpoint for the vector dimension and interpolates it into the
+# DDL. halfvec(N) is a typed column, so N must be resolved before the first
+# CREATE TABLE — and the authority on N is the model, not a config file (§4.4).
+# ============================================================================
+schemaBootstrap:
+  image: pocket-advisor/schema-bootstrap:latest
+  backoffLimit: 10
+  # Escape hatch that skips the probe. Leave unset.
+  dimensionOverride: ""
+  matryoshkaTruncated: false
+
+# ============================================================================
+# Discovery: the sole entry point (§5.2)
+# ============================================================================
+discovery:
+  image: pocket-advisor/discovery:latest
+  replicaCount: 2
+  metricsPort: 9090
+  httpPort: 8080
+
+  bucketNotification:
+    # The live path. Safe to rely on because the bucket scan is an exact
+    # backstop: a dropped event costs a delay, not a document.
+    enabled: true
+
+  reconcile:
+    # Re-publishes documents whose stub committed but whose command never
+    # reached NATS (§2.2).
+    schedule: "*/15 * * * *"
+    staleAfter: 30m
+
+  scan:
+    # Operator-invoked, not part of a normal install:
+    #   --set discovery.scan.enabled=true --set discovery.scan.workspace=<id>
+    enabled: false
+    workspace: ""
+    # The scan can outrun the whole pipeline — listing a bucket enqueues far
+    # faster than OCR drains (§5.2).
+    highWater: 10000
+    lowWater: 2000
+
+  resources:
+    requests: {cpu: "100m", memory: "128Mi"}
+    limits:   {cpu: "300m", memory: "256Mi"}
+
+# ============================================================================
+# Corpus uploader (§5.1)
+#
+# Operator-invoked, because uploading is an act rather than a deployment
+# state. Disabled by default:
+#
+#   helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
+#     --set uploader.enabled=true \
+#     --set uploader.workspace=family-law \
+#     --set uploader.collection=bank-accounts \
+#     --set uploader.hostPath=/absolute/path/to/documents
+# ============================================================================
+uploader:
+  enabled: false
+  image: pocket-advisor/uploader:latest
+  metricsPort: 9090
+  workspace: ""
+  collection: ""
+  concurrency: 4
+  dryRun: false
+  # --wipe purges Tier 1 AND Tier 2 for the workspace. It empties Postgres
+  # first, so a failure to reach it leaves the bucket untouched (§5.1).
+  wipe: false
+  # --forget removes one document by sha256. Absence from a later upload run
+  # never implies deletion.
+  forget: ""
+  # Where the documents are. Mounted readOnly.
+  hostPath: ""
+  existingClaim: ""
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests: {cpu: "200m", memory: "256Mi"}
+    limits:   {cpu: "500m", memory: "512Mi"}
+
+# ============================================================================
+# Worker Pipeline Deployments
+#
+# Requests total ~3.3 cores / ~3.8Gi against the 6-core / 8GB budget (§6.2).
+# The document extractor is the dominant consumer by design: OCR is the
+# bottleneck, which is exactly why image OCR was folded into it rather than
+# given a competing pool.
 # ============================================================================
 workers:
   imagePullPolicy: IfNotPresent
 
   emailProcessor:
-    image: pocket-advisor/email-processor-worker:latest
+    image: pocket-advisor/email-processor:latest
     replicaCount: 2
     metricsPort: 9090
     resources:
-      requests:
-        cpu: "150m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "256Mi"
+      requests: {cpu: "150m", memory: "256Mi"}
+      limits:   {cpu: "500m", memory: "512Mi"}
 
-  pdfExtractor:
-    image: pocket-advisor/pdf-extractor-worker:latest
-    replicaCount: 3  # 3 x 1.0 CPU = 3.0 Cores limit for OCR/PDFium
+  documentExtractor:
+    image: pocket-advisor/document-extractor:latest
+    replicaCount: 3  # 3 x 1.0 CPU limit for OCR + PDFium
+    metricsPort: 9090
+    # Process-wide OCR limit. Page bitmaps are the memory hot spot in the whole
+    # system: A4 at 300 DPI is ~35MB as RGBA (§5.4).
+    ocrConcurrency: 2
+    pdfInstances: 2
+    # Matches the corpus. A missing language does not error — it silently
+    # produces plausible-looking garbage that reaches the index.
+    ocrLangs: "eng+rus"
+    resources:
+      requests: {cpu: "400m", memory: "512Mi"}
+      limits:   {cpu: "1000m", memory: "1024Mi"}
+
+  officeExtractor:
+    image: pocket-advisor/office-extractor:latest
+    replicaCount: 1  # pure Go, cheap
     metricsPort: 9090
     resources:
-      requests:
-        cpu: "400m"
-        memory: "384Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1024Mi"
+      requests: {cpu: "150m", memory: "192Mi"}
+      limits:   {cpu: "400m", memory: "384Mi"}
 
   embeddingIndexer:
-    image: pocket-advisor/embedding-indexer-worker:latest
+    image: pocket-advisor/embedding-indexer:latest
     replicaCount: 2
     metricsPort: 9090
-    embeddingApiUrl: "http://embedding-model-service.pocket-advisor.svc.cluster.local:8080/v1/embeddings"
     resources:
-      requests:
-        cpu: "200m"
-        memory: "256Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
+      requests: {cpu: "200m", memory: "256Mi"}
+      limits:   {cpu: "500m", memory: "512Mi"}

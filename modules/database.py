@@ -421,19 +421,29 @@ class Database:
         self.path = path
         self.workspace_id = workspace_id
 
-    def connect(self) -> sqlite3.Connection:
+    def connect(self, *, handed_off: bool = False) -> sqlite3.Connection:
         # timeout: wait for other writers (daemon, parallel CLI) instead
         # of failing immediately with "database is locked".
-        conn = sqlite3.connect(self.path, timeout=60.0)
+        conn = sqlite3.connect(
+            self.path, timeout=60.0, check_same_thread=not handed_off)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 60000")  # ms
         return conn
 
-    def open(self) -> sqlite3.Connection:
-        """Connect AND ensure the schema — the normal entry point."""
+    def open(self, *, handed_off: bool = False) -> sqlite3.Connection:
+        """Connect AND ensure the schema — the normal entry point.
+
+        `handed_off` is for the one caller that moves the connection to a
+        different owning thread: the service runtime's `StateWriter`. sqlite3's
+        same-thread check is a good default guard, but it cannot express
+        "owned by exactly one thread that is not the creator", which is what
+        `ingest all` needs. `StateWriter` enforces that stricter rule instead
+        (`docs/ingestion/document-flow-services.md` S1), so the
+        weaker check is retired only where the stronger one applies.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = self.connect()
+        conn = self.connect(handed_off=handed_off)
         try:
             tables = self._tables(conn)
             is_new = not tables

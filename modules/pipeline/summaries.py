@@ -9,7 +9,7 @@ from modules.integrity import write_verified
 from modules.pipeline.base import Stage
 from modules.pipeline.summary_dispatch import (
     EmailThreadsSummaryDispatcher, SummaryOutcome)
-from modules.pipeline.summaries_core import _GenerationMetrics, _ThreadWork
+from modules.pipeline.summaries_core import _ThreadWork
 from modules.review import now_iso
 from modules.summarization import (SUMMARY_PROMPT_VERSION,
                                     get_summary_generator)
@@ -26,13 +26,44 @@ class _BrokenThread:
 
 
 class ThreadSummaryStage(Stage):
+    """Summary staleness maintenance and the generative pass.
+
+    The two are separable on purpose. Maintenance is relational and always
+    runs; generation is a bounded fan-out at an inference endpoint that
+    `SummarisationEmbeddingService` owns during a full ingest
+    (`docs/ingestion/document-flow-services.md` D7). `run()` composes them for
+    a named-stage invocation; the hub calls `maintain()`, feeds thread ids
+    over the service's REST API, and settles each answer through
+    `settle_summary()`.
+    """
+
     name = "summaries"
 
+    #: Set by open_generation, consumed by settle_generation.
+    _embed_dispatcher = None
+    _progress = None
+
     def run(self) -> StageStats:
+        stats = StageStats()
+        stale = self.maintain(stats)
+        if not stale:
+            return stats
+        dispatcher = self.open_generation(stats, stale)
+        for job in stale:
+            dispatcher.submit(job)
+        self.settle_generation(dispatcher, stats)
+        return stats
+
+    # -- maintenance -------------------------------------------------------
+
+    def maintain(self, stats: StageStats) -> list[_ThreadWork]:
         """Staleness maintenance always runs — even with generation
         disabled — so retrieval never serves a summary whose sources
-        have diverged. Only the generative pass is gated by the knob."""
-        stats = StageStats()
+        have diverged. Only the generative pass is gated by the knob.
+
+        Returns the stale jobs the generative pass should cover, or an empty
+        list when generation is disabled or nothing has diverged.
+        """
         work, broken = self._load_work()
         stats.inc("eligible", len(work) + len(broken))
         current = {
@@ -85,16 +116,27 @@ class ThreadSummaryStage(Stage):
             # measured zero.
             self.ctx.telemetry.mark_not_applicable(self.name)
             stats.inc("generation_disabled")
-            return stats
+            return []
 
         perf = self.ctx.telemetry.summaries
         perf.eligible_threads = len(work) + len(broken)
         perf.pending_threads = len(stale)
         perf.unchanged_threads = len(work) - len(stale)
         if not stale:
-            return stats
+            return []
         perf.new_tiers()
+        return stale
 
+    # -- generation --------------------------------------------------------
+
+    def open_generation(
+            self, stats: StageStats,
+            stale: list[_ThreadWork]) -> EmailThreadsSummaryDispatcher:
+        """Start the bounded generation fan-out for `stale`.
+
+        Split from `settle_generation` so the Summarisation service can feed
+        thread ids between the two while PDF transforms are still running.
+        """
         self.log.notice(
             f"summaries: {len(stale)} stale"
             f" {'thread' if len(stale) == 1 else 'threads'} —"
@@ -105,21 +147,23 @@ class ThreadSummaryStage(Stage):
         # Each finished summary's vector is dispatched at readiness
         # (design decision 5) without waiting — the embed stage drains;
         # embed_text=false disables all embedding.
-        embed_dispatcher = shared_dispatcher(self.ctx) \
+        self._embed_dispatcher = shared_dispatcher(self.ctx) \
             if self.config.embed_text else None
-        progress = self.log.progress(
+        self._progress = self.log.progress(
             "generate thread summaries", total=len(stale))
+        return EmailThreadsSummaryDispatcher(self.ctx, generator)
 
-        dispatcher = EmailThreadsSummaryDispatcher(self.ctx, generator)
-        for job in stale:
-            dispatcher.submit(job)
+    def settle_generation(self, dispatcher: EmailThreadsSummaryDispatcher,
+                          stats: StageStats) -> None:
+        """Drain every submitted generation and settle it on this thread."""
+        perf = self.ctx.telemetry.summaries
         done, failed, skipped, _outcomes = dispatcher.drain(
-            progress,
+            self._progress,
             on_complete=lambda outcome: self._settle(
-                outcome, embed_dispatcher, stats, perf),
+                outcome, self._embed_dispatcher, stats, perf),
             idle_callback=self.ctx.idle_callback,
         )
-        progress.done()
+        self._progress.done()
         dispatcher.close()
 
         if skipped and dispatcher.unavailable is not None:
@@ -134,10 +178,21 @@ class ThreadSummaryStage(Stage):
         stats.inc("generated", done)
         stats.inc("failed", failed)
         stats.inc("skipped", skipped)
-        return stats
+
+    def settle_summary(self, outcome: SummaryOutcome, stats: StageStats, *,
+                       summary_sha256: str | None = None) -> None:
+        """Settle one summary the Summarisation service already produced.
+
+        The service wrote the artifact and published the vector, so no embed
+        dispatcher is passed and the digest it computed is reused rather than
+        rewriting an identical file.
+        """
+        self._settle(outcome, None, stats, self.ctx.telemetry.summaries,
+                     summary_sha256=summary_sha256)
 
     def _settle(self, outcome: SummaryOutcome, embed_dispatcher,
-                stats: StageStats, perf) -> None:
+                stats: StageStats, perf, *,
+                summary_sha256: str | None = None) -> None:
         """Main-thread settlement for one generated thread: merge telemetry,
         write the DB row, dispatch the summary's embedding, and flag
         failures. DB, Progress, and ReviewLog are touched only here."""
@@ -169,9 +224,10 @@ class ThreadSummaryStage(Stage):
         # content digest. File first, then row + FTS feed in one
         # transaction — a crash in between leaves a current file with a
         # stale row, which the next run's digest check regenerates.
-        summary_sha256 = write_verified(
-            self.config.summary_path(outcome.job.thread_id),
-            outcome.summary_text.encode("utf-8"))
+        if summary_sha256 is None:
+            summary_sha256 = write_verified(
+                self.config.summary_path(outcome.job.thread_id),
+                outcome.summary_text.encode("utf-8"))
         self.conn.execute(
             """INSERT INTO thread_summaries
                (thread_id, summary_sha256, source_digest,

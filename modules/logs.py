@@ -140,7 +140,10 @@ def _caller(record: logging.LogRecord) -> str:
     called from, which is both stabler and what a query on this field
     means to ask.
     """
-    if record.name != LOGGER_NAME:
+    # Our own loggers include the per-service children
+    # (`pocket_advisor.service.<name>`): those records still come from files
+    # under modules/, so path attribution stays the more useful answer.
+    if not record.name.startswith(LOGGER_NAME):
         return f"{record.name}.{record.funcName}"
     try:
         relative = Path(record.pathname).resolve().relative_to(_MODULES_ROOT)
@@ -390,6 +393,47 @@ def log_path(directory: Path, started: datetime) -> Path:
         target = directory / f"{stem}-{suffix}.jsonl"
         suffix += 1
     return target
+
+
+@contextmanager
+def open_service_log(config: Config, run_id: str, service: str,
+                     *, run_log: Path | None = None) -> Iterator[Log]:
+    """One ingestion service's own `.jsonl`, beside the run log.
+
+    Each of the five services owns an independent log file so a slow or
+    failing concern can be read on its own, without grepping a run log
+    interleaved from five producers
+    (`docs/ingestion/document-flow-services.md` D3).
+
+    Records also propagate to the run logger, so the complete run remains
+    readable in one place — the split is an additional view, never a
+    partition. The returned facade is deliberately not published as
+    `get_log()`: the process-wide facade stays the run's, and a service holds
+    its own.
+    """
+    base = run_log if run_log is not None else get_log().path
+    directory = config.execution_logs_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = base.stem if base is not None else run_id or "run"
+    path = directory / f"{stem}-{service}.jsonl"
+
+    handler = JsonlHandler(path)
+    handler.setFormatter(JsonFormatter(run_id))
+    records: queue.SimpleQueue[Any] = queue.SimpleQueue()
+    listener = logging.handlers.QueueListener(records, handler,
+                                              respect_handler_level=False)
+    logger = logging.getLogger(f"{LOGGER_NAME}.service.{service}")
+    logger.handlers.clear()
+    logger.addHandler(_QueueHandler(records))
+    # Left True on purpose: the parent's handler is the run log.
+    logger.propagate = True
+    listener.start()
+    try:
+        yield Log(logger, run_id, path)
+    finally:
+        logger.handlers.clear()
+        listener.stop()
+        handler.close()
 
 
 @contextmanager

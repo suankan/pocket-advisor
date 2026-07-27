@@ -4,6 +4,117 @@ Reverse-chronological history of shipped platform changes, including completed
 roadmap items. Active work lives in `docs/work-in-progress.md`; future work
 lives only in `docs/roadmap.md`.
 
+## 2026-07-26 — Document-flow ingestion services
+
+Feature doc: `docs/ingestion/document-flow-services.md`.
+
+The five services are re-arranged from a producer→consumer chain into a hub
+and four workers, and the wire carries a *document* rather than an identity.
+One service decides; four do the work.
+
+- **`ManagementService`** replaces `DiscoveryService` and takes the
+  overarching role: it walks and hashes the mounted collections, registers
+  every result relationally, and routes each document to whatever its own
+  itinerary names next. It is the only service constructed with a
+  `PipelineContext`, so the sole-writer invariant is now enforced by what a
+  service was handed rather than by discipline. The three deadlock rules the
+  old chaining needed are deleted, not restated: a worker cannot wait on the
+  writer because it cannot reach it.
+- **A "document" is the wire contract.** `DocumentRecord`
+  (`modules/services/documents.py`) carries kind, content-addressed identity,
+  filesystem location, email headers, lineage (`attached_to`, an occurrence
+  key rather than a doc id, so identity can deduplicate while lineage does
+  not), the derived text location, per-stage status, and `stages` — the
+  remaining itinerary the hub routes on.
+- **Request/response transport.** `POST /work` answers with the work product
+  instead of `202 Accepted`; the hub settles what comes back and cannot settle
+  what it never sees. `Lane` replaces `Feed`: a queue plus a pool of workers
+  that process items through the target's REST API and hand each result to a
+  sink, sized to the *downstream* service's capacity. Read timeouts are
+  disabled on `/work` because a scanned PDF legitimately takes minutes.
+- **MIME extraction split from registration.** `MimeExtractor` is a pure
+  function of bytes plus the filesystem; `ExtractionRegistrar` owns the row
+  shapes on the writer thread. `EmailStage` composes both, so a named-stage
+  run and a service run cannot diverge in MIME semantics — and email parsing
+  is parallel for the first time, since the `INSERT`s that forced one worker
+  are no longer interleaved with the walk. `write_verified_shared()` makes a
+  content-addressed write safe for concurrent workers targeting the same
+  attachment.
+- **Worker services hold `Config`, never a context.** Emails Processing
+  (extract · render), PDF-to-Text (transform · publish, with
+  `StreamingPdfProducer` deleted — its queue, pool and polling are now the
+  service's own), Plain-text Embedding (slice · enrich · embed · publish, the
+  artifact I/O and payload derivation moved off the writer thread), and
+  Summarisation-Embedding (generate · embed as one settled unit).
+- **Rich** draws five rectangles in hub-first order, and now wraps against the
+  width it is rendered into rather than the ambient terminal, so long service
+  names stack instead of truncating.
+
+Verification: `pocket-advisor.py test` 22/22. A cold real ingest of 75 sources
+(56 emails, 19 PDFs → 33 unique OCR transforms on 10 workers, 42 occurrences)
+produced 599 leaf + 3 summary vectors with consistent indexes and 1488
+transaction rows; a re-run created nothing; a real SIGINT mid-OCR exited 130 in
+0.7s with no stray children and the resumed run converged on the identical
+index; `ingest thread` ran the ordered prefix and started no services.
+
+Not caused by this change, reproduced at `HEAD`: `verify` reports every vector
+invalid because `modules/maintenance.py:456` compares against
+`config.embed_dim`, which is `0` until a live embedding response auto-detects
+it; the index's own `meta` already carries the real dimension. Summary
+generation still loses 4 of 7 threads to `RemoteProtocolError` from the local
+oMLX server, correctly left as durable pending gaps.
+
+## 2026-07-26 — Service-oriented ingestion runtime
+
+Feature doc: `docs/ingestion/service-oriented-ingestion-runtime.md`.
+
+`ingest all` is now five named services connected by REST, replacing the
+single-coordinator event loop. `modules/pipeline/concurrent.py` is deleted;
+`modules/services/` owns the runtime. Every existing stage class is composed
+unchanged — the change is who owns each phase, not how any phase works.
+
+- **Five services**, each with an inbound queue, a bounded worker pool, live
+  statistics, a loopback REST API, its own `.jsonl`, and one open→close
+  lifecycle: Discovery (walk · hash · integrity), Emails (parse MIME · render
+  · chunk), PDF-to-Text (OCR · extract · publish), Summarisation (maintain ·
+  generate), Plain-text Embedding (embed · publish vectors). One `Service`
+  interface with two backings: `QueueBackedService` runs its own workers,
+  `PoolBackedService` fronts an existing `BoundedInferenceDispatcher` or
+  `StreamingPdfProducer` so verified OCR and inference machinery gained a REST
+  door without a rewrite.
+- **`StateWriter`** owns the SQLite connection on one thread. The
+  sole-coordinator rule moved from convention to construction: workers submit
+  a callable and await its result, and `assert_owner()` rejects a relational
+  touch from anywhere else. `ingest all` opens its connection with
+  `handed_off=True`; every other entry point keeps sqlite3's same-thread
+  guard.
+- **Feeds** are outbound queues with their own sender thread, batching up to
+  64 items per POST, so a producer never waits on a consumer. Closure is
+  ordered by the orchestrator along the dependency graph and each lane is
+  flushed to prove delivery. Every request carries a per-run bearer token;
+  servers bind `127.0.0.1:0` only.
+- **Rich** gained a Services region: one bordered rectangle per service with
+  queued / in-flight / done / failed / skipped, worker count, rate and
+  elapsed, colour-coded by state, wrapping by terminal width. The seven-stage
+  Pipeline panel is unchanged — reports and named-stage commands are still
+  defined in stage terms.
+- `ThreadSummaryStage` split into `maintain()` / `open_generation()` /
+  `settle_generation()` so the Summarisation service can feed thread ids
+  between staleness maintenance and the drain. `EmbedDispatcher.enqueue()` is
+  the new seam the producer-side `EmbedFeed` overrides to post over REST.
+
+Verification: 22/22 `pocket-advisor.py test`, including new
+`test_services.py` and `test_service_ingest.py` (which replaces
+`test_concurrent_ingest.py`). Cold full ingest over the test corpus with real
+OCR and inference: 56 emails, 23 attached PDF occurrences over 14 unique
+transforms on 10 workers, 197 leaf vectors published through the REST hop,
+indexes consistent; re-run produced no duplicate entities and no new chunks.
+`SIGINT` mid-run exits 130 in 0.8s with no stray OCR children, and the
+resumed run converged to the identical 197-vector index. Summary generation
+against the local oMLX endpoint remains flaky in this environment
+(`RemoteProtocolError` on longer generations, present before this change);
+the unreachable-endpoint latch left durable pending gaps as designed.
+
 ## 2026-07-26 — Concurrent streaming ingestion
 
 Design `4240232`; implementation `d75862f`; documentation lock `73e89c6`.

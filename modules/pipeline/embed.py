@@ -160,7 +160,7 @@ class EmbedStage(Stage):
         dispatched at readiness (a bare `ingest embed`)."""
         dispatcher = self.ctx.embed_dispatcher
         if dispatcher is None:
-            dispatcher = EmbedDispatcher(
+            dispatcher = EmbedDispatcher.for_ctx(
                 self.ctx, backend=backend, fingerprint=fingerprint)
             self.ctx.embed_dispatcher = dispatcher
             return dispatcher

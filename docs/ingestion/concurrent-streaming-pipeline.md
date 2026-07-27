@@ -1,6 +1,14 @@
 # Concurrent Streaming Ingestion Pipeline
 
-Status: **shipped 2026-07-26**. Design `4240232`; implementation `d75862f`.
+Status: **superseded 2026-07-26** by
+`service-oriented-ingestion-runtime.md`, which decomposes the same dataflow
+into five named services. The dataflow, the phase overlaps, the non-negotiable
+invariants, and the acceptance criteria below all still govern; only D1's
+"one coordinator" *composition* is replaced — `modules/pipeline/concurrent.py`
+is deleted and `StateWriter` now owns the relational thread. Read this
+document for what the pipeline does and the service document for who runs it.
+
+Originally shipped 2026-07-26. Design `4240232`; implementation `d75862f`.
 
 This design supersedes the sequential cross-stage orchestration of
 `ingest all` and the earlier deferral of cross-stage streaming in
@@ -65,9 +73,12 @@ The phases overlap as soon as their real prerequisites exist:
 
 ## D1. One coordinator, several producer queues
 
-`modules/pipeline/concurrent.py` owns the `ingest all` event loop. It composes
-the existing concern implementations instead of allowing stages to call one
-another.
+One coordinator owns the `ingest all` event loop, composing the existing
+concern implementations instead of allowing stages to call one another.
+(Superseded: `modules/services/orchestrator.py` now composes five services,
+and `modules/services/state.py` owns the relational thread. The ownership
+rules below are unchanged — they are enforced by construction rather than by
+convention.)
 
 The event loop is the only code allowed to:
 

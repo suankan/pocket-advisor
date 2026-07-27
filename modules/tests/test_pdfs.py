@@ -28,14 +28,15 @@ import modules.pipeline.pdfs as pdfs_mod  # noqa: E402
 from modules.config import Config  # noqa: E402
 from modules.database import Database  # noqa: E402
 from modules.integrity import sha256_bytes, write_verified  # noqa: E402
-from modules.domain import CandidateStatus, DocumentType, StageStats  # noqa: E402
+from modules.domain import CandidateStatus, DocumentType  # noqa: E402
 from modules.pdf_transforms import TransformResult  # noqa: E402
 from modules.pipeline.base import PipelineContext  # noqa: E402
 from modules.pipeline.discover import DiscoverStage  # noqa: E402
 from modules.pipeline.emails import EmailStage  # noqa: E402
-from modules.pipeline.pdfs import (PdfTextStage,  # noqa: E402
-                                   StreamingPdfProducer)
-from modules.review import ReviewLog, now_iso  # noqa: E402
+from modules.pipeline.pdfs import PdfTextStage  # noqa: E402
+from modules.services.documents import PDF, DocumentRecord  # noqa: E402
+from modules.services.pdftotext import PdfToTextService  # noqa: E402
+from modules.review import ReviewLog  # noqa: E402
 from modules.telemetry import PerformanceTelemetry  # noqa: E402
 from modules.workspace import Registry  # noqa: E402
 
@@ -150,7 +151,12 @@ def build_fixtures(ws_dir: Path) -> None:
 
 
 def check_completion_driven_dispatch() -> None:
-    """A fast PDF publishes and dispatches while a slow peer still runs."""
+    """A fast PDF publishes while a slow peer is still transforming.
+
+    Drives `PdfToTextService` directly: the queue, the pool, the cache gates,
+    and the answer shape are the whole of what the hub settles from. Only the
+    external transform is faked.
+    """
     with tempfile.TemporaryDirectory(prefix="pa_pdf_completion_") as td:
         tmp = Path(td)
         ws_dir = tmp / "workspaces"
@@ -163,44 +169,39 @@ def check_completion_driven_dispatch() -> None:
         registry = Registry.load(base)
         workspace = registry.require_workspace("matter-x")
         cfg = base.for_workspace(workspace.id)
-        conn = Database(cfg.db_path, workspace.id).open()
-        ctx = PipelineContext(
-            config=cfg, registry=registry, workspace=workspace, conn=conn,
-            review=ReviewLog(conn, cfg.review_queue_csv))
 
-        document_ids: dict[str, int] = {}
-        for name, raw in (
+        jobs: dict[str, dict] = {}
+        shas: dict[str, str] = {}
+        for index, (name, raw) in enumerate((
                 ("slow", b"%PDF-slow-transform-with-more-bytes"),
-                ("fast", b"%PDF-fast")):
+                ("fast", b"%PDF-fast")), start=1):
             sha = sha256_bytes(raw)
+            shas[name] = sha
             source = cfg.document_artifacts(sha).source_path(f"{name}.pdf")
             write_verified(source, raw)
-            cur = conn.execute(
-                "INSERT INTO documents"
-                " (sha256, media_kind, content_type, size_bytes, is_skipped,"
-                "  ingested_at) VALUES (?, 'pdf', 'application/pdf', ?, 0, ?)",
-                (sha, len(raw), now_iso()))
-            document_ids[name] = int(cur.lastrowid)
-        conn.commit()
+            record = DocumentRecord(
+                key=str(index), doc_id=sha, kind=PDF,
+                source_path=str(source.relative_to(tmp)),
+                size_bytes=len(raw), content_type="application/pdf",
+                stages=("pdftotext",))
+            jobs[name] = {"document_id": index,
+                          "document": record.as_dict()}
 
         slow_started = threading.Event()
         release_slow = threading.Event()
         slow_finished = threading.Event()
-        fast_dispatched = threading.Event()
-        coordinator_thread = threading.current_thread()
-        dispatch_observations: list[tuple[int, threading.Thread, int]] = []
 
         def fake_transform(request):
             request.work_dir.mkdir(parents=True, exist_ok=True)
             derivative = request.work_dir / "ocr.pdf"
             text_path = request.work_dir / "output.txt"
             derivative.write_bytes(b"%PDF-derived")
-            if request.document_id == document_ids["slow"]:
+            if request.source_sha256 == shas["slow"]:
                 slow_started.set()
-                release_slow.wait(timeout=3.0)
+                release_slow.wait(timeout=5.0)
                 slow_finished.set()
             else:
-                assert slow_started.wait(timeout=1.0)
+                assert slow_started.wait(timeout=2.0)
             text_path.write_text(STATEMENT_TEXT, encoding="utf-8")
             now = time.monotonic()
             return TransformResult(
@@ -212,54 +213,41 @@ def check_completion_driven_dispatch() -> None:
                 text_seconds=0.01, queue_wait_seconds=0.0,
                 started_at=now, finished_at=now, error=None)
 
-        class RecordingDispatcher:
-            def submit_pending_leaves(
-                    self, active_conn, *, document_id: int,
-                    at_readiness: bool) -> int:
-                chunks = int(active_conn.execute(
-                    "SELECT COUNT(*) FROM chunks"
-                    " WHERE document_id = ? AND"
-                    " source_type = 'document_text'",
-                    (document_id,)).fetchone()[0])
-                dispatch_observations.append(
-                    (document_id, threading.current_thread(), chunks))
-                if document_id == document_ids["fast"]:
-                    if not slow_finished.is_set():
-                        fast_dispatched.set()
-                    release_slow.set()
-                return chunks
-
-        stage = PdfTextStage(ctx)
+        service = PdfToTextService(cfg, workers=2)
         try:
-            with patch.object(pdfs_mod, "run_transform",
-                              side_effect=fake_transform), \
-                 patch.object(
-                     pdfs_mod, "shared_dispatcher",
-                     return_value=RecordingDispatcher()):
-                stats = StageStats()
-                producer = StreamingPdfProducer(stage, stats)
-                docs = stage._pdf_documents()
-                assert [doc.document_id for doc in docs] == [
-                    document_ids["slow"], document_ids["fast"]]
-                producer.offer(docs[0])
-                assert slow_started.wait(timeout=1.0)
-                # Input grows after workers have already started.
-                producer.offer(docs[1])
-                producer.poll(block=True)
-                assert fast_dispatched.is_set()
-                producer.close()
-            assert fast_dispatched.is_set()
+            with patch("modules.services.pdftotext.run_transform",
+                       side_effect=fake_transform):
+                slow = service.submit(jobs["slow"])
+                assert slow_started.wait(timeout=2.0)
+                # Input grows after a worker has already started.
+                fast = service.submit(jobs["fast"])
+                result = fast.result(timeout=10)
+                assert not slow_finished.is_set(), (
+                    "the fast transform must publish without waiting for the"
+                    " slow one")
+                assert result.error is None, result.error
+                text_rel = result.payload["document"]["text_path"]
+                assert (tmp / text_rel).is_file()
+                assert result.payload["extraction_method"] == \
+                    service.extraction_method
+
+                release_slow.set()
+                assert slow.result(timeout=10).error is None
+                service.close()
+
             assert slow_finished.is_set()
-            assert {item[0] for item in dispatch_observations} == \
-                set(document_ids.values())
-            assert all(item[1] is coordinator_thread
-                       for item in dispatch_observations)
-            assert all(item[2] > 0 for item in dispatch_observations)
-            assert stats.get("ocr_ok") == 2, stats
-            assert ctx.telemetry.pdfs.successful_transforms == 2
+            stats = service.stats()
+            assert stats.done == 2, stats
+            # A repeat offer of published bytes reuses the cache product
+            # instead of transforming again.
+            again = PdfToTextService(cfg, workers=1)
+            try:
+                repeat = again.call([jobs["fast"]])[0]
+                assert repeat.payload["reused"] is True, repeat.payload
+            finally:
+                again.close()
         finally:
             release_slow.set()
-            conn.close()
 
 
 def main() -> int:

@@ -24,6 +24,7 @@ the integrity rules here.
 | Concern | Doc |
 |---|---|
 | Concurrent full-ingest streaming DAG | `concurrent-streaming-pipeline.md` |
+| Document-flow ingestion services | `document-flow-services.md` |
 | Content-addressed email/document graph | `ingestion-design-v2.md` |
 | PDF text pipeline | `pdf-to-text-pipeline-design.md` |
 | Chunking, embedding, thread-summary indexing | `chunking-and-embedding.md` |
@@ -176,9 +177,16 @@ execution order. Discovery feeds email/native-document registration; email
 parsing feeds the run-scoped PDF producer and leaf embedding; PDF completions
 feed leaf embedding; thread reconstruction and summary generation begin when
 email input closes and may overlap remaining PDFs; the embed stage closes only
-after every text/summary producer closes. The exact event protocol and narrow
+after every text/summary producer closes. The dataflow and the narrow
 email-compaction barrier are locked in
-`docs/ingestion/concurrent-streaming-pipeline.md`.
+`docs/ingestion/concurrent-streaming-pipeline.md`; the five services that run
+it are locked in `docs/ingestion/document-flow-services.md`. Each has its own
+queue, worker pool, loopback REST interface, log file, and dashboard
+rectangle. `ManagementService` is the hub: it walks and hashes, registers what
+comes back, and routes each document to the stage its own itinerary names
+next. The four worker services are constructed from `Config` alone and cannot
+reach relational state; all relational mutation is serialized on one owning
+`StateWriter` thread.
 
 Stages implement the common `Stage` interface, receive one explicit
 `PipelineContext`, never parse CLI arguments, and return `StageStats`.
@@ -305,16 +313,28 @@ work: `docs/roadmap.md` item 2.
 - `pocket-advisor.py` is the sole executable entrypoint.
 - `modules/cli.py` is the sole argparse surface and owns orchestration.
 - **Python is written in OOP style.** Classes are the default unit of
-  design: one class per pipeline stage (the `Stage` interface), typed
+  design: one class per pipeline stage (the `Stage` interface), one class
+  per ingestion service (the `Service` interface), typed
   domain values as frozen dataclasses (`Workspace`, `ExtractedBody`,
-  `TransactionRow`, `SummaryOutcome`, …), and stateful concerns as
-  dedicated classes owning their lifecycle (`InferenceClient`,
-  `EmbedDispatcher`, `EmailThreadsSummaryDispatcher`, `PdfTransformCache`,
+  `TransactionRow`, `SummaryOutcome`, `ServiceStats`, `DocumentRecord`, …),
+  and stateful
+  concerns as dedicated classes owning their lifecycle (`InferenceClient`,
+  `StateWriter`, `MimeExtractor`, `ExtractionRegistrar`, `EmbedDispatcher`,
+  `EmailThreadsSummaryDispatcher`, `PdfTransformCache`,
   statement parsers in a class-per-format registry). Module-level
   functions are reserved for small, pure, stateless helpers; new features
   must not accrete as loose function collections when they carry state,
   configuration, or a lifecycle.
-- Stage modules do not import or sequence other stages.
+- Stage modules do not import or sequence other stages. Worker services do not
+  import or sequence one another at all: every edge runs through
+  `ManagementService`, which reaches a downstream only through a `Lane`
+  obtained from the host, and closure order is the orchestrator's alone.
+- Only the `StateWriter` thread mutates SQLite, the review log, canonical
+  artifacts, or chunk/FTS rows — enforced by construction, since only the hub
+  is given a `PipelineContext`.
+- A service answers with its work product (`POST /work` → results), never with
+  an acknowledgement: the hub settles what comes back, and cannot settle what
+  it never sees.
 - The retired `scripts/` tree is deleted. Historical mechanics are recorded in
   `docs/changelog.md` (pre-rewrite section); all runtime code and self-tests live under `modules/`.
 - SQLite is the relational source of truth. Local NumPy vector matrices and

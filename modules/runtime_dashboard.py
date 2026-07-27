@@ -87,6 +87,7 @@ class IngestDashboard:
         self.run_state = "starting"
         self.stages = {name: StageView(name) for name in stage_names}
         self._widgets: list[Any] = []
+        self._services: list[Any] = []
         self._events: deque[tuple[str, str]] = deque(maxlen=5)
         self._lock = threading.RLock()
         self._live: Live | None = None
@@ -184,6 +185,11 @@ class IngestDashboard:
             stage.duration = duration
             stage.result = result
 
+    def attach_services(self, services: Iterable[Any]) -> None:
+        """Publish the run's services, in feed order, as live rectangles."""
+        with self._lock:
+            self._services = list(services)
+
     def register_widget(self, widget: Any) -> None:
         with self._lock:
             if widget not in self._widgets:
@@ -263,12 +269,23 @@ class IngestDashboard:
                 for view in self.stages.values()
             ]
             widgets = list(self._widgets)
+            services = list(self._services)
             events = list(self._events)
             run_state = self.run_state
             finished = self.finished
             report = self._report
             report_path = self._report_path
             log_path = self._log_path
+
+        # Outside the dashboard lock on purpose: `stats()` takes each
+        # service's own lock, and the display lock is innermost
+        # (see the locking rule in modules/progress.py).
+        service_states = []
+        for service in services:
+            try:
+                service_states.append(service.stats())
+            except Exception:
+                continue
 
         if report is not None:
             return Group(
@@ -282,6 +299,7 @@ class IngestDashboard:
         return Group(
             self._header(stages, run_state, finished),
             self._pipeline(stages),
+            self._services_panel(service_states),
             self._active_work(widgets),
             self._event_panel(events),
             Text(
@@ -372,6 +390,18 @@ class IngestDashboard:
             title="[bold]Pipeline[/bold]",
             title_align="left",
             border_style="blue",
+            padding=(0, 0),
+        )
+
+    def _services_panel(self, states: list[Any]) -> Any:
+        """One rectangle per service, in hub-first order."""
+        if not states:
+            return Text("")
+        return Panel(
+            _ServiceGrid(states),
+            title="[bold]Services[/bold]",
+            title_align="left",
+            border_style="green",
             padding=(0, 0),
         )
 
@@ -587,6 +617,104 @@ class IngestDashboard:
             Text("Report audit", style="dim"),
             Text(_fmt_secs(report.report_seconds), style="dim"))
         return table
+
+
+SERVICE_STATE_STYLE = {
+    "pending": "dim",
+    "running": "cyan",
+    "closing": "yellow",
+    "closed": "green",
+    "failed": "bold red",
+}
+
+
+def _console_width(default: int = 100) -> int:
+    try:
+        import shutil
+        return shutil.get_terminal_size((default, 24)).columns
+    except Exception:      # pragma: no cover - presentation only
+        return default
+
+
+class _ServiceGrid:
+    """Service rectangles laid out against the width they are drawn into.
+
+    Wrapping is decided at render time from `options.max_width` rather than
+    from the ambient terminal size, so the layout is a property of the space
+    the panel actually gets. A card narrower than its own title is worse than
+    useless — the operator cannot tell which service they are looking at — so
+    the column count is capped by the longest name on screen.
+    """
+
+    #: Room for the widest body row ("999 queued", "99 in flight") plus the
+    #: card's own border and padding.
+    MIN_BODY = 22
+
+    def __init__(self, states: list[Any]):
+        self.states = states
+
+    def __rich_console__(self, console: Console,
+                         options: ConsoleOptions) -> RenderResult:
+        widest = max(len(state.name) for state in self.states)
+        needed = max(self.MIN_BODY, widest + 8)
+        per_row = min(len(self.states), max(1, options.max_width // needed))
+        grid = Table.grid(expand=True)
+        for _ in range(per_row):
+            grid.add_column(ratio=1)
+        row: list[Any] = []
+        for index, state in enumerate(self.states, start=1):
+            row.append(_service_card(index, state))
+            if len(row) == per_row:
+                grid.add_row(*row)
+                row = []
+        if row:
+            grid.add_row(*(row + [Text("")] * (per_row - len(row))))
+        yield grid
+
+
+def _service_card(index: int, state: Any) -> Panel:
+    """One service rectangle: what it is, what it is doing, how fast."""
+    style = SERVICE_STATE_STYLE.get(state.state, "white")
+    body = Table.grid(expand=True)
+    body.add_column(ratio=1, overflow="ellipsis")
+    body.add_column(justify="right", no_wrap=True)
+
+    body.add_row(Text(state.detail, style="dim", overflow="ellipsis",
+                      no_wrap=True), Text(""))
+    body.add_row(
+        Text.assemble((f"{state.queued}", "yellow"), (" queued", "dim")),
+        Text.assemble((f"{state.in_flight}", "cyan"), (" in flight", "dim")),
+    )
+    settled = Text.assemble((f"{state.done}", "green"), (" done", "dim"))
+    if state.failed:
+        settled.append("  ")
+        settled.append(str(state.failed), style="red")
+        settled.append(" failed", style="dim")
+    if state.skipped:
+        settled.append("  ")
+        settled.append(str(state.skipped), style="magenta")
+        settled.append(" skipped", style="dim")
+    rate = state.settled / state.elapsed if state.elapsed > 0 else 0.0
+    body.add_row(
+        settled,
+        Text(f"{rate:.1f}/s" if rate >= 0.05 else "", style="magenta"),
+    )
+    body.add_row(
+        Text(f"{state.workers} worker{'' if state.workers == 1 else 's'}",
+             style="dim"),
+        Text(_fmt_secs(state.elapsed), style="dim"),
+    )
+    title = Text.assemble(
+        (f"{index} ", "dim"), (state.name.upper(), "bold"))
+    return Panel(
+        body,
+        title=title,
+        title_align="left",
+        subtitle=Text(state.state, style=style),
+        subtitle_align="right",
+        border_style=style,
+        padding=(0, 1),
+    )
 
 
 def _stage_status(state: str) -> tuple[str, Any]:

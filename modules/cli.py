@@ -91,9 +91,11 @@ def _resolve_selection(workspace_id: str) -> RuntimeSelection:
     )
 
 
-def _open_context(selection: RuntimeSelection) -> PipelineContext:
+def _open_context(selection: RuntimeSelection, *,
+                  handed_off: bool = False) -> PipelineContext:
     config = selection.config
-    conn = Database(config.db_path, selection.workspace.id).open()
+    conn = Database(config.db_path, selection.workspace.id).open(
+        handed_off=handed_off)
     return PipelineContext(
         config=config,
         registry=selection.registry,
@@ -296,7 +298,10 @@ def _run_ingest(
     pipeline_started = clock()
     started_at = utc_now().isoformat()
     try:
-        ctx = _open_context(selection)
+        # `ingest all` hands the connection to the service runtime's
+        # StateWriter thread; every other path keeps sqlite3's same-thread
+        # guard.
+        ctx = _open_context(selection, handed_off=stage == "all")
     except BaseException as exc:
         if stage == "all":
             elapsed = clock() - pipeline_started
@@ -395,11 +400,12 @@ def _run_ingest(
                 result=reason,
             )
 
-        # Full ingestion is a streaming DAG. Named stages retain their
-        # ordered-prefix execution above.
+        # Full ingestion is five concurrent services over one streaming DAG.
+        # Named stages retain their ordered-prefix execution above and start
+        # no services at all.
         try:
-            from modules.pipeline.concurrent import ConcurrentIngest
-            ConcurrentIngest(
+            from modules.services.orchestrator import ServiceIngest
+            ServiceIngest(
                 ctx,
                 execute_stage=lambda name: _execute_stage(
                     ctx, name,
@@ -408,10 +414,11 @@ def _run_ingest(
                 stage_started=begin,
                 stage_completed=complete,
                 stage_skipped=skip,
+                dashboard=dashboard,
             ).run()
         except BaseException as pipeline_exc:
-            from modules.pipeline.concurrent import ConcurrentPipelineFailure
-            if isinstance(pipeline_exc, ConcurrentPipelineFailure):
+            from modules.services.orchestrator import ServicePipelineFailure
+            if isinstance(pipeline_exc, ServicePipelineFailure):
                 failed_stage = pipeline_exc.stage
                 failure_exc = pipeline_exc.cause
             else:

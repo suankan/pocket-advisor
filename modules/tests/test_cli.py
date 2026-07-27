@@ -75,16 +75,17 @@ def fake_context(*, embed: bool, bank: bool):
     )
 
 
-class SerialConcurrentIngest:
+class SerialServiceIngest:
     """Unit-test seam: exercise CLI lifecycle without the real dataflow."""
 
     def __init__(self, ctx, *, execute_stage, stage_started,
-                 stage_completed, stage_skipped):
+                 stage_completed, stage_skipped, dashboard=None):
         self.ctx = ctx
         self.execute_stage = execute_stage
         self.stage_started = stage_started
         self.stage_completed = stage_completed
         self.stage_skipped = stage_skipped
+        self.dashboard = dashboard
 
     def run(self):
         from modules.pipeline.transactions import has_transaction_state
@@ -220,8 +221,8 @@ def test_orchestration() -> None:
     selection = fake_selection(embed=True, bank=True)
     context = fake_context(embed=True, bank=True)
     with patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name, **_kwargs:
                          record_stage(executed, name)), \
@@ -240,8 +241,8 @@ def test_orchestration() -> None:
     selection = fake_selection(embed=False, bank=False)
     context = fake_context(embed=False, bank=False)
     with patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name, **_kwargs:
                          record_stage(executed, name)), \
@@ -257,8 +258,8 @@ def test_orchestration() -> None:
     selection = fake_selection(embed=False, bank=False)
     context = fake_context(embed=False, bank=False)
     with patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage",
                          side_effect=lambda _, name, **_kwargs:
                          record_stage(executed, name)), \
@@ -333,8 +334,8 @@ def test_dashboard_lifetime_includes_report() -> None:
 
     with patch("modules.runtime_dashboard.IngestDashboard", Dashboard), \
             patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage", return_value=StageStats()), \
             patch.object(cli, "_finalize_ingest_report",
                          side_effect=finalize):
@@ -368,8 +369,8 @@ def test_ingest_reporting_failures_and_timings() -> None:
         return stats
 
     with patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage", side_effect=fail_at_pdfs), \
             patch.object(cli, "_finalize_ingest_report") as finalize, \
             contextlib.redirect_stdout(io.StringIO()):
@@ -410,8 +411,8 @@ def test_ingest_reporting_failures_and_timings() -> None:
         return StageStats()
 
     with patch.object(cli, "_open_context", return_value=context), \
-            patch("modules.pipeline.concurrent.ConcurrentIngest",
-                  SerialConcurrentIngest), \
+            patch("modules.services.orchestrator.ServiceIngest",
+                  SerialServiceIngest), \
             patch.object(cli, "_execute_stage", side_effect=successful_stage), \
             patch.object(
                 cli, "_finalize_ingest_report",

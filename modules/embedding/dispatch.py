@@ -42,7 +42,7 @@ from modules.telemetry import NOT_RUN, PARTIAL
 def shared_dispatcher(ctx) -> "EmbedDispatcher":
     """The run-wide dispatcher producers submit to without waiting."""
     if ctx.embed_dispatcher is None:
-        ctx.embed_dispatcher = EmbedDispatcher(ctx)
+        ctx.embed_dispatcher = EmbedDispatcher.for_ctx(ctx)
     return ctx.embed_dispatcher
 
 
@@ -88,19 +88,30 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
     unavailable_label = "embed dispatch"
     queue_label = "embed queue"
 
-    def __init__(self, ctx, *, backend=None, fingerprint=None):
+    def __init__(self, config, telemetry, *, backend=None,
+                 fingerprint=None):
         super().__init__(max_in_flight=INFERENCE_MAX_IN_FLIGHT)
-        self.config = ctx.config
-        self.telemetry = ctx.telemetry.embed
+        self.config = config
+        self.telemetry = telemetry
         self.fingerprint = fingerprint if fingerprint is not None \
-            else current_fingerprint(ctx.config)
+            else current_fingerprint(config)
         # Directories are created on first publication
         # (atomic_publish_array), never eagerly — a run that dispatches
         # nothing must leave no empty cache directories behind.
-        self.leaf_paths = index_paths(ctx.config, self.fingerprint)
-        self.thread_paths = thread_index_paths(ctx.config, self.fingerprint)
+        self.leaf_paths = index_paths(config, self.fingerprint)
+        self.thread_paths = thread_index_paths(config, self.fingerprint)
         self.backend = backend if backend is not None \
-            else get_backend(ctx.config)
+            else get_backend(config)
+
+    @classmethod
+    def for_ctx(cls, ctx, **kwargs) -> "EmbedDispatcher":
+        """The run-wide dispatcher for a stage that holds a context.
+
+        Config and telemetry are passed positionally rather than reached for
+        through a context so `PlainTextEmbeddingService` — which must never
+        hold a database connection (invariant S2) — can build the same engine.
+        """
+        return cls(ctx.config, ctx.telemetry.embed, **kwargs)
 
     def retarget(self, *, backend, fingerprint: dict) -> None:
         """Point the run's one dispatcher at the readiness-verified backend
@@ -188,14 +199,32 @@ class EmbedDispatcher(BoundedInferenceDispatcher):
             with self._lock:
                 self._mark_entered()
                 queue.dispatched_at_readiness += 1
-        self._submit_task(
-            self._task, text, target, queue_name, review_key, note)
+        self.enqueue(text, target, queue_name, review_key, note)
         return True
+
+    def enqueue(self, text: str, target: Path, queue_name: str,
+                review_key: str, note: str) -> None:
+        """Hand one already-derived payload to this dispatcher's pool.
+
+        The one seam between deciding *what* to embed and *where* that work
+        executes. `modules/services/embedding.py` overrides it to POST the
+        item to the Embedding service's REST API instead, so a producer's
+        submission path stays identical whether or not services are running.
+        """
+        self._submit_task(
+            self.execute, text, target, queue_name, review_key, note)
 
     # -- execution ---------------------------------------------------------
 
-    def _task(self, text: str, target: Path, queue_name: str,
-              review_key: str, note: str) -> DispatchOutcome:
+    def execute(self, text: str, target: Path, queue_name: str,
+                review_key: str, note: str) -> DispatchOutcome:
+        """Embed one payload and publish its vector. Worker-safe.
+
+        Public because it is also the whole of `PlainTextEmbeddingService`'s
+        per-item work: that service supplies its own pool and calls this
+        synchronously, so the endpoint budget, the availability latch, and the
+        telemetry buckets stay in one implementation.
+        """
         if self.unavailable is not None:
             return DispatchOutcome(review_key, note, None, True)
         queue = getattr(self.telemetry.queues, queue_name)

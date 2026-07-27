@@ -196,8 +196,65 @@ def check_non_tty_never_activates() -> None:
     print("  non-TTY output never activates Rich")
 
 
+def check_service_rectangles() -> None:
+    """One rectangle per service, live counts, wrapping by terminal width."""
+    from modules.services.base import ServiceStats
+
+    def stats(name, detail, state, workers, **counts):
+        return ServiceStats(
+            name=name, detail=detail, state=state, workers=workers,
+            accepted=counts.get("accepted", 0),
+            queued=counts.get("queued", 0),
+            in_flight=counts.get("in_flight", 0),
+            done=counts.get("done", 0),
+            failed=counts.get("failed", 0),
+            skipped=counts.get("skipped", 0),
+            elapsed=counts.get("elapsed", 10.0))
+
+    services = [
+        SimpleNamespace(stats=lambda s=s: s) for s in (
+            stats("management", "walk · route · settle", "closed", 4,
+                  accepted=56, done=56),
+            stats("emails", "parse MIME · store · describe", "closed", 1,
+                  accepted=56, done=55, failed=1),
+            stats("pdftotext", "OCR · extract · publish", "running", 10,
+                  accepted=23, queued=6, in_flight=10, done=7, skipped=9),
+            stats("summarisation-embedding", "summarise · embed · publish",
+                  "running", 8, accepted=7, queued=2, in_flight=3, done=2),
+            stats("plaintext-embedding", "chunk · embed · publish",
+                  "running", 8,
+                  accepted=197, queued=12, in_flight=8, done=177),
+        )
+    ]
+    dashboard = IngestDashboard("matter", RUN_ID, STAGES, enabled=False)
+    dashboard.attach_services(services)
+    text = rendered(dashboard, width=120)
+    assert "Services" in text
+    for name in ("MANAGEMENT", "EMAILS", "PDFTOTEXT",
+                 "SUMMARISATION-EMBEDDING", "PLAINTEXT-EMBEDDING"):
+        assert name in text, f"{name} rectangle missing"
+    # Live per-service figures, not just labels.
+    assert "6 queued" in text and "10 in flight" in text
+    assert "177 done" in text and "1 failed" in text and "9 skipped" in text
+    assert "10 workers" in text
+    assert "1 worker " in text and "1 workers" not in text
+    assert "closed" in text and "running" in text
+
+    # A narrow terminal stacks rather than truncating the last rectangles.
+    narrow = rendered(dashboard, width=44)
+    for name in ("MANAGEMENT", "PLAINTEXT-EMBEDDING"):
+        assert name in narrow, f"{name} lost at narrow width"
+    assert max(len(line) for line in narrow.splitlines()) <= 44
+
+    # No services attached: the region contributes nothing.
+    bare = IngestDashboard("matter", RUN_ID, STAGES, enabled=False)
+    assert "Services" not in rendered(bare)
+    print("  service rectangles render with live per-service counts")
+
+
 def main() -> int:
     check_stage_model_and_render()
+    check_service_rectangles()
     with tempfile.TemporaryDirectory(prefix="pa-dashboard-") as tmp:
         check_widgets_and_event_routing(Path(tmp))
     check_non_tty_never_activates()

@@ -1,0 +1,153 @@
+# ============================================================================
+# VictoriaMetrics K8s Stack - Local Development (M5 / 16GB)
+# ============================================================================
+# Release: vmks
+# Namespace: observability
+# ============================================================================
+
+# --- Logs Storage & Collection (VLSingle + VLAgent) ---
+vlsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "7"
+    storage:
+      resources:
+        requests:
+          storage: 5Gi
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+
+vlagent:
+  enabled: true
+  spec:
+    k8sCollector:
+      enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+# --- Metrics Storage (VMSingle) ---
+vmsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "7"
+    storage:
+      resources:
+        requests:
+          storage: 10Gi
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+# --- Metrics Collection Agent (VMAgent) ---
+vmagent:
+  enabled: true
+  spec:
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "300m"
+        memory: "256Mi"
+
+# --- Alerting (disabled for local dev) ---
+vmalert:
+  enabled: false
+
+alertmanager:
+  enabled: false
+
+# --- Grafana (lightweight) ---
+grafana:
+  enabled: true
+  adminPassword: "admin"
+  plugins:
+    - victoriametrics-logs-datasource
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "512Mi"
+  sidecar:
+    dashboards:
+      enabled: true
+    datasources:
+      enabled: true
+  persistence:
+    enabled: true
+    size: 10Gi
+
+# --- Single VictoriaMetrics datasource ---
+defaultDatasources:
+  victoriametrics:
+    datasources:
+      - name: VictoriaMetrics
+        type: prometheus
+        uid: VictoriaMetrics
+        access: proxy
+        url: http://vmsingle-vmks-victoria-metrics-k8s-stack.observability.svc.cluster.local.:8428
+        isDefault: true
+        editable: false
+  victorialogs:
+    datasources:
+      - name: VictoriaLogs
+        type: victoriametrics-logs-datasource
+        uid: VictoriaLogs
+        access: proxy
+        url: http://vlsingle-vmks-victoria-metrics-k8s-stack.observability.svc.cluster.local.:9428
+        editable: false
+
+# --- Disable heavy default dashboards & rules ---
+defaultDashboards:
+  enabled: true
+experimentalDashboards:
+  enabled: false
+defaultRules:
+  create: false
+
+# --- K8s Metrics Exporters (lightweight) ---
+kube-state-metrics:
+  enabled: true
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "50m"
+      memory: "64Mi"
+
+prometheus-node-exporter:
+  enabled: true
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "16Mi"
+    limits:
+      cpu: "50m"
+      memory: "32Mi"
+
+# --- Operator (lightweight) ---
+victoria-metrics-operator:
+  resources:
+    requests:
+      cpu: "25m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"

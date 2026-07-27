@@ -1,0 +1,112 @@
+# ============================================================================
+# Global & Environment Settings
+# ============================================================================
+global:
+  namespace: pocket-advisor
+  environment: local
+
+# ============================================================================
+# Tier 1: MinIO Object Storage
+# ============================================================================
+minio:
+  image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+  replicaCount: 1
+  apiPort: 9000
+  consolePort: 9001
+  credentials:
+    accessKey: minioadmin
+    secretKey: minioadminpassword
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "768Mi"
+
+# ============================================================================
+# Pipeline Bus: NATS JetStream
+# ============================================================================
+nats:
+  image: nats:2.10-alpine
+  replicaCount: 1
+  clientPort: 4222
+  monitorPort: 8222
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests:
+      cpu: "150m"
+      memory: "128Mi"
+    limits:
+      cpu: "300m"
+      memory: "384Mi"
+
+# ============================================================================
+# Tier 2 & 3: PostgreSQL + pgvector
+# ============================================================================
+postgres:
+  image: pgvector/pgvector:pg16
+  replicaCount: 1
+  port: 5432
+  credentials:
+    db: rag_ingestion
+    user: postgres
+    password: postgrespassword
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      cpu: "300m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1536Mi"
+
+# ============================================================================
+# Worker Pipeline Deployments (Total Budget: 6 Cores / 8 GB RAM)
+# ============================================================================
+workers:
+  imagePullPolicy: IfNotPresent
+
+  emailProcessor:
+    image: pocket-advisor/email-processor-worker:latest
+    replicaCount: 2
+    metricsPort: 9090
+    resources:
+      requests:
+        cpu: "150m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+
+  pdfExtractor:
+    image: pocket-advisor/pdf-extractor-worker:latest
+    replicaCount: 3  # 3 x 1.0 CPU = 3.0 Cores limit for OCR/PDFium
+    metricsPort: 9090
+    resources:
+      requests:
+        cpu: "400m"
+        memory: "384Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1024Mi"
+
+  embeddingIndexer:
+    image: pocket-advisor/embedding-indexer-worker:latest
+    replicaCount: 2
+    metricsPort: 9090
+    embeddingApiUrl: "http://embedding-model-service.pocket-advisor.svc.cluster.local:8080/v1/embeddings"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"

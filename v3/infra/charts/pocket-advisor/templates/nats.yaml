@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-nats
+  labels:
+    app.kubernetes.io/component: message-bus
+spec:
+  serviceName: {{ .Release.Name }}-nats
+  replicas: {{ .Values.nats.replicaCount }}
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: {{ .Values.nats.image }}
+          command:
+            - nats-server
+            - "-js"
+            - "-m"
+            - "{{ .Values.nats.monitorPort }}"
+            - "-sd"
+            - "/data"
+          ports:
+            - containerPort: {{ .Values.nats.clientPort }}
+            - containerPort: {{ .Values.nats.monitorPort }}
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+          volumeMounts:
+            - name: nats-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: nats-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: {{ .Values.nats.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nats
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.nats.clientPort }}
+      targetPort: {{ .Values.nats.clientPort }}
+      name: client
+    - port: {{ .Values.nats.monitorPort }}
+      targetPort: {{ .Values.nats.monitorPort }}
+      name: monitor
+  selector:
+    app: nats

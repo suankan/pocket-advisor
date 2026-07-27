@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-embedding-indexer-worker
+  labels:
+    app.kubernetes.io/component: worker
+    app: embedding-indexer-worker
+spec:
+  replicas: {{ .Values.workers.embeddingIndexer.replicaCount }}
+  selector:
+    matchLabels:
+      app: embedding-indexer-worker
+  template:
+    metadata:
+      labels:
+        app: embedding-indexer-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.workers.embeddingIndexer.metricsPort }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: embedding-indexer-worker
+          image: {{ .Values.workers.embeddingIndexer.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.workers.embeddingIndexer.metricsPort }}
+              name: metrics
+          env:
+            - name: NATS_URL
+              value: "nats://{{ .Release.Name }}-nats:4222"
+            - name: DATABASE_URL
+              value: "postgres://{{ .Values.postgres.credentials.user }}:{{ .Values.postgres.credentials.password }}@{{ .Release.Name }}-postgres:5432/{{ .Values.postgres.credentials.db }}?sslmode=disable"
+            - name: EMBEDDING_API_URL
+              value: {{ .Values.workers.embeddingIndexer.embeddingApiUrl }}
+            - name: METRICS_PORT
+              value: "{{ .Values.workers.embeddingIndexer.metricsPort }}"
+          resources:
+            {{- toYaml .Values.workers.embeddingIndexer.resources | nindent 12 }}

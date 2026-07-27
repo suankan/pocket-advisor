@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-email-processor-worker
+  labels:
+    app.kubernetes.io/component: worker
+    app: email-processor-worker
+spec:
+  replicas: {{ .Values.workers.emailProcessor.replicaCount }}
+  selector:
+    matchLabels:
+      app: email-processor-worker
+  template:
+    metadata:
+      labels:
+        app: email-processor-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.workers.emailProcessor.metricsPort }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: email-processor-worker
+          image: {{ .Values.workers.emailProcessor.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.workers.emailProcessor.metricsPort }}
+              name: metrics
+          env:
+            - name: NATS_URL
+              value: "nats://{{ .Release.Name }}-nats:4222"
+            - name: MINIO_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              value: {{ .Values.minio.credentials.accessKey }}
+            - name: MINIO_SECRET_KEY
+              value: {{ .Values.minio.credentials.secretKey }}
+            - name: METRICS_PORT
+              value: "{{ .Values.workers.emailProcessor.metricsPort }}"
+          resources:
+            {{- toYaml .Values.workers.emailProcessor.resources | nindent 12 }}

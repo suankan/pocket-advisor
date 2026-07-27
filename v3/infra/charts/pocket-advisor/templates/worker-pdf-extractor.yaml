@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pdf-extractor-worker
+  labels:
+    app.kubernetes.io/component: worker
+    app: pdf-extractor-worker
+spec:
+  replicas: {{ .Values.workers.pdfExtractor.replicaCount }}
+  selector:
+    matchLabels:
+      app: pdf-extractor-worker
+  template:
+    metadata:
+      labels:
+        app: pdf-extractor-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.workers.pdfExtractor.metricsPort }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: pdf-extractor-worker
+          image: {{ .Values.workers.pdfExtractor.image }}
+          imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.workers.pdfExtractor.metricsPort }}
+              name: metrics
+          env:
+            - name: NATS_URL
+              value: "nats://{{ .Release.Name }}-nats:4222"
+            - name: MINIO_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              value: {{ .Values.minio.credentials.accessKey }}
+            - name: MINIO_SECRET_KEY
+              value: {{ .Values.minio.credentials.secretKey }}
+            - name: METRICS_PORT
+              value: "{{ .Values.workers.pdfExtractor.metricsPort }}"
+          resources:
+            {{- toYaml .Values.workers.pdfExtractor.resources | nindent 12 }}

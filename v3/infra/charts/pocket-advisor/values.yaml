@@ -18,7 +18,11 @@ minio:
     secretKey: minioadminpassword
   persistence:
     enabled: true
-    size: 10Gi
+    # Tier 1 is the SOLE source of truth (ingestion-design.md §5.1, §6.3).
+    # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children.
+    # ~60x headroom: the matter is active, and re-ingestion writes new
+    # extracted/ objects without reclaiming old ones.
+    size: 50Gi
   resources:
     requests:
       cpu: "200m"
@@ -37,7 +41,10 @@ nats:
   monitorPort: 8222
   persistence:
     enabled: true
-    size: 2Gi
+    # Commands carry object references and doc_ids (~1Ki each), never document
+    # text (ingestion-design.md §4.1). Sized for backlog depth, not document
+    # volume: a 100k-message backlog is ~100Mi, and WorkQueue deletes on ack.
+    size: 5Gi
   resources:
     requests:
       cpu: "150m"
@@ -59,7 +66,12 @@ postgres:
     password: postgrespassword
   persistence:
     enabled: true
-    size: 5Gi
+    # Tier 2 + Tier 3. Steady state for the measured corpus is ~250Mi
+    # (ingestion-design.md §6.3). The headroom is for three transient
+    # operations, not the steady state: a re-embed holds two embed_model
+    # namespaces at once, REINDEX needs ~2x the index, and max_wal_size
+    # defaults to 1Gi regardless of corpus size.
+    size: 20Gi
   resources:
     requests:
       cpu: "300m"

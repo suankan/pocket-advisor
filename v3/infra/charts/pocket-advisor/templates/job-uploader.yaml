@@ -1,21 +1,31 @@
 {{- if .Values.uploader.enabled }}
 {{/*
-Corpus uploader: moves a directory into Tier 1, which is the sole source of
-truth (§5.1). The only writer to raw/, and the only workload that mounts a
-user filesystem.
+Corpus uploader: moves a workspace's documents into Tier 1, which is the sole
+source of truth (§5.1). The only writer to raw/, and the only workload that
+mounts a user filesystem.
 
-Deliberately not part of a normal install — it is operator-invoked, because
-uploading is an act, not a deployment state:
+WHAT to upload comes from the workspace registry, not from flags. Two values
+identify everything:
+
+  uploader.workspace.config  path to workspaces/workspace-config.yaml
+  uploader.workspace.id      which workspace in it
+
+The registry's collection paths are relative to the registry file's own
+directory, so the Job mounts that directory — registry and corpora together —
+and the collections resolve exactly as they do on the host.
 
   helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
     --set uploader.enabled=true \
-    --set uploader.workspace=family-law \
-    --set uploader.collection=bank-accounts \
-    --set uploader.hostPath=/absolute/path/to/documents
+    --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
+    --set uploader.workspace.id=case-documents-demo
 
 The mount is readOnly. Source corpora are never written, renamed or deleted,
 and that is enforced at the kernel rather than by a code-level guard.
 */}}
+{{- $cfg := required "uploader.workspace.config is required (path to workspace-config.yaml)" .Values.uploader.workspace.config }}
+{{- $wsid := required "uploader.workspace.id is required" .Values.uploader.workspace.id }}
+{{- $dir := dir $cfg }}
+{{- $file := base $cfg }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -41,16 +51,15 @@ spec:
           image: {{ .Values.uploader.image }}
           imagePullPolicy: {{ .Values.workers.imagePullPolicy }}
           args:
-            - "--workspace={{ required "uploader.workspace is required" .Values.uploader.workspace }}"
-            - "--source=/corpus"
+            - "--workspace-config=/workspaces/{{ $file }}"
+            - "--workspace-id={{ $wsid }}"
             - "--concurrency={{ .Values.uploader.concurrency }}"
             {{- if .Values.uploader.forget }}
             # Explicit removal. Absence from a later upload run never implies
             # deletion (§5.1).
             - "--forget={{ .Values.uploader.forget }}"
             - "--yes"
-            {{- else }}
-            - "--collection={{ required "uploader.collection is required" .Values.uploader.collection }}"
+            {{- end }}
             {{- if .Values.uploader.dryRun }}
             - "--dry-run"
             {{- end }}
@@ -59,7 +68,6 @@ spec:
             # Postgres leaves the bucket untouched (§5.1).
             - "--wipe"
             - "--yes"
-            {{- end }}
             {{- end }}
           env:
             {{- include "pa.minioUploaderEnv" . | nindent 12 }}
@@ -70,22 +78,20 @@ spec:
             {{- include "pa.postgresEnv" . | nindent 12 }}
             {{- end }}
           volumeMounts:
-            - name: corpus
-              mountPath: /corpus
+            - name: workspaces
+              mountPath: /workspaces
               readOnly: true
           resources:
             {{- toYaml .Values.uploader.resources | nindent 12 }}
       volumes:
-        - name: corpus
-          {{- if .Values.uploader.hostPath }}
-          hostPath:
-            path: {{ .Values.uploader.hostPath | quote }}
-            type: Directory
-          {{- else if .Values.uploader.existingClaim }}
+        - name: workspaces
+          {{- if .Values.uploader.existingClaim }}
           persistentVolumeClaim:
             claimName: {{ .Values.uploader.existingClaim }}
             readOnly: true
           {{- else }}
-          {{- fail "uploader requires either uploader.hostPath or uploader.existingClaim" }}
+          hostPath:
+            path: {{ $dir | quote }}
+            type: Directory
           {{- end }}
 {{- end }}

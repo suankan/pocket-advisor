@@ -24,15 +24,17 @@ import (
 	"github.com/suankan/pocket-advisor/v3/internal/domain"
 	"github.com/suankan/pocket-advisor/v3/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
+	"github.com/suankan/pocket-advisor/v3/internal/workspace"
 )
 
 type Options struct {
-	WorkspaceID  string
-	CollectionID string
-	SourceDir    string
-	Concurrency  int
-	DryRun       bool
-	RunID        string
+	WorkspaceID string
+	// Collections come from the workspace registry, not from a flag: the
+	// registry is the single definition of what a matter contains (§5.1).
+	Collections []workspace.ResolvedCollection
+	Concurrency int
+	DryRun      bool
+	RunID       string
 }
 
 type Result struct {
@@ -40,6 +42,14 @@ type Result struct {
 	Duplicate int64
 	Failed    int64
 	Bytes     int64
+}
+
+// Add accumulates a per-collection result into a run total.
+func (r *Result) Add(o Result) {
+	r.Uploaded += o.Uploaded
+	r.Duplicate += o.Duplicate
+	r.Failed += o.Failed
+	r.Bytes += o.Bytes
 }
 
 type Uploader struct {
@@ -60,35 +70,55 @@ var skipNames = map[string]bool{
 	"desktop.ini": true,
 }
 
-// Run walks the source directory and uploads everything not already present.
+// Run uploads every collection the workspace mounts.
 //
 // The uploader is additive. It never infers that a document should be removed
 // because this run's folder did not contain it: a staging directory is
 // legitimately partial, and inferring deletion from absence would let an
 // incomplete run destroy the corpus. Removal is explicit (Forget).
 func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
+	var total Result
+
+	u.log.Info("upload starting",
+		"workspace_id", opts.WorkspaceID,
+		"collections", len(opts.Collections),
+		"dry_run", opts.DryRun,
+		"uploader_run_id", opts.RunID)
+
+	// Content seen anywhere in this run, across every collection. Deliberately
+	// shared: the same PDF disclosed under two collections is one object in
+	// Tier 1, and only the first occurrence uploads it.
+	var seen sync.Map
+
+	for _, c := range opts.Collections {
+		res, err := u.collection(ctx, opts, c, &seen)
+		total.Add(res)
+		if err != nil {
+			return total, fmt.Errorf("collection %s: %w", c.ID, err)
+		}
+		u.log.Info("collection complete",
+			"collection_id", c.ID,
+			"uploaded", res.Uploaded, "duplicate", res.Duplicate,
+			"failed", res.Failed, "bytes", res.Bytes)
+	}
+	return total, nil
+}
+
+func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.ResolvedCollection, seen *sync.Map) (Result, error) {
 	var res Result
 
-	files, err := collect(opts.SourceDir)
+	files, err := collect(c.AbsPath)
 	if err != nil {
 		return res, err
 	}
-	u.log.Info("upload starting",
-		"files", len(files),
-		"workspace_id", opts.WorkspaceID,
-		"collection_id", opts.CollectionID,
-		"source", opts.SourceDir,
-		"dry_run", opts.DryRun,
-		"uploader_run_id", opts.RunID)
+	u.log.Info("collection starting",
+		"collection_id", c.ID, "files", len(files),
+		"ingestion_type", c.IngestionType, "path", c.AbsPath)
 
 	conc := opts.Concurrency
 	if conc < 1 {
 		conc = 4
 	}
-
-	// Content already seen in this run: two identical files under different
-	// names must produce one object plus an alias, not a lost race.
-	var seen sync.Map
 
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
@@ -107,7 +137,7 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			n, outcome, err := u.one(ctx, path, opts, &seen)
+			n, outcome, err := u.one(ctx, path, opts, c, seen)
 			switch {
 			case err != nil:
 				atomic.AddInt64(&failed, 1)
@@ -138,14 +168,14 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 // one uploads a single file. The sequence is hash → key → StatObject →
 // PutObject: skip-if-present is exact rather than heuristic, because the key
 // is the content hash.
-func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *sync.Map) (int64, string, error) {
+func (u *Uploader) one(ctx context.Context, path string, opts Options, c workspace.ResolvedCollection, seen *sync.Map) (int64, string, error) {
 	sum, size, err := hashFile(path)
 	if err != nil {
 		return 0, "", err
 	}
 
 	key := domain.RawObjectKey(opts.WorkspaceID, sum)
-	rel, err := filepath.Rel(opts.SourceDir, path)
+	rel, err := filepath.Rel(c.AbsPath, path)
 	if err != nil {
 		rel = filepath.Base(path)
 	}
@@ -192,9 +222,13 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *syn
 	prov = minio.Provenance{
 		SourceFilename: name,
 		SourcePath:     filepath.ToSlash(rel),
-		CollectionID:   opts.CollectionID,
+		CollectionID:   c.ID,
 		UploadedAt:     time.Now().UTC().Format(time.RFC3339),
 		UploaderRunID:  opts.RunID,
+		// Registry attributes travel with the bytes: the workspace config does
+		// not live in the cluster, so anything it knows about a document's
+		// origin is lost unless it is written onto the object (§5.1).
+		Extra: c.Metadata(),
 	}
 	// The uploader does not sniff formats — it is a byte mover. All format
 	// knowledge lives in discovery, in one place (§5.1).

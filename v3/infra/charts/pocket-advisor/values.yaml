@@ -158,16 +158,26 @@ discovery:
 #
 #   helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
 #     --set uploader.enabled=true \
-#     --set uploader.workspace=family-law \
-#     --set uploader.collection=bank-accounts \
-#     --set uploader.hostPath=/absolute/path/to/documents
+#     --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
+#     --set uploader.workspace.id=case-documents-demo
 # ============================================================================
 uploader:
   enabled: false
   image: pocket-advisor/uploader:latest
   metricsPort: 9090
-  workspace: ""
-  collection: ""
+
+  # WHAT to upload comes from the workspace registry, not from flags — the
+  # registry is the single definition of which collections a matter contains
+  # and where their documents live. These two values identify everything.
+  workspace:
+    # Path to workspaces/workspace-config.yaml ON THE HOST. Its parent
+    # directory is mounted readOnly, so the registry and the corpora it
+    # references travel together and relative paths resolve unchanged.
+    config: ""
+    # Which workspace inside that file. A typo fails before anything is
+    # written, and the error lists the ids that do exist.
+    id: ""
+
   concurrency: 4
   dryRun: false
   # --wipe purges Tier 1 AND Tier 2 for the workspace. It empties Postgres
@@ -176,8 +186,8 @@ uploader:
   # --forget removes one document by sha256. Absence from a later upload run
   # never implies deletion.
   forget: ""
-  # Where the documents are. Mounted readOnly.
-  hostPath: ""
+  # Optional: mount the workspaces directory from a PVC instead of the host.
+  # The registry path above is still used, relative to the mount.
   existingClaim: ""
   backoffLimit: 2
   ttlSecondsAfterFinished: 3600

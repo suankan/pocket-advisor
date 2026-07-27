@@ -1,6 +1,6 @@
 # High-Throughput Event-Driven Enterprise RAG Ingestion Engine Architecture
 
-**Version:** `3.5.0`
+**Version:** `3.6.0`
 
 **Architecture Paradigm:** Event-Driven Microservices, In-Memory Pipeline Processing, 3-Tier Storage Model
 
@@ -13,6 +13,11 @@ ingestion — pipeline, storage, failure semantics, codebase layout,
 observability — lives in this file. Its only peer is
 `v3/docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
+
+**Changes in 3.6.0:** the uploader resolves the user's
+`workspaces/workspace-config.yaml` instead of taking a directory (§5.1). Two
+parameters — registry path and workspace id — identify every collection in a
+matter, and registry attributes travel onto the Tier 1 objects.
 
 **Changes in 3.5.0:** Helm is the only deployment path (§6.2); the
 write-authority split of §5.1 is now enforced by two scoped MinIO identities
@@ -503,9 +508,40 @@ and once in MinIO. That duplication buys a single authoritative store with
 uniform access, and it is the user's folder — not the bucket — that is free to
 be reorganised, moved, or deleted afterwards.
 
+#### What to upload comes from the workspace registry
+
+The uploader is not told a directory. It is given the user's
+`workspaces/workspace-config.yaml` — the same registry v2 used — and a
+workspace id, and it resolves the rest:
+
+```
+uploader --workspace-config <path>/workspace-config.yaml
+         --workspace-id     <workspace id>
+```
+
+The registry declares `collections[]` (each with an `id`, a `path`, and an
+`ingestion-type`) and `workspaces[]` that reference collections by id. Those
+two flags therefore identify every document in a matter, and "what this
+workspace contains" has one definition instead of one per invocation.
+
+Collection paths are relative to the registry file's own directory, so the
+registry and the corpora travel together: mounting that one directory is
+enough, and paths resolve in the cluster exactly as they do on the host.
+
+Resolution happens **before any store is touched**. An unknown workspace id
+fails immediately and reports the ids that do exist; a workspace referencing an
+undefined collection is an error rather than a smaller upload, because silently
+ingesting less than the matter contains is the worst available outcome.
+
+Registry attributes are written onto the Tier 1 object alongside the file's own
+provenance — `ingestion-type`, and for bank collections the BSB, account
+number, account type and owners. The registry does not live in the cluster, so
+anything it knows that the bytes do not is lost the moment the bucket outlives
+the checkout.
+
 #### Operation
 
-For each file under the target directory:
+For each file in each of the workspace's collections:
 
 1. Stream the file, computing `sha256` as it reads.
 2. Form the key `workspaces/{workspace_id}/raw/{sha256[0:2]}/{sha256}`.
@@ -529,6 +565,8 @@ system no longer reads:
 | `x-amz-meta-source-filename` | original basename, becomes `documents.source_filename` |
 | `x-amz-meta-source-path` | path relative to the upload root |
 | `x-amz-meta-collection-id` | collection scope for `doc_id` derivation (§5.2) |
+| `x-amz-meta-ingestion-type` | `general` or `bank-transactions`, from the registry |
+| `x-amz-meta-account-*` | BSB, number, type, owners — bank collections only |
 | `x-amz-meta-uploaded-at` | RFC 3339 timestamp |
 | `x-amz-meta-uploader-run-id` | which upload run introduced this object |
 
@@ -586,7 +624,7 @@ same way `--wipe` does for one document.
 #### Interface
 
 ```
-uploader --workspace <id> --collection <id> --source <dir>
+uploader --workspace-config <path> --workspace-id <id>
          [--dry-run] [--concurrency N] [--yes]
          [--wipe | --forget <sha256>]
 ```

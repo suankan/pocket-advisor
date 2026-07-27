@@ -12,11 +12,13 @@ a full re-embed):
 LOAD A CORPUS
   Tier 1 is the source of truth; your folders are a staging feed into it.
 
+  What to upload comes from your workspace registry, so two values identify
+  every collection in a matter:
+
   helm upgrade {{ .Release.Name }} <chart> \
     --set uploader.enabled=true \
-    --set uploader.workspace=<workspace-id> \
-    --set uploader.collection=<collection-id> \
-    --set uploader.hostPath=/absolute/path/to/documents
+    --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
+    --set uploader.workspace.id=<workspace-id>
 
   Add --set uploader.dryRun=true first to see what would be uploaded.
   Re-running is free: content already in Tier 1 is skipped, not re-uploaded.

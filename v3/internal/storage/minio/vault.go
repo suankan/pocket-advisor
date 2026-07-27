@@ -25,6 +25,10 @@ type Provenance struct {
 	UploadedAt     string
 	UploaderRunID  string
 	AliasFilenames []string
+	// Extra carries registry attributes the workspace config knows and the
+	// bytes do not — ingestion type, and for bank collections the account
+	// identification. Keys are stored verbatim under x-amz-meta-.
+	Extra map[string]string
 }
 
 const (
@@ -46,6 +50,15 @@ func (p Provenance) toUserMetadata() map[string]string {
 	}
 	if len(p.AliasFilenames) > 0 {
 		m[metaAliases] = strings.Join(p.AliasFilenames, "\x1f")
+	}
+	for k, v := range p.Extra {
+		if v == "" {
+			continue
+		}
+		// Never let an Extra key shadow a core provenance field.
+		if _, reserved := m[k]; !reserved {
+			m[k] = v
+		}
 	}
 	return m
 }
@@ -70,6 +83,24 @@ func provenanceFrom(userMeta map[string]string) Provenance {
 	}
 	if a := get(metaAliases); a != "" {
 		p.AliasFilenames = strings.Split(a, "\x1f")
+	}
+
+	// Anything not a core field is a registry attribute. Round-tripping it
+	// matters: AddAlias rewrites the object's metadata wholesale, so a key
+	// dropped here is a key deleted from Tier 1.
+	core := map[string]bool{
+		metaFilename: true, metaPath: true, metaColl: true,
+		metaUploaded: true, metaRunID: true, metaAliases: true,
+	}
+	for name, v := range userMeta {
+		k := strings.ToLower(strings.TrimPrefix(name, "X-Amz-Meta-"))
+		if core[k] || v == "" {
+			continue
+		}
+		if p.Extra == nil {
+			p.Extra = map[string]string{}
+		}
+		p.Extra[k] = v
 	}
 	return p
 }

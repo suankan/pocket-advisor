@@ -1,6 +1,6 @@
 # High-Throughput Event-Driven Enterprise RAG Ingestion Engine Architecture
 
-**Version:** `3.3.0`
+**Version:** `3.4.0`
 
 **Architecture Paradigm:** Event-Driven Microservices, In-Memory Pipeline Processing, 3-Tier Storage Model
 
@@ -13,6 +13,9 @@ ingestion — pipeline, storage, failure semantics, codebase layout,
 observability — lives in this file. Its only peer is
 `v3/docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
+
+**Changes in 3.4.0:** implementation landed (§12 records where the code
+deliberately differs from this design).
 
 **Changes in 3.3.0:**
 
@@ -1299,3 +1302,43 @@ to `v3/docs/retrieval-design.md`.
    image subject added (§5.4); and MinIO needs the bucket-notification
    configuration plus the `raw/` write policy (§5.1). Mechanical, but must
    land with the code.
+
+---
+
+## 12. Implementation Deviations
+
+Recorded where the shipped code differs from the design above. Each is a
+deliberate choice with a reason, not drift.
+
+1. **PDFium runs as WebAssembly, not CGo.** §5.4 and Core Pillar 1 specify CGo
+   bindings to `libpdfium`. The implementation uses `go-pdfium`'s wazero
+   backend instead. It satisfies what the pillar is actually protecting —
+   in-process, in-memory, no OS subprocess — while removing the prebuilt
+   `libpdfium` dependency and the C-heap lifecycle risk that §5.4 spends most
+   of its length mitigating. Tesseract remains CGo, so `document-extractor` is
+   still the only image carrying a C toolchain (§8.3).
+
+2. **`.msg` (Outlook CFBF) is declined, not parsed.** The §5.2 routing table
+   sends `.msg` to the email worker. In practice CFBF has the same problem as
+   legacy binary Office: no credible pure-Go parser. It is classified as
+   `legacy-office` and recorded `SKIPPED` / `UNSUPPORTED_FORMAT`. If the corpus
+   turns out to contain `.msg` in quantity, this needs the same conversion
+   sidecar decision as open decision 1.
+
+3. **Go 1.25 is the minimum toolchain**, required by `go-pdfium`.
+
+4. **OCR is behind the `ocr` build tag.** Only the `document-extractor` image
+   sets it. Any other build links a stub that returns `ErrUnavailable`, which
+   callers treat as `SKIPPED` / `OCR_UNAVAILABLE` rather than a failure. The
+   binary logs a startup warning when it is not linked, because scanned
+   documents being skipped rather than indexed must not be discovered by
+   surprise.
+
+5. **`schema_metadata` is a single-row table** keyed on a `CHECK (id)` boolean
+   rather than a key/value store. §4.4 does not specify the shape; this makes
+   "there is exactly one index configuration" a constraint rather than a
+   convention.
+
+6. **Vectors are written as text and cast to `halfvec`** rather than through
+   `pgvector-go`. Keeps the dependency set smaller; the cost is paid once per
+   chunk at write time and never at query time.

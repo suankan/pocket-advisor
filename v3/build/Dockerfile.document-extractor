@@ -1,0 +1,49 @@
+# document-extractor: the only binary that needs CGo.
+#
+# PDF text extraction and rasterisation run through go-pdfium's WebAssembly
+# backend (pure Go, wazero) — in-process and in-memory, no subprocess. OCR is
+# Tesseract via CGo, which is why this image alone carries a C toolchain and
+# the tesseract runtime (ingestion-design.md §5.4, §8.3).
+#
+# Built with -tags ocr. Without that tag the binary links the OCR stub and
+# records scanned documents as SKIPPED rather than indexing them.
+#
+#   docker build -f build/Dockerfile.document-extractor -t pocket-advisor/document-extractor:latest .
+
+ARG GO_VERSION=1.25
+
+FROM golang:${GO_VERSION}-alpine AS build
+WORKDIR /src
+
+RUN apk add --no-cache \
+        build-base \
+        tesseract-ocr-dev \
+        leptonica-dev
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux go build \
+        -tags ocr \
+        -trimpath -ldflags="-s -w" \
+        -o /out/app ./cmd/document-extractor
+
+FROM alpine:3.20
+# eng+rus matches the corpus. A missing language does not error — it silently
+# produces plausible-looking garbage, which is worse than a failure because it
+# reaches the index (§5.4).
+RUN apk add --no-cache \
+        ca-certificates tzdata \
+        tesseract-ocr \
+        tesseract-ocr-data-eng \
+        tesseract-ocr-data-rus \
+        leptonica && \
+    adduser -D -u 10001 pocket
+
+COPY --from=build /out/app /usr/local/bin/app
+USER pocket
+ENV METRICS_PORT=9090 \
+    TESSDATA_PREFIX=/usr/share/tessdata
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/app"]

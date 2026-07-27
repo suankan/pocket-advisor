@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package pocketadvisor.ingestion.v1;
+
+option go_package = "github.com/suankan/pocket-advisor/v3/api/proto/v1/gen;ingestionv1";
+
+// DocumentMetadata is the envelope every command carries as its first field
+// (ingestion-design.md §4.1).
+message DocumentMetadata {
+  string doc_id = 1;
+  // Empty for root documents. Only DiscoveryService mints those.
+  string parent_doc_id = 2;
+  string workspace_id = 3;
+  string collection_id = 4;
+  string thread_id = 5;
+  string source_filename = 6;
+  string mime_type = 7;
+  string raw_sha256 = 8;
+
+  // OpenTelemetry correlation. Mandatory, not optional: a command without it
+  // produces an orphaned trace and is rejected at the consumer.
+  string traceparent = 9;
+
+  // Container unrolling depth, bounded to stop zip bombs and mail loops (§5.3).
+  int32 depth = 10;
+
+  map<string, string> custom_attributes = 11;
+}
+
+// ProcessEmailCommand -> ingest.emails.raw
+// Also carries archives: an archive is a container with no body text, and the
+// email worker already owns in-RAM container unrolling.
+message ProcessEmailCommand {
+  DocumentMetadata metadata = 1;
+  string minio_raw_uri = 2;
+}
+
+// ProcessPdfCommand -> ingest.pdfs.raw
+message ProcessPdfCommand {
+  DocumentMetadata metadata = 1;
+  string minio_raw_uri = 2;
+  int32 priority = 3;
+}
+
+// ProcessOfficeCommand -> ingest.docx.raw
+message ProcessOfficeCommand {
+  DocumentMetadata metadata = 1;
+  string minio_raw_uri = 2;
+  // docx | xlsx | pptx | rtf | odt
+  string subtype = 3;
+}
+
+// ProcessImageCommand -> ingest.images.raw
+// Dimensions are recorded at discovery so the viability gate can decide
+// without a second fetch (§4.1).
+message ProcessImageCommand {
+  DocumentMetadata metadata = 1;
+  string minio_raw_uri = 2;
+  int32 width = 3;
+  int32 height = 4;
+  int64 byte_size = 5;
+}
+
+// EmbedTextCommand -> ingest.text.embed
+//
+// Carries a doc_id REFERENCE, not the text. NATS caps message payload at 1MB
+// by default and a large OCR'd document exceeds it — failing at the end of the
+// most expensive work in the pipeline. The extractor writes
+// documents.normalized_text; the indexer reads it back (§4.1).
+message EmbedTextCommand {
+  DocumentMetadata metadata = 1;
+  // Character length of the text awaiting embedding, for batch budgeting.
+  int64 text_length = 2;
+}

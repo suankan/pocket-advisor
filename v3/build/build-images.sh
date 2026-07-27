@@ -7,7 +7,9 @@ set -e
 TAG="${1:-latest}"
 cd "$(dirname "$0")/.."
 
-PURE_GO="uploader discovery email-processor office-extractor embed-indexer schema-bootstrap"
+# Derived from cmd/, never hardcoded: an image name that does not match a
+# cmd/ directory is unbuildable, and a chart referencing one fails to pull.
+PURE_GO=$(ls cmd | grep -v '^document-extractor$' | tr '\n' ' ')
 
 for bin in $PURE_GO; do
     echo "==> pocket-advisor/${bin}:${TAG}"

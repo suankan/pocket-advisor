@@ -34,9 +34,13 @@ minio:
 
   persistence:
     enabled: true
+    # CHANGING THIS ON A LIVE RELEASE REQUIRES RECREATING THE STATEFULSET.
+    # volumeClaimTemplates is immutable, so `helm upgrade` fails with
+    # "updates to statefulset spec ... are forbidden". See the chart README.
+    #
     # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children.
     # ~60x headroom: the matter is active, and re-ingestion writes new
-    # extracted/ objects without reclaiming old ones (§6.3).
+    # extracted/ objects without reclaiming old ones (§6.4).
     size: 50Gi
   resources:
     requests: {cpu: "200m", memory: "256Mi"}
@@ -75,7 +79,7 @@ postgres:
     # Steady state for the measured corpus is ~250Mi. The headroom is for
     # three transient operations, not the steady state: a re-embed holds two
     # embed_model namespaces at once, REINDEX needs ~2x the index, and
-    # max_wal_size defaults to 1Gi regardless of corpus size (§6.3).
+    # max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
     size: 20Gi
   resources:
     requests: {cpu: "300m", memory: "512Mi"}
@@ -85,7 +89,14 @@ postgres:
 # Embedding endpoint (external REST API — the engine loads no models)
 # ============================================================================
 embedding:
-  endpoint: "http://embedding-model-service.pocket-advisor.svc.cluster.local:8080/v1/embeddings"
+  # Defaults to a local oMLX on the host, reachable from rancher-desktop /
+  # docker-desktop clusters. Point this at an in-cluster Service or a remote
+  # API for anything else.
+  endpoint: "http://host.docker.internal:8000/v1/embeddings"
+  # The model must actually be served by the endpoint above. schema-bootstrap
+  # probes it for the vector dimension and every worker re-probes at startup,
+  # so a name that is not served fails the deploy rather than producing a
+  # wrongly-shaped index (§4.4).
   model: "jina-embeddings-v5-text-small"
   # Optional pre-existing Secret holding the API key.
   apiKeySecret: ""
@@ -217,7 +228,9 @@ workers:
       limits:   {cpu: "400m", memory: "384Mi"}
 
   embeddingIndexer:
-    image: pocket-advisor/embedding-indexer:latest
+    # Image names match cmd/ directory names exactly — build-images.sh derives
+    # them from that list, so any other name is unbuildable.
+    image: pocket-advisor/embed-indexer:latest
     replicaCount: 2
     metricsPort: 9090
     resources:

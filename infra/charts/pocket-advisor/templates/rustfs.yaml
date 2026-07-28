@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-rustfs
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: object-store
+spec:
+  serviceName: {{ .Release.Name }}-rustfs
+  replicas: {{ .Values.rustfs.replicaCount }}
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      containers:
+        - name: rustfs
+          image: {{ .Values.rustfs.image }}
+          ports:
+            - containerPort: {{ .Values.rustfs.apiPort }}
+            - containerPort: {{ .Values.rustfs.consolePort }}
+          env:
+            - name: RUSTFS_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-credentials
+                  key: rustfs-root-user
+            - name: RUSTFS_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-credentials
+                  key: rustfs-root-password
+            {{- if .Values.discovery.bucketNotification.enabled }}
+            # Bucket notification target for discovery's live path (§5.2).
+            # The event is registered against this ARN by the rustfs-setup
+            # Job. RUSTFS_NOTIFY_ENABLE is required in addition to the
+            # instance-scoped ENABLE_DISCOVERY var below — without it the
+            # whole notify subsystem stays off regardless of targets
+            # configured (confirmed against rustfs/rustfs#2756).
+            - name: RUSTFS_NOTIFY_ENABLE
+              value: "true"
+            - name: RUSTFS_NOTIFY_WEBHOOK_ENABLE_DISCOVERY
+              value: "on"
+            - name: RUSTFS_NOTIFY_WEBHOOK_ENDPOINT_DISCOVERY
+              value: "http://{{ .Release.Name }}-discovery:{{ .Values.discovery.httpPort }}/v1/notify"
+            # Required: the default queue dir (/opt/rustfs/events) doesn't
+            # exist and isn't writable by RustFS's non-root runtime user,
+            # which silently prevents the webhook target from constructing.
+            - name: RUSTFS_NOTIFY_WEBHOOK_QUEUE_DIR_DISCOVERY
+              value: {{ .Values.rustfs.notifyQueueDir | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.rustfs.resources | nindent 12 }}
+          volumeMounts:
+            - name: rustfs-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: rustfs-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: {{ .Values.rustfs.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-rustfs
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.rustfs.apiPort }}
+      targetPort: {{ .Values.rustfs.apiPort }}
+      name: api
+    - port: {{ .Values.rustfs.consolePort }}
+      targetPort: {{ .Values.rustfs.consolePort }}
+      name: console
+  selector:
+    app: rustfs

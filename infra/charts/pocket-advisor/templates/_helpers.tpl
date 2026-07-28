@@ -32,46 +32,53 @@ Infrastructure endpoints, identical for every workload.
 {{- end }}
 
 {{/*
-MinIO with the WORKER identity: read anywhere, write only under extracted/.
-raw/ is the uploader's alone, and that is enforced by policy rather than by
-convention (§5.1).
+Object store (RustFS) with the WORKER identity: read anywhere, write only
+under extracted/. raw/ is the uploader's alone, and that is enforced by
+policy rather than by convention (§5.1).
+
+Env var names stay MINIO_* deliberately: this is our own Go code's
+contract (internal/config), independent of which S3-compatible backend
+actually runs behind it — renaming these would touch every worker's
+config-loading code for no functional benefit, the same reasoning as
+leaving the Go module path as .../v3 after the directory move.
 */}}
 {{- define "pa.minioWorkerEnv" -}}
 - name: MINIO_ENDPOINT
-  value: "{{ .Release.Name }}-minio:{{ .Values.minio.apiPort }}"
+  value: "{{ .Release.Name }}-rustfs:{{ .Values.rustfs.apiPort }}"
 - name: MINIO_BUCKET
-  value: {{ .Values.minio.bucket | quote }}
+  value: {{ .Values.rustfs.bucket | quote }}
 - name: MINIO_ACCESS_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Release.Name }}-credentials
-      key: minio-worker-access-key
+      key: rustfs-worker-access-key
 - name: MINIO_SECRET_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Release.Name }}-credentials
-      key: minio-worker-secret-key
+      key: rustfs-worker-secret-key
 {{- end }}
 
 {{/*
-MinIO with the UPLOADER identity: the only credentials that may write raw/ or
-delete anything.
+Object store (RustFS) with the UPLOADER identity: the only credentials that
+may write raw/ or delete anything. See pa.minioWorkerEnv above for why the
+env var names stay MINIO_*.
 */}}
 {{- define "pa.minioUploaderEnv" -}}
 - name: MINIO_ENDPOINT
-  value: "{{ .Release.Name }}-minio:{{ .Values.minio.apiPort }}"
+  value: "{{ .Release.Name }}-rustfs:{{ .Values.rustfs.apiPort }}"
 - name: MINIO_BUCKET
-  value: {{ .Values.minio.bucket | quote }}
+  value: {{ .Values.rustfs.bucket | quote }}
 - name: MINIO_ACCESS_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Release.Name }}-credentials
-      key: minio-uploader-access-key
+      key: rustfs-uploader-access-key
 - name: MINIO_SECRET_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Release.Name }}-credentials
-      key: minio-uploader-secret-key
+      key: rustfs-uploader-secret-key
 {{- end }}
 
 {{- define "pa.embeddingEnv" -}}

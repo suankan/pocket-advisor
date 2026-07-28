@@ -7,13 +7,25 @@ global:
   logLevel: info
 
 # ============================================================================
-# Tier 1: MinIO Object Storage — the SOLE source of truth
+# Tier 1: RustFS Object Storage — the SOLE source of truth
 #
 # User filesystems are a staging feed into this bucket, never read by the
 # system itself (ingestion-design.md §5.1).
+#
+# Migrated from MinIO: MinIO's Community Edition has been progressively
+# stripped of features since mid-2025 and the project archived in Feb 2026.
+# RustFS is Apache-2.0 and deliberately implements MinIO's admin wire
+# protocol (/minio/admin/v3), so `mc admin` tooling and our whole scoped-
+# identity model carry over unchanged. PINNED to 1.0.0-beta.8, not `latest`:
+# beta.9 introduced a regression where the notify subsystem never leaves
+# "storage layer not initialized" and bucket-notification webhooks silently
+# never fire — confirmed by bisection, reported upstream. Do not bump past
+# beta.8 without re-verifying live notifications end-to-end first.
 # ============================================================================
-minio:
-  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+rustfs:
+  image: rustfs/rustfs:1.0.0-beta.8
+  # Still `mc` — RustFS implements MinIO's admin API, so the same client
+  # that talked to MinIO talks to RustFS unchanged.
   mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
   replicaCount: 1
   apiPort: 9000
@@ -22,8 +34,8 @@ minio:
 
   # Two scoped identities, not one. The uploader is the only writer to raw/
   # and the only identity that may delete; workers read anywhere but write
-  # only under extracted/. Enforced by MinIO policy rather than convention
-  # (§5.1) — see templates/job-minio-setup.yaml.
+  # only under extracted/. Enforced by policy rather than convention
+  # (§5.1) — see templates/job-rustfs-setup.yaml.
   credentials:
     rootUser: minioadmin
     rootPassword: minioadminpassword
@@ -31,6 +43,13 @@ minio:
     uploaderSecretKey: pa-uploader-secret
     workerAccessKey: pa-worker
     workerSecretKey: pa-worker-secret
+
+  # Where the webhook notify target queues events. RustFS's default
+  # (/opt/rustfs/events) doesn't exist and isn't writable by its non-root
+  # runtime user, which silently prevents the target from ever constructing
+  # — this must be overridden. Under /data so it survives restarts on the
+  # same PVC; the leading dot keeps it out of bucket-name enumeration.
+  notifyQueueDir: /data/.rustfs-events
 
   persistence:
     enabled: true

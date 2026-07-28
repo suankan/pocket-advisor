@@ -1,7 +1,7 @@
 pocket-advisor {{ .Chart.Version }} deployed as {{ .Release.Name }}.
 
 Two hooks ran before the workers:
-  - {{ .Release.Name }}-minio-setup      bucket, scoped identities, notification
+  - {{ .Release.Name }}-rustfs-setup     bucket, scoped identities, notification
   - {{ .Release.Name }}-schema-bootstrap probed the embedding endpoint, applied the DDL
 
 schema-bootstrap deletes itself on success, so check the resolved vector

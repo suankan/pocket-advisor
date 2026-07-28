@@ -1,0 +1,192 @@
+{{/*
+Creates the bucket, the two scoped identities, and the bucket notification
+that makes discovery's live path work.
+
+Runs as a post-install/post-upgrade hook before anything else, because both
+the write-authority split (§5.1) and the notification path (§5.2) have to
+exist before a single object lands.
+
+Uses `mc` even though the backend is RustFS, not MinIO: RustFS deliberately
+implements MinIO's admin wire protocol (/minio/admin/v3), so every `mc
+admin` command below is unchanged from the MinIO-backed version of this
+Job — verified directly against RustFS 1.0.0-beta.8 before migrating.
+
+Policy documents are rendered by Helm rather than assembled in the container:
+the minio/mc image is a near-empty distroless-style image with no sed, awk or
+envsubst, and the bucket name is known at render time anyway.
+
+hook-succeeded is deliberately ABSENT here, unlike the other hooks in this
+chart: this Job's admin-API readiness wait (below) can run past whatever
+poll budget this Helm build's generic Job-completion watcher uses before
+giving up — observed directly with Helm v4.2.3, where "waiting for
+resource ... actualStatus=InProgress" is polled a fixed number of times,
+then the Job is deleted via hook-succeeded regardless of whether it had
+actually finished, silently killing the setup script mid-run while the
+release still reports success. Leaving a completed Job around for
+before-hook-creation to clean up on the next install/upgrade is far safer
+than a policy that can kill it before it does its job.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-rustfs-setup
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "pa.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: policies
+          configMap:
+            name: {{ .Release.Name }}-rustfs-policies
+      containers:
+        - name: mc
+          image: {{ .Values.rustfs.mcImage }}
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+          env:
+            - name: MC_HOST_local
+              value: "http://{{ .Values.rustfs.credentials.rootUser }}:{{ .Values.rustfs.credentials.rootPassword }}@{{ .Release.Name }}-rustfs:{{ .Values.rustfs.apiPort }}"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for rustfs"
+              until mc ls local >/dev/null 2>&1; do sleep 2; done
+
+              # Basic S3 connectivity (above) comes up before the admin/IAM
+              # subsystem is actually ready to serve `mc admin` calls — this
+              # gap let a fresh install's admin commands fail while `ensure`
+              # misread the error as an idempotent no-op, so the Job
+              # "succeeded" having created nothing. Gate on the admin API
+              # itself, not just bucket listing.
+              echo "waiting for rustfs admin API"
+              until mc admin info local >/dev/null 2>&1; do sleep 2; done
+
+              # Every step is idempotent: this hook re-runs on every
+              # `helm upgrade`, so "already exists" must be success, not
+              # failure. Errors are never swallowed wholesale — a genuinely
+              # broken policy has to surface here rather than as an auth
+              # failure in a worker three minutes later.
+              #
+              # Shell builtins only: the minio/mc image ships no sed, grep or
+              # awk, so `case` is the pattern match available.
+              ensure() {
+                desc="$1"; shift
+                if out=$("$@" 2>&1); then
+                  echo "ok: $desc"
+                  return 0
+                fi
+                case "$out" in
+                  *already*|*Already*|*"in effect"*|*"no net effect"*)
+                    echo "ok: $desc (already applied)"
+                    return 0 ;;
+                esac
+                echo "FAILED: $desc"
+                echo "$out"
+                return 1
+              }
+
+              ensure "bucket" mc mb --ignore-existing local/{{ .Values.rustfs.bucket }}
+
+              ensure "policy pa-worker"   mc admin policy create local pa-worker   /policies/worker.json
+              ensure "policy pa-uploader" mc admin policy create local pa-uploader /policies/uploader.json
+
+              ensure "user pa-worker"   mc admin user add local {{ .Values.rustfs.credentials.workerAccessKey }}   {{ .Values.rustfs.credentials.workerSecretKey }}
+              ensure "user pa-uploader" mc admin user add local {{ .Values.rustfs.credentials.uploaderAccessKey }} {{ .Values.rustfs.credentials.uploaderSecretKey }}
+
+              ensure "attach pa-worker"   mc admin policy attach local pa-worker   --user {{ .Values.rustfs.credentials.workerAccessKey }}
+              ensure "attach pa-uploader" mc admin policy attach local pa-uploader --user {{ .Values.rustfs.credentials.uploaderAccessKey }}
+
+              {{- if .Values.discovery.bucketNotification.enabled }}
+              # Bucket notification: discovery's live path (§5.2). A dropped
+              # event costs a delay, not a document — the bucket scan is an
+              # exact backstop. RustFS's ARN scheme is arn:rustfs:sqs::..
+              # (MinIO's is arn:minio:sqs::..) — with two further gotchas
+              # confirmed by direct testing against 1.0.0-beta.8:
+              #
+              # 1. The target name must be LOWERCASE regardless of the
+              #    UPPERCASE env var suffix that defines it
+              #    (RUSTFS_NOTIFY_WEBHOOK_ENABLE_DISCOVERY). RustFS
+              #    materializes that env-configured target into its
+              #    persistent config store under a lowercased key; a rule
+              #    registered against the uppercase name never matches it
+              #    ("Target ID ... found in rules but not in target list",
+              #    logged once per object — every upload, silently, forever).
+              # 2. The region segment must match the bucket's actual region
+              #    (us-east-1, S3's default when none is set) rather than
+              #    being left empty as MinIO's ARN convention allows —
+              #    otherwise: "Bucket notification config references
+              #    missing target ARN".
+              mc event add local/{{ .Values.rustfs.bucket }} \
+                arn:rustfs:sqs:us-east-1:discovery:webhook \
+                --event put --prefix workspaces/ 2>/dev/null || \
+                echo "notification already registered"
+              {{- end }}
+
+              echo "rustfs setup complete"
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits:   {cpu: "200m", memory: "128Mi"}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-rustfs-policies
+  labels:
+    {{- include "pa.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  # Worker identity: read anywhere, write ONLY under extracted/, never delete.
+  # This is the enforcement point for the write-authority split — a worker that
+  # tries to write raw/ is refused by policy, not by a code-level guard (§5.1).
+  worker.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+          "Resource": ["arn:aws:s3:::{{ .Values.rustfs.bucket }}"]
+        },
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetObject"],
+          "Resource": ["arn:aws:s3:::{{ .Values.rustfs.bucket }}/*"]
+        },
+        {
+          "Effect": "Allow",
+          "Action": ["s3:PutObject"],
+          "Resource": ["arn:aws:s3:::{{ .Values.rustfs.bucket }}/workspaces/*/extracted/*"]
+        }
+      ]
+    }
+  # Uploader identity: full control, including delete (needed for --wipe).
+  uploader.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:*"],
+          "Resource": [
+            "arn:aws:s3:::{{ .Values.rustfs.bucket }}",
+            "arn:aws:s3:::{{ .Values.rustfs.bucket }}/*"
+          ]
+        }
+      ]
+    }

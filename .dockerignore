@@ -1,0 +1,6 @@
+workspaces/
+*.log
+.git/
+retired-v2/
+tmp/
+.claude/

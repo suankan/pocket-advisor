@@ -1,14 +1,13 @@
-# pocket-advisor v3 — Operator Guide
+# pocket-advisor — Operator Guide
 
 Local Kubernetes RAG ingestion pipeline. This is the day-to-day operator
 handbook: install, load a corpus, watch it drain, inspect state, remove
 documents, upgrade. For the "why", see [`docs/ingestion-design.md`](docs/ingestion-design.md)
 (write path) and [`docs/retrieval-design.md`](docs/retrieval-design.md) (read path).
 
-All commands assume:
+All commands assume you're at the repository root:
 
 ```bash
-cd v3
 export NS=pocket-advisor   # the chart's namespace
 ```
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build every container image. Run from the v3/ directory.
+# Build every container image. Run from the repository root.
 #
 #   ./build/build-images.sh [tag]
 set -e

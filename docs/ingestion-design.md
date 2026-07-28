@@ -11,7 +11,7 @@
 **Status:** holistic design of record for the write path. Everything about
 ingestion — pipeline, storage, failure semantics, codebase layout,
 observability — lives in this file. Its only peer is
-`v3/docs/retrieval-design.md`, which owns every read-path concern; §7 here
+`docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
 
 **Changes in 3.6.0:** the uploader resolves the user's
@@ -56,7 +56,7 @@ deliberately differs from this design).
 * **Embedding model set to `jina-embeddings-v5-text-small` over an external
   REST API**, with vector dimensionality discovered by probing the endpoint
   rather than hardcoded (§4.4).
-* **Retrieval mechanics moved out** to `v3/docs/retrieval-design.md`; §7
+* **Retrieval mechanics moved out** to `docs/retrieval-design.md`; §7
   reduced to the ingestion-side contract.
 * **`project-layout.md` and `observability.md` folded in** as §8 and §9 and
   deleted; both were drifting from the services added in 3.0.0.
@@ -938,7 +938,7 @@ throughput and OCR CPU budget bind long before storage does.
 ## 7. Retrieval Contract
 
 Retrieval mechanics — fusion, ranking, expansion, the query service — live in
-`v3/docs/retrieval-design.md`. This section states only what ingestion
+`docs/retrieval-design.md`. This section states only what ingestion
 guarantees to the read path, because these guarantees constrain ingestion and
 would otherwise be invisible here.
 
@@ -982,7 +982,7 @@ Absorbed from the former `v3/docs/project-layout.md` and brought current with
 ### 8.1 Directory Layout
 
 ```text
-v3/
+pocket-advisor/                    # repo root — single Go module
 ├── cmd/                          # Entry points (each compiles to its own binary)
 │   ├── uploader/                 # user folder → MinIO raw/          (§5.1)
 │   ├── discovery/                # --mode=serve | scan | reconcile   (§5.2)
@@ -1341,7 +1341,7 @@ failure is otherwise invisible.
 16. Every document reaching Tier 3 carries a trace whose root span was created by discovery.
 
 Read-path acceptance criteria (fusion, filter recall, packet budgets) belong
-to `v3/docs/retrieval-design.md`.
+to `docs/retrieval-design.md`.
 
 ---
 

@@ -7,7 +7,7 @@
 **Target Runtime:** Go service over PostgreSQL + pgvector, HTTP to local model endpoints
 
 **Status:** holistic design of record for the read path. Every retrieval
-concern lives in this file. Its peer is `v3/docs/ingestion-design.md`, which
+concern lives in this file. Its peer is `docs/ingestion-design.md`, which
 owns the write path; §7 there states the contract between them and this
 document does not restate ingestion mechanics.
 
@@ -261,7 +261,7 @@ complete on their own — the immediate consumer is a human or agent reading
 `POST /v1/query` output.
 
 Answer generation is **out of scope for this document** and will be specified
-in `v3/docs/generation-design.md` when it is taken up. Only the boundary is
+in `docs/generation-design.md` when it is taken up. Only the boundary is
 fixed here:
 
 * Generation is a **separate, separately-failable call**. A generation outage

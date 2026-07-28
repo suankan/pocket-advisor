@@ -6,7 +6,7 @@ import (
 
 	"github.com/gabriel-vasile/mimetype"
 
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/bus"
 )
 
 // Route is where a document goes and what it is.

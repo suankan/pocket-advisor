@@ -21,13 +21,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/suankan/pocket-advisor/v3/internal/config"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/minio"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
-	"github.com/suankan/pocket-advisor/v3/internal/uploader"
-	"github.com/suankan/pocket-advisor/v3/internal/workspace"
+	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/storage/minio"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/uploader"
+	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 func main() {

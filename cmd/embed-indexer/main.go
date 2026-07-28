@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/suankan/pocket-advisor/v3/internal/app"
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/client/embedding"
-	"github.com/suankan/pocket-advisor/v3/internal/worker"
+	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/client/embedding"
+	"github.com/suankan/pocket-advisor/internal/worker"
 )
 
 func main() {

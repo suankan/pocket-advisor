@@ -9,13 +9,13 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	ingestionv1 "github.com/suankan/pocket-advisor/v3/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/v3/internal/client/embedding"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
-	"github.com/suankan/pocket-advisor/v3/internal/engine/embed"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
-	"github.com/suankan/pocket-advisor/v3/internal/trace"
+	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
+	"github.com/suankan/pocket-advisor/internal/client/embedding"
+	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/engine/embed"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type EmbedWorker struct {

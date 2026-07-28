@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
 type ChunkRepo struct{ db *DB }

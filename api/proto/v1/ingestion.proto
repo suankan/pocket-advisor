@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package pocketadvisor.ingestion.v1;
 
-option go_package = "github.com/suankan/pocket-advisor/v3/api/proto/v1/gen;ingestionv1";
+option go_package = "github.com/suankan/pocket-advisor/api/proto/v1/gen;ingestionv1";
 
 // DocumentMetadata is the envelope every command carries as its first field
 // (ingestion-design.md §4.1).

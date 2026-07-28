@@ -10,11 +10,11 @@ import (
 	"os"
 	"sync"
 
-	"github.com/suankan/pocket-advisor/v3/internal/app"
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/engine/ocr"
-	"github.com/suankan/pocket-advisor/v3/internal/engine/pdf"
-	"github.com/suankan/pocket-advisor/v3/internal/worker"
+	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/engine/ocr"
+	"github.com/suankan/pocket-advisor/internal/engine/pdf"
+	"github.com/suankan/pocket-advisor/internal/worker"
 )
 
 func main() {

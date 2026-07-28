@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/suankan/pocket-advisor/v3/internal/app"
-	"github.com/suankan/pocket-advisor/v3/internal/client/embedding"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/client/embedding"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 )
 
 func main() {

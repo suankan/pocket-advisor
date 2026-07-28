@@ -11,8 +11,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"github.com/suankan/pocket-advisor/v3/internal/config"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
 // Provenance is what travels with the bytes. Content-addressed keys carry no

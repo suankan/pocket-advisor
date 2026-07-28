@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/bus"
 )
 
 func TestClassifyIgnoresLyingExtensions(t *testing.T) {

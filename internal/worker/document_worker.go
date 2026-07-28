@@ -10,15 +10,15 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	ingestionv1 "github.com/suankan/pocket-advisor/v3/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
-	"github.com/suankan/pocket-advisor/v3/internal/engine/ocr"
-	"github.com/suankan/pocket-advisor/v3/internal/engine/pdf"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/minio"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
-	"github.com/suankan/pocket-advisor/v3/internal/trace"
+	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/engine/ocr"
+	"github.com/suankan/pocket-advisor/internal/engine/pdf"
+	"github.com/suankan/pocket-advisor/internal/storage/minio"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 // RasterDPI is the rasterisation resolution for scanned pages. 300 is the

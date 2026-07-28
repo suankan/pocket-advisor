@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/suankan/pocket-advisor/v3/internal/config"
+	"github.com/suankan/pocket-advisor/internal/config"
 )
 
 type Client struct {

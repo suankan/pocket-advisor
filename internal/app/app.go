@@ -9,11 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/config"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/minio"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/storage/minio"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
 type App struct {

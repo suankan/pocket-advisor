@@ -12,10 +12,10 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
 // Terminal marks an error as not worth retrying: the work is broken in a way

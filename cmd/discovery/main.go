@@ -14,9 +14,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/suankan/pocket-advisor/v3/internal/app"
-	"github.com/suankan/pocket-advisor/v3/internal/discovery"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/discovery"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
 func main() {

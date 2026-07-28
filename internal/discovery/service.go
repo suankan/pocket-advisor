@@ -16,13 +16,13 @@ import (
 
 	"bytes"
 
-	ingestionv1 "github.com/suankan/pocket-advisor/v3/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/v3/internal/bus"
-	"github.com/suankan/pocket-advisor/v3/internal/domain"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/minio"
-	"github.com/suankan/pocket-advisor/v3/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/v3/internal/telemetry"
-	"github.com/suankan/pocket-advisor/v3/internal/trace"
+	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
+	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/storage/minio"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type Service struct {

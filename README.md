@@ -5,11 +5,24 @@ handbook: install, load a corpus, watch it drain, inspect state, remove
 documents, upgrade. For the "why", see [`docs/ingestion-design.md`](docs/ingestion-design.md)
 (write path) and [`docs/retrieval-design.md`](docs/retrieval-design.md) (read path).
 
-All commands assume you're at the repository root:
+All commands assume you're at the repository root, with a kube context that
+defaults to the `pocket-advisor` namespace — set that up once:
 
 ```bash
-export NS=pocket-advisor   # the chart's namespace
+# One-time: a dedicated context so kubectl/helm never need -n/--namespace.
+# Doesn't touch your existing default context — <cluster>/<user> are
+# whatever `kubectl config get-contexts` shows for the context you're
+# already using against this cluster.
+kubectl config set-context pocket-advisor --cluster=<cluster> --user=<user> \
+  --namespace=pocket-advisor
+
+kubectl config use-context pocket-advisor   # switch into it
+# kubectl config use-context <previous>     # switch back for other work
 ```
+
+Every command below omits `-n`/`--namespace` on that basis. If you'd rather
+not touch kube contexts, add `-n pocket-advisor` (or `--namespace
+pocket-advisor`) back to any `kubectl`/`helm` command yourself.
 
 ## Concepts you need before running anything
 
@@ -62,9 +75,7 @@ export NS=pocket-advisor   # the chart's namespace
 ## 2. Install
 
 ```bash
-kubectl create namespace $NS   # if it doesn't already exist
-
-helm install pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm install pocket-advisor ./infra/charts/pocket-advisor --create-namespace \
   --set embedding.model=<model-name-served-by-your-endpoint>
 ```
 
@@ -81,14 +92,14 @@ dimension got resolved (the index can't be reshaped later without a full
 re-embed) in the table it wrote instead of the Job's logs:
 
 ```bash
-kubectl -n $NS exec pocket-advisor-postgres-0 -- \
+kubectl exec pocket-advisor-postgres-0 -- \
   psql -U postgres -d rag_ingestion -c "select * from schema_metadata;"
 ```
 
 Confirm everything is up:
 
 ```bash
-kubectl -n $NS get pods
+kubectl get pods
 ```
 
 You should see 2 discovery, 2 email-processor, 3 document-extractor, 1
@@ -103,7 +114,7 @@ Everything the uploader needs comes from `workspace-config.yaml` — you only
 ever pass its path and a workspace id:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set uploader.enabled=true \
   --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
   --set uploader.workspace.id=<workspace-id> \
@@ -117,7 +128,7 @@ in the workspace id fails immediately and lists the ids that do exist.
 Watch it (the Job's pod name is timestamped, so grab the newest one):
 
 ```bash
-kubectl -n $NS logs -f "$(kubectl -n $NS get pods -o name | grep uploader | tail -1)"
+kubectl logs -f "$(kubectl get pods -o name | grep uploader | tail -1)"
 ```
 
 ### 3.2 Do the real upload
@@ -125,7 +136,7 @@ kubectl -n $NS logs -f "$(kubectl -n $NS get pods -o name | grep uploader | tail
 Drop `dryRun`:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set uploader.enabled=true \
   --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
   --set uploader.workspace.id=<workspace-id>
@@ -139,7 +150,7 @@ re-uploaded.
 disable it explicitly on your *next* unrelated upgrade:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set uploader.enabled=false
 ```
 
@@ -157,7 +168,7 @@ ingestion automatically. If a notification was ever dropped, or you want to
 force a full catch-up scan of everything already in the bucket:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set discovery.scan.enabled=true \
   --set discovery.scan.workspace=<workspace-id>
 ```
@@ -170,19 +181,19 @@ afterwards for the same reason as the uploader above.
 
 ```bash
 # Pipeline backlog: streams, consumers, message counts
-kubectl -n $NS exec pocket-advisor-nats-0 -- \
+kubectl exec pocket-advisor-nats-0 -- \
   sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
 
 # Discovery service logs (the sole ingestion entry point)
-kubectl -n $NS logs -l app=discovery -f
+kubectl logs -l app=discovery -f
 
 # Any worker's logs (pods carry a plain `app=<name>` label, not
 # app.kubernetes.io/component — that field only exists on the Deployment
 # resource itself, so it's not selectable via `kubectl get pods -l ...`)
-kubectl -n $NS logs -l app=document-extractor-worker -f
-kubectl -n $NS logs -l app=email-processor-worker -f
-kubectl -n $NS logs -l app=office-extractor-worker -f
-kubectl -n $NS logs -l app=embedding-indexer-worker -f
+kubectl logs -l app=document-extractor-worker -f
+kubectl logs -l app=email-processor-worker -f
+kubectl logs -l app=office-extractor-worker -f
+kubectl logs -l app=embedding-indexer-worker -f
 ```
 
 > The NATS image ships only `nats-server`, not the `nats` CLI — querying
@@ -192,7 +203,7 @@ kubectl -n $NS logs -l app=embedding-indexer-worker -f
 Row counts, once you want ground truth instead of logs:
 
 ```bash
-kubectl -n $NS exec pocket-advisor-postgres-0 -- \
+kubectl exec pocket-advisor-postgres-0 -- \
   psql -U postgres -d rag_ingestion -c "select count(*) from documents;" \
   -c "select count(*) from document_chunks;"
 ```
@@ -208,7 +219,7 @@ confirmation unless run through the Job (which always passes `--yes`).
 
 ```bash
 # One document, cascading into Tier 2, by sha256
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set uploader.enabled=true \
   --set uploader.workspace.config=/abs/path/to/workspace-config.yaml \
   --set uploader.workspace.id=<workspace-id> \
@@ -216,7 +227,7 @@ helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
 
 # The entire workspace: every Tier 1 object AND every Tier 2 row/chunk.
 # Re-run the normal upload afterwards to reload it.
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS \
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
   --set uploader.enabled=true \
   --set uploader.workspace.config=/abs/path/to/workspace-config.yaml \
   --set uploader.workspace.id=<workspace-id> \
@@ -231,7 +242,7 @@ again afterwards (see the trap in §3.2).
 
 ```bash
 ./build/build-images.sh [tag]
-kubectl -n $NS rollout restart deployment -l app.kubernetes.io/part-of=rag-ingestion-engine
+kubectl rollout restart deployment -l app.kubernetes.io/part-of=rag-ingestion-engine
 ```
 
 (`kubectl rollout restart` is needed because the tag is usually still
@@ -243,7 +254,7 @@ kubectl -n $NS rollout restart deployment -l app.kubernetes.io/part-of=rag-inges
 Plain config or worker-image changes are a normal rolling upgrade:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS --reuse-values
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values
 ```
 
 Two categories of change need extra care, both stemming from the same
@@ -258,10 +269,10 @@ immutable**, so certain changes can never land via a plain `helm upgrade`:
   is derived state, the fix is targeted rather than a full reinstall:
 
   ```bash
-  kubectl -n $NS scale statefulset pocket-advisor-postgres --replicas=0
-  kubectl -n $NS wait --for=delete pod/pocket-advisor-postgres-0 --timeout=60s
-  kubectl -n $NS delete pvc postgres-data-pocket-advisor-postgres-0
-  helm upgrade pocket-advisor ./infra/charts/pocket-advisor -n $NS --reuse-values --wait
+  kubectl scale statefulset pocket-advisor-postgres --replicas=0
+  kubectl wait --for=delete pod/pocket-advisor-postgres-0 --timeout=60s
+  kubectl delete pvc postgres-data-pocket-advisor-postgres-0
+  helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values --wait
   ```
 
   schema-bootstrap re-runs automatically as a post-upgrade hook and rebuilds
@@ -278,7 +289,7 @@ immutable**, so certain changes can never land via a plain `helm upgrade`:
 Always confirm what's actually in Postgres before wiping it:
 
 ```bash
-kubectl -n $NS exec pocket-advisor-postgres-0 -- \
+kubectl exec pocket-advisor-postgres-0 -- \
   psql -U postgres -d rag_ingestion -c "select count(*) from documents;"
 ```
 
@@ -288,9 +299,9 @@ everything.
 ## 8. Uninstall
 
 ```bash
-helm uninstall pocket-advisor -n $NS
-kubectl -n $NS get pvc   # PVCs outlive the release — delete explicitly if you want them gone
-kubectl -n $NS delete pvc --all
+helm uninstall pocket-advisor
+kubectl get pvc   # PVCs outlive the release — delete explicitly if you want them gone
+kubectl delete pvc --all
 ```
 
 PVCs aren't the only thing that outlives a plain `helm uninstall` — Helm hook
@@ -305,6 +316,6 @@ If you ever do find a leftover Job after uninstalling, it means the last
 hook run before that failed:
 
 ```bash
-kubectl -n $NS get jobs
-kubectl -n $NS delete job -l app.kubernetes.io/part-of=rag-ingestion-engine
+kubectl get jobs
+kubectl delete job -l app.kubernetes.io/part-of=rag-ingestion-engine
 ```

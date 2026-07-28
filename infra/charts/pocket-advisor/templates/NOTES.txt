@@ -4,10 +4,12 @@ Two hooks ran before the workers:
   - {{ .Release.Name }}-minio-setup      bucket, scoped identities, notification
   - {{ .Release.Name }}-schema-bootstrap probed the embedding endpoint, applied the DDL
 
-Check the resolved vector dimension (the index cannot be reshaped later without
-a full re-embed):
+schema-bootstrap deletes itself on success, so check the resolved vector
+dimension (the index cannot be reshaped later without a full re-embed) in
+the table it wrote instead:
 
-  kubectl logs -l job-name={{ .Release.Name }}-schema-bootstrap
+  kubectl exec {{ .Release.Name }}-postgres-0 -- \
+    psql -U postgres -d rag_ingestion -c "select * from schema_metadata;"
 
 LOAD A CORPUS
   Tier 1 is the source of truth; your folders are a staging feed into it.
@@ -34,7 +36,7 @@ LOAD A CORPUS
   needed to catch up after a bulk upload or a dropped event.
 
 WATCH IT DRAIN
-  kubectl exec -it {{ .Release.Name }}-nats-0 -- nats stream info INGESTION
+  kubectl exec {{ .Release.Name }}-nats-0 -- sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
   kubectl logs -l app=discovery -f
 
 REMOVE DOCUMENTS

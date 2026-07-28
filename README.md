@@ -76,11 +76,13 @@ Two Helm hooks run automatically before any worker starts:
 2. `pocket-advisor-schema-bootstrap` — probes the embedding endpoint's
    dimension and applies the DDL (`halfvec(N)`, HNSW + GIN indexes).
 
-Check what dimension got resolved (the index can't be reshaped later without
-a full re-embed):
+schema-bootstrap deletes itself on success (see §8 for why), so check what
+dimension got resolved (the index can't be reshaped later without a full
+re-embed) in the table it wrote instead of the Job's logs:
 
 ```bash
-kubectl -n $NS logs -l job-name=pocket-advisor-schema-bootstrap
+kubectl -n $NS exec pocket-advisor-postgres-0 -- \
+  psql -U postgres -d rag_ingestion -c "select * from schema_metadata;"
 ```
 
 Confirm everything is up:
@@ -289,4 +291,20 @@ everything.
 helm uninstall pocket-advisor -n $NS
 kubectl -n $NS get pvc   # PVCs outlive the release — delete explicitly if you want them gone
 kubectl -n $NS delete pvc --all
+```
+
+PVCs aren't the only thing that outlives a plain `helm uninstall` — Helm hook
+resources (the `minio-setup` and `schema-bootstrap` Jobs) are never part of
+the release's tracked manifest, so uninstall doesn't touch them either. Both
+carry `hook-delete-policy: before-hook-creation,hook-succeeded`, so a
+successful run deletes its own Job immediately rather than waiting around —
+there should be nothing left to clean up. A *failed* hook run is the one
+exception: it's left in place deliberately so you can `kubectl logs` it,
+and only gets swept on the next `helm install`/`upgrade` (`before-hook-creation`).
+If you ever do find a leftover Job after uninstalling, it means the last
+hook run before that failed:
+
+```bash
+kubectl -n $NS get jobs
+kubectl -n $NS delete job -l app.kubernetes.io/part-of=rag-ingestion-engine
 ```

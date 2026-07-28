@@ -6,6 +6,16 @@ A hook, and one that runs before every worker: halfvec(N) is a typed column,
 so N must be resolved before the first CREATE TABLE. Every worker re-probes at
 startup and treats a mismatch as fatal, so this Job failing must block the
 rollout rather than let workers come up against a wrongly-shaped index.
+
+hook-succeeded is required, not optional: hook resources are never part of
+the release's tracked manifest (Helm's own docs — "Hooks are not managed
+with corresponding release objects"), so `helm uninstall` never removes
+them. Without it, a successful run leaves this Job behind forever, only
+ever cleaned up by before-hook-creation on the NEXT install/upgrade. On
+success it deletes itself immediately, so kubectl logs against it stops
+working the moment it finishes — schema_metadata in Postgres is the durable
+record of what it resolved (§4.4). hook-failed is deliberately absent: a
+failed run should stay inspectable until the next hook creation replaces it.
 */}}
 apiVersion: batch/v1
 kind: Job
@@ -16,7 +26,7 @@ metadata:
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.schemaBootstrap.backoffLimit }}
   template:

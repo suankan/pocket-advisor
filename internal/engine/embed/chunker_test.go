@@ -56,6 +56,28 @@ func TestSplitNeverBreaksMultibyteRunes(t *testing.T) {
 	}
 }
 
+func TestSplitOverlapStartsOnRuneBoundary(t *testing.T) {
+	// Place a two-byte Cyrillic rune exactly where the old byte-based overlap
+	// start landed. The next chunk must begin at the following complete rune.
+	text := strings.Repeat("a", TargetChars-OverlapChars-1) + "я" + strings.Repeat("b", TargetChars)
+	chunks := Split(text)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	for _, c := range chunks {
+		if !utf8.ValidString(c.Text) {
+			t.Fatalf("chunk %d is not valid utf-8", c.Index)
+		}
+		if c.Start > 0 && !utf8.RuneStart(text[c.Start]) {
+			t.Fatalf("chunk %d starts inside a rune at byte %d", c.Index, c.Start)
+		}
+	}
+	if want := TargetChars - OverlapChars + 1; chunks[1].Start != want {
+		t.Fatalf("second chunk starts at byte %d, want %d", chunks[1].Start, want)
+	}
+}
+
 func TestSplitOffsetsPointIntoSource(t *testing.T) {
 	text := strings.Repeat("sentence one. sentence two. ", 400)
 	for _, c := range Split(text) {

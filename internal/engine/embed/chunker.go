@@ -11,7 +11,7 @@ const (
 	// Window and overlap in tokens, converted to characters below.
 	TargetTokens  = 512
 	OverlapTokens = 64
-	// Rough characters-per-token for mixed English/Russian prose. Chunk sizes
+	// Rough Unicode characters-per-token for mixed English/Russian prose. Chunk sizes
 	// only need to be approximately right; the embedding endpoint truncates
 	// anything genuinely over-long.
 	CharsPerToken = 4
@@ -52,10 +52,8 @@ func Split(text string) []Chunk {
 	idx := 0
 
 	for start < len(text) {
-		end := start + TargetChars
-		if end >= len(text) {
-			end = len(text)
-		} else {
+		end := advanceRunes(text, start, TargetChars)
+		if end < len(text) {
 			end = boundary(text, start, end)
 		}
 
@@ -69,7 +67,7 @@ func Split(text string) []Chunk {
 			break
 		}
 
-		next := end - OverlapChars
+		next := retreatRunes(text, end, OverlapChars)
 		if next <= start {
 			// Guarantee forward progress even if the boundary search lands
 			// inside the overlap region.
@@ -78,6 +76,31 @@ func Split(text string) []Chunk {
 		start = next
 	}
 	return chunks
+}
+
+// advanceRunes returns the byte offset n Unicode characters after start.
+// Chunk offsets remain byte offsets because Go strings are byte-addressed, but
+// windows must be measured in characters so multi-byte text is neither split
+// nor given a smaller effective window.
+func advanceRunes(s string, start, n int) int {
+	pos := start
+	for i := 0; i < n && pos < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[pos:])
+		pos += size
+	}
+	return pos
+}
+
+// retreatRunes returns the byte offset n Unicode characters before end.
+func retreatRunes(s string, end, n int) int {
+	pos := end
+	for i := 0; i < n && pos > 0; i++ {
+		pos--
+		for pos > 0 && !utf8.RuneStart(s[pos]) {
+			pos--
+		}
+	}
+	return pos
 }
 
 // boundary finds the best split point in the final 40% of the window.

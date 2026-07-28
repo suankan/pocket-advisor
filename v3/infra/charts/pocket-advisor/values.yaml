@@ -13,8 +13,8 @@ global:
 # system itself (ingestion-design.md §5.1).
 # ============================================================================
 minio:
-  image: minio/minio:RELEASE.2024-01-18T22-51-28Z
-  mcImage: minio/mc:RELEASE.2024-01-18T07-03-39Z
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
   replicaCount: 1
   apiPort: 9000
   consolePort: 9001
@@ -50,7 +50,7 @@ minio:
 # Pipeline Bus: NATS JetStream
 # ============================================================================
 nats:
-  image: nats:2.10-alpine
+  image: nats:2.14.3-alpine
   replicaCount: 1
   clientPort: 4222
   monitorPort: 8222
@@ -67,7 +67,10 @@ nats:
 # Tier 2 & 3: PostgreSQL + pgvector
 # ============================================================================
 postgres:
-  image: pgvector/pgvector:pg16
+  # pgvector 0.8.5 on Postgres 18. A major-version bump changes the on-disk
+  # data directory format, so this requires deleting the postgres PVC before
+  # upgrading a live release — schema-bootstrap recreates the schema fresh.
+  image: pgvector/pgvector:0.8.5-pg18-bookworm
   replicaCount: 1
   port: 5432
   credentials:
@@ -97,7 +100,7 @@ embedding:
   # probes it for the vector dimension and every worker re-probes at startup,
   # so a name that is not served fails the deploy rather than producing a
   # wrongly-shaped index (§4.4).
-  model: "jina-embeddings-v5-text-small"
+  model: "jina-embeddings-v5-text-small-mlx"
   # Optional pre-existing Secret holding the API key.
   apiKeySecret: ""
   apiKeySecretKey: "api-key"

@@ -31,8 +31,13 @@ spec:
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:
+            # Postgres 18's image restructured its volume layout to support
+            # pg_upgrade: PGDATA now lives in a version-named subdirectory
+            # under this mount rather than at its root (docker-library/
+            # postgres#1259). Mounting directly at .../data, as pg16 wanted,
+            # makes every pg18+ container refuse to start.
             - name: postgres-data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
   volumeClaimTemplates:
     - metadata:
         name: postgres-data

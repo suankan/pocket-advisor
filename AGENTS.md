@@ -1,85 +1,102 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local RAG engine over personal content.
+Pocket Advisor is a local, Kubernetes-deployed RAG engine over personal
+content: a Go microservice pipeline (MinIO Tier 1 → Postgres/pgvector Tier
+2/3), driven by NATS JetStream, deployed via a single Helm chart.
+
+`retired-v2/` is a frozen prior implementation (Python, single-process). It
+is history, not a reference architecture — do not build on it, and do not
+treat anything under it as current design.
 
 ## Read first
 
-For every platform task, load these files in order:
+For every task, load in order:
 
 1. this file;
-2. `docs/design.md` — holistic solution architecture, pipeline, artifacts,
-   retrieval, transactions, and system invariants;
-   - load the relevant feature design from the per-concern folders under
-     `docs/` (`ingestion/`, `retrieval/`, `generation/`, `inference/`,
-     `storage/`, `benchmarks/`, `platform/`) as needed by the task;
-   - read the code as needed;
-3. `docs/work-in-progress.md` — check for unfinished work; cross-reference
-   with `git status`;
-4. `docs/roadmap.md` — ordered future work only;
-5. `docs/changelog.md` — shipped history, newest first (optional context).
+2. [`README.md`](README.md) — the operator handbook: install, load a
+   corpus, watch it drain, remove documents, upgrade. Load this whenever the
+   task touches running the stack, not just its code.
+3. the one holistic doc for the concern the task touches:
+   - [`docs/ingestion-design.md`](docs/ingestion-design.md) — everything
+     write-path: contracts, schemas, every microservice, deployment,
+     codebase layout, observability.
+   - [`docs/retrieval-design.md`](docs/retrieval-design.md) — everything
+     read-path: candidate generation, fusion, reranking, expansion.
+   - `docs/generation-design.md` — answer generation, once that concern is
+     taken up. Does not exist yet; do not create it speculatively.
 
-For case work, additionally load:
+For work involving a specific matter or corpus, additionally load
+`workspaces/workspace-config.yaml` to resolve the workspace/collection the
+task refers to before touching any document.
 
-1. `workspaces/workspace-config.yaml`;
-2. the selected workspace's `WORKSPACE.md`;
-3. its applicable domain playbook(s).
+## Documentation philosophy — one doc per concern, no exceptions
 
-Do not answer case questions from platform instructions alone.
+There are exactly two design docs today, and there will only ever be a
+handful: one per major concern (ingestion, retrieval, eventually
+generation). This is a deliberate rejection of the previous approach —
+per-feature design files under `docs/<concern>/<feature>.md`, plus separate
+`roadmap.md` / `work-in-progress.md` / `changelog.md` bookkeeping files.
+That structure fragmented faster than anyone could keep it honest: designs
+went stale the moment a feature shipped differently than planned, because
+updating them meant finding and touching N scattered files instead of one.
 
-## Documentation lifecycle
+The rule going forward:
 
-The three planning records are:
+- **A new feature or design decision is a new section (or an edit to an
+  existing section) in the relevant concern's doc — never a new file.** If
+  you're about to create `docs/<anything>.md` for a specific feature, stop;
+  put it in the holistic doc instead, under the section it belongs to.
+- **Update the doc in place when the implementation changes.** Both docs
+  already carry the machinery for this: an "Open Decisions" section (§11 in
+  each) for unresolved questions, and `ingestion-design.md` §12
+  "Implementation Deviations" for places the shipped code diverged from the
+  original design. Use those instead of a separate roadmap/changelog file.
+- **Git history is the changelog.** There is no `docs/changelog.md` to
+  update — a descriptive commit message on the design-doc edit and the
+  matching implementation is the record.
+- **There is no work-in-progress scratch file.** Use the conversation's own
+  task tracking for in-flight work; commit the doc update once the design is
+  actually settled, not as a running draft.
 
-- `docs/roadmap.md` — ordered, unshipped work.
-- `docs/work-in-progress.md` — scratch pad for the feature currently being
-  implemented. Near-empty when idle.
-- `docs/changelog.md` — durable, reverse-chronological history of shipped
-  items.
-
-The implementation workflow is:
-
-1. **Design and commit.** Plan the feature, lock down an initial design in a
-   doc under the relevant `docs/` concern folder, and commit.
-2. **Pick up.** Move the roadmap item into `docs/work-in-progress.md` with any
-   active context needed to resume.
-3. **Implement.** Build and verify.
-4. **Lock down and commit.** Update the feature design doc to reflect the final
-   implemented state and commit.
-5. **Changelog.** Add a condensed entry to `docs/changelog.md`
-   (date, title, commit, summary, verification).
-6. **Clean up.** Remove the item from `docs/work-in-progress.md`; remove the
-   completed item from `docs/roadmap.md`, renumber remaining items, and repair
-   cross-references.
-7. **Commit.** One atomic commit with changelog entry, roadmap and
-   work-in-progress records cleanup.
+If a concern grows enough that its single doc becomes unwieldy, that's a
+conversation to have explicitly — split deliberately, don't let it happen by
+accretion.
 
 ## Hard rules
 
-1. **Source of truth corpora collections is read-only.** Never write, rename, or delete anything under a
-   collection root (`workspaces/corpora/...` or a registry path). Durable
-   identity is `(collection_id, sha256)`, never a path. Only engine-derived
-   state under `workspaces/.state/` is regenerable; preserved
-   `search-accuracy-tests/` directories are human-authored workspace test data.
-
-## Design references
-
-All design and architecture detail lives in `docs/`. When working on a
-concern, load the relevant feature doc from the index in `docs/design.md`. Or create the new one if needed.
+1. **Source-of-truth corpora are read-only.** Never write, rename, or
+   delete anything under a collection root (`workspaces/corpora/...` or a
+   registry path). Durable identity is `(collection_id, sha256)`, never a
+   path.
+2. **MinIO Tier 1 is the sole ingested source of truth**, not the
+   filesystem. A workspace's corpus folders are a staging feed the uploader
+   reads once; nothing downstream ever reads them directly
+   (`ingestion-design.md` §5.1). Postgres (Tier 2/3) is derived state —
+   losing it costs a re-scan, not data.
+3. **One doc per concern** (see above) — this is a hard rule, not a
+   preference, because the previous structure's failure mode was silent and
+   gradual.
 
 ## Verification
 
-Use temp fixtures for any integrity/drift test; never modify real corpus files.
-Before handing off a change:
+```bash
+go build ./... && go vet ./... && gofmt -l .
+go test ./...
+helm lint ./infra/charts/pocket-advisor
+```
+
+This host has no local Go toolchain; run the Go checks in a container with a
+persistent module cache instead of re-downloading every time:
 
 ```bash
-for test_file in modules/tests/test_*.py; do
-  uv run python "$test_file"
-done
-uv run pocket-advisor.py test
+docker run --rm -v "$PWD":/src -v gomodcache:/go/pkg/mod -w /src \
+  golang:1.25-alpine sh -c "go build ./... && go vet ./... && go test ./... && gofmt -l ."
+```
+
+Never modify real corpus files to construct a test fixture — use temp
+fixtures. Before handing off a change:
+
+```bash
 git diff --check
 git status --short
 ```
-
-The query-daemon socket test may require permission to bind a temporary local
-Unix socket in restricted environments; that is an environment constraint,
-not grounds to weaken or skip the test.

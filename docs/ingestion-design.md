@@ -1,6 +1,6 @@
 # High-Throughput Event-Driven Enterprise RAG Ingestion Engine Architecture
 
-**Version:** `3.6.0`
+**Version:** `3.7.0`
 
 **Architecture Paradigm:** Event-Driven Microservices, In-Memory Pipeline Processing, 3-Tier Storage Model
 
@@ -14,13 +14,19 @@ observability — lives in this file. Its only peer is
 `docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
 
+**Changes in 3.7.0:** Tier 1 migrated from MinIO to RustFS (§12.7) — four
+bugs found and fixed en route, one still open (§11.5): live bucket
+notifications don't yet fire end-to-end in-cluster, despite working in
+isolated testing of the same version. `discovery.scan` remains the
+operational backstop until that's resolved.
+
 **Changes in 3.6.0:** the uploader resolves the user's
 `workspaces/workspace-config.yaml` instead of taking a directory (§5.1). Two
 parameters — registry path and workspace id — identify every collection in a
 matter, and registry attributes travel onto the Tier 1 objects.
 
 **Changes in 3.5.0:** Helm is the only deployment path (§6.2); the
-write-authority split of §5.1 is now enforced by two scoped MinIO identities
+write-authority split of §5.1 is now enforced by two scoped RustFS identities
 rather than described.
 
 **Changes in 3.4.0:** implementation landed (§12 records where the code
@@ -31,19 +37,19 @@ deliberately differs from this design).
 * **`EmbedTextCommand` now carries a `doc_id` reference, not text** (§4.1).
   Extractors write `documents.normalized_text`; the indexer reads it back.
   Avoids NATS's 1 MB payload cap on large OCR output.
-* **Storage sized against the measured corpus** (§6.4): MinIO 10Gi → 50Gi,
+* **Storage sized against the measured corpus** (§6.4): RustFS 10Gi → 50Gi,
   PostgreSQL 5Gi → 20Gi, NATS 2Gi → 5Gi.
 * **Single-replica, no-backup storage recorded as an accepted risk**
   (§11.2) rather than an open question.
 
 **Changes in 3.2.0:**
 
-* **Tier 1 (MinIO) is now the sole source of truth.** User filesystems are a
+* **Tier 1 (RustFS) is now the sole source of truth.** User filesystems are a
   staging feed, never read by the system (pillar 2, §5.1).
 * **New `Corpus Uploader`** (§5.1) — CLI/Job that moves a folder into
   `raw/`, skipping content already present, with `--wipe` and `--forget`
   resets that cascade into PostgreSQL.
-* **Discovery no longer walks a filesystem** (§5.2) — it consumes MinIO bucket
+* **Discovery no longer walks a filesystem** (§5.2) — it consumes RustFS bucket
   notifications, with a bucket scan as an exact reconciliation. No corpus
   volume mount anywhere in the cluster.
 * **Two Tier 1 prefixes with distinct write authorities:** `raw/` (uploader
@@ -77,7 +83,7 @@ This system provides a high-throughput, deterministic document ingestion pipelin
 
 1. **In-Memory CGo Processing:** Direct C-library memory integration (`libpdfium` and `libtesseract`) inside Go microservices eliminates shell execution overhead and disk I/O latency.
 2. **Strict 3-Tier Data Lifecycle:**
-* **Tier 1 (Immutable Vault):** Object storage (`MinIO` / S3) preserves exact byte representations of original files, and is the **sole source of truth** for document content. User filesystems are a feed into it, never read by the system itself (§5.1).
+* **Tier 1 (Immutable Vault):** Object storage (`RustFS` / S3-compatible) preserves exact byte representations of original files, and is the **sole source of truth** for document content. User filesystems are a feed into it, never read by the system itself (§5.1).
 * **Tier 2 (Relational Graph & Lineage):** Relational storage (`PostgreSQL`) tracks workspace boundaries, thread contexts, and parent-child document trees.
 * **Tier 3 (Vector Similarity Index):** Vector storage (`pgvector`) retains spatial text chunk offsets and half-precision (`halfvec`) HNSW similarity indices.
 
@@ -100,13 +106,13 @@ To eliminate foreign key lookup failures caused by concurrent event consumption,
 Bytes arrive in Tier 1 first, and separately — the uploader (§5.1) puts them there before the pipeline knows they exist:
 
 ```
-[Uploader]  ─── Write Raw Object ────────────────────────► [Tier 1: MinIO raw/]
+[Uploader]  ─── Write Raw Object ────────────────────────► [Tier 1: RustFS raw/]
                                                                    │
                                               (bucket notification │ or scan)
                                                                    ▼
 [Discovery Service]
        │
-       ├─── 1. Read Object + Provenance Metadata ────────► [Tier 1: MinIO raw/]
+       ├─── 1. Read Object + Provenance Metadata ────────► [Tier 1: RustFS raw/]
        │
        ├─── 2. Transactional Create Document Stub ───────► [Tier 2: PostgreSQL Documents]
        │       (State: 'PENDING', parent_doc_id NULL)
@@ -194,7 +200,7 @@ flowchart TB
     UserDir[/"User folder\n(staging, never read by workers)"/]
     Uploader["Corpus Uploader (CLI / Job)\nsha256 → skip-if-present → PutObject"]
     UserDir --> Uploader
-    Uploader -- "raw/{aa}/{sha256} + provenance metadata" --> MinIO[("Tier 1: MinIO\nSOURCE OF TRUTH\nraw/ + extracted/")]
+    Uploader -- "raw/{aa}/{sha256} + provenance metadata" --> RustFS[("Tier 1: RustFS\nSOURCE OF TRUTH\nraw/ + extracted/")]
 
     %% --- DISCOVERY & STUBBING ---
     subgraph Disco["Discovery Service"]
@@ -205,8 +211,8 @@ flowchart TB
         Scan --> Sniff
     end
 
-    MinIO -- "notify / list" --> Disco
-    Sniff -- "1. Read Object + Metadata" --> MinIO
+    RustFS -- "notify / list" --> Disco
+    Sniff -- "1. Read Object + Metadata" --> RustFS
     Sniff -- "2. Insert Parent Stubs" --> Tier2Docs
     Sniff -- "3. Dispatch Work Commands" --> EventBus
     Reconciler["Reconciler CronJob\n(PENDING > 30m)"] -. "re-publish (idempotent)" .-> EventBus
@@ -280,7 +286,7 @@ flowchart TB
     Gosseract -- "Extracted OCR Text" --> Q_Embed
     SheetFlat -- "Flattened Office Text" --> Q_Embed
 
-    MIME_Parser -- "Stream Extracted Child Files → extracted/" --> MinIO
+    MIME_Parser -- "Stream Extracted Child Files → extracted/" --> RustFS
 
     %% Embedding Request
     HTTP_Embedder -- "POST /v1/embeddings" --> EmbeddingAPI
@@ -504,7 +510,7 @@ consequences follow, and they are the reason for the change:
   directory tree that only one machine ever had.
 
 The cost is honest and accepted: bytes exist twice, once in the user's folder
-and once in MinIO. That duplication buys a single authoritative store with
+and once in RustFS. That duplication buys a single authoritative store with
 uniform access, and it is the user's folder — not the bucket — that is free to
 be reorganised, moved, or deleted afterwards.
 
@@ -556,7 +562,7 @@ that has grown by ten files uploads exactly those ten.
 
 #### Provenance travels with the bytes
 
-Content-addressed keys carry no filename, and MinIO is now the authoritative
+Content-addressed keys carry no filename, and RustFS is now the authoritative
 store — so the provenance has to live on the object, not in a filesystem the
 system no longer reads:
 
@@ -589,7 +595,7 @@ workspaces/{workspace_id}/
 
 v2's hard rule — source corpora are read-only, never written, renamed, or
 deleted — transfers from a filesystem mount to the `raw/` prefix. It is
-enforced by a MinIO access policy on the worker service account rather than by
+enforced by a RustFS access policy on the worker service account rather than by
 convention, because a convention that only holds while everyone remembers it
 is not an invariant.
 
@@ -642,7 +648,7 @@ never writes it and never sees a user filesystem.
 
 | Mode | Trigger | Shape | Phase |
 | --- | --- | --- | --- |
-| **Bucket notification** | MinIO `s3:ObjectCreated:*` on `raw/` | event → NATS, live path | 1 |
+| **Bucket notification** | RustFS `s3:ObjectCreated:*` on `raw/` | event → NATS, live path | 1 |
 | **Bucket scan** | operator-invoked / post-upload | `Job` listing `raw/` objects with no Tier 2 row | 1 |
 | **HTTP ingest** | `POST /v1/ingest` | direct upload for one-off files, writes Tier 1 then proceeds | 2 |
 
@@ -812,11 +818,11 @@ Legacy binary Office formats are declined rather than attempted: there is no cre
 | KUBERNETES CLUSTER (Namespace: pocket-advisor)                                    |
 +-----------------------------------------------------------------------------------+
 |                                                                                   |
-|   [ Uploader CLI / Job ] ──► MinIO raw/   (only writer; runs on demand)           |
+|   [ Uploader CLI / Job ] ──► RustFS raw/   (only writer; runs on demand)           |
 |   [ Ingress ] ──► [ Query API ]                                                    |
 |                                                                                   |
 |   +--------------------------+   +--------------------------+                     |
-|   | StatefulSet: MinIO       |   | StatefulSet: NATS        |                     |
+|   | StatefulSet: RustFS      |   | StatefulSet: NATS        |                     |
 |   | - Tier 1 Immutable Vault |   | - JetStream WorkQueues   |                     |
 |   +--------------------------+   +--------------------------+                     |
 |                                                                                   |
@@ -848,7 +854,7 @@ use.
 
 Two Helm hooks run before any worker starts, in this order:
 
-1. **`minio-setup`** (weight -10) creates the bucket, both scoped identities
+1. **`rustfs-setup`** (weight -10) creates the bucket, both scoped identities
    with their policies (§5.1), and the bucket notification (§5.2).
 2. **`schema-bootstrap`** (weight -5) probes the embedding endpoint and applies
    the DDL with the resolved dimension (§4.4). Workers re-probe at startup and
@@ -860,17 +866,17 @@ default and enabled per invocation (`--set uploader.enabled=true`). Uploading a
 corpus is an act, not a deployment state, and modelling it as one would re-run
 it on every `helm upgrade`.
 
-The two MinIO identities are the enforcement point for the write-authority
+The two RustFS identities are the enforcement point for the write-authority
 split. `pa-uploader` holds `s3:*` on the bucket; `pa-worker` holds `GetObject`
 everywhere but `PutObject` only under `workspaces/*/extracted/*`, and no
-delete at all. A worker that tries to write `raw/` is refused by MinIO, not by
+delete at all. A worker that tries to write `raw/` is refused by RustFS, not by
 a code-level guard.
 
 ### 6.3 Component Resource Planning
 
 | Service Role | Min Scaling Unit | CPU req/limit (each) | Primary Bottleneck | HPA Metric |
 | --- | --- | --- | --- | --- |
-| **Corpus Uploader** | Job (on demand) | 200m / 500m | Network I/O to MinIO | n/a |
+| **Corpus Uploader** | Job (on demand) | 200m / 500m | Network I/O to RustFS | n/a |
 | **Discovery Service** | 2 Replicas | 100m / 300m | Network I/O | Queue Depth / Request Rate |
 | **Email Processor** | 2 Replicas | 150m / 500m | RAM / Parsing | Queue Depth (`ingest.emails.raw`) |
 | **Document Extractor** | 3 Replicas | 400m / 1000m | CPU / CGo RAM | CPU Utilization / Queue Depth |
@@ -879,7 +885,7 @@ a code-level guard.
 | **Query Service** | 2 Replicas | 200m / 500m | Reranker latency | Request Rate |
 | **PostgreSQL + pgvector** | StatefulSet | 300m / 1000m | Disk IOPS / RAM | Memory / Storage Capacity |
 | **NATS JetStream** | StatefulSet | 150m / 300m | Network / Memory | Queue Backpressure |
-| **MinIO** | StatefulSet | 200m / 500m | Disk IOPS | Storage Capacity |
+| **RustFS** | StatefulSet | 200m / 500m | Disk IOPS | Storage Capacity |
 
 Against the stated 6-core / 8 GB budget this totals ~3.3 cores and ~3.8 GiB of **requests** (the schedulable figure), leaving headroom for burst to limits. The Document Extractor pool remains the dominant consumer by design — OCR is the bottleneck, and giving it 3 of the 6 cores is the intended allocation, which is precisely why image OCR was folded into it (§5.4) rather than given a competing pool.
 
@@ -889,7 +895,7 @@ Sized against the actual corpus as measured 2026-07-27: **559 MB across 1101
 files — 868 `.eml`, 221 `.pdf`, 3 `.csv`.** Everything below that figure is an
 estimate derived from it.
 
-**Tier 1 (MinIO)**
+**Tier 1 (RustFS)**
 
 | Component | Estimate | Basis |
 | --- | --- | --- |
@@ -984,7 +990,7 @@ Absorbed from the former `v3/docs/project-layout.md` and brought current with
 ```text
 pocket-advisor/                    # repo root — single Go module
 ├── cmd/                          # Entry points (each compiles to its own binary)
-│   ├── uploader/                 # user folder → MinIO raw/          (§5.1)
+│   ├── uploader/                 # user folder → RustFS raw/         (§5.1)
 │   ├── discovery/                # --mode=serve | scan | reconcile   (§5.2)
 │   ├── email-processor/          # consumes ingest.emails.raw        (§5.3)
 │   ├── document-extractor/       # consumes ingest.pdfs.raw + images (§5.4)
@@ -1029,7 +1035,7 @@ pocket-advisor/                    # repo root — single Go module
 │   ├── retrieval/                # query path internals — see retrieval-design.md
 │   │
 │   ├── storage/
-│   │   ├── minio/vault.go        # Tier 1, content-addressed keys
+│   │   ├── minio/vault.go        # Tier 1 (RustFS), content-addressed keys
 │   │   └── postgres/
 │   │       ├── db.go
 │   │       ├── document_repo.go  # Tier 2
@@ -1183,7 +1189,7 @@ embedding), so trace context propagation is mandatory, not optional.
 ```text
 [Trace Root] discovery.ingest_file (workspace, sha256, doc_id)
   ├── [Span] email.unroll_mime
-  │     ├── [Span] minio.write_child
+  │     ├── [Span] minio.write_child   # package name predates the migration, see §12.7
   │     └── [Span] postgres.create_stub
   ├── [Span] document.process_pdf (doc_id: child)
   │     ├── [Span] pdf.inspect (<2ms)
@@ -1282,7 +1288,7 @@ failure is otherwise invisible.
 
 [ Phase 2: Deployment ]
   │── helm upgrade --install pocket-advisor infra/charts/pocket-advisor
-  │     hook -10: minio-setup      bucket + scoped identities + notification
+  │     hook -10: rustfs-setup     bucket + scoped identities + notification
   │     hook  -5: schema-bootstrap probe endpoint, apply DDL with resolved N
   └── Workers roll out only after both hooks succeed
 
@@ -1302,7 +1308,7 @@ failure is otherwise invisible.
 
 1. Running the uploader twice over the same folder uploads every file once; the second run reports all of them as `duplicate` and issues zero `PutObject` calls.
 2. The same file present twice under different names produces one object, one `doc_id`, and both names recorded (`source_filename` plus alias).
-3. A worker service account attempting to write, rename, or delete under `raw/` is refused by the MinIO policy, not by application code.
+3. A worker service account attempting to write, rename, or delete under `raw/` is refused by the RustFS policy, not by application code.
 4. `--wipe` removes objects **and** the corresponding `documents` rows; a wipe that cannot reach PostgreSQL aborts without touching the bucket.
 5. Deleting a file from the source folder and re-running the uploader does **not** remove it from Tier 1 — only `--forget` does.
 6. Nothing in the running system reads a user filesystem path: the cluster has no corpus volume mount and ingestion succeeds with the source folder unmounted.
@@ -1349,8 +1355,8 @@ to `docs/retrieval-design.md`.
 
 1. **Legacy Office formats.** Currently declined (§5.5). Revisit only if the corpus proves to contain enough `.doc`/`.xls` to matter, and then via a conversion sidecar, not a subprocess.
 2. **Single-replica storage with no backup — accepted risk, decided
-   2026-07-27.** MinIO and PostgreSQL each run as a one-replica `StatefulSet`
-   with no replication and no backup job. Losing the MinIO volume loses the
+   2026-07-27.** RustFS and PostgreSQL each run as a one-replica `StatefulSet`
+   with no replication and no backup job. Losing the RustFS volume loses the
    corpus, since Tier 1 is the source of truth (§5.1). This is accepted for
    now and is **not** an open question; it is recorded here so the exposure is
    explicit rather than forgotten.
@@ -1370,6 +1376,31 @@ to `docs/retrieval-design.md`.
    deployed by `infra/charts/pocket-advisor`; the read path is unbuilt, so its
    Deployment and Service are absent. Add both with the service
    (`retrieval-design.md` §7).
+
+5. **TODO — continue investigation: RustFS live bucket notifications do not
+   fire end-to-end in-cluster.** Full migration record and root-cause trail
+   in §12.7. Summary for whoever picks this up next: three distinct RustFS
+   bugs were found and fixed (webhook queue-dir default unwritable; a target
+   name gets silently lowercased in RustFS's config store so an
+   uppercase-registered event rule never matches it; a target
+   ("`Failed to initialize target`, `error: Target not connected`") can fail
+   to connect at boot if `discovery` isn't up yet). After fixing all three,
+   on a from-scratch install with no manual chart tampering: pods healthy,
+   IAM/bucket/notification-rule all correctly set up (confirmed via `mc
+   admin`/`mc event list`), network connectivity `rustfs-0` → `discovery`
+   confirmed working (tested from inside `rustfs-0`'s own network namespace),
+   yet a real object PUT still produces zero effect — no document row, no
+   error in `discovery`'s logs (which only log on `Ingest` failure, not
+   success — check the `documents` table, not logs, for ground truth), no
+   further error in `/logs/rustfs.log` on the RustFS pod. This is confirmed
+   to work end-to-end in an isolated single-container `docker run` test
+   against the identical version and configuration (see §12.7) — something
+   about the in-cluster environment (StatefulSet + PVC + Kubernetes Service
+   networking + our IAM layering, versus a single ad-hoc container) makes the
+   difference, not yet identified. Current operational stance: rely on
+   `discovery.scan` after every upload (§5.1, §3.3 in `README.md`) exactly as
+   before the migration — nothing about the migration regresses the backstop
+   path, only the live path is unconfirmed working in-cluster.
 
 ---
 
@@ -1410,3 +1441,135 @@ deliberate choice with a reason, not drift.
 6. **Vectors are written as text and cast to `halfvec`** rather than through
    `pgvector-go`. Keeps the dependency set smaller; the cost is paid once per
    chunk at write time and never at query time.
+
+7. **Tier 1 migrated from MinIO to RustFS (2026-07-28), a deliberate,
+   business-driven change** — not a technical failing of MinIO itself. Full
+   record below, since this is a large deviation with an unresolved tail
+   (open decision 5, above).
+
+   ### Why
+
+   MinIO Inc. has been progressively stripping the free Community Edition
+   since mid-2025 (access control, bucket deletion, user management, and OIDC
+   all removed from the web console) and archived the Community Edition
+   repository in February 2026, shifting all development to a commercial
+   "AIStor" product. RustFS (Apache-2.0, still under active OSS development)
+   was chosen as the replacement specifically because it deliberately
+   implements MinIO's admin wire protocol (`/minio/admin/v3`) — so `mc admin`
+   (policy create, user add, policy attach) works completely unchanged, and
+   the entire scoped-identity security model in §5.1 carried over with no
+   redesign.
+
+   ### Version pinned to 1.0.0-beta.8, not `latest`
+
+   `rustfs/rustfs:latest` currently resolves to `1.0.0-beta.11`. Bisecting
+   available tags after discovering a live-notification failure (below)
+   found a regression introduced between `beta.8` and `beta.9` in the
+   disk/erasure-store startup path (unrelated to notifications specifically —
+   related subsystems like `admin/kms` report the identical
+   `reason:"storage_uninitialized"` around the same startup window),
+   which leaves the notify subsystem permanently degraded
+   (`"storage layer not initialized"`, reconciliation retries every ~5s
+   forever, confirmed never recovering after 45+ seconds and across a full
+   container restart):
+
+   | Version | `storage layer not initialized`? | Webhook delivery (isolated `docker run` test) |
+   |---|---|---|
+   | `1.0.0-beta.1` | No | ✅ confirmed working |
+   | `1.0.0-beta.5` | No | not re-confirmed end-to-end, log clean |
+   | `1.0.0-beta.8` | No | ✅ confirmed working |
+   | `1.0.0-beta.9` | **Yes** | ❌ |
+   | `1.0.0-beta.10` | Yes | ❌ |
+   | `1.0.0-beta.11` (`:latest`) | Yes | ❌ |
+
+   Filed upstream: [rustfs/rustfs#2756 (comment)](https://github.com/rustfs/rustfs/issues/2756)
+   is the closest existing issue (a different, already-"fixed" config
+   footgun — see bug 1 below); the beta.9 regression is distinct and was
+   reported as a new issue with the full bisection.
+
+   **Do not bump `rustfs.image` past `beta.8` without re-running the
+   bisection.** `values.yaml` carries this constraint in a comment.
+
+   ### Three bugs found and fixed during migration
+
+   **Bug 1 — default webhook queue directory is unwritable.** RustFS's
+   default (`/opt/rustfs/events`) doesn't exist and its non-root runtime user
+   (uid 10001) gets `Permission denied` trying to create it, silently
+   preventing the webhook target from constructing
+   (`"Failed to open store for Webhook target ...: Permission denied"` in
+   `/logs/rustfs.log`, when using verbose logs — `docker logs` alone shows
+   almost nothing, per rustfs#2756). Fixed: `RUSTFS_NOTIFY_WEBHOOK_QUEUE_DIR_DISCOVERY`
+   set explicitly to `/data/.rustfs-events`, under the persistent volume so
+   it survives restarts (`values.yaml: rustfs.notifyQueueDir`,
+   `templates/rustfs.yaml`).
+
+   **Bug 2 — a Helm v4.2.3 hook-completion bug, not a chart bug.** This
+   cluster runs Helm v4.2.3. Its generic Job-readiness watcher (used
+   whenever `--wait` is passed as bare `--wait` or `--wait=legacy`) polls a
+   hook Job's status a fixed number of times (observed: exactly 5), never
+   recognizes a `batch/v1` Job as reaching its expected `Current` state, and
+   then proceeds to delete the Job anyway per its `hook-succeeded`
+   delete-policy — regardless of whether the Job's script had actually
+   finished running. This silently killed `rustfs-setup` mid-script on every
+   install that passed `--wait`, while Helm still reported the overall
+   release as successfully deployed. Confirmed via `helm install --debug`:
+   `"waiting for resource ... expectedStatus=Current actualStatus=InProgress"`
+   five times, then `"starting delete resource ... kind=Job"`. Direct
+   `kubectl apply` of the identical rendered manifest (bypassing Helm's hook
+   orchestration) always completes correctly, proving the manifest itself is
+   fine. Fixed two ways together: `templates/job-rustfs-setup.yaml`'s
+   `hook-delete-policy` no longer includes `hook-succeeded` (only
+   `before-hook-creation` — the Job lingers after success, cleaned up on the
+   next install/upgrade, same tradeoff already accepted for the schema
+   bootstrap hook's failure case); and operational commands should avoid
+   passing `--wait`/`--wait=legacy` for this chart until this is resolved
+   upstream or a newer Helm fixes it (`README.md` needs this note added when
+   the migration is finalized).
+
+   **Bug 3 — RustFS silently lowercases env-configured target names in its
+   own config store.** `RUSTFS_NOTIFY_WEBHOOK_ENABLE_DISCOVERY` (uppercase
+   suffix, our existing naming convention, matching how MinIO's equivalent
+   `MINIO_NOTIFY_WEBHOOK_ENABLE_DISCOVERY` was named) gets materialized by
+   RustFS into its persistent config store under a **lowercased** key
+   (confirmed via `mc admin config get local notify_webhook` showing an
+   auto-generated `notify_webhook:discovery` stanza). A bucket event rule
+   registered with the matching uppercase ARN
+   (`arn:rustfs:sqs::DISCOVERY:webhook`, mirroring MinIO's convention) never
+   resolves against that lowercased target — logged forever, once per
+   uploaded object, with no indication anything is broken from the
+   uploader's or operator's point of view: `"Target ID TargetID { id:
+   \"DISCOVERY\", name: \"webhook\" } found in rules but not in target
+   list."` A related, second symptom of the same underlying region handling:
+   the ARN's region segment must match the bucket's actual region
+   (`us-east-1`, S3's default when none is set) rather than being left empty
+   as MinIO's ARN convention (`arn:minio:sqs::ID:webhook`) allows, or
+   loading the bucket's notification config logs `"Bucket notification
+   config references missing target ARN"`. Fixed:
+   `templates/job-rustfs-setup.yaml`'s `mc event add` now registers
+   `arn:rustfs:sqs:us-east-1:discovery:webhook` (lowercase name, explicit
+   region) — env var suffix stays uppercase `DISCOVERY` (RustFS lowercases
+   it internally regardless of the env var's case, so the naming convention
+   used elsewhere in this chart didn't need to change).
+
+   ### Still open: live notifications don't work end-to-end in-cluster
+
+   See open decision 5, above, for the current status and full symptom
+   description. Not yet explained: an isolated `docker run
+   rustfs/rustfs:1.0.0-beta.8` with equivalent configuration delivers
+   webhooks correctly and reproducibly; the in-cluster StatefulSet
+   deployment, after fixing all three bugs above, still delivers nothing for
+   a real object PUT, with no further error surfaced anywhere checked so far
+   (`/logs/rustfs.log`, `discovery`'s logs, `documents` table, direct
+   connectivity test from `rustfs-0`'s own network namespace to
+   `discovery`'s `/v1/notify` endpoint — all clean). A fourth bug was found
+   and fixed along the way (`"Failed to initialize target" error:"Target not
+   connected"` at boot, apparently a race against `discovery` not yet being
+   up — resolved by restarting the RustFS pod once `discovery` is stable),
+   but delivery still doesn't happen afterward. The working assumption
+   going in to the next session: there is likely at least one more distinct
+   bug, following the exact pattern of the first four (something silently
+   wrong, requiring the `/logs/rustfs.log` JSON log rather than `docker
+   logs`/`kubectl logs` to surface at all). Operationally, this costs
+   nothing beyond typing one extra `helm upgrade --set discovery.scan.enabled=true`
+   after every upload — the backstop path is unaffected and this chart's
+   behavior here is identical to MinIO's.

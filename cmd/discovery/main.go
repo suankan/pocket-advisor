@@ -7,15 +7,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/discovery"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -107,34 +111,9 @@ func reconcile(a *app.App, svc *discovery.Service, stale time.Duration) (int, er
 func serve(a *app.App, svc *discovery.Service, port int) {
 	mux := http.NewServeMux()
 
-	// MinIO bucket notification: the live path. A dropped event costs a delay
+	// RustFS bucket notification: the live path. A dropped event costs a delay
 	// rather than a document, because the scan is an exact backstop (§5.2).
-	mux.HandleFunc("/v1/notify", func(w http.ResponseWriter, r *http.Request) {
-		var event struct {
-			Records []struct {
-				S3 struct {
-					Object struct {
-						Key string `json:"key"`
-					} `json:"object"`
-				} `json:"s3"`
-			} `json:"Records"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		for _, rec := range event.Records {
-			key := rec.S3.Object.Key
-			ws := workspaceFromKey(key)
-			if ws == "" {
-				continue
-			}
-			if err := svc.Ingest(r.Context(), ws, key, "notify"); err != nil {
-				a.Log.Error("notify ingest failed", "key", key, "error", err)
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.Handle("/v1/notify", newNotifyHandler(a.Log, svc))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -156,17 +135,56 @@ func serve(a *app.App, svc *discovery.Service, port int) {
 	}
 }
 
-// workspaceFromKey pulls the workspace out of workspaces/{id}/raw/...
-func workspaceFromKey(key string) string {
-	const prefix = "workspaces/"
-	if len(key) <= len(prefix) || key[:len(prefix)] != prefix {
-		return ""
-	}
-	rest := key[len(prefix):]
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == '/' {
-			return rest[:i]
+type notifyIngester interface {
+	Ingest(context.Context, string, string, string) error
+}
+
+type bucketNotification struct {
+	Records []struct {
+		S3 struct {
+			Object struct {
+				Key string `json:"key"`
+			} `json:"object"`
+		} `json:"s3"`
+	} `json:"Records"`
+}
+
+func newNotifyHandler(log *slog.Logger, svc notifyIngester) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
-	}
-	return ""
+
+		var event bucketNotification
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
+			http.Error(w, "invalid notification payload", http.StatusBadRequest)
+			return
+		}
+
+		for _, rec := range event.Records {
+			key, err := url.QueryUnescape(rec.S3.Object.Key)
+			if err != nil {
+				telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
+				http.Error(w, "invalid notification object key", http.StatusBadRequest)
+				return
+			}
+			workspaceID, _, err := domain.ParseRawObjectKey(key)
+			if err != nil {
+				// The bucket rule can only filter on workspaces/, so extracted/
+				// child writes arrive here too. They are owned by the worker
+				// that created them and must never mint root documents.
+				telemetry.DiscoveryFiles.WithLabelValues("notify", "ignored").Inc()
+				continue
+			}
+			if err := svc.Ingest(r.Context(), workspaceID, key, "notify"); err != nil {
+				log.Error("notify ingest failed", "key", key, "error", err)
+				http.Error(w, "notification ingestion failed", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 }

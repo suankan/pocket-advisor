@@ -1,6 +1,6 @@
 # High-Throughput Event-Driven Enterprise RAG Ingestion Engine Architecture
 
-**Version:** `3.7.0`
+**Version:** `3.9.0`
 
 **Architecture Paradigm:** Event-Driven Microservices, In-Memory Pipeline Processing, 3-Tier Storage Model
 
@@ -14,11 +14,21 @@ observability — lives in this file. Its only peer is
 `docs/retrieval-design.md`, which owns every read-path concern; §7 here
 states the contract between them. There are no other v3 design documents.
 
-**Changes in 3.7.0:** Tier 1 migrated from MinIO to RustFS (§12.7) — four
-bugs found and fixed en route, one still open (§11.5): live bucket
-notifications don't yet fire end-to-end in-cluster, despite working in
-isolated testing of the same version. `discovery.scan` remains the
-operational backstop until that's resolved.
+**Changes in 3.9.0:** RustFS provisioning is now a release-owned,
+revision-named Job rather than an untracked Helm hook (§6.2, §12.7). It still
+runs idempotently on every install and upgrade, while `helm uninstall` now
+removes its Job, Pod, and policy ConfigMap. PersistentVolumeClaims remain
+deliberately retained because Tier 1 is the corpus source of truth.
+
+**Changes in 3.8.0:** live RustFS bucket notifications now honor the S3
+contract end-to-end (§5.2, §12.7). Discovery form-decodes notification object
+keys, admits only canonical `raw/` keys as root documents, acknowledges
+`extracted/` events without ingesting them, and returns a retryable non-2xx
+response when ingestion fails. Notification setup is idempotent.
+
+**Changes in 3.7.0:** Tier 1 migrated from MinIO to RustFS (§12.7). Three
+RustFS/Helm integration problems were fixed during the migration; the
+remaining application-side notification contract bug was fixed in 3.8.0.
 
 **Changes in 3.6.0:** the uploader resolves the user's
 `workspaces/workspace-config.yaml` instead of taking a directory (§5.1). Two
@@ -659,6 +669,26 @@ one store. The scan is the backstop that makes a dropped bucket notification a
 delay rather than a loss, which is why notification can safely be the live
 path.
 
+RustFS delivers S3 notification keys using form-URL encoding: `/` appears as
+`%2F`, spaces as `+`, and literal plus signs as `%2B`. The notification
+boundary decodes that representation before doing anything with the key. The
+bucket rule can filter only as far as `workspaces/`, because the workspace id
+sits before the storage class, so discovery then admits exactly this canonical
+root shape:
+
+```
+workspaces/<workspace_id>/raw/<sha256[0:2]>/<lowercase-sha256>
+```
+
+Everything else under the notified prefix, including
+`workspaces/<workspace_id>/extracted/...`, is acknowledged and counted as
+ignored. This validation must happen before `Ingest`: treating an extracted
+child as a new root would race the extractor's own child-row creation and lose
+lineage. A malformed notification is rejected; if `Ingest` fails, discovery
+returns HTTP 503 so RustFS retains and retries its persisted event. HTTP 200
+therefore means every admissible record in that delivery has been accepted,
+not merely that the JSON parsed.
+
 The scan is a `Job`, not a loop inside the Deployment — two HTTP replicas
 enumerating the same prefix would duplicate work, and a leader lease is more
 machinery than a one-shot Job needs.
@@ -852,14 +882,21 @@ docker-compose: a second way to stand the system up is a second thing to keep
 correct, and the two drift the moment one of them is the one people actually
 use.
 
-Two Helm hooks run before any worker starts, in this order:
+Two setup tasks accompany every install and upgrade:
 
-1. **`rustfs-setup`** (weight -10) creates the bucket, both scoped identities
-   with their policies (§5.1), and the bucket notification (§5.2).
-2. **`schema-bootstrap`** (weight -5) probes the embedding endpoint and applies
-   the DDL with the resolved dimension (§4.4). Workers re-probe at startup and
-   refuse to run against a mismatched index, so this hook failing must block
-   the rollout rather than let them come up.
+1. **`rustfs-setup-<release-revision>`** is an ordinary release-owned Job. It
+   waits for the RustFS data and admin APIs, then creates the bucket, both
+   scoped identities with their policies (§5.1), and the bucket notification
+   (§5.2). The revision suffix creates a new immutable Job on every upgrade;
+   Helm removes the previous revision and removes the current Job, its Pod,
+   and the release-owned policy ConfigMap on uninstall. It is deliberately not
+   a hook because Helm does not track hook resources as part of a release.
+   Operators wait for its `Complete` condition before uploading.
+2. **`schema-bootstrap`** remains a post-install/post-upgrade hook. It probes
+   the embedding endpoint and applies the DDL with the resolved dimension
+   (§4.4). Workers re-probe at startup and refuse to run against a mismatched
+   index, so this hook failing must block the rollout rather than let them
+   process work.
 
 The uploader and the bucket scan are **operator-invoked Jobs**, disabled by
 default and enabled per invocation (`--set uploader.enabled=true`). Uploading a
@@ -1132,7 +1169,7 @@ Every worker exposes `/metrics` via `prometheus/client_golang`.
 | `rag_ingestion_duration_seconds{worker, doc_type}` | Histogram | Per-stage latency distribution |
 | `rag_uploader_files_total{outcome}` | Counter | `uploaded`, `duplicate`, `failed` per run |
 | `rag_uploader_bytes_total` | Counter | Tier 1 ingress volume |
-| `rag_discovery_files_total{mode, outcome}` | Counter | `accepted`, `duplicate`, `unsupported`, `error` |
+| `rag_discovery_files_total{mode, outcome}` | Counter | `accepted`, `duplicate`, `unsupported`, `error`; notification boundary also records `ignored` and `malformed` |
 | `rag_discovery_unstubbed_objects` | Gauge | `raw/` objects with no Tier 2 row (§2.2 upstream gap) |
 | `rag_discovery_stale_pending` | Gauge | Documents awaiting reconciliation (§2.2) |
 | `rag_discovery_scan_backpressure_seconds` | Counter | Time the scan spent blocked on high water |
@@ -1288,9 +1325,9 @@ failure is otherwise invisible.
 
 [ Phase 2: Deployment ]
   │── helm upgrade --install pocket-advisor infra/charts/pocket-advisor
-  │     hook -10: rustfs-setup     bucket + scoped identities + notification
-  │     hook  -5: schema-bootstrap probe endpoint, apply DDL with resolved N
-  └── Workers roll out only after both hooks succeed
+  │     Job:  rustfs-setup-<revision> bucket + identities + notification
+  │     hook: schema-bootstrap        probe endpoint, apply DDL with resolved N
+  └── Wait for rustfs-setup Complete before uploading
 
 [ Phase 2b: Corpus Load ]
   │── helm upgrade --set uploader.enabled=true --set uploader.hostPath=...
@@ -1377,31 +1414,6 @@ to `docs/retrieval-design.md`.
    Deployment and Service are absent. Add both with the service
    (`retrieval-design.md` §7).
 
-5. **TODO — continue investigation: RustFS live bucket notifications do not
-   fire end-to-end in-cluster.** Full migration record and root-cause trail
-   in §12.7. Summary for whoever picks this up next: three distinct RustFS
-   bugs were found and fixed (webhook queue-dir default unwritable; a target
-   name gets silently lowercased in RustFS's config store so an
-   uppercase-registered event rule never matches it; a target
-   ("`Failed to initialize target`, `error: Target not connected`") can fail
-   to connect at boot if `discovery` isn't up yet). After fixing all three,
-   on a from-scratch install with no manual chart tampering: pods healthy,
-   IAM/bucket/notification-rule all correctly set up (confirmed via `mc
-   admin`/`mc event list`), network connectivity `rustfs-0` → `discovery`
-   confirmed working (tested from inside `rustfs-0`'s own network namespace),
-   yet a real object PUT still produces zero effect — no document row, no
-   error in `discovery`'s logs (which only log on `Ingest` failure, not
-   success — check the `documents` table, not logs, for ground truth), no
-   further error in `/logs/rustfs.log` on the RustFS pod. This is confirmed
-   to work end-to-end in an isolated single-container `docker run` test
-   against the identical version and configuration (see §12.7) — something
-   about the in-cluster environment (StatefulSet + PVC + Kubernetes Service
-   networking + our IAM layering, versus a single ad-hoc container) makes the
-   difference, not yet identified. Current operational stance: rely on
-   `discovery.scan` after every upload (§5.1, §3.3 in `README.md`) exactly as
-   before the migration — nothing about the migration regresses the backstop
-   path, only the live path is unconfirmed working in-cluster.
-
 ---
 
 ## 12. Implementation Deviations
@@ -1444,8 +1456,8 @@ deliberate choice with a reason, not drift.
 
 7. **Tier 1 migrated from MinIO to RustFS (2026-07-28), a deliberate,
    business-driven change** — not a technical failing of MinIO itself. Full
-   record below, since this is a large deviation with an unresolved tail
-   (open decision 5, above).
+   record below, since this is a large deviation whose notification failure
+   crossed the RustFS, Helm, and application boundaries.
 
    ### Why
 
@@ -1517,14 +1529,14 @@ deliberate choice with a reason, not drift.
    five times, then `"starting delete resource ... kind=Job"`. Direct
    `kubectl apply` of the identical rendered manifest (bypassing Helm's hook
    orchestration) always completes correctly, proving the manifest itself is
-   fine. Fixed two ways together: `templates/job-rustfs-setup.yaml`'s
-   `hook-delete-policy` no longer includes `hook-succeeded` (only
-   `before-hook-creation` — the Job lingers after success, cleaned up on the
-   next install/upgrade, same tradeoff already accepted for the schema
-   bootstrap hook's failure case); and operational commands should avoid
-   passing `--wait`/`--wait=legacy` for this chart until this is resolved
-   upstream or a newer Helm fixes it (`README.md` needs this note added when
-   the migration is finalized).
+   fine. The initial workaround removed `hook-succeeded`, which protected the
+   setup script but left an untracked completed Job, Pod, and policy ConfigMap
+   after uninstall. Fixed without another cleanup hook in 3.9.0:
+   `rustfs-setup-<release-revision>` and its policy ConfigMap are ordinary
+   release-owned resources. The revision suffix reruns setup without patching
+   immutable Job fields, and Helm now removes those resources on upgrade and
+   uninstall. This takes the faulty hook watcher out of the setup lifecycle
+   entirely.
 
    **Bug 3 — RustFS silently lowercases env-configured target names in its
    own config store.** `RUSTFS_NOTIFY_WEBHOOK_ENABLE_DISCOVERY` (uppercase
@@ -1551,25 +1563,31 @@ deliberate choice with a reason, not drift.
    it internally regardless of the env var's case, so the naming convention
    used elsewhere in this chart didn't need to change).
 
-   ### Still open: live notifications don't work end-to-end in-cluster
+   ### Application-side root cause and resolution
 
-   See open decision 5, above, for the current status and full symptom
-   description. Not yet explained: an isolated `docker run
-   rustfs/rustfs:1.0.0-beta.8` with equivalent configuration delivers
-   webhooks correctly and reproducibly; the in-cluster StatefulSet
-   deployment, after fixing all three bugs above, still delivers nothing for
-   a real object PUT, with no further error surfaced anywhere checked so far
-   (`/logs/rustfs.log`, `discovery`'s logs, `documents` table, direct
-   connectivity test from `rustfs-0`'s own network namespace to
-   `discovery`'s `/v1/notify` endpoint — all clean). A fourth bug was found
-   and fixed along the way (`"Failed to initialize target" error:"Target not
-   connected"` at boot, apparently a race against `discovery` not yet being
-   up — resolved by restarting the RustFS pod once `discovery` is stable),
-   but delivery still doesn't happen afterward. The working assumption
-   going in to the next session: there is likely at least one more distinct
-   bug, following the exact pattern of the first four (something silently
-   wrong, requiring the `/logs/rustfs.log` JSON log rather than `docker
-   logs`/`kubectl logs` to surface at all). Operationally, this costs
-   nothing beyond typing one extra `helm upgrade --set discovery.scan.enabled=true`
-   after every upload — the backstop path is unaffected and this chart's
-   behavior here is identical to MinIO's.
+   The remaining failure was not in Kubernetes networking or RustFS target
+   delivery. RustFS correctly follows the S3 notification contract and
+   form-URL-encodes `Records[].s3.object.key`. For example,
+   `workspaces/test/raw/ab/<sha256>` arrives as
+   `workspaces%2Ftest%2Fraw%2Fab%2F<sha256>`. Discovery treated that encoded
+   value as a literal key, failed its `workspaces/` prefix check, silently
+   skipped the record, and returned HTTP 200. That combination exactly
+   explains the misleading evidence: the target and network were healthy,
+   RustFS drained its persistent event queue, discovery emitted no ingest
+   error, and no database row appeared.
+
+   Fixed in 3.8.0 at the notification boundary: discovery form-decodes the
+   key, validates the exact canonical `raw/` shape from §5.2, and returns 503
+   on an `Ingest` failure so RustFS can retry. Events for `extracted/` children
+   are acknowledged but never admitted as new roots, preserving the lineage
+   written by the extractor. The setup Job now uses `mc event add
+   --ignore-existing` through the same strict error wrapper as the rest of the
+   Job, so upgrades neither accumulate duplicate rules nor hide genuine
+   configuration failures.
+
+   The observed boot-time `"Failed to initialize target", error:"Target not
+   connected"` did not require an application-ordered RustFS restart. Beta.8's
+   store-backed webhook target retries initialization; restarting after
+   discovery became ready merely coincided with that recovery. The bucket
+   scan remains the exact reconciliation backstop required by §5.2, not a
+   workaround for a broken live path.

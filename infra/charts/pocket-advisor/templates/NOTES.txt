@@ -1,8 +1,13 @@
 pocket-advisor {{ .Chart.Version }} deployed as {{ .Release.Name }}.
 
-Two hooks ran before the workers:
-  - {{ .Release.Name }}-rustfs-setup     bucket, scoped identities, notification
-  - {{ .Release.Name }}-schema-bootstrap probed the embedding endpoint, applied the DDL
+Two setup tasks were created:
+  - {{ .Release.Name }}-rustfs-setup-{{ .Release.Revision }} provisions the bucket, identities, and notification
+  - {{ .Release.Name }}-schema-bootstrap probed the embedding endpoint and applied the DDL
+
+Wait for RustFS setup before uploading:
+
+  kubectl wait --for=condition=complete job \
+    -l app.kubernetes.io/component=rustfs-setup --timeout=5m
 
 schema-bootstrap deletes itself on success, so check the resolved vector
 dimension (the index cannot be reshaped later without a full re-embed) in

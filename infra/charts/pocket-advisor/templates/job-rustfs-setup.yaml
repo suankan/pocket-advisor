@@ -2,9 +2,14 @@
 Creates the bucket, the two scoped identities, and the bucket notification
 that makes discovery's live path work.
 
-Runs as a post-install/post-upgrade hook before anything else, because both
-the write-authority split (§5.1) and the notification path (§5.2) have to
-exist before a single object lands.
+This is an ordinary release-owned Job, not a Helm hook. Hook resources are
+not part of a release and therefore survive `helm uninstall`. The release
+revision in the name creates a fresh Job on every install, upgrade, and
+rollback without trying to patch immutable Job fields; Helm removes the
+previous revision and owns cleanup on uninstall.
+
+The Job and RustFS are created together. Its readiness loops below handle
+that ordering, and operators wait for this Job before uploading a corpus.
 
 Uses `mc` even though the backend is RustFS, not MinIO: RustFS deliberately
 implements MinIO's admin wire protocol (/minio/admin/v3), so every `mc
@@ -15,33 +20,23 @@ Policy documents are rendered by Helm rather than assembled in the container:
 the minio/mc image is a near-empty distroless-style image with no sed, awk or
 envsubst, and the bucket name is known at render time anyway.
 
-hook-succeeded is deliberately ABSENT here, unlike the other hooks in this
-chart: this Job's admin-API readiness wait (below) can run past whatever
-poll budget this Helm build's generic Job-completion watcher uses before
-giving up — observed directly with Helm v4.2.3, where "waiting for
-resource ... actualStatus=InProgress" is polled a fixed number of times,
-then the Job is deleted via hook-succeeded regardless of whether it had
-actually finished, silently killing the setup script mid-run while the
-release still reports success. Leaving a completed Job around for
-before-hook-creation to clean up on the next install/upgrade is far safer
-than a policy that can kill it before it does its job.
+This also avoids Helm v4.2.3's hook-completion race, where hook-succeeded
+could delete the setup Job before its readiness loop finished.
 */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Release.Name }}-rustfs-setup
+  name: {{ .Release.Name }}-rustfs-setup-{{ .Release.Revision }}
   labels:
     {{- include "pa.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "-10"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    app.kubernetes.io/component: rustfs-setup
 spec:
   backoffLimit: 10
   template:
     metadata:
       labels:
         {{- include "pa.labels" . | nindent 8 }}
+        app.kubernetes.io/component: rustfs-setup
     spec:
       restartPolicy: OnFailure
       volumes:
@@ -129,10 +124,10 @@ spec:
               #    being left empty as MinIO's ARN convention allows —
               #    otherwise: "Bucket notification config references
               #    missing target ARN".
-              mc event add local/{{ .Values.rustfs.bucket }} \
+              ensure "bucket notification" mc event add local/{{ .Values.rustfs.bucket }} \
                 arn:rustfs:sqs:us-east-1:discovery:webhook \
-                --event put --prefix workspaces/ 2>/dev/null || \
-                echo "notification already registered"
+                --ignore-existing \
+                --event put --prefix workspaces/
               {{- end }}
 
               echo "rustfs setup complete"
@@ -146,10 +141,6 @@ metadata:
   name: {{ .Release.Name }}-rustfs-policies
   labels:
     {{- include "pa.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "-11"
-    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   # Worker identity: read anywhere, write ONLY under extracted/, never delete.
   # This is the enforcement point for the write-authority split — a worker that

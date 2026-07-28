@@ -26,8 +26,8 @@ pocket-advisor`) back to any `kubectl`/`helm` command yourself.
 
 ## Concepts you need before running anything
 
-- **MinIO (Tier 1) is the sole source of truth.** Your filesystem is never
-  read directly by the system — it's a staging feed you push into MinIO via
+- **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
+  read directly by the system — it's a staging feed you push into RustFS via
   the uploader. Once uploaded, a document's origin folder can move or vanish;
   the bucket is authoritative.
 - **The workspace registry decides what gets uploaded**, not CLI flags. A
@@ -40,7 +40,7 @@ pocket-advisor`) back to any `kubectl`/`helm` command yourself.
   leaves the bucket untouched rather than dangling a citation.
 - **Postgres is derived state, not source of truth.** If it's ever lost or
   reset, re-running the discovery scan against the bucket rebuilds it from
-  MinIO. Losing MinIO loses the corpus; losing Postgres just costs a re-index.
+  RustFS. Losing RustFS loses the corpus; losing Postgres just costs a re-index.
 
 ## 1. Prerequisites
 
@@ -79,15 +79,24 @@ helm install pocket-advisor ./infra/charts/pocket-advisor --create-namespace \
   --set embedding.model=<model-name-served-by-your-endpoint>
 ```
 
-Two Helm hooks run automatically before any worker starts:
+Two setup tasks run automatically:
 
-1. `pocket-advisor-minio-setup` — creates the bucket, the two scoped
-   identities (uploader: raw/ read-write; workers: read-anywhere,
-   extracted/-only write), and the bucket notification.
-2. `pocket-advisor-schema-bootstrap` — probes the embedding endpoint's
-   dimension and applies the DDL (`halfvec(N)`, HNSW + GIN indexes).
+1. The release-owned `pocket-advisor-rustfs-setup-<revision>` Job creates the
+   bucket, the two scoped identities (uploader: raw/ read-write; workers:
+   read-anywhere, extracted/-only write), and the bucket notification.
+2. The `pocket-advisor-schema-bootstrap` post-install hook probes the
+   embedding endpoint's dimension and applies the DDL (`halfvec(N)`, HNSW +
+   GIN indexes).
 
-schema-bootstrap deletes itself on success (see §8 for why), so check what
+Helm does not block on the ordinary RustFS setup Job. Before uploading
+anything, wait for the current revision to finish:
+
+```bash
+kubectl wait --for=condition=complete job \
+  -l app.kubernetes.io/component=rustfs-setup --timeout=5m
+```
+
+`schema-bootstrap` deletes itself on success, so check what
 dimension got resolved (the index can't be reshaped later without a full
 re-embed) in the table it wrote instead of the Job's logs:
 
@@ -103,7 +112,7 @@ kubectl get pods
 ```
 
 You should see 2 discovery, 2 email-processor, 3 document-extractor, 1
-office-extractor, 2 embedding-indexer replicas, plus single MinIO/NATS/Postgres
+office-extractor, 2 embedding-indexer replicas, plus single RustFS/NATS/Postgres
 pods, all `Running`.
 
 ## 3. Load a corpus
@@ -257,11 +266,16 @@ Plain config or worker-image changes are a normal rolling upgrade:
 helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values
 ```
 
+The RustFS setup Job carries the release revision in its name. Every upgrade
+therefore runs setup idempotently in a new Job without patching immutable Job
+fields; the previous revision is removed by Helm. Use the `kubectl wait`
+command from §2 before starting an upload after an upgrade.
+
 Two categories of change need extra care, both stemming from the same
 underlying constraint — **`volumeClaimTemplates` on a StatefulSet is
 immutable**, so certain changes can never land via a plain `helm upgrade`:
 
-- **Resizing a StatefulSet PVC** (MinIO, NATS, or Postgres storage size).
+- **Resizing a StatefulSet PVC** (RustFS, NATS, or Postgres storage size).
   `local-path` has no `allowVolumeExpansion`. There is no in-place fix:
   `helm uninstall`, delete the affected PVC(s), `helm install` again.
 - **A Postgres major-version bump** (as shipped once already, pg16→pg18).
@@ -272,12 +286,13 @@ immutable**, so certain changes can never land via a plain `helm upgrade`:
   kubectl scale statefulset pocket-advisor-postgres --replicas=0
   kubectl wait --for=delete pod/pocket-advisor-postgres-0 --timeout=60s
   kubectl delete pvc postgres-data-pocket-advisor-postgres-0
-  helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values --wait
+  helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values
+  kubectl wait --for=condition=Ready pod/pocket-advisor-postgres-0 --timeout=180s
   ```
 
   schema-bootstrap re-runs automatically as a post-upgrade hook and rebuilds
   the schema fresh. Re-run the discovery scan afterwards (§3.3) per workspace
-  to repopulate Tier 2 from the untouched MinIO bucket.
+  to repopulate Tier 2 from the untouched RustFS bucket.
 
   Also note: **Postgres 18's official image restructured its expected volume
   layout** — PGDATA now lives in a version-named subdirectory under the
@@ -293,29 +308,32 @@ kubectl exec pocket-advisor-postgres-0 -- \
   psql -U postgres -d rag_ingestion -c "select count(*) from documents;"
 ```
 
-If it's zero, wiping costs nothing — MinIO is untouched and a re-scan rebuilds
+If it's zero, wiping costs nothing — RustFS is untouched and a re-scan rebuilds
 everything.
 
 ## 8. Uninstall
 
 ```bash
-helm uninstall pocket-advisor
+helm uninstall pocket-advisor --cascade=foreground --wait=watcher
 kubectl get pvc   # PVCs outlive the release — delete explicitly if you want them gone
 kubectl delete pvc --all
 ```
 
-PVCs aren't the only thing that outlives a plain `helm uninstall` — Helm hook
-resources (the `minio-setup` and `schema-bootstrap` Jobs) are never part of
-the release's tracked manifest, so uninstall doesn't touch them either. Both
-carry `hook-delete-policy: before-hook-creation,hook-succeeded`, so a
-successful run deletes its own Job immediately rather than waiting around —
-there should be nothing left to clean up. A *failed* hook run is the one
-exception: it's left in place deliberately so you can `kubectl logs` it,
-and only gets swept on the next `helm install`/`upgrade` (`before-hook-creation`).
-If you ever do find a leftover Job after uninstalling, it means the last
-hook run before that failed:
+`rustfs-setup` and its policy ConfigMap are ordinary release resources, so
+Helm deletes their Job, Pod, and ConfigMap during uninstall. Foreground
+cascading plus `--wait=watcher` makes the command wait for dependent Pods to
+disappear instead of returning while they are merely terminating.
+
+PVCs deliberately remain: the RustFS PVC is the Tier 1 source of truth, so
+the chart must never silently delete it. The namespace's automatically
+created `kube-root-ca.crt` ConfigMap also belongs to Kubernetes, not this
+release.
+
+Releases installed with the older hook-based chart can have one-time orphan
+resources that Helm never owned. Remove those exact legacy names once:
 
 ```bash
-kubectl get jobs
-kubectl delete job -l app.kubernetes.io/part-of=rag-ingestion-engine
+kubectl delete job pocket-advisor-rustfs-setup --ignore-not-found
+kubectl delete configmap pocket-advisor-rustfs-policies \
+  pocket-advisor-minio-policies --ignore-not-found
 ```

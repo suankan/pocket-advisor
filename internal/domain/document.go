@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -76,6 +77,30 @@ func SHA256Hex(b []byte) string {
 // for free, and never renamed.
 func RawObjectKey(workspaceID, sha256hex string) string {
 	return fmt.Sprintf("workspaces/%s/raw/%s/%s", workspaceID, sha256hex[:2], sha256hex)
+}
+
+// ParseRawObjectKey validates and decomposes the only Tier 1 key shape that
+// may mint a root document.
+func ParseRawObjectKey(key string) (workspaceID, sha256hex string, err error) {
+	parts := strings.Split(key, "/")
+	if len(parts) != 5 || parts[0] != "workspaces" || parts[2] != "raw" {
+		return "", "", fmt.Errorf("not a raw object key: %q", key)
+	}
+	if parts[1] == "" {
+		return "", "", fmt.Errorf("raw object key has an empty workspace: %q", key)
+	}
+
+	hash := parts[4]
+	if len(hash) != sha256.Size*2 || hash != strings.ToLower(hash) {
+		return "", "", fmt.Errorf("raw object key has a non-canonical sha256: %q", key)
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return "", "", fmt.Errorf("raw object key has an invalid sha256: %q", key)
+	}
+	if parts[3] != hash[:2] {
+		return "", "", fmt.Errorf("raw object key shard does not match its sha256: %q", key)
+	}
+	return parts[1], hash, nil
 }
 
 // ExtractedObjectKey is the Tier 1 key for a child unrolled out of a

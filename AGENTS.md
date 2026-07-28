@@ -62,6 +62,16 @@ If a concern grows enough that its single doc becomes unwieldy, that's a
 conversation to have explicitly — split deliberately, don't let it happen by
 accretion.
 
+## Commit messages
+
+Write comprehensive commit messages. The subject should state the outcome;
+the body must explain the problem, the substantive implementation changes,
+operational or behavioural effects, and the verification performed. When a
+commit changes a user-facing workflow, include any migration, upgrade, or
+cleanup implications. Git history is a durable part of this project's
+documentation, so do not use terse messages that require readers to reconstruct
+intent from the diff.
+
 ## Hard rules
 
 1. **Source-of-truth corpora are read-only.** Never write, rename, or

@@ -68,6 +68,14 @@ func TestObjectKeysAndRoundTrip(t *testing.T) {
 	if got != sha {
 		t.Errorf("round trip lost the hash: %s", got)
 	}
+
+	workspace, parsedSHA, err := ParseRawObjectKey(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace != "ws1" || parsedSHA != sha {
+		t.Fatalf("unexpected parsed raw key: workspace=%q sha=%q", workspace, parsedSHA)
+	}
 }
 
 func TestSHA256FromKeyRejectsNonHex(t *testing.T) {
@@ -77,5 +85,23 @@ func TestSHA256FromKeyRejectsNonHex(t *testing.T) {
 	}
 	if _, err := SHA256FromKey("short"); err == nil {
 		t.Error("expected a short key to be rejected")
+	}
+}
+
+func TestParseRawObjectKeyRejectsNonCanonicalKeys(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := map[string]string{
+		"extracted child": ExtractedObjectKey("ws", sha),
+		"empty workspace": "workspaces//raw/01/" + sha,
+		"wrong shard":     "workspaces/ws/raw/ff/" + sha,
+		"uppercase hash":  "workspaces/ws/raw/01/" + "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+		"extra segment":   "workspaces/ws/raw/extra/01/" + sha,
+	}
+	for name, key := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := ParseRawObjectKey(key); err == nil {
+				t.Fatalf("expected key to be rejected: %q", key)
+			}
+		})
 	}
 }

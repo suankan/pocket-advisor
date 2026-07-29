@@ -7,9 +7,15 @@
 **Target Runtime:** Go service over PostgreSQL + pgvector, HTTP to local model endpoints
 
 **Status:** holistic design of record for the read path. Every retrieval
-concern lives in this file. Its peer is `docs/ingestion-design.md`, which
-owns the write path; §7 there states the contract between them and this
-document does not restate ingestion mechanics.
+concern lives in this file. Its peers are `docs/ingestion-design.md`, which
+owns the write path (§7 there states the contract between them, and this
+document does not restate ingestion mechanics); `docs/workspace-isolation.md`,
+which owns the per-workspace database boundary every query in this document
+runs against — the workspace scoping in §3.1, §3.3, and §7.1 assumes that
+isolation, it does not design it; and `docs/api-server-design.md`, which
+owns whether `POST /v1/query` (§7 here) is served by a mode of the
+ingestion binary or its own long-running service — an open question this
+document does not resolve either.
 
 ---
 

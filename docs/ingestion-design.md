@@ -10,9 +10,15 @@
 
 **Status:** holistic design of record for the write path. Everything about
 ingestion — pipeline, storage, failure semantics, codebase layout,
-observability — lives in this file. Its only peer is
-`docs/retrieval-design.md`, which owns every read-path concern; §7 here
-states the contract between them. There are no other v3 design documents.
+observability — lives in this file. Its peers are `docs/retrieval-design.md`,
+which owns every read-path concern (§7 here states the contract between
+them); `docs/workspace-isolation.md`, which owns how workspaces are
+kept apart across all three stores — the per-workspace database, bucket,
+and NATS account this file's uploader/discovery/worker code will need to
+address once that design is implemented; and `docs/api-server-design.md`,
+which owns the longer-term direction of exposing this pipeline's
+operations (and workspace lifecycle) behind an API Server rather than
+only a CLI — forward-looking, not yet begun.
 
 **Changes in 4.0.0:** the pipeline is one process, not five Deployments.
 

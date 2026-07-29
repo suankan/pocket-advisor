@@ -16,11 +16,9 @@ global:
 # stripped of features since mid-2025 and the project archived in Feb 2026.
 # RustFS is Apache-2.0 and deliberately implements MinIO's admin wire
 # protocol (/minio/admin/v3), so `mc admin` tooling and our whole scoped-
-# identity model carry over unchanged. PINNED to 1.0.0-beta.8, not `latest`:
-# beta.9 introduced a regression where the notify subsystem never leaves
-# "storage layer not initialized" and bucket-notification webhooks silently
-# never fire — confirmed by bisection, reported upstream. Do not bump past
-# beta.8 without re-verifying live notifications end-to-end first.
+# identity model carry over unchanged. Still pinned rather than `latest`,
+# but the beta.9 notify regression that forced this exact pin no longer
+# applies: nothing here uses bucket notifications any more.
 # ============================================================================
 rustfs:
   image: rustfs/rustfs:1.0.0-beta.8
@@ -43,13 +41,6 @@ rustfs:
     uploaderSecretKey: pa-uploader-secret
     workerAccessKey: pa-worker
     workerSecretKey: pa-worker-secret
-
-  # Where the webhook notify target queues events. RustFS's default
-  # (/opt/rustfs/events) doesn't exist and isn't writable by its non-root
-  # runtime user, which silently prevents the target from ever constructing
-  # — this must be overridden. Under /data so it survives restarts on the
-  # same PVC; the leading dot keeps it out of bucket-name enumeration.
-  notifyQueueDir: /data/.rustfs-events
 
   persistence:
     enabled: true
@@ -106,165 +97,3 @@ postgres:
   resources:
     requests: {cpu: "300m", memory: "512Mi"}
     limits:   {cpu: "1000m", memory: "1536Mi"}
-
-# ============================================================================
-# Embedding endpoint (external REST API — the engine loads no models)
-# ============================================================================
-embedding:
-  # Defaults to a local oMLX on the host, reachable from rancher-desktop /
-  # docker-desktop clusters. Point this at an in-cluster Service or a remote
-  # API for anything else.
-  endpoint: "http://host.docker.internal:8000/v1/embeddings"
-  # The model must actually be served by the endpoint above. schema-bootstrap
-  # probes it for the vector dimension and every worker re-probes at startup,
-  # so a name that is not served fails the deploy rather than producing a
-  # wrongly-shaped index (§4.4).
-  model: "jina-embeddings-v5-text-small-mlx"
-  # Optional pre-existing Secret holding the API key.
-  apiKeySecret: ""
-  apiKeySecretKey: "api-key"
-
-# ============================================================================
-# Schema bootstrap (Helm hook, runs before the workers)
-#
-# Probes the endpoint for the vector dimension and interpolates it into the
-# DDL. halfvec(N) is a typed column, so N must be resolved before the first
-# CREATE TABLE — and the authority on N is the model, not a config file (§4.4).
-# ============================================================================
-schemaBootstrap:
-  image: pocket-advisor/schema-bootstrap:latest
-  backoffLimit: 10
-  # Escape hatch that skips the probe. Leave unset.
-  dimensionOverride: ""
-  matryoshkaTruncated: false
-
-# ============================================================================
-# Discovery: the sole entry point (§5.2)
-# ============================================================================
-discovery:
-  image: pocket-advisor/discovery:latest
-  replicaCount: 2
-  metricsPort: 9090
-  httpPort: 8080
-
-  bucketNotification:
-    # The live path. Safe to rely on because the bucket scan is an exact
-    # backstop: a dropped event costs a delay, not a document.
-    enabled: true
-
-  reconcile:
-    # Re-publishes documents whose stub committed but whose command never
-    # reached NATS (§2.2).
-    schedule: "*/15 * * * *"
-    staleAfter: 30m
-
-  scan:
-    # Operator-invoked, not part of a normal install:
-    #   --set discovery.scan.enabled=true --set discovery.scan.workspace=<id>
-    enabled: false
-    workspace: ""
-    # The scan can outrun the whole pipeline — listing a bucket enqueues far
-    # faster than OCR drains (§5.2).
-    highWater: 10000
-    lowWater: 2000
-
-  resources:
-    requests: {cpu: "100m", memory: "128Mi"}
-    limits:   {cpu: "300m", memory: "256Mi"}
-
-# ============================================================================
-# Corpus uploader (§5.1)
-#
-# Operator-invoked, because uploading is an act rather than a deployment
-# state. Disabled by default:
-#
-#   helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-#     --set uploader.enabled=true \
-#     --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
-#     --set uploader.workspace.id=case-documents-demo
-# ============================================================================
-uploader:
-  enabled: false
-  image: pocket-advisor/uploader:latest
-  metricsPort: 9090
-
-  # WHAT to upload comes from the workspace registry, not from flags — the
-  # registry is the single definition of which collections a matter contains
-  # and where their documents live. These two values identify everything.
-  workspace:
-    # Path to workspaces/workspace-config.yaml ON THE HOST. Its parent
-    # directory is mounted readOnly, so the registry and the corpora it
-    # references travel together and relative paths resolve unchanged.
-    config: ""
-    # Which workspace inside that file. A typo fails before anything is
-    # written, and the error lists the ids that do exist.
-    id: ""
-
-  concurrency: 4
-  dryRun: false
-  # --wipe purges Tier 1 AND Tier 2 for the workspace. It empties Postgres
-  # first, so a failure to reach it leaves the bucket untouched (§5.1).
-  wipe: false
-  # --forget removes one document by sha256. Absence from a later upload run
-  # never implies deletion.
-  forget: ""
-  # Optional: mount the workspaces directory from a PVC instead of the host.
-  # The registry path above is still used, relative to the mount.
-  existingClaim: ""
-  backoffLimit: 2
-  ttlSecondsAfterFinished: 3600
-  resources:
-    requests: {cpu: "200m", memory: "256Mi"}
-    limits:   {cpu: "500m", memory: "512Mi"}
-
-# ============================================================================
-# Worker Pipeline Deployments
-#
-# Requests total ~3.3 cores / ~3.8Gi against the 6-core / 8GB budget (§6.2).
-# The document extractor is the dominant consumer by design: OCR is the
-# bottleneck, which is exactly why image OCR was folded into it rather than
-# given a competing pool.
-# ============================================================================
-workers:
-  imagePullPolicy: IfNotPresent
-
-  emailProcessor:
-    image: pocket-advisor/email-processor:latest
-    replicaCount: 2
-    metricsPort: 9090
-    resources:
-      requests: {cpu: "150m", memory: "256Mi"}
-      limits:   {cpu: "500m", memory: "512Mi"}
-
-  documentExtractor:
-    image: pocket-advisor/document-extractor:latest
-    replicaCount: 3  # 3 x 1.0 CPU limit for OCR + PDFium
-    metricsPort: 9090
-    # Process-wide OCR limit. Page bitmaps are the memory hot spot in the whole
-    # system: A4 at 300 DPI is ~35MB as RGBA (§5.4).
-    ocrConcurrency: 2
-    pdfInstances: 2
-    # Matches the corpus. A missing language does not error — it silently
-    # produces plausible-looking garbage that reaches the index.
-    ocrLangs: "eng+rus"
-    resources:
-      requests: {cpu: "400m", memory: "512Mi"}
-      limits:   {cpu: "1000m", memory: "1024Mi"}
-
-  officeExtractor:
-    image: pocket-advisor/office-extractor:latest
-    replicaCount: 1  # pure Go, cheap
-    metricsPort: 9090
-    resources:
-      requests: {cpu: "150m", memory: "192Mi"}
-      limits:   {cpu: "400m", memory: "384Mi"}
-
-  embeddingIndexer:
-    # Image names match cmd/ directory names exactly — build-images.sh derives
-    # them from that list, so any other name is unbuildable.
-    image: pocket-advisor/embed-indexer:latest
-    replicaCount: 2
-    metricsPort: 9090
-    resources:
-      requests: {cpu: "200m", memory: "256Mi"}
-      limits:   {cpu: "500m", memory: "512Mi"}

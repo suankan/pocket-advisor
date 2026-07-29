@@ -12,3 +12,6 @@ __pycache__/
 *.pyc
 .DS_Store
 tmp/
+# Compiled binary and the per-role run logs.
+bin/
+logs/

@@ -12,10 +12,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/config"
 )
+
+// DefaultConcurrency is how many requests the endpoint is asked to serve at
+// once. Unlike the CPU-bound pools this is not derived from the host: the
+// constraint lives in the endpoint, not here.
+const DefaultConcurrency = 8
 
 type Client struct {
 	endpoint string
@@ -23,19 +29,45 @@ type Client struct {
 	model    string
 	http     *http.Client
 	breaker  *Breaker
+
+	// sem bounds concurrent requests, and the transport below is sized to
+	// match. Without that pairing Go caps idle connections per host at 2, so a
+	// wider semaphore would spend its extra concurrency dialling and discarding
+	// connections instead of embedding.
+	sem      chan struct{}
+	inFlight atomic.Int64
 }
 
 func New(cfg config.Embedding) *Client {
+	conc := cfg.Concurrency
+	if conc < 1 {
+		conc = DefaultConcurrency
+	}
 	return &Client{
 		endpoint: cfg.Endpoint,
 		apiKey:   cfg.APIKey,
 		model:    cfg.Model,
-		http:     &http.Client{Timeout: cfg.Timeout},
-		breaker:  NewBreaker(5, 30*time.Second),
+		http: &http.Client{
+			Timeout: cfg.Timeout,
+			Transport: &http.Transport{
+				MaxConnsPerHost:     conc,
+				MaxIdleConnsPerHost: conc,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
+		breaker: NewBreaker(5, 30*time.Second),
+		sem:     make(chan struct{}, conc),
 	}
 }
 
 func (c *Client) Model() string { return c.model }
+
+// Concurrency and InFlight feed the dashboard's session gauge.
+func (c *Client) Concurrency() int { return cap(c.sem) }
+func (c *Client) InFlight() int    { return int(c.inFlight.Load()) }
+
+// BreakerState reports the circuit breaker's current state.
+func (c *Client) BreakerState() string { return c.breaker.State() }
 
 type request struct {
 	Model string   `json:"model"`
@@ -58,6 +90,21 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	if len(inputs) == 0 {
 		return nil, nil
 	}
+
+	// Bound before the breaker check, not after: a caller queued behind the
+	// semaphore should re-read the breaker when it actually gets its turn,
+	// rather than act on a verdict formed while it was waiting.
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	c.inFlight.Add(1)
+	defer func() {
+		c.inFlight.Add(-1)
+		<-c.sem
+	}()
+
 	if err := c.breaker.Allow(); err != nil {
 		return nil, err
 	}

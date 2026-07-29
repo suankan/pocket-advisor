@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -45,44 +48,130 @@ func Decline(docID, reason string) error { return &Declined{Reason: reason, DocI
 // Handler processes one message. Returning nil acks it.
 type Handler func(ctx context.Context, msg jetstream.Msg) error
 
-type Runtime struct {
-	Name    string
-	Bus     *bus.Bus
-	Docs    *postgres.DocumentRepo
-	Log     *slog.Logger
-	Batch   int
-	Subject string
+// DeadLetterer is the half of the DLQ protocol the runtime needs. Narrowed to
+// an interface so the pool's failure paths are testable without a broker;
+// *bus.Bus is the only production implementation.
+type DeadLetterer interface {
+	ToDLQ(ctx context.Context, origSubject, worker, reason, traceparent string, deliveries uint64, payload []byte) error
 }
 
-// Consume runs the pull loop until ctx is cancelled.
+type Runtime struct {
+	Name    string
+	Bus     DeadLetterer
+	Docs    *postgres.DocumentRepo
+	Log     *slog.Logger
+	Subject string
+
+	// Lanes is how many messages this pool handles at once. Replaces the old
+	// Batch, which only controlled how many messages were fetched per call —
+	// they were then processed one at a time in the fetching goroutine, so a
+	// pod's real parallelism was 1 and scaling meant adding replicas.
+	Lanes int
+
+	// Stats is the live counter set for this subject. Optional: nil disables
+	// dashboard reporting without affecting behaviour.
+	Stats *telemetry.Queue
+}
+
+// Consume runs a bounded worker pool until fetchCtx is done, then drains.
 //
-// Batch sizing carries policy: CPU-bound work fetches one task at a time so
-// idle workers steal from busy ones, while I/O-bound work fetches in batches.
-func (r *Runtime) Consume(ctx context.Context, consumer jetstream.Consumer, h Handler) error {
-	batch := r.Batch
-	if batch < 1 {
-		batch = 1
+// The two contexts have deliberately different lifetimes. fetchCtx ending stops
+// new work being pulled; workCtx bounds the handlers themselves and must
+// outlive it. That gap is what makes Ctrl+C safe: in-flight documents finish
+// and ack normally instead of being abandoned unacked, which would burn one of
+// their three delivery attempts and eventually dead-letter perfectly good work.
+func (r *Runtime) Consume(fetchCtx, workCtx context.Context, consumer jetstream.Consumer, h Handler) error {
+	lanes := r.Lanes
+	if lanes < 1 {
+		lanes = 1
 	}
 
+	work := make(chan jetstream.Msg)
+	freed := make(chan struct{}, 1)
+	var inFlight atomic.Int64
+	var wg sync.WaitGroup
+
+	for i := 0; i < lanes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msg := range work {
+				r.handle(workCtx, msg, h)
+				inFlight.Add(-1)
+				// Wake the fetcher if it is parked waiting for a free lane. A
+				// buffered-one channel and a non-blocking send make this a
+				// signal rather than a queue.
+				select {
+				case freed <- struct{}{}:
+				default:
+				}
+			}
+		}()
+	}
+
+	r.fetchLoop(fetchCtx, consumer, work, freed, &inFlight, lanes)
+
+	// Closing work lets the lanes finish what they hold and exit. Nothing new
+	// enters after this point.
+	close(work)
+	wg.Wait()
+	return nil
+}
+
+// fetchLoop pulls only as many messages as there are idle lanes.
+//
+// Fetching more would park them in an in-process buffer where their AckWait
+// keeps running while they wait — the broker considers a message delivered the
+// moment it hands it over, so an over-eager fetch converts queue depth into
+// redelivery risk for no throughput gain.
+func (r *Runtime) fetchLoop(
+	ctx context.Context,
+	consumer jetstream.Consumer,
+	work chan<- jetstream.Msg,
+	freed <-chan struct{},
+	inFlight *atomic.Int64,
+	lanes int,
+) {
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
+		if ctx.Err() != nil {
+			return
 		}
 
-		msgs, err := consumer.Fetch(batch, jetstream.FetchMaxWait(5*time.Second))
+		free := lanes - int(inFlight.Load())
+		if free < 1 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-freed:
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+
+		msgs, err := consumer.Fetch(free, jetstream.FetchMaxWait(2*time.Second))
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return
 			}
 			r.Log.Warn("fetch failed", "error", err)
-			time.Sleep(time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
 			continue
 		}
 
 		for msg := range msgs.Messages() {
-			r.handle(ctx, msg, h)
+			inFlight.Add(1)
+			select {
+			case work <- msg:
+			case <-ctx.Done():
+				// Hand it back rather than dropping it: an unacked Nak
+				// redelivers immediately instead of after the ack window.
+				inFlight.Add(-1)
+				_ = msg.Nak()
+			}
 		}
 		if err := msgs.Error(); err != nil && ctx.Err() == nil {
 			r.Log.Warn("fetch batch error", "error", err)
@@ -90,14 +179,34 @@ func (r *Runtime) Consume(ctx context.Context, consumer jetstream.Consumer, h Ha
 	}
 }
 
+// invoke calls the handler with a panic guard.
+//
+// One process now hosts every role. A panic that used to kill a single pod and
+// be restarted by Kubernetes would take the whole pipeline down, so it is
+// converted into a terminal failure for that one message instead.
+func (r *Runtime) invoke(ctx context.Context, msg jetstream.Msg, h Handler) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = Fatal("HANDLER_PANIC", fmt.Errorf("%v\n%s", p, debug.Stack()))
+		}
+	}()
+	return h(ctx, msg)
+}
+
 func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
+	if r.Stats != nil {
+		r.Stats.LaneStarted()
+		defer r.Stats.LaneFinished()
+	}
+
 	start := time.Now()
-	err := h(ctx, msg)
+	err := r.invoke(ctx, msg, h)
 	telemetry.IngestionDuration.WithLabelValues(r.Name, r.Subject).Observe(time.Since(start).Seconds())
 
 	switch {
 	case err == nil:
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "completed").Inc()
+		r.stat((*telemetry.Queue).Completed)
 		_ = msg.Ack()
 		return
 
@@ -106,6 +215,7 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		errors.As(err, &d)
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
 		telemetry.Skipped.WithLabelValues(d.Reason).Inc()
+		r.stat((*telemetry.Queue).Skipped)
 		if d.DocID != "" && r.Docs != nil {
 			if uerr := r.Docs.UpdateStatus(ctx, d.DocID, domain.StatusSkipped, d.Reason); uerr != nil {
 				r.Log.Error("record skip", "doc_id", d.DocID, "error", uerr)
@@ -134,6 +244,7 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		}
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "dlq").Inc()
 		telemetry.DLQ.WithLabelValues(r.Name, reason).Inc()
+		r.stat((*telemetry.Queue).DeadLettered)
 
 		if id := docIDOf(err); id != "" && r.Docs != nil {
 			_ = r.Docs.UpdateStatus(ctx, id, domain.StatusFailed, reason)
@@ -145,9 +256,17 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	}
 
 	telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
+	r.stat((*telemetry.Queue).Retried)
 	r.Log.Warn("transient failure, will redeliver",
 		"error", err, "delivery", deliveries, "max", bus.MaxDeliver)
 	_ = msg.Nak()
+}
+
+// stat applies a counter method when the dashboard is attached.
+func (r *Runtime) stat(f func(*telemetry.Queue)) {
+	if r.Stats != nil {
+		f(r.Stats)
+	}
 }
 
 func isDeclined(err error) bool {

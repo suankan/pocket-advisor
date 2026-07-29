@@ -1,73 +1,103 @@
-// Package app holds the wiring every worker binary repeats: config, logging,
-// metrics, store connections, and graceful shutdown. cmd/ mains stay as thin
-// as §8.2 requires.
+// Package app builds the dependency graph the whole process shares: config,
+// per-role logging, metrics, store connections, and the CPU bound.
+//
+// It used to hold the wiring each worker binary repeated. There is one binary
+// now, so it holds the wiring once — and the graph it builds is shared by every
+// role rather than rebuilt per pod (ingestion-design.md §8.2).
 package app
 
 import (
 	"context"
 	"log/slog"
-	"os/signal"
-	"syscall"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/limits"
 	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
 type App struct {
-	Cfg      *config.Config
-	Log      *slog.Logger
-	Vault    *minio.Vault
-	DB       *postgres.DB
-	Docs     *postgres.DocumentRepo
-	Chunks   *postgres.ChunkRepo
-	Bus      *bus.Bus
-	Ctx      context.Context
-	stopFns  []func()
-	stopSigs context.CancelFunc
+	Cfg  *config.Config
+	Logs *telemetry.Logs
+	Log  *slog.Logger
+
+	// Two Tier 1 clients for two scoped identities. Vault is the worker
+	// identity used by discovery and the extractors; Uploads is the uploader
+	// identity, the only one permitted to write raw/ or delete (§5.1).
+	Vault   *minio.Vault
+	Uploads *minio.Vault
+
+	DB     *postgres.DB
+	Docs   *postgres.DocumentRepo
+	Chunks *postgres.ChunkRepo
+	Bus    *bus.Bus
+
+	// CPU is the single bound on genuinely CPU-bound work — rasterisation and
+	// OCR — shared across every lane in the process.
+	CPU *limits.CPU
+
+	stopFns []func()
 }
 
 type Needs struct {
-	MinIO    bool
+	RustFS   bool
+	Uploader bool
 	Postgres bool
 	NATS     bool
+	Metrics  bool
 }
 
-// New builds the dependency graph a worker needs and nothing more.
-func New(name string, needs Needs) (*App, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
+// New builds what the requested modes need and nothing more.
+//
+// ctx governs connection setup and is retained by the stores; the caller owns
+// signal handling, because shutdown ordering is the supervisor's business.
+func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Needs) (*App, error) {
+	a := &App{
+		Cfg:  cfg,
+		Logs: logs,
+		Log:  logs.Logger(telemetry.RoleApp),
+		CPU:  limits.NewCPU(limits.CPUs),
 	}
-	log := telemetry.NewLogger(name, cfg.LogLevel)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	a := &App{Cfg: cfg, Log: log, Ctx: ctx, stopSigs: cancel}
+	if needs.Metrics {
+		shutdown := telemetry.ServeMetrics(cfg.MetricsPort, a.Log)
+		a.stopFns = append(a.stopFns, func() { _ = shutdown(context.Background()) })
+	}
 
-	shutdownMetrics := telemetry.ServeMetrics(cfg.MetricsPort, log)
-	a.stopFns = append(a.stopFns, func() { _ = shutdownMetrics(context.Background()) })
-
-	if needs.MinIO {
+	if needs.RustFS || needs.Uploader {
 		if err := cfg.RequireMinIO(); err != nil {
 			return nil, err
 		}
-		v, err := minio.New(cfg.MinIO)
+	}
+
+	if needs.RustFS {
+		v, err := minio.NewWorker(cfg.MinIO)
 		if err != nil {
 			return nil, err
 		}
-		if err := v.EnsureBucket(ctx); err != nil {
+		a.Vault = v
+	}
+
+	if needs.Uploader {
+		u, err := minio.NewUploader(cfg.MinIO)
+		if err != nil {
 			return nil, err
 		}
-		a.Vault = v
+		// Only the uploader identity may create the bucket, so this is the one
+		// place the check belongs.
+		if err := u.EnsureBucket(ctx); err != nil {
+			return nil, err
+		}
+		a.Uploads = u
 	}
 
 	if needs.Postgres {
 		if err := cfg.RequirePostgres(); err != nil {
 			return nil, err
 		}
-		db, err := postgres.Connect(ctx, cfg.Postgres.DSN)
+		db, err := postgres.Connect(ctx, cfg.Postgres.DSN, cfg.Postgres.MaxConns)
 		if err != nil {
 			return nil, err
 		}
@@ -89,12 +119,18 @@ func New(name string, needs Needs) (*App, error) {
 		a.stopFns = append(a.stopFns, b.Close)
 	}
 
-	log.Info("started", "metrics_port", cfg.MetricsPort)
+	a.Log.Info("dependencies ready",
+		"cpus", limits.CPUs,
+		"rustfs", cfg.MinIO.Endpoint,
+		"nats", cfg.NATS.URL,
+		"metrics_port", cfg.MetricsPort)
 	return a, nil
 }
 
+// Logger returns the log file writer for one role.
+func (a *App) Logger(role string) *slog.Logger { return a.Logs.Logger(role) }
+
 func (a *App) Close() {
-	a.stopSigs()
 	for i := len(a.stopFns) - 1; i >= 0; i-- {
 		a.stopFns[i]()
 	}

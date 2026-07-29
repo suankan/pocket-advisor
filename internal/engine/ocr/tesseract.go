@@ -1,62 +1,65 @@
 //go:build ocr
 
-// Tesseract via CGo. Built only into the document-extractor image, which is
-// the one binary that carries a C toolchain and the tesseract runtime
+// Tesseract via CGo. On the host this links against the Homebrew tesseract and
+// leptonica runtimes; mise.toml carries the CGo include and library paths
 // (ingestion-design.md §8.3).
 package ocr
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/png"
-	"sync"
 
 	"github.com/otiai10/gosseract/v2"
+
+	"github.com/suankan/pocket-advisor/internal/limits"
 )
 
 // Available reports whether this build has a real OCR engine linked.
 const Available = true
 
-// Engine holds the concurrency bound for OCR work.
+// Engine holds the language set and the CPU bound OCR runs under.
 //
-// A process-wide semaphore of 2, not one per document: OCR is the CPU
-// bottleneck and the bitmaps are the memory hot spot, so the limit has to be
-// global rather than per-request (§5.4).
+// The bound is the process-wide CPU semaphore shared with PDF rasterisation,
+// not a private limit: both burn the same cores, and two independent limits
+// would oversubscribe the machine by their sum. It replaces an earlier private
+// semaphore of 2, which was sized for a 1-core container rather than a host
+// (§5.4).
 type Engine struct {
-	sem  chan struct{}
+	cpu  *limits.CPU
 	lang string
-	mu   sync.Mutex
 }
 
-func NewEngine(concurrency int, lang string) *Engine {
-	if concurrency < 1 {
-		concurrency = 2
-	}
+func NewEngine(cpu *limits.CPU, lang string) *Engine {
 	if lang == "" {
 		// A missing language does not error — it silently produces
 		// plausible-looking garbage, which is worse than a failure because it
 		// reaches the index (§5.4).
 		lang = "eng+rus"
 	}
-	return &Engine{sem: make(chan struct{}, concurrency), lang: lang}
+	return &Engine{cpu: cpu, lang: lang}
 }
 
 func (e *Engine) Close() error { return nil }
 
 // Image runs OCR over a decoded image.
-func (e *Engine) Image(img image.Image) (string, error) {
+func (e *Engine) Image(ctx context.Context, img image.Image) (string, error) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return "", fmt.Errorf("encode page for ocr: %w", err)
 	}
-	return e.Bytes(buf.Bytes())
+	return e.Bytes(ctx, buf.Bytes())
 }
 
 // Bytes runs OCR over encoded image bytes.
-func (e *Engine) Bytes(data []byte) (string, error) {
-	e.sem <- struct{}{}
-	defer func() { <-e.sem }()
+func (e *Engine) Bytes(ctx context.Context, data []byte) (string, error) {
+	release, err := e.cpu.Acquire(ctx, limits.LabelOCR)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 
 	client := gosseract.NewClient()
 	defer client.Close()

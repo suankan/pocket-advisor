@@ -1,6 +1,9 @@
 {{/*
-Creates the bucket, the two scoped identities, and the bucket notification
-that makes discovery's live path work.
+Creates the bucket and the two scoped identities.
+
+The identities still matter with one client process: pocket-advisor holds
+two RustFS clients, one per identity, so the raw/ vs extracted/ write split
+stays enforced by policy rather than by which binary is running (§5.1).
 
 This is an ordinary release-owned Job, not a Helm hook. Hook resources are
 not part of a release and therefore survive `helm uninstall`. The release
@@ -104,31 +107,9 @@ spec:
               ensure "attach pa-worker"   mc admin policy attach local pa-worker   --user {{ .Values.rustfs.credentials.workerAccessKey }}
               ensure "attach pa-uploader" mc admin policy attach local pa-uploader --user {{ .Values.rustfs.credentials.uploaderAccessKey }}
 
-              {{- if .Values.discovery.bucketNotification.enabled }}
-              # Bucket notification: discovery's live path (§5.2). A dropped
-              # event costs a delay, not a document — the bucket scan is an
-              # exact backstop. RustFS's ARN scheme is arn:rustfs:sqs::..
-              # (MinIO's is arn:minio:sqs::..) — with two further gotchas
-              # confirmed by direct testing against 1.0.0-beta.8:
-              #
-              # 1. The target name must be LOWERCASE regardless of the
-              #    UPPERCASE env var suffix that defines it
-              #    (RUSTFS_NOTIFY_WEBHOOK_ENABLE_DISCOVERY). RustFS
-              #    materializes that env-configured target into its
-              #    persistent config store under a lowercased key; a rule
-              #    registered against the uppercase name never matches it
-              #    ("Target ID ... found in rules but not in target list",
-              #    logged once per object — every upload, silently, forever).
-              # 2. The region segment must match the bucket's actual region
-              #    (us-east-1, S3's default when none is set) rather than
-              #    being left empty as MinIO's ARN convention allows —
-              #    otherwise: "Bucket notification config references
-              #    missing target ARN".
-              ensure "bucket notification" mc event add local/{{ .Values.rustfs.bucket }} \
-                arn:rustfs:sqs:us-east-1:discovery:webhook \
-                --ignore-existing \
-                --event put --prefix workspaces/
-              {{- end }}
+              # No bucket notification is registered. Ingestion runs from the
+              # host on demand and reconciles raw/ against Tier 2 itself, so
+              # there is no in-cluster consumer for an event to reach (§5.2).
 
               echo "rustfs setup complete"
           resources:

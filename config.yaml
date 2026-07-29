@@ -3,6 +3,64 @@
 # optional; omitted keys fall back to modules/config.py. Unknown keys
 # abort loudly (typo protection).
 #
+# NOTE: everything below `infra` predates the v3 Go pipeline and is read by
+# nothing in it. `infra` is the only section internal/config loads.
+
+# ============================================================================
+# Infrastructure endpoints (v3 Go pipeline)
+#
+# pocket-advisor runs on the host; its three stores stay in the local OrbStack
+# cluster. These defaults match a `pocket-advisor` Helm release in the
+# `pocket-advisor` namespace, so a stock local cluster needs no edits here —
+# this section exists to point at a different one.
+#
+# Precedence: built-in defaults < this file < environment variables < flags.
+# Put secrets in the environment rather than here; the file is committed.
+# ============================================================================
+infra:
+  rustfs:
+    # OrbStack routes *.svc.cluster.local from macOS via the system resolver.
+    endpoint: pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
+    bucket: pocket-advisor
+    use_ssl: false
+    # Two scoped identities, not one. The uploader is the only writer to raw/
+    # and the only identity permitted to delete; the worker reads anywhere but
+    # writes only under extracted/. One process now plays both roles, so these
+    # are what keeps RustFS enforcing the split rather than the code merely
+    # promising it. Override the secrets via RUSTFS_*_SECRET_KEY.
+    uploader_access_key: pa-uploader
+    uploader_secret_key: pa-uploader-secret
+    worker_access_key: pa-worker
+    worker_secret_key: pa-worker-secret
+
+  nats:
+    url: nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+
+  postgres:
+    dsn: postgres://postgres:postgrespassword@pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/rag_ingestion?sslmode=disable
+    # Must cover every lane that can hold a connection at once. pgxpool
+    # defaults to max(4, NumCPU), which becomes the pipeline's narrowest point
+    # once all roles share one process.
+    max_conns: 50
+
+  embedding:
+    # Plain localhost: the process calling this now runs on the machine serving
+    # it, so the host.docker.internal hop the in-cluster workers needed is gone.
+    endpoint: http://localhost:8000/v1/embeddings
+    model: jina-embeddings-v5-text-small-mlx
+    # The one concurrency knob in the system. Every other pool is sized from
+    # runtime.NumCPU(), because the host is the honest authority on how much
+    # work fits at once — but this limit lives in the endpoint, not here.
+    concurrency: 16
+    timeout: 60s
+
+  observability:
+    metrics_port: 9090
+    log_level: info
+    # One file per role. The terminal belongs to the live dashboard, so these
+    # files are the complete record of what each role did.
+    log_dir: logs
+#
 # Three-class knob discipline (`docs_old/DESIGN.md`):
 #   - query / ingestion.ocr / ingestion.thread_* / ingestion.doc_date_* /
 #     ingestion.embed_text: FREE, change anytime.

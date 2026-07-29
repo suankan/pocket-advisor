@@ -1,9 +1,21 @@
 # pocket-advisor — Operator Guide
 
-Local Kubernetes RAG ingestion pipeline. This is the day-to-day operator
-handbook: install, load a corpus, watch it drain, inspect state, remove
-documents, upgrade. For the "why", see [`docs/ingestion-design.md`](docs/ingestion-design.md)
-(write path) and [`docs/retrieval-design.md`](docs/retrieval-design.md) (read path).
+Local RAG ingestion pipeline. The pipeline is **one binary that runs on your
+host**; its three stores run in a local Kubernetes cluster. This is the
+day-to-day handbook: install, load a corpus, watch it drain, inspect state,
+remove documents, upgrade. For the "why", see
+[`docs/ingestion-design.md`](docs/ingestion-design.md) (write path) and
+[`docs/retrieval-design.md`](docs/retrieval-design.md) (read path).
+
+```
+  your machine                             local cluster
+  pocket-advisor  ─────────────────────►   RustFS      Tier 1 — source of truth
+  (uploader, discovery,                    PostgreSQL  Tier 2 lineage + Tier 3 vectors
+   4 worker pools, live display)           NATS        JetStream queues between pools
+```
+
+The chart deploys those three stores and nothing else — no pipeline code runs
+in the cluster, so a code change never needs a redeploy.
 
 All commands assume you're at the repository root, with a kube context that
 defaults to the `pocket-advisor` namespace — set that up once:
@@ -20,320 +32,235 @@ kubectl config use-context pocket-advisor   # switch into it
 # kubectl config use-context <previous>     # switch back for other work
 ```
 
-Every command below omits `-n`/`--namespace` on that basis. If you'd rather
-not touch kube contexts, add `-n pocket-advisor` (or `--namespace
-pocket-advisor`) back to any `kubectl`/`helm` command yourself.
-
 ## Concepts you need before running anything
 
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
-  read directly by the system — it's a staging feed you push into RustFS via
-  the uploader. Once uploaded, a document's origin folder can move or vanish;
-  the bucket is authoritative.
+  read directly by the system — it's a staging feed you push into RustFS. Once
+  uploaded, a document's origin folder can move or vanish; the bucket is
+  authoritative.
 - **The workspace registry decides what gets uploaded**, not CLI flags. A
   `workspace-config.yaml` defines named *workspaces*, each a set of named
-  *collections*, each collection a path on disk. The uploader and the Job
-  template only ever take two identifying values: the registry path and a
-  workspace id.
-- **Everything destructive prompts unless `--yes`/the Job wrapper sets it.**
-  `--wipe` and `--forget` both hit Postgres first, so a failure to reach it
-  leaves the bucket untouched rather than dangling a citation.
-- **Postgres is derived state, not source of truth.** If it's ever lost or
-  reset, re-running the discovery scan against the bucket rebuilds it from
-  RustFS. Losing RustFS loses the corpus; losing Postgres just costs a re-index.
+  *collections*, each collection a path on disk. Two values identify
+  everything: the registry path and a workspace id.
+- **Ingestion is reconciliation, not events.** Every run compares the bucket
+  against Postgres and processes the difference. That makes re-running free
+  and interrupting safe.
+- **Everything destructive prompts unless `--yes`.** `--delete-data` and
+  `--forget` both hit Postgres first, so a failure to reach it leaves the
+  bucket untouched rather than dangling a citation.
+- **Postgres is derived state, not source of truth.** If it's lost, re-running
+  ingestion rebuilds it from RustFS. Losing RustFS loses the corpus; losing
+  Postgres just costs a re-index.
 
 ## 1. Prerequisites
 
-- A local Kubernetes cluster (rancher-desktop, docker-desktop, orbstack, etc.)
-  with a default StorageClass that supports dynamic provisioning
-  (`local-path` works).
-- An embedding REST endpoint reachable from inside the cluster — by default
-  `http://host.docker.internal:8000/v1/embeddings`, i.e. something running on
-  your host and exposed to the cluster's containers. Confirm what models it
-  actually serves before deploying:
-
+- **OrbStack** (or another local Kubernetes) with a default StorageClass
+  supporting dynamic provisioning (`local-path` works). OrbStack resolves
+  cluster Service DNS from macOS, which is how the host binary reaches the
+  stores with no port-forwarding.
+- **mise** — pins the Go toolchain and the CGo paths:
   ```bash
-  curl -s http://localhost:8000/v1/models | jq .
+  brew install mise && mise trust && mise install
   ```
-
-  `embedding.model` in `values.yaml` **must** name one of those models exactly
-  — schema-bootstrap probes the endpoint at install time and every worker
-  re-probes at startup, so a name the endpoint doesn't serve fails the
-  deploy loudly rather than silently building a wrongly-shaped index.
-
-- Container images built locally (the chart never pulls from a registry):
-
+- **Tesseract**, for OCR of scanned documents:
   ```bash
-  ./build/build-images.sh
+  brew install tesseract tesseract-lang
   ```
-
-  This builds one image per `cmd/` directory, tagged `pocket-advisor/<name>:latest`,
-  plus `document-extractor` from its own CGo+Tesseract Dockerfile. Re-run it
-  whenever Go source changes — the chart's `imagePullPolicy` is `IfNotPresent`,
-  so a stale local image is not refetched.
+  Without it the build still works, but scanned PDFs and images are recorded
+  `SKIPPED` rather than indexed.
+- **An embedding REST endpoint on localhost**, serving the model named in
+  `config.yaml` (default `jina-embeddings-v5-text-small-mlx` on `:8000`).
 
 ## 2. Install
 
 ```bash
-helm install pocket-advisor ./infra/charts/pocket-advisor --create-namespace \
-  --set embedding.model=<model-name-served-by-your-endpoint>
+make deploy-infra    # helm install + wait for RustFS setup to complete
+make build           # produces bin/pocket-advisor
 ```
 
-Two setup tasks run automatically:
-
-1. The release-owned `pocket-advisor-rustfs-setup-<revision>` Job creates the
-   bucket, the two scoped identities (uploader: raw/ read-write; workers:
-   read-anywhere, extracted/-only write), and the bucket notification.
-2. The `pocket-advisor-schema-bootstrap` post-install hook probes the
-   embedding endpoint's dimension and applies the DDL (`halfvec(N)`, HNSW +
-   GIN indexes).
-
-Helm does not block on the ordinary RustFS setup Job. Before uploading
-anything, wait for the current revision to finish:
+Then resolve the vector dimension and create the schema. The vector column is
+typed `halfvec(N)`, so `N` is read from the embedding endpoint before the first
+`CREATE TABLE` — it can't be reshaped later without a full re-embed:
 
 ```bash
+./bin/pocket-advisor --bootstrap-schema
+# schema ready: model=jina-embeddings-v5-text-small-mlx dimension=1024
+```
+
+Infrastructure endpoints live under `infra:` in
+[`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`, so you
+only edit it to point somewhere else. Environment variables override the file
+(`POSTGRES_DSN`, `RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, …) — put secrets
+there rather than in the committed file.
+
+OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
+and the defaults address the cluster directly:
+
+```
+pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
+pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432
+pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+```
+
+If the binary can't reach a store, check these resolve before anything else —
+they go through the **system** resolver, which Go consults only when cgo is
+enabled (`mise.toml` pins it). Note that `nslookup`/`dig` bypass the system
+resolver and will report NXDOMAIN even when everything is fine; use `nc -vz`
+or `ping` instead:
+
+```bash
+nc -vz pocket-advisor-postgres.pocket-advisor.svc.cluster.local 5432
+```
+
+## 3. Load a corpus
+
+Point at your registry and pick a workspace:
+
+```bash
+./bin/pocket-advisor --ingest-all --workspace-id test
+```
+
+That uploads every collection in the workspace, enqueues every bucket object
+with no Postgres row, and runs the worker pools until everything drains,
+showing live progress. Add `--dry-run` to see what would be uploaded without
+writing anything.
+
+Re-running is free — content already in Tier 1 is skipped by content hash, not
+re-uploaded — so the normal way to add documents is to drop them in the
+collection folder and run the same command again.
+
+**Ctrl+C is safe.** The first one stops fetching new work and lets in-flight
+documents finish and acknowledge; a second aborts immediately. The next
+`--ingest-all` resumes: the queues are durable, and anything not yet processed
+is still missing from Postgres.
+
+Two repair modes exist for when a run didn't leave things clean:
+
+```bash
+# Enqueue bucket objects with no Postgres row, without re-walking your disk
+./bin/pocket-advisor --scan --workspace-id test
+
+# Re-publish documents stuck PENDING (stub committed, publish failed)
+./bin/pocket-advisor --reconcile --workspace-id test
+```
+
+## 4. Watch it drain
+
+The live display covers a running ingest. For everything else:
+
+```bash
+# Per-role logs — one file per worker type, full JSON
+tail -f logs/document-extractor.log
+ls logs/     # uploader, discovery, email-processor, document-extractor,
+             # office-extractor, embed-indexer, pocket-advisor
+
+# Prometheus metrics while a run is in flight
+curl -s localhost:9090/metrics | grep rag_
+
+# Pipeline backlog
+kubectl exec pocket-advisor-nats-0 -- \
+  sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
+
+# What actually landed
+kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d rag_ingestion -c \
+  "select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;"
+
+# The resolved vector dimension — worth checking after any embedding model
+# change, since the column can't be reshaped without a full re-embed
+kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d rag_ingestion -c \
+  "select * from schema_metadata;"
+
+# Anything that failed for real (as opposed to being skipped)
+kubectl exec pocket-advisor-nats-0 -- \
+  sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"' | grep -A5 INGESTION_DLQ
+```
+
+`SKIPPED` and dead-lettered are deliberately different outcomes: a skip is a
+format the system knowingly declines (a tracking pixel, a legacy `.doc`), a
+dead letter is work that should have succeeded and didn't. A run reports
+failure if anything was dead-lettered.
+
+## 5. Remove documents
+
+```bash
+# One document, cascading into Tier 2, by sha256
+./bin/pocket-advisor --forget <sha256> --workspace-id test
+
+# The entire workspace: every Tier 1 object AND every Tier 2 row/chunk
+./bin/pocket-advisor --delete-data --workspace-id test
+```
+
+Both prompt for confirmation unless `--yes`. Absence of a file from a later
+upload run never implies deletion — removal is always explicit.
+
+## 6. After code changes
+
+```bash
+make build          # rebuild the binary — no images, no rollout
+make test           # go test with the ocr tag
+make race           # the worker pool under -race
+make lint           # gofmt, go vet, helm lint
+```
+
+Nothing in the cluster runs pipeline code, so a code change never needs a
+`helm upgrade`.
+
+## 7. Tuning
+
+Pool sizes derive from your host's CPU count and aren't configurable — one
+machine doesn't need six knobs to misconfigure it. On a 10-core host:
+
+| Pool | Lanes |
+| --- | --- |
+| email-processor | 20 |
+| document-extractor (PDF / images) | 10 each |
+| office-extractor | 10 |
+| embed-indexer | 20 |
+| shared CPU budget (OCR + rasterise) | 10 |
+
+The one exception is the embedding endpoint, whose limit belongs to the
+endpoint rather than to your CPU count:
+
+```bash
+./bin/pocket-advisor --ingest-all --workspace-id test --embedding-concurrency 4
+```
+
+Set it in `config.yaml` under `infra.embedding.concurrency` to make it stick.
+
+## 8. Upgrading the chart
+
+```bash
+make deploy-infra    # upgrade --install, then waits for RustFS setup
+```
+
+Prefer that over a bare `helm upgrade`. Every install and upgrade creates a new
+revision-named `rustfs-setup` Job that provisions the bucket and the two scoped
+identities the binary authenticates as; ingesting before it completes fails on
+credentials that don't exist yet. If you do run Helm directly, wait yourself:
+
+```bash
+helm upgrade pocket-advisor ./infra/charts/pocket-advisor
 kubectl wait --for=condition=complete job \
   -l app.kubernetes.io/component=rustfs-setup --timeout=5m
 ```
 
-`schema-bootstrap` deletes itself on success, so check what
-dimension got resolved (the index can't be reshaped later without a full
-re-embed) in the table it wrote instead of the Job's logs:
+Two immutability traps:
+
+- **`persistence.size` can't be changed on a live release.**
+  `volumeClaimTemplates` is immutable, so `helm upgrade` fails with "updates to
+  statefulset spec … are forbidden". Recreate the StatefulSet to resize.
+- **A PostgreSQL major-version bump changes the on-disk format.** Delete the
+  postgres PVC first, then re-run `--bootstrap-schema` and re-ingest.
+
+## 9. Uninstall
 
 ```bash
-kubectl exec pocket-advisor-postgres-0 -- \
-  psql -U postgres -d rag_ingestion -c "select * from schema_metadata;"
+make destroy-infra    # helm uninstall; PVCs deliberately retained
 ```
 
-Confirm everything is up:
+PVCs survive on purpose: Tier 1 is the corpus source of truth, and the NATS
+volume is what makes an interrupted ingest resumable. To discard everything:
 
 ```bash
-kubectl get pods
-```
-
-You should see 2 discovery, 2 email-processor, 3 document-extractor, 1
-office-extractor, 2 embedding-indexer replicas, plus single RustFS/NATS/Postgres
-pods, all `Running`.
-
-## 3. Load a corpus
-
-### 3.1 Point at your workspace registry
-
-Everything the uploader needs comes from `workspace-config.yaml` — you only
-ever pass its path and a workspace id:
-
-```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set uploader.enabled=true \
-  --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
-  --set uploader.workspace.id=<workspace-id> \
-  --set uploader.dryRun=true
-```
-
-`dryRun=true` reports what would be uploaded without writing anything —
-always run this first against a workspace you haven't loaded before. A typo
-in the workspace id fails immediately and lists the ids that do exist.
-
-Watch it (the Job's pod name is timestamped, so grab the newest one):
-
-```bash
-kubectl logs -f "$(kubectl get pods -o name | grep uploader | tail -1)"
-```
-
-### 3.2 Do the real upload
-
-Drop `dryRun`:
-
-```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set uploader.enabled=true \
-  --set uploader.workspace.config=/abs/path/to/workspaces/workspace-config.yaml \
-  --set uploader.workspace.id=<workspace-id>
-```
-
-Content is addressed by sha256, so re-running the same command later only
-uploads what's new — already-present files report as `duplicate`, not
-re-uploaded.
-
-**Important — always pass `uploader.enabled=false` back afterwards**, or
-disable it explicitly on your *next* unrelated upgrade:
-
-```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set uploader.enabled=false
-```
-
-Helm's default behaviour is a trap here: any bare `helm upgrade ... --set X`
-call **without** `--reuse-values` discards every previously-set override that
-isn't in the new command, not just the ones you didn't mention — including
-`uploader.enabled`, which would silently re-fire the upload Job on your next
-unrelated upgrade. Either always pass the full set of overrides you care
-about, or add `--reuse-values` when you only mean to change one thing.
-
-### 3.3 Backstop: reconcile Tier 2 against the bucket
-
-Bucket notifications are the live path — uploading normally triggers
-ingestion automatically. If a notification was ever dropped, or you want to
-force a full catch-up scan of everything already in the bucket:
-
-```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set discovery.scan.enabled=true \
-  --set discovery.scan.workspace=<workspace-id>
-```
-
-The scan is exact, not best-effort: it publishes every `raw/` object that has
-no `documents` row yet. Remember to set `discovery.scan.enabled=false` again
-afterwards for the same reason as the uploader above.
-
-## 4. Watch it drain
-
-```bash
-# Pipeline backlog: streams, consumers, message counts
-kubectl exec pocket-advisor-nats-0 -- \
-  sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
-
-# Discovery service logs (the sole ingestion entry point)
-kubectl logs -l app=discovery -f
-
-# Any worker's logs (pods carry a plain `app=<name>` label, not
-# app.kubernetes.io/component — that field only exists on the Deployment
-# resource itself, so it's not selectable via `kubectl get pods -l ...`)
-kubectl logs -l app=document-extractor-worker -f
-kubectl logs -l app=email-processor-worker -f
-kubectl logs -l app=office-extractor-worker -f
-kubectl logs -l app=embedding-indexer-worker -f
-```
-
-> The NATS image ships only `nats-server`, not the `nats` CLI — querying
-> JetStream state means hitting the monitor HTTP port (`8222`) as above, not
-> `nats stream info`.
-
-Row counts, once you want ground truth instead of logs:
-
-```bash
-kubectl exec pocket-advisor-postgres-0 -- \
-  psql -U postgres -d rag_ingestion -c "select count(*) from documents;" \
-  -c "select count(*) from document_chunks;"
-```
-
-Per-service metrics (Prometheus format) are on port `9090` of every worker
-and on discovery; discovery also exposes `/healthz` on `8080`.
-
-## 5. Remove documents
-
-Both operations empty Postgres first, so a failure to reach it leaves the
-bucket untouched rather than dangling a citation. Both prompt for
-confirmation unless run through the Job (which always passes `--yes`).
-
-```bash
-# One document, cascading into Tier 2, by sha256
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set uploader.enabled=true \
-  --set uploader.workspace.config=/abs/path/to/workspace-config.yaml \
-  --set uploader.workspace.id=<workspace-id> \
-  --set uploader.forget=<sha256>
-
-# The entire workspace: every Tier 1 object AND every Tier 2 row/chunk.
-# Re-run the normal upload afterwards to reload it.
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor \
-  --set uploader.enabled=true \
-  --set uploader.workspace.config=/abs/path/to/workspace-config.yaml \
-  --set uploader.workspace.id=<workspace-id> \
-  --set uploader.wipe=true
-```
-
-Remember: absence of a file from a *later* upload run never implies deletion
-— only `--forget` or `--wipe` remove anything. Set `uploader.enabled=false`
-again afterwards (see the trap in §3.2).
-
-## 6. Rebuilding images after code changes
-
-```bash
-./build/build-images.sh [tag]
-kubectl rollout restart deployment -l app.kubernetes.io/part-of=rag-ingestion-engine
-```
-
-(`kubectl rollout restart` is needed because the tag is usually still
-`latest` and Kubernetes won't re-pull an unchanged tag on its own with
-`IfNotPresent`.)
-
-## 7. Upgrading the chart / third-party components
-
-Plain config or worker-image changes are a normal rolling upgrade:
-
-```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values
-```
-
-The RustFS setup Job carries the release revision in its name. Every upgrade
-therefore runs setup idempotently in a new Job without patching immutable Job
-fields; the previous revision is removed by Helm. Use the `kubectl wait`
-command from §2 before starting an upload after an upgrade.
-
-Two categories of change need extra care, both stemming from the same
-underlying constraint — **`volumeClaimTemplates` on a StatefulSet is
-immutable**, so certain changes can never land via a plain `helm upgrade`:
-
-- **Resizing a StatefulSet PVC** (RustFS, NATS, or Postgres storage size).
-  `local-path` has no `allowVolumeExpansion`. There is no in-place fix:
-  `helm uninstall`, delete the affected PVC(s), `helm install` again.
-- **A Postgres major-version bump** (as shipped once already, pg16→pg18).
-  The new binary can't read the old data directory format. Since Postgres
-  is derived state, the fix is targeted rather than a full reinstall:
-
-  ```bash
-  kubectl scale statefulset pocket-advisor-postgres --replicas=0
-  kubectl wait --for=delete pod/pocket-advisor-postgres-0 --timeout=60s
-  kubectl delete pvc postgres-data-pocket-advisor-postgres-0
-  helm upgrade pocket-advisor ./infra/charts/pocket-advisor --reuse-values
-  kubectl wait --for=condition=Ready pod/pocket-advisor-postgres-0 --timeout=180s
-  ```
-
-  schema-bootstrap re-runs automatically as a post-upgrade hook and rebuilds
-  the schema fresh. Re-run the discovery scan afterwards (§3.3) per workspace
-  to repopulate Tier 2 from the untouched RustFS bucket.
-
-  Also note: **Postgres 18's official image restructured its expected volume
-  layout** — PGDATA now lives in a version-named subdirectory under the
-  mount rather than at its root (docker-library/postgres#1259). This chart's
-  `postgres-data` volume is already mounted at the correct parent path
-  (`/var/lib/postgresql`); if you fork the template, mounting directly at
-  `.../data` makes a pg18+ container refuse to start even on an empty volume.
-
-Always confirm what's actually in Postgres before wiping it:
-
-```bash
-kubectl exec pocket-advisor-postgres-0 -- \
-  psql -U postgres -d rag_ingestion -c "select count(*) from documents;"
-```
-
-If it's zero, wiping costs nothing — RustFS is untouched and a re-scan rebuilds
-everything.
-
-## 8. Uninstall
-
-```bash
-helm uninstall pocket-advisor --cascade=foreground --wait=watcher
-kubectl get pvc   # PVCs outlive the release — delete explicitly if you want them gone
-kubectl delete pvc --all
-```
-
-`rustfs-setup` and its policy ConfigMap are ordinary release resources, so
-Helm deletes their Job, Pod, and ConfigMap during uninstall. Foreground
-cascading plus `--wait=watcher` makes the command wait for dependent Pods to
-disappear instead of returning while they are merely terminating.
-
-PVCs deliberately remain: the RustFS PVC is the Tier 1 source of truth, so
-the chart must never silently delete it. The namespace's automatically
-created `kube-root-ca.crt` ConfigMap also belongs to Kubernetes, not this
-release.
-
-Releases installed with the older hook-based chart can have one-time orphan
-resources that Helm never owned. Remove those exact legacy names once:
-
-```bash
-kubectl delete job pocket-advisor-rustfs-setup --ignore-not-found
-kubectl delete configmap pocket-advisor-rustfs-policies \
-  pocket-advisor-minio-policies --ignore-not-found
+make destroy-state    # kubectl delete pvc --all
 ```

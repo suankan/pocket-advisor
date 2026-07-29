@@ -71,7 +71,7 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 		telemetry.PDFClassification.WithLabelValues("digital").Inc()
 	} else {
 		telemetry.PDFClassification.WithLabelValues("scanned").Inc()
-		ocrText, err := w.ocrPages(doc, meta.DocId)
+		ocrText, err := w.ocrPages(ctx, doc, meta.DocId)
 		if err != nil {
 			if errors.Is(err, ocr.ErrUnavailable) {
 				return Decline(meta.DocId, "OCR_UNAVAILABLE")
@@ -93,19 +93,26 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 
 // ocrPages rasterises and OCRs one page at a time, releasing each bitmap
 // before rendering the next (§5.4).
-func (w *DocumentWorker) ocrPages(doc *pdf.Document, docID string) (string, error) {
+//
+// Pages within a document stay sequential — that is the memory discipline that
+// keeps live bitmaps bounded. Parallelism comes from other lanes working other
+// documents, all of them metered by the same CPU semaphore.
+func (w *DocumentWorker) ocrPages(ctx context.Context, doc *pdf.Document, docID string) (string, error) {
 	if !ocr.Available {
 		return "", ocr.ErrUnavailable
 	}
 	var b strings.Builder
 	for i := 0; i < doc.PageCount(); i++ {
-		img, cleanup, err := w.PDF.RenderPage(doc, i, RasterDPI)
+		img, cleanup, err := w.PDF.RenderPage(ctx, doc, i, RasterDPI)
 		if err != nil {
 			cleanup()
+			if ctx.Err() != nil {
+				return b.String(), ctx.Err()
+			}
 			w.Log.Warn("page render failed", "doc_id", docID, "page", i, "error", err)
 			continue
 		}
-		text, err := w.OCR.Image(img)
+		text, err := w.OCR.Image(ctx, img)
 		cleanup() // before the next page is rendered, always
 		if err != nil {
 			if errors.Is(err, ocr.ErrUnavailable) {
@@ -147,7 +154,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 	}
 	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
 
-	text, err := w.OCR.Bytes(data)
+	text, err := w.OCR.Bytes(ctx, data)
 	if err != nil {
 		if errors.Is(err, ocr.ErrUnavailable) {
 			return Decline(meta.DocId, "OCR_UNAVAILABLE")

@@ -4,8 +4,10 @@ package minio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -40,6 +42,39 @@ const (
 	metaAliases  = "alias-filenames"
 )
 
+// encodeAliases serialises the alias list as JSON.
+//
+// It used to join on \x1f. That is a control character, which net/http rejects
+// outright in a header value — so the moment an object acquired a second alias,
+// every subsequent metadata write on it failed permanently with "invalid header
+// field value". JSON escapes control characters as \uXXXX, so any filename the
+// filesystem allows survives the round trip.
+func encodeAliases(aliases []string) string {
+	if len(aliases) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(aliases)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeAliases reads either form. Objects written before the JSON change still
+// carry \x1f-joined values, and re-reading them must not lose the names.
+func decodeAliases(s string) []string {
+	if s == "" {
+		return nil
+	}
+	if strings.HasPrefix(s, "[") {
+		var out []string
+		if err := json.Unmarshal([]byte(s), &out); err == nil {
+			return out
+		}
+	}
+	return strings.Split(s, "\x1f")
+}
+
 func (p Provenance) toUserMetadata() map[string]string {
 	m := map[string]string{
 		metaFilename: p.SourceFilename,
@@ -48,8 +83,8 @@ func (p Provenance) toUserMetadata() map[string]string {
 		metaUploaded: p.UploadedAt,
 		metaRunID:    p.UploaderRunID,
 	}
-	if len(p.AliasFilenames) > 0 {
-		m[metaAliases] = strings.Join(p.AliasFilenames, "\x1f")
+	if a := encodeAliases(p.AliasFilenames); a != "" {
+		m[metaAliases] = a
 	}
 	for k, v := range p.Extra {
 		if v == "" {
@@ -63,13 +98,30 @@ func (p Provenance) toUserMetadata() map[string]string {
 	return m
 }
 
+// decodeWord reverses the RFC 2047 encoding minio-go applies to non-ASCII
+// metadata values on the way out.
+//
+// It encodes on write but does not decode on read, so a Cyrillic filename comes
+// back as "=?UTF-8?B?...?=". Left alone, that value never equals the filename it
+// was made from — which made the uploader believe every non-ASCII document had
+// been renamed, and record a fresh alias for it on every single run.
+func decodeWord(s string) string {
+	if !strings.Contains(s, "=?") {
+		return s
+	}
+	if decoded, err := (&mime.WordDecoder{}).DecodeHeader(s); err == nil {
+		return decoded
+	}
+	return s
+}
+
 func provenanceFrom(userMeta map[string]string) Provenance {
 	// minio-go returns user metadata with the X-Amz-Meta- prefix stripped but
 	// canonicalised, so look keys up case-insensitively.
 	get := func(k string) string {
 		for name, v := range userMeta {
 			if strings.EqualFold(strings.TrimPrefix(name, "X-Amz-Meta-"), k) {
-				return v
+				return decodeWord(v)
 			}
 		}
 		return ""
@@ -81,9 +133,7 @@ func provenanceFrom(userMeta map[string]string) Provenance {
 		UploadedAt:     get(metaUploaded),
 		UploaderRunID:  get(metaRunID),
 	}
-	if a := get(metaAliases); a != "" {
-		p.AliasFilenames = strings.Split(a, "\x1f")
-	}
+	p.AliasFilenames = decodeAliases(get(metaAliases))
 
 	// Anything not a core field is a registry attribute. Round-tripping it
 	// matters: AddAlias rewrites the object's metadata wholesale, so a key
@@ -111,9 +161,25 @@ type Vault struct {
 	bucket string
 }
 
-func New(cfg config.MinIO) (*Vault, error) {
+// NewUploader returns a client bound to the uploader identity: the only one
+// allowed to write raw/ and the only one allowed to delete.
+func NewUploader(cfg config.MinIO) (*Vault, error) {
+	return newVault(cfg, cfg.UploaderAccessKey, cfg.UploaderSecretKey)
+}
+
+// NewWorker returns a client bound to the worker identity: reads anywhere,
+// writes only under extracted/.
+//
+// One process now performs both roles, so the split is no longer implied by
+// which binary is running. Keeping two clients is what keeps RustFS enforcing
+// it rather than this code promising it (§5.1).
+func NewWorker(cfg config.MinIO) (*Vault, error) {
+	return newVault(cfg, cfg.WorkerAccessKey, cfg.WorkerSecretKey)
+}
+
+func newVault(cfg config.MinIO, accessKey, secretKey string) (*Vault, error) {
 	c, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure: cfg.UseSSL,
 	})
 	if err != nil {

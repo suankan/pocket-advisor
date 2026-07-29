@@ -61,3 +61,19 @@ func (b *Breaker) Fail() {
 		b.openedAt = time.Now()
 	}
 }
+
+// State reports "closed", "open" or "half-open" for the dashboard. A tripped
+// breaker stalls the whole embedding stage, so it has to be visible rather than
+// only inferable from a stalled queue.
+func (b *Breaker) State() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.failures < b.threshold {
+		return "closed"
+	}
+	if time.Since(b.openedAt) < b.cooldown {
+		return "open"
+	}
+	return "half-open"
+}

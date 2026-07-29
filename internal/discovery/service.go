@@ -201,6 +201,15 @@ func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWa
 
 	var todo []string
 	for _, o := range objects {
+		// Admit only canonical raw/ keys. The scan is the sole minter of root
+		// documents now that bucket notifications are gone, so this is the only
+		// place the shape can be checked — and a key that is not content
+		// addressed cannot have its identity verified against its bytes below.
+		if _, _, err := domain.ParseRawObjectKey(o.Key); err != nil {
+			telemetry.DiscoveryFiles.WithLabelValues("scan", "ignored").Inc()
+			s.Log.Warn("ignoring non-canonical object under raw/", "key", o.Key, "error", err)
+			continue
+		}
 		if _, ok := known[s.Vault.URI(o.Key)]; !ok {
 			todo = append(todo, o.Key)
 		}

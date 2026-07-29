@@ -1,0 +1,15 @@
+[tools]
+go = "1.25"
+
+[env]
+# Tesseract is linked via CGo, so the toolchain must not be in pure-Go mode.
+# This also keeps Go on the macOS system resolver, which is what makes
+# OrbStack's *.svc.cluster.local names resolvable from the host process.
+CGO_ENABLED = "1"
+
+# gosseract's tessbridge.cpp includes <leptonica/allheaders.h>, which needs the
+# Homebrew include root on the search path — pkg-config's own --cflags points
+# one level too deep (at .../include/leptonica) for that form to resolve.
+# gosseract supplies -ltesseract/-lleptonica itself; only the paths are ours.
+CGO_CXXFLAGS = "-I/opt/homebrew/include"
+CGO_LDFLAGS = "-L/opt/homebrew/lib"

@@ -35,6 +35,8 @@ type Options struct {
 	Concurrency int
 	DryRun      bool
 	RunID       string
+	// Progress receives live counts for the dashboard. Optional.
+	Progress *telemetry.Upload
 }
 
 type Result struct {
@@ -90,6 +92,22 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 	// Tier 1, and only the first occurrence uploads it.
 	var seen sync.Map
 
+	// Count everything before moving anything, so the progress bar has a fixed
+	// denominator. A second walk is metadata-only and costs far less than a
+	// total that keeps growing under the bar.
+	if opts.Progress != nil {
+		var fileCount int64
+		for _, c := range opts.Collections {
+			files, err := collect(c.AbsPath)
+			if err != nil {
+				return total, fmt.Errorf("collection %s: %w", c.ID, err)
+			}
+			fileCount += int64(len(files))
+		}
+		opts.Progress.Start(fileCount)
+		defer opts.Progress.Finish()
+	}
+
 	for _, c := range opts.Collections {
 		res, err := u.collection(ctx, opts, c, &seen)
 		total.Add(res)
@@ -142,15 +160,24 @@ func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.Res
 			case err != nil:
 				atomic.AddInt64(&failed, 1)
 				telemetry.UploaderFiles.WithLabelValues("failed").Inc()
+				if opts.Progress != nil {
+					opts.Progress.Failed()
+				}
 				u.log.Error("upload failed", "path", path, "error", err)
 			case outcome == "duplicate":
 				atomic.AddInt64(&duplicate, 1)
 				telemetry.UploaderFiles.WithLabelValues("duplicate").Inc()
+				if opts.Progress != nil {
+					opts.Progress.Duplicate()
+				}
 			default:
 				atomic.AddInt64(&uploaded, 1)
 				atomic.AddInt64(&bytes, n)
 				telemetry.UploaderFiles.WithLabelValues("uploaded").Inc()
 				telemetry.UploaderBytes.Add(float64(n))
+				if opts.Progress != nil {
+					opts.Progress.Uploaded(n)
+				}
 			}
 		}(f)
 	}

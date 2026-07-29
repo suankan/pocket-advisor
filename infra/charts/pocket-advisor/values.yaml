@@ -35,8 +35,8 @@ rustfs:
   # only under extracted/. Enforced by policy rather than convention
   # (§5.1) — see templates/job-rustfs-setup.yaml.
   credentials:
-    rootUser: minioadmin
-    rootPassword: minioadminpassword
+    rootUser: rustfsadmin
+    rootPassword: rustfsadminpassword
     uploaderAccessKey: pa-uploader
     uploaderSecretKey: pa-uploader-secret
     workerAccessKey: pa-worker

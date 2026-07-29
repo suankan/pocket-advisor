@@ -15,8 +15,8 @@ import (
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/ocr"
 	"github.com/suankan/pocket-advisor/internal/engine/pdf"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
@@ -31,7 +31,7 @@ const RasterDPI = 300
 // paths execute the same OCR engine against the same finite CPU budget. Two
 // pools would compete for cores with no coordination (§5.4).
 type DocumentWorker struct {
-	Vault *minio.Vault
+	Vault *rustfs.Vault
 	Docs  *postgres.DocumentRepo
 	Bus   *bus.Bus
 	PDF   *pdf.Engine
@@ -49,7 +49,7 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
 	}
 
-	data, err := w.fetch(ctx, cmd.MinioRawUri, meta.DocId)
+	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 		return Decline(meta.DocId, "OCR_UNAVAILABLE")
 	}
 
-	data, err := w.fetch(ctx, cmd.MinioRawUri, meta.DocId)
+	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
 	if err != nil {
 		return err
 	}

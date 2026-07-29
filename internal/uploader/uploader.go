@@ -2,7 +2,7 @@
 // (ingestion-design.md §5.1).
 //
 // It is the only writer to the raw/ prefix and the only component in the
-// system that reads a user filesystem. Everything downstream reads MinIO.
+// system that reads a user filesystem. Everything downstream reads RustFS.
 package uploader
 
 import (
@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
@@ -55,11 +55,11 @@ func (r *Result) Add(o Result) {
 }
 
 type Uploader struct {
-	vault *minio.Vault
+	vault *rustfs.Vault
 	log   *slog.Logger
 }
 
-func New(v *minio.Vault, log *slog.Logger) *Uploader {
+func New(v *rustfs.Vault, log *slog.Logger) *Uploader {
 	return &Uploader{vault: v, log: log}
 }
 
@@ -246,7 +246,7 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, c workspa
 	}
 	defer f.Close()
 
-	prov = minio.Provenance{
+	prov = rustfs.Provenance{
 		SourceFilename: name,
 		SourcePath:     filepath.ToSlash(rel),
 		CollectionID:   c.ID,

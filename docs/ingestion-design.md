@@ -176,7 +176,7 @@ Two mechanisms close the gap.
 **Reconciliation sweep.** A `CronJob` (every 15 min) re-publishes any document `PENDING` longer than 30 minutes:
 
 ```sql
-SELECT doc_id, minio_raw_uri, mime_type, workspace_id
+SELECT doc_id, rustfs_raw_uri, mime_type, workspace_id
 FROM documents
 WHERE processing_status = 'PENDING'
   AND updated_at < now() - interval '30 minutes'
@@ -400,7 +400,7 @@ flowchart TB
 The internal messaging protocol relies on immutable command messages containing tracing headers, workspace scope, and document lineage pointers.
 
 * **DocumentMetadata Schema:** Captures context including `workspace_id`, `collection_id`, `thread_id`, `parent_doc_id` (empty for root entities), `source_filename`, `mime_type`, `raw_sha256`, and OpenTelemetry correlation headers (`trace_parent`).
-* **ProcessEmailCommand:** Wraps object storage references (`minio_raw_uri`) and metadata for inbound email and archive tasks.
+* **ProcessEmailCommand:** Wraps object storage references (`rustfs_raw_uri`) and metadata for inbound email and archive tasks.
 * **ProcessPdfCommand:** Contains object references, lineage metadata, and explicit processing priority flags for PDF processing.
 * **ProcessOfficeCommand:** Object reference plus detected OOXML sub-type (`docx` / `xlsx` / `pptx` / `rtf` / `odt`) for the pure-Go Office path.
 * **ProcessImageCommand:** Object reference plus pixel dimensions and byte size recorded at discovery, so the viability gate (§5.4) can decide without a second fetch.
@@ -443,7 +443,7 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 | - thread_id (VARCHAR, Indexed)                                                    |
 | - processing_status (ENUM: PENDING, PROCESSING, COMPLETED, SKIPPED, FAILED)       |
 | - doc_type & mime_type (VARCHAR)                                                  |
-| - minio_raw_uri & raw_sha256 (TEXT/VARCHAR)                                       |
+| - rustfs_raw_uri & raw_sha256 (TEXT/VARCHAR)                                      |
 | - normalized_text (TEXT)                                                          |
 | - metadata_headers (JSONB)       -- incl. skip/failure reason codes               |
 | - created_at / updated_at (TIMESTAMPTZ)                                           |
@@ -689,7 +689,7 @@ The flag purges everything for a workspace and re-uploads from scratch. It
 ```
 
 Tier 2 and Tier 3 are derivatives of Tier 1 objects. Purging the bucket while
-leaving the database populated leaves every `minio_raw_uri` dangling and every
+leaving the database populated leaves every `rustfs_raw_uri` dangling and every
 citation unresolvable — retrieval keeps returning confident results that point
 at nothing, which is worse than either a clean reset or no action at all. The
 uploader therefore refuses to do half of this: if it cannot reach PostgreSQL,
@@ -1205,7 +1205,7 @@ pocket-advisor/                    # repo root — single Go module
 │   │   └── embed_worker.go
 │   │
 │   ├── storage/
-│   │   ├── minio/vault.go        # Tier 1 (RustFS), content-addressed keys
+│   │   ├── rustfs/vault.go       # Tier 1 (RustFS), content-addressed keys
 │   │   └── postgres/             # Tier 2 rows, Tier 3 chunks, schema
 │   │
 │   ├── client/embedding/         # external REST client + circuit breaker (§4.4)
@@ -1364,7 +1364,7 @@ embedding), so trace context propagation is mandatory, not optional.
 ```text
 [Trace Root] discovery.ingest_file (workspace, sha256, doc_id)
   ├── [Span] email.unroll_mime
-  │     ├── [Span] minio.write_child   # package name predates the migration, see §12.7
+  │     ├── [Span] rustfs.write_child
   │     └── [Span] postgres.create_stub
   ├── [Span] document.process_pdf (doc_id: child)
   │     ├── [Span] pdf.inspect (<2ms)

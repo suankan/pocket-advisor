@@ -15,14 +15,14 @@ import (
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/office"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type OfficeWorker struct {
-	Vault *minio.Vault
+	Vault *rustfs.Vault
 	Docs  *postgres.DocumentRepo
 	Bus   *bus.Bus
 	Log   *slog.Logger
@@ -38,7 +38,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
 	}
 
-	key, err := w.Vault.KeyFromURI(cmd.MinioRawUri)
+	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
 	if err != nil {
 		return Fatal("BAD_OBJECT_URI", err)
 	}
@@ -81,4 +81,4 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
-var _ = minio.Provenance{}
+var _ = rustfs.Provenance{}

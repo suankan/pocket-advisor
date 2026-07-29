@@ -34,7 +34,7 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (bool
 	err = r.db.Pool.QueryRow(ctx, `
         INSERT INTO documents (
             doc_id, parent_doc_id, workspace_id, collection_id, thread_id,
-            processing_status, doc_type, mime_type, minio_raw_uri, raw_sha256,
+            processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
             source_filename, metadata_headers)
         VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11)
         ON CONFLICT (doc_id) DO NOTHING
@@ -112,7 +112,7 @@ func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (string, stri
 func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error) {
 	rows, err := r.db.Pool.Query(ctx, `
         SELECT doc_id::text, workspace_id, collection_id, mime_type,
-               minio_raw_uri, raw_sha256, source_filename,
+               rustfs_raw_uri, raw_sha256, source_filename,
                COALESCE(parent_doc_id::text, '')
         FROM documents
         WHERE processing_status = 'PENDING'
@@ -151,7 +151,7 @@ func (r *DocumentRepo) CountStalePending(ctx context.Context, olderThan time.Dur
 // for the bucket-scan anti-join (§5.2).
 func (r *DocumentRepo) KnownRawURIs(ctx context.Context, workspaceID string) (map[string]struct{}, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT minio_raw_uri FROM documents WHERE workspace_id = $1 AND minio_raw_uri <> ''`,
+		`SELECT rustfs_raw_uri FROM documents WHERE workspace_id = $1 AND rustfs_raw_uri <> ''`,
 		workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("known raw uris: %w", err)

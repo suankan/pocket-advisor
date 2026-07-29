@@ -6,26 +6,26 @@ import (
 	"log/slog"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 )
 
 // Resetter performs the destructive operations. It holds both stores because
 // neither half is valid alone.
 type Resetter struct {
-	vault *minio.Vault
+	vault *rustfs.Vault
 	docs  *postgres.DocumentRepo
 	log   *slog.Logger
 }
 
-func NewResetter(v *minio.Vault, docs *postgres.DocumentRepo, log *slog.Logger) *Resetter {
+func NewResetter(v *rustfs.Vault, docs *postgres.DocumentRepo, log *slog.Logger) *Resetter {
 	return &Resetter{vault: v, docs: docs, log: log}
 }
 
 // Wipe purges a workspace from Tier 1 and cascades into Tier 2.
 //
 // Tier 2 and Tier 3 are derivatives of Tier 1 objects. Purging the bucket
-// while leaving the database populated leaves every minio_raw_uri dangling and
+// while leaving the database populated leaves every rustfs_raw_uri dangling and
 // every citation unresolvable — retrieval keeps returning confident results
 // that point at nothing, which is worse than either a clean reset or no action
 // at all.

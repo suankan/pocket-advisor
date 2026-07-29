@@ -1,6 +1,6 @@
-// Package minio wraps Tier 1, the immutable object vault and sole source of
+// Package rustfs wraps Tier 1, the immutable object vault and sole source of
 // truth for document content (ingestion-design.md §5.1).
-package minio
+package rustfs
 
 import (
 	"context"
@@ -163,7 +163,7 @@ type Vault struct {
 
 // NewUploader returns a client bound to the uploader identity: the only one
 // allowed to write raw/ and the only one allowed to delete.
-func NewUploader(cfg config.MinIO) (*Vault, error) {
+func NewUploader(cfg config.RustFS) (*Vault, error) {
 	return newVault(cfg, cfg.UploaderAccessKey, cfg.UploaderSecretKey)
 }
 
@@ -173,11 +173,11 @@ func NewUploader(cfg config.MinIO) (*Vault, error) {
 // One process now performs both roles, so the split is no longer implied by
 // which binary is running. Keeping two clients is what keeps RustFS enforcing
 // it rather than this code promising it (§5.1).
-func NewWorker(cfg config.MinIO) (*Vault, error) {
+func NewWorker(cfg config.RustFS) (*Vault, error) {
 	return newVault(cfg, cfg.WorkerAccessKey, cfg.WorkerSecretKey)
 }
 
-func newVault(cfg config.MinIO, accessKey, secretKey string) (*Vault, error) {
+func newVault(cfg config.RustFS, accessKey, secretKey string) (*Vault, error) {
 	c, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure: cfg.UseSSL,

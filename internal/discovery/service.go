@@ -19,14 +19,14 @@ import (
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type Service struct {
-	Vault *minio.Vault
+	Vault *rustfs.Vault
 	Docs  *postgres.DocumentRepo
 	Bus   *bus.Bus
 	Log   *slog.Logger
@@ -141,22 +141,22 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 	switch route.Subject {
 	case bus.SubjectEmails:
 		return s.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessEmailCommand{Metadata: meta, MinioRawUri: uri}, tp)
+			&ingestionv1.ProcessEmailCommand{Metadata: meta, RustfsRawUri: uri}, tp)
 
 	case bus.SubjectPDFs:
 		return s.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessPdfCommand{Metadata: meta, MinioRawUri: uri}, tp)
+			&ingestionv1.ProcessPdfCommand{Metadata: meta, RustfsRawUri: uri}, tp)
 
 	case bus.SubjectDocx:
 		return s.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessOfficeCommand{Metadata: meta, MinioRawUri: uri, Subtype: route.Subtype}, tp)
+			&ingestionv1.ProcessOfficeCommand{Metadata: meta, RustfsRawUri: uri, Subtype: route.Subtype}, tp)
 
 	case bus.SubjectImages:
 		// Dimensions are recorded here so the viability gate can decide
 		// without a second fetch (§4.1).
 		w, h := imageDimensions(data)
 		return s.Bus.Publish(ctx, route.Subject, &ingestionv1.ProcessImageCommand{
-			Metadata: meta, MinioRawUri: uri,
+			Metadata: meta, RustfsRawUri: uri,
 			Width: int32(w), Height: int32(h), ByteSize: int64(len(data)),
 		}, tp)
 

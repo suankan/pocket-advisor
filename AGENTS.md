@@ -1,7 +1,7 @@
 # Pocket Advisor — Agent Instructions
 
 Pocket Advisor is a local, Kubernetes-deployed RAG engine over personal
-content: a Go microservice pipeline (MinIO Tier 1 → Postgres/pgvector Tier
+content: a Go microservice pipeline (RustFS Tier 1 → Postgres/pgvector Tier
 2/3), driven by NATS JetStream, deployed via a single Helm chart.
 
 `retired-v2/` is a frozen prior implementation (Python, single-process). It
@@ -78,7 +78,7 @@ intent from the diff.
    delete anything under a collection root (`workspaces/corpora/...` or a
    registry path). Durable identity is `(collection_id, sha256)`, never a
    path.
-2. **MinIO Tier 1 is the sole ingested source of truth**, not the
+2. **RustFS Tier 1 is the sole ingested source of truth**, not the
    filesystem. A workspace's corpus folders are a staging feed the uploader
    reads once; nothing downstream ever reads them directly
    (`ingestion-design.md` §5.1). Postgres (Tier 2/3) is derived state —

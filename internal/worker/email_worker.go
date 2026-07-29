@@ -14,13 +14,13 @@ import (
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type EmailWorker struct {
-	Vault *minio.Vault
+	Vault *rustfs.Vault
 	Docs  *postgres.DocumentRepo
 	Bus   *bus.Bus
 	Log   *slog.Logger
@@ -41,7 +41,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		return Decline(meta.DocId, domain.ReasonRecursionLimit)
 	}
 
-	key, err := w.Vault.KeyFromURI(cmd.MinioRawUri)
+	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
 	if err != nil {
 		return Fatal("BAD_OBJECT_URI", err)
 	}
@@ -122,7 +122,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		return err
 	}
 	if !exists {
-		prov := minio.Provenance{
+		prov := rustfs.Provenance{
 			SourceFilename: c.Filename,
 			SourcePath:     parent.SourceFilename + "!" + c.Filename,
 			CollectionID:   parent.CollectionId,
@@ -174,16 +174,16 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	switch route.Subject {
 	case bus.SubjectEmails:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessEmailCommand{Metadata: meta, MinioRawUri: uri}, tp)
+			&ingestionv1.ProcessEmailCommand{Metadata: meta, RustfsRawUri: uri}, tp)
 	case bus.SubjectPDFs:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessPdfCommand{Metadata: meta, MinioRawUri: uri}, tp)
+			&ingestionv1.ProcessPdfCommand{Metadata: meta, RustfsRawUri: uri}, tp)
 	case bus.SubjectDocx:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessOfficeCommand{Metadata: meta, MinioRawUri: uri, Subtype: route.Subtype}, tp)
+			&ingestionv1.ProcessOfficeCommand{Metadata: meta, RustfsRawUri: uri, Subtype: route.Subtype}, tp)
 	case bus.SubjectImages:
 		return w.Bus.Publish(ctx, route.Subject, &ingestionv1.ProcessImageCommand{
-			Metadata: meta, MinioRawUri: uri, ByteSize: int64(len(c.Data)),
+			Metadata: meta, RustfsRawUri: uri, ByteSize: int64(len(c.Data)),
 		}, tp)
 	case bus.SubjectEmbed:
 		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType, threadID); err != nil {

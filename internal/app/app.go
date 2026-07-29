@@ -13,8 +13,8 @@ import (
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/limits"
-	"github.com/suankan/pocket-advisor/internal/storage/minio"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
+	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -26,8 +26,8 @@ type App struct {
 	// Two Tier 1 clients for two scoped identities. Vault is the worker
 	// identity used by discovery and the extractors; Uploads is the uploader
 	// identity, the only one permitted to write raw/ or delete (§5.1).
-	Vault   *minio.Vault
-	Uploads *minio.Vault
+	Vault   *rustfs.Vault
+	Uploads *rustfs.Vault
 
 	DB     *postgres.DB
 	Docs   *postgres.DocumentRepo
@@ -67,13 +67,13 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.RustFS || needs.Uploader {
-		if err := cfg.RequireMinIO(); err != nil {
+		if err := cfg.RequireRustFS(); err != nil {
 			return nil, err
 		}
 	}
 
 	if needs.RustFS {
-		v, err := minio.NewWorker(cfg.MinIO)
+		v, err := rustfs.NewWorker(cfg.RustFS)
 		if err != nil {
 			return nil, err
 		}
@@ -81,7 +81,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Uploader {
-		u, err := minio.NewUploader(cfg.MinIO)
+		u, err := rustfs.NewUploader(cfg.RustFS)
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +121,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
-		"rustfs", cfg.MinIO.Endpoint,
+		"rustfs", cfg.RustFS.Endpoint,
 		"nats", cfg.NATS.URL,
 		"metrics_port", cfg.MetricsPort)
 	return a, nil

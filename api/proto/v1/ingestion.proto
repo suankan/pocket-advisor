@@ -32,20 +32,20 @@ message DocumentMetadata {
 // email worker already owns in-RAM container unrolling.
 message ProcessEmailCommand {
   DocumentMetadata metadata = 1;
-  string minio_raw_uri = 2;
+  string rustfs_raw_uri = 2;
 }
 
 // ProcessPdfCommand -> ingest.pdfs.raw
 message ProcessPdfCommand {
   DocumentMetadata metadata = 1;
-  string minio_raw_uri = 2;
+  string rustfs_raw_uri = 2;
   int32 priority = 3;
 }
 
 // ProcessOfficeCommand -> ingest.docx.raw
 message ProcessOfficeCommand {
   DocumentMetadata metadata = 1;
-  string minio_raw_uri = 2;
+  string rustfs_raw_uri = 2;
   // docx | xlsx | pptx | rtf | odt
   string subtype = 3;
 }
@@ -55,7 +55,7 @@ message ProcessOfficeCommand {
 // without a second fetch (§4.1).
 message ProcessImageCommand {
   DocumentMetadata metadata = 1;
-  string minio_raw_uri = 2;
+  string rustfs_raw_uri = 2;
   int32 width = 3;
   int32 height = 4;
   int64 byte_size = 5;

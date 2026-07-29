@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS documents (
     processing_status processing_status NOT NULL DEFAULT 'PENDING',
     doc_type          VARCHAR NOT NULL DEFAULT '',
     mime_type         VARCHAR NOT NULL DEFAULT '',
-    minio_raw_uri     TEXT    NOT NULL DEFAULT '',
+    rustfs_raw_uri    TEXT    NOT NULL DEFAULT '',
     raw_sha256        VARCHAR NOT NULL DEFAULT '',
     source_filename   TEXT    NOT NULL DEFAULT '',
     normalized_text   TEXT,
@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
 CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';
 -- Drives the bucket-scan anti-join (§5.2).
-CREATE INDEX IF NOT EXISTS documents_raw_uri_idx    ON documents(minio_raw_uri);
+CREATE INDEX IF NOT EXISTS documents_raw_uri_idx    ON documents(rustfs_raw_uri);
 
 CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_id          UUID PRIMARY KEY,

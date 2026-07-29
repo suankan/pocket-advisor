@@ -38,9 +38,8 @@ const (
 	DefaultPath = "config.yaml"
 )
 
-// MinIO addresses RustFS, which implements the same S3 and admin wire
-// protocols. The name is the client library's, not the server's.
-type MinIO struct {
+// RustFS holds the connection and credential settings for Tier 1.
+type RustFS struct {
 	Endpoint string
 	Bucket   string
 	UseSSL   bool
@@ -77,7 +76,7 @@ type Embedding struct {
 }
 
 type Config struct {
-	MinIO     MinIO
+	RustFS    RustFS
 	Postgres  Postgres
 	NATS      NATS
 	Embedding Embedding
@@ -140,7 +139,7 @@ func Load(path string) (*Config, error) {
 
 func defaults() *Config {
 	return &Config{
-		MinIO: MinIO{
+		RustFS: RustFS{
 			Endpoint:          defaultRustFSEndpoint,
 			Bucket:            "pocket-advisor",
 			UseSSL:            false,
@@ -181,15 +180,15 @@ func applyFile(c *Config, path string) error {
 	}
 	in := f.Infra
 
-	setStr(&c.MinIO.Endpoint, in.RustFS.Endpoint)
-	setStr(&c.MinIO.Bucket, in.RustFS.Bucket)
+	setStr(&c.RustFS.Endpoint, in.RustFS.Endpoint)
+	setStr(&c.RustFS.Bucket, in.RustFS.Bucket)
 	if in.RustFS.UseSSL != nil {
-		c.MinIO.UseSSL = *in.RustFS.UseSSL
+		c.RustFS.UseSSL = *in.RustFS.UseSSL
 	}
-	setStr(&c.MinIO.UploaderAccessKey, in.RustFS.UploaderAccessKey)
-	setStr(&c.MinIO.UploaderSecretKey, in.RustFS.UploaderSecretKey)
-	setStr(&c.MinIO.WorkerAccessKey, in.RustFS.WorkerAccessKey)
-	setStr(&c.MinIO.WorkerSecretKey, in.RustFS.WorkerSecretKey)
+	setStr(&c.RustFS.UploaderAccessKey, in.RustFS.UploaderAccessKey)
+	setStr(&c.RustFS.UploaderSecretKey, in.RustFS.UploaderSecretKey)
+	setStr(&c.RustFS.WorkerAccessKey, in.RustFS.WorkerAccessKey)
+	setStr(&c.RustFS.WorkerSecretKey, in.RustFS.WorkerSecretKey)
 
 	setStr(&c.NATS.URL, in.NATS.URL)
 
@@ -223,13 +222,13 @@ func applyFile(c *Config, path string) error {
 // somewhere else without editing committed configuration. Secrets in
 // particular belong here rather than in a committed file.
 func applyEnv(c *Config) {
-	c.MinIO.Endpoint = env("RUSTFS_ENDPOINT", c.MinIO.Endpoint)
-	c.MinIO.Bucket = env("RUSTFS_BUCKET", c.MinIO.Bucket)
-	c.MinIO.UseSSL = envBool("RUSTFS_USE_SSL", c.MinIO.UseSSL)
-	c.MinIO.UploaderAccessKey = env("RUSTFS_UPLOADER_ACCESS_KEY", c.MinIO.UploaderAccessKey)
-	c.MinIO.UploaderSecretKey = env("RUSTFS_UPLOADER_SECRET_KEY", c.MinIO.UploaderSecretKey)
-	c.MinIO.WorkerAccessKey = env("RUSTFS_WORKER_ACCESS_KEY", c.MinIO.WorkerAccessKey)
-	c.MinIO.WorkerSecretKey = env("RUSTFS_WORKER_SECRET_KEY", c.MinIO.WorkerSecretKey)
+	c.RustFS.Endpoint = env("RUSTFS_ENDPOINT", c.RustFS.Endpoint)
+	c.RustFS.Bucket = env("RUSTFS_BUCKET", c.RustFS.Bucket)
+	c.RustFS.UseSSL = envBool("RUSTFS_USE_SSL", c.RustFS.UseSSL)
+	c.RustFS.UploaderAccessKey = env("RUSTFS_UPLOADER_ACCESS_KEY", c.RustFS.UploaderAccessKey)
+	c.RustFS.UploaderSecretKey = env("RUSTFS_UPLOADER_SECRET_KEY", c.RustFS.UploaderSecretKey)
+	c.RustFS.WorkerAccessKey = env("RUSTFS_WORKER_ACCESS_KEY", c.RustFS.WorkerAccessKey)
+	c.RustFS.WorkerSecretKey = env("RUSTFS_WORKER_SECRET_KEY", c.RustFS.WorkerSecretKey)
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
 
@@ -247,19 +246,19 @@ func applyEnv(c *Config) {
 	c.LogDir = env("LOG_DIR", c.LogDir)
 }
 
-// RequireMinIO validates the credentials for both scoped identities.
-func (c *Config) RequireMinIO() error {
+// RequireRustFS validates the credentials for both scoped identities.
+func (c *Config) RequireRustFS() error {
 	var missing []string
-	if c.MinIO.UploaderAccessKey == "" {
+	if c.RustFS.UploaderAccessKey == "" {
 		missing = append(missing, "infra.rustfs.uploader_access_key")
 	}
-	if c.MinIO.UploaderSecretKey == "" {
+	if c.RustFS.UploaderSecretKey == "" {
 		missing = append(missing, "infra.rustfs.uploader_secret_key")
 	}
-	if c.MinIO.WorkerAccessKey == "" {
+	if c.RustFS.WorkerAccessKey == "" {
 		missing = append(missing, "infra.rustfs.worker_access_key")
 	}
-	if c.MinIO.WorkerSecretKey == "" {
+	if c.RustFS.WorkerSecretKey == "" {
 		missing = append(missing, "infra.rustfs.worker_secret_key")
 	}
 	return report(missing)

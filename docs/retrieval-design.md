@@ -305,7 +305,7 @@ POST /v1/query
 200 OK
 {
   "packets": [ { doc_id, thread_id, match: {chunk_id, start, end, score},
-                 text, lineage: {...}, citation: {minio_uri, raw_sha256} } ],
+                 text, lineage: {...}, citation: {raw_uri, raw_sha256} } ],
   "warnings": [ "dense_leg_underfill", "reranker_unavailable" ],
   "budget": { "chars_used": 98341, "chars_allowed": 120000 }
 }

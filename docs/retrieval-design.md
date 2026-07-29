@@ -114,7 +114,7 @@ mode, and a paraphrase that degrades match quality before search even starts.
 
 **This makes cross-lingual capability a hard requirement on the embedding
 model, not a nice-to-have.** The selected model is
-`jina-embeddings-v5-text-small` (`ingestion-design.md` §4.4); its multilingual
+`jina-embeddings-v5-text-small-mlx` (`ingestion-design.md` §4.4); its multilingual
 coverage of Russian must be verified against the corpus before the index is
 built, because if it is monolingual the no-translation decision silently
 halves recall on half the corpus. Acceptance criterion 4 (§10) is the check.
@@ -278,8 +278,16 @@ fixed here:
 
 ## 7. Service Shape
 
-`QueryService` is a stateless Deployment (`cmd/query-api/`) exposing
-`POST /v1/query`.
+**Unbuilt, and the shape below is one candidate, not a decision.** The write
+path collapsed five Deployments into one host binary because it is one-shot
+(`ingestion-design.md` §11.4) — that argument does not automatically carry
+over to a service answering live queries, and whether `QueryService` becomes
+a mode of `pocket-advisor` or its own long-running process is still open.
+What follows sketches it as a separate Deployment, `cmd/query-api/`, because
+that is the shape that needs the most new design; revisit this section
+first if the open decision resolves the other way.
+
+`QueryService` is a stateless Deployment exposing `POST /v1/query`.
 
 v2 ran a warm daemon to avoid per-invocation cold start of a CLI process. A
 long-lived Kubernetes pod is warm by construction, so the daemon concept
@@ -290,6 +298,11 @@ per query reintroduces exactly the cost the daemon existed to avoid.
 
 Scaling is on request rate; 2 replicas minimum. The service is CPU-light —
 its latency is dominated by waiting on the model endpoint and on Postgres.
+
+None of this exists yet: no `cmd/query-api`, no HTTP handler, no query-side
+Go code at all. `internal/domain`, `internal/storage/postgres`, and the
+`document_chunks` schema this design queries are real and already shipped
+(`ingestion-design.md` §4.2, §8.1).
 
 ### 7.1 Request and response
 

@@ -38,7 +38,7 @@ states the contract between them. There are no other v3 design documents.
   Deployment never needed either, because it ran until something killed it.
 * **The chart carries only the three stores** (§6.2): RustFS,
   PostgreSQL+pgvector, NATS. No images are built.
-* **The terminal shows live pipeline state** (§9.6), and each role writes its
+* **The terminal shows live pipeline state** (§9.5), and each role writes its
   own log file — the monolith took away `kubectl logs -l app=<role>`, and
   these replace it.
 
@@ -146,7 +146,7 @@ Bytes arrive in Tier 1 first, and separately — the uploader (§5.1) puts them 
 ```
 [Uploader]  ─── Write Raw Object ────────────────────────► [Tier 1: RustFS raw/]
                                                                    │
-                                              (bucket notification │ or scan)
+                                                            (bucket scan, §5.2)
                                                                    ▼
 [Discovery Service]
        │
@@ -173,22 +173,27 @@ Two mechanisms close the gap.
 
 **Acknowledged publish with bounded retry.** Publishing uses JetStream's acknowledged path (`PublishMsg` awaiting `PubAck`), never fire-and-forget. A publish still failing after retry is logged at `ERROR` with `doc_id` and left to the reconciler.
 
-**Reconciliation sweep.** A `CronJob` (every 15 min) re-publishes any document `PENDING` longer than 30 minutes:
+**Reconciliation sweep.** There is no in-cluster scheduler for this — the
+monolith has no long-running consumer to schedule one against (§5, §6.2). The
+operator re-publishes stale work on demand with `--reconcile`
+(`internal/cli/ingest.go`), which claims every document `PENDING` longer than
+`--stale-after` (default 30 minutes) and re-ingests it:
 
 ```sql
-SELECT doc_id, rustfs_raw_uri, mime_type, workspace_id
+SELECT doc_id, workspace_id, collection_id, mime_type,
+       rustfs_raw_uri, raw_sha256, source_filename, parent_doc_id
 FROM documents
 WHERE processing_status = 'PENDING'
-  AND updated_at < now() - interval '30 minutes'
+  AND updated_at < now() - $1::interval
 ORDER BY updated_at
 LIMIT 500;
 ```
 
-Re-publishing is safe precisely because `doc_id` is deterministic (§5.2) and every worker is idempotent on it: a duplicate delivery redoes work, it does not create a second document. The sweep exports `rag_discovery_stale_pending`; a non-zero steady state is an alertable symptom, not routine.
+Re-publishing is safe precisely because `doc_id` is deterministic (§5.2) and every worker is idempotent on it: a duplicate delivery redoes work, it does not create a second document. The sweep exports `rag_discovery_stale_pending`; a non-zero steady state after a `--reconcile` run is an alertable symptom, not routine.
 
 The same reasoning applies to the child stubs created by `EmailProcessorWorker` — it uses the identical stub-then-publish protocol and is covered by the same sweep.
 
-**A second gap exists upstream:** an object can land in `raw/` and its bucket notification be dropped, leaving bytes with no Tier 2 row at all — invisible to the `PENDING` sweep, which only sees documents that already exist. The bucket scan (§5.2) closes it, and because Tier 1 is authoritative the check is exact rather than best-effort: enumerate `raw/`, anti-join `documents`, publish the difference. Running it after every upload is the normal operating procedure, not a repair action.
+**A second gap exists upstream:** an object can land in `raw/` between runs — or a run can be interrupted before discovery ever reads it — leaving bytes with no Tier 2 row at all, invisible to the `PENDING` sweep, which only sees documents that already exist. The bucket scan (§5.2) closes it, and because Tier 1 is authoritative the check is exact rather than best-effort: enumerate `raw/`, anti-join `documents`, publish the difference. `--ingest-all` and `--scan` both run it every time, which is why re-running either is the normal way to pick up anything a previous run missed, not a repair action reached for only when something looks wrong.
 
 ### 2.3 Idempotency Contract
 
@@ -275,24 +280,22 @@ config:
 flowchart TB
     %% --- UPLOAD (outside the pipeline) ---
     UserDir[/"User folder\n(staging, never read by workers)"/]
-    Uploader["Corpus Uploader (CLI / Job)\nsha256 → skip-if-present → PutObject"]
+    Uploader["Corpus Uploader (--ingest-all)\nsha256 → skip-if-present → PutObject"]
     UserDir --> Uploader
     Uploader -- "raw/{aa}/{sha256} + provenance metadata" --> RustFS[("Tier 1: RustFS\nSOURCE OF TRUTH\nraw/ + extracted/")]
 
     %% --- DISCOVERY & STUBBING ---
     subgraph Disco["Discovery Service"]
-        Notify["Bucket Notification\n(s3:ObjectCreated on raw/)"]
-        Scan["Bucket Scan Job\n(objects with no Tier 2 row)"]
+        Scan["Bucket Scan\n(objects with no Tier 2 row)"]
         Sniff["Magic-Byte Sniffer\n+ sha256 verify + UUIDv5 doc_id"]
-        Notify --> Sniff
         Scan --> Sniff
     end
 
-    RustFS -- "notify / list" --> Disco
+    RustFS -- "list" --> Disco
     Sniff -- "1. Read Object + Metadata" --> RustFS
     Sniff -- "2. Insert Parent Stubs" --> Tier2Docs
     Sniff -- "3. Dispatch Work Commands" --> EventBus
-    Reconciler["Reconciler CronJob\n(PENDING > 30m)"] -. "re-publish (idempotent)" .-> EventBus
+    Reconciler["Reconciler (--reconcile, on demand)\n(PENDING > 30m)"] -. "re-publish (idempotent)" .-> EventBus
 
     %% --- QUEUE LAYER ---
     subgraph EventBus["NATS JetStream (WorkQueue Streams / Protobuf Payloads)"]
@@ -399,7 +402,7 @@ flowchart TB
 
 The internal messaging protocol relies on immutable command messages containing tracing headers, workspace scope, and document lineage pointers.
 
-* **DocumentMetadata Schema:** Captures context including `workspace_id`, `collection_id`, `thread_id`, `parent_doc_id` (empty for root entities), `source_filename`, `mime_type`, `raw_sha256`, and OpenTelemetry correlation headers (`trace_parent`).
+* **DocumentMetadata Schema:** Captures context including `workspace_id`, `collection_id`, `thread_id`, `parent_doc_id` (empty for root entities), `source_filename`, `mime_type`, `raw_sha256`, and OpenTelemetry correlation headers (`traceparent`).
 * **ProcessEmailCommand:** Wraps object storage references (`rustfs_raw_uri`) and metadata for inbound email and archive tasks.
 * **ProcessPdfCommand:** Contains object references, lineage metadata, and explicit processing priority flags for PDF processing.
 * **ProcessOfficeCommand:** Object reference plus detected OOXML sub-type (`docx` / `xlsx` / `pptx` / `rtf` / `odt`) for the pure-Go Office path.
@@ -518,10 +521,11 @@ markup, and never rewrites content.
 
 ### 4.4 Embedding Model and Dimensionality Discovery
 
-**Model:** `jinaai/jina-embeddings-v5-text-small`, served over an **external
-REST API**. The engine loads no models itself — it holds a URL and an HTTP
-client (`models.embedding_endpoint`). This is a change from earlier drafts,
-which assumed bge-m3 on a local oMLX endpoint.
+**Model:** `jina-embeddings-v5-text-small-mlx` by default, served over an
+**external REST API**. The engine loads no models itself — it holds a URL and
+an HTTP client (`infra.embedding.endpoint` in `config.yaml`, or
+`EMBEDDING_ENDPOINT`). This is a change from earlier drafts, which assumed
+bge-m3 on a local oMLX endpoint.
 
 **Dimensionality is discovered, never hardcoded.** `halfvec(N)` is a typed
 SQL column, so `N` must be known before the first `CREATE TABLE` — but the
@@ -598,8 +602,9 @@ The uploader is not told a directory. It is given the user's
 workspace id, and it resolves the rest:
 
 ```
-uploader --workspace-config <path>/workspace-config.yaml
-         --workspace-id     <workspace id>
+pocket-advisor --ingest-all
+               --workspace-config <path>/workspace-config.yaml
+               --workspace-id     <workspace id>
 ```
 
 The registry declares `collections[]` (each with an `id`, a `path`, and an
@@ -676,16 +681,16 @@ enforced by a RustFS access policy on the worker service account rather than by
 convention, because a convention that only holds while everyone remembers it
 is not an invariant.
 
-#### `--wipe` is a corpus reset, not a bucket delete
+#### `--delete-data` is a corpus reset, not a bucket delete
 
-The flag purges everything for a workspace and re-uploads from scratch. It
-**must cascade into PostgreSQL**:
+The flag purges every Tier 1 object and every Tier 2 row for a workspace. It
+**must cascade into PostgreSQL**, and it does not re-upload anything —
+repopulating the workspace is a separate, later `--ingest-all`:
 
 ```
-1. Confirm (interactive prompt, or --yes for a Job)
+1. Confirm (interactive prompt, or --yes)
 2. Remove objects under workspaces/{workspace_id}/     (raw/ and extracted/)
 3. DELETE FROM documents WHERE workspace_id = $1       (chunks cascade)
-4. Re-upload from the source directory
 ```
 
 Tier 2 and Tier 3 are derivatives of Tier 1 objects. Purging the bucket while
@@ -702,18 +707,24 @@ because this run's folder did not contain it — a staging directory is
 legitimately partial, and inferring deletion from absence would let an
 incomplete run silently destroy the corpus. Removing a document is an explicit
 operation (`--forget <sha256>`), which deletes the object and cascades the
-same way `--wipe` does for one document.
+same way `--delete-data` does for the whole workspace.
 
 #### Interface
 
+The uploader is not a separate binary — it is one mode of the single
+`pocket-advisor` host process (§8):
+
 ```
-uploader --workspace-config <path> --workspace-id <id>
-         [--dry-run] [--concurrency N] [--yes]
-         [--wipe | --forget <sha256>]
+pocket-advisor --ingest-all --workspace-id <id>
+               [--workspace-config <path>] [--dry-run] [--yes]
+
+pocket-advisor --delete-data --workspace-id <id> [--yes]
+pocket-advisor --forget <sha256> --workspace-id <id> [--yes]
 ```
 
-Ships as a CLI binary and as a K8s `Job` wrapping the same binary. Reports
-`uploaded`, `duplicate`, `failed` counts per run, keyed by `uploader-run-id`.
+Runs on the host, not in the cluster — nothing in the chart wraps it (§6.2).
+Reports `uploaded`, `duplicate`, `failed` counts per run, keyed by
+`uploader-run-id`.
 
 ### 5.2 Discovery (`internal/discovery`)
 
@@ -847,13 +858,13 @@ Discovery **starts the trace**. It creates the root span (`discovery.ingest_file
 * Creates Tier 2 stubs for child documents before publishing commands back to NATS topic routes based on magic-byte classification.
 * Assigns `thread_id` from `In-Reply-To`/`References`, falling back to normalized-subject plus shared-participant matching within a 60-day window.
 
-**Recursion bound.** Nested containers are adversarially unbounded — a zip bomb or a mail loop can recurse until the pod OOMs. Unrolling stops at depth 8 and at a cumulative expansion ratio of 100×, whichever comes first; exceeding either sets the child `SKIPPED` with reason `RECURSION_LIMIT`.
+**Recursion bound.** Nested containers are adversarially unbounded — a zip bomb or a mail loop can recurse until the host process OOMs. Unrolling stops at depth 8 and at a cumulative expansion ratio of 100×, whichever comes first; exceeding either sets the child `SKIPPED` with reason `RECURSION_LIMIT`.
 
 ### 5.4 Document Extractor Service (`DocumentExtractorWorker`)
 
 **Renamed from `PdfExtractorWorker`,** and now consumes both `ingest.pdfs.raw` and `ingest.images.raw`.
 
-Image OCR is folded into this pool rather than given its own, because both paths execute the same CGo Tesseract engine against the same finite CPU budget. A separate image-OCR Deployment would create two pools competing for cores with no coordination, and the cluster budget (6 cores / 8 GB) has no room for a fourth CPU-heavy pool. One pool, one bounded OCR semaphore, one memory ceiling.
+Image OCR is folded into this pool rather than given its own, because both paths execute the same CGo Tesseract engine against the same finite CPU budget. A separate image-OCR pool would compete with this one for the same cores with no coordination, and the host has one CPU count to divide, not a fourth CPU-heavy pool's worth to spare (§6.3). One pool, one bounded OCR semaphore.
 
 * **Role:** High-speed document inspection and dual-engine text extraction.
 * **Key Operations:**
@@ -875,7 +886,7 @@ A skipped image still exists in Tier 1 and Tier 2 with its lineage intact; it is
 
 #### Rasterization memory ceiling
 
-"Zero local disk I/O" means page bitmaps live entirely in RAM, and they are the memory hot spot in the whole system: an A4 page at 300 DPI is ~2480×3508 px, ~35 MB uncompressed RGBA. With a 1 GiB pod limit, unbounded page concurrency reaches the limit in under 30 pages.
+"Zero local disk I/O" means page bitmaps live entirely in RAM, and they are the memory hot spot in the whole system: an A4 page at 300 DPI is ~2480×3508 px, ~35 MB uncompressed RGBA. There is no per-pod limit to bound this against any more — the process runs on the host (§6.1) — so unbounded page concurrency is bounded only by however much host RAM is free, which is exactly why §6.3's CPU semaphore, not a memory ceiling, is the real backstop.
 
 Pages are therefore rasterized **one at a time per document**, and each bitmap
 is explicitly freed before the next is rendered. Parallelism comes from other
@@ -1152,7 +1163,8 @@ that summarises anything, per pillar 8.
 ## 8. Codebase Layout
 
 Absorbed from the former `v3/docs/project-layout.md` and brought current with
-§5. One Go module, one build pipeline, one binary per worker role.
+§5. One Go module, one build pipeline, one binary total — the roles are
+packages, not processes (§8.2).
 
 ### 8.1 Directory Layout
 
@@ -1160,7 +1172,7 @@ Absorbed from the former `v3/docs/project-layout.md` and brought current with
 pocket-advisor/                    # repo root — single Go module
 ├── mise.toml                     # pinned Go + CGo paths for Tesseract
 ├── config.yaml                   # infra: endpoints, credentials, concurrency
-├── Makefile                      # build / test / deploy
+├── Makefile                      # build / test / deploy-infra
 │
 ├── cmd/pocket-advisor/           # the only binary; flag parsing only
 │
@@ -1176,11 +1188,11 @@ pocket-advisor/                    # repo root — single Go module
 │   │
 │   ├── pipeline/                 # starts every role pool, drain detection (§2.6)
 │   ├── limits/                   # CPU-derived pool sizes + CPU semaphore (§6.3)
-│   ├── dashboard/                # live terminal display               (§9.6)
+│   ├── dashboard/                # live terminal display               (§9.5)
 │   │
 │   ├── app/                      # shared dependency graph (stores, logs, CPU)
 │   ├── config/                   # defaults < config.yaml < env
-│   ├── domain/                   # Document, DocumentChunk, Status enums
+│   ├── domain/                   # Document, Chunk, Status enums
 │   │
 │   ├── uploader/                 # ingress to Tier 1                 (§5.1)
 │   │   ├── uploader.go           # walk, hash, skip-if-present
@@ -1227,9 +1239,12 @@ functions that differed only in which consumer they wired up.
 
 ### 8.2 Layering Rules
 
-**`cmd/`** does dependency injection and lifecycle only — construct clients,
-wire engines, start consumer loops, handle graceful shutdown via
-`context.Context`. No business logic.
+**`cmd/`** is flag parsing and an exit code, nothing else: `main.go` calls
+`cli.Parse` then `cli.Run` and translates the returned error into
+`os.Exit`. Dependency injection and lifecycle live one layer in —
+**`internal/app`** builds the shared graph (store clients, per-role logs, the
+CPU budget) once per process, and **`internal/pipeline`** wires engines into
+worker pools and starts and drains them. No business logic in `cmd/`.
 
 **`internal/engine/`** is framework-agnostic: no NATS, no HTTP, no SQL. It
 takes bytes and returns text. This is what makes the extraction paths
@@ -1239,21 +1254,24 @@ testable without a cluster.
 fetches, unmarshals Protobuf, extracts `traceparent` into a child span, calls
 an engine, and dispatches `Ack()` / `Nak()` / `Term()`.
 
-**`internal/storage/`** hides all SQL and object-store calls behind
-interfaces:
+**`internal/storage/`** hides all SQL and object-store calls behind package
+boundaries, not Go interfaces — there is no DI framework (§8.4), so callers
+take the concrete `*postgres.DocumentRepo` / `*postgres.ChunkRepo` /
+`*rustfs.Vault` types directly, wired once in `internal/app` and passed down
+as public struct fields:
 
 ```go
-type DocumentRepository interface {
-    CreateStub(ctx context.Context, doc *domain.Document) (created bool, err error)
-    UpdateStatus(ctx context.Context, docID string, status domain.Status, reason string) error
-    ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error)
-}
+type DocumentRepo struct{ /* unexported db handle */ }
 
-type ChunkRepository interface {
-    // Deletes existing chunks for docID and inserts the new set in one
-    // transaction, together with the Tier 2 status update (§2.3).
-    ReplaceChunks(ctx context.Context, docID string, chunks []domain.DocumentChunk) error
-}
+func (r *DocumentRepo) CreateStub(ctx context.Context, doc *domain.Document) (created bool, err error)
+func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, status domain.Status, reason string) error
+func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error)
+
+type ChunkRepo struct{ /* unexported db handle */ }
+
+// ReplaceChunks deletes existing chunks for docID and inserts the new set in
+// one transaction, together with the Tier 2 status update (§2.3).
+func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []domain.Chunk) error
 ```
 
 `CreateStub` returns `created bool` rather than an error on conflict — a
@@ -1281,25 +1299,36 @@ everything except scanned PDFs and images.
 
 ### 8.4 Cross-Cutting Practices
 
-1. **Constructor injection, no DI framework.** Pass interfaces explicitly:
-   `NewDocumentWorker(repo storage.DocumentRepository, ocr ocr.Engine, js jetstream.JetStream)`.
+1. **Struct-literal injection, no DI framework.** Public fields set at
+   construction, not constructor parameters, and concrete types throughout,
+   not interfaces — for example `worker.DocumentWorker` has exported `Vault
+   *rustfs.Vault`, `Docs *postgres.DocumentRepo`, `Bus *bus.Bus`, `PDF
+   *pdf.Engine`, `OCR *ocr.Engine`, and `Log *slog.Logger` fields, built once
+   in `internal/pipeline` from the graph `internal/app` assembled.
 2. **`context.Context` first parameter, everywhere,** from consumer down to
    storage — this is what carries the trace span the whole way (§9).
-3. **Explicit C-heap scopes** (`pkg/cgohelpers`) around every PDFium and
-   Tesseract call, so a leak cannot outlive the request that caused it.
+3. **Explicit lifetime management around every CGo call**, not through a
+   shared helper package: `internal/engine/pdf` borrows a PDFium instance from
+   a pool per document and returns it, `internal/engine/ocr` closes its
+   Tesseract client with `defer` on every call. Either way a leak cannot
+   outlive the request that caused it.
 
 ---
 
 ## 9. Observability
 
 Absorbed from the former `v3/docs/observability.md`, updated for the services
-added in 3.0.0. The stack is `victoria-metrics-k8s-stack`, whose operator
-supplies the `VMServiceScrape`, `VMRule`, `VLSingle`/`VLAgent`, and `VTSingle`
-CRDs. Read-path metrics live in `retrieval-design.md` §9.
+added in 3.0.0. Read-path metrics live in `retrieval-design.md` §9.
 
 ### 9.1 Metrics
 
-Every worker exposes `/metrics` via `prometheus/client_golang`.
+The process exposes one `/metrics` endpoint on the host
+(`infra.observability.metrics_port` in `config.yaml`, default `9090`) via
+`prometheus/client_golang` — every role shares the process's default
+registry, so there is nothing per-worker left to label or scrape. Nothing in
+the cluster runs pipeline code (§6.1), so there is no Kubernetes scrape
+config either; `curl localhost:9090/metrics` while a run is in flight, or
+point a local Prometheus at it.
 
 | Metric | Type | Description |
 | --- | --- | --- |
@@ -1307,48 +1336,20 @@ Every worker exposes `/metrics` via `prometheus/client_golang`.
 | `rag_ingestion_duration_seconds{worker, doc_type}` | Histogram | Per-stage latency distribution |
 | `rag_uploader_files_total{outcome}` | Counter | `uploaded`, `duplicate`, `failed` per run |
 | `rag_uploader_bytes_total` | Counter | Tier 1 ingress volume |
-| `rag_discovery_files_total{mode, outcome}` | Counter | `accepted`, `duplicate`, `unsupported`, `error`; notification boundary also records `ignored` and `malformed` |
+| `rag_discovery_files_total{mode, outcome}` | Counter | `accepted`, `duplicate`, `unsupported`, `error`; the scan also records `ignored` (non-canonical key under `raw/`) and `backpressure` |
 | `rag_discovery_unstubbed_objects` | Gauge | `raw/` objects with no Tier 2 row (§2.2 upstream gap) |
 | `rag_discovery_stale_pending` | Gauge | Documents awaiting reconciliation (§2.2) |
-| `rag_discovery_scan_backpressure_seconds` | Counter | Time the scan spent blocked on high water |
 | `rag_pdf_classification_total{type}` | Counter | Digital vs. scanned routing split |
-| `rag_image_skipped_total{reason}` | Counter | Viability-gate rejections (§5.4) |
 | `rag_office_extracted_total{format}` | Counter | Per-format Office throughput |
 | `rag_skipped_total{reason}` | Counter | `UNSUPPORTED_FORMAT`, `RECURSION_LIMIT`, `IMAGE_NOT_VIABLE` |
 | `rag_dlq_total{worker, reason}` | Counter | DLQ arrivals **by reason** — the actionable one |
 | `rag_embedding_tokens_processed_total` | Counter | Token throughput vs. micro-batch budget |
-| `rag_cgo_tesseract_active_instances` | Gauge | Live Tesseract instances (leak / spike detection) |
 
 `rag_skipped_total` and `rag_dlq_total` are deliberately separate series.
 Declined work and broken work have different responses (§2.5), so folding
 them into one counter makes the alert meaningless.
 
-### 9.2 Scrape Configuration
-
-```yaml
-apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMServiceScrape
-metadata:
-  name: rag-ingestion-workers
-  namespace: pocket-advisor
-  labels:
-    release: victoria-metrics-k8s-stack   # matches operator selector
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/part-of: rag-ingestion-engine
-  endpoints:
-  - port: metrics
-    path: /metrics
-    interval: 15s
-    scrapeTimeout: 10s
-```
-
-Every worker Deployment must carry
-`app.kubernetes.io/part-of: rag-ingestion-engine`, or it is silently not
-scraped.
-
-### 9.3 Distributed Tracing
+### 9.2 Distributed Tracing
 
 A single document cascades across several queues (email → child PDF → OCR →
 embedding), so trace context propagation is mandatory, not optional.
@@ -1358,8 +1359,7 @@ embedding), so trace context propagation is mandatory, not optional.
 2. `traceparent` travels in
    `DocumentMetadata.custom_attributes["traceparent"]`; a command missing it
    is rejected at the consumer (§4.1).
-3. OTLP spans export over HTTP to the VictoriaTraces collector
-   (`vtsingle-*.monitoring.svc:4318/v1/traces`).
+3. OTLP spans export over HTTP to the tracing collector.
 
 ```text
 [Trace Root] discovery.ingest_file (workspace, sha256, doc_id)
@@ -1377,67 +1377,42 @@ embedding), so trace context propagation is mandatory, not optional.
         └── [Span] postgres.write_tier2_tier3
 ```
 
-### 9.4 Structured Logging
+### 9.3 Structured Logging
 
-JSON to stdout/stderr for `VLAgent` parsing. Mandatory fields: `trace_id`,
-`span_id` (click-through to the trace in Grafana), `workspace_id`, `doc_id`,
-`parent_doc_id`, `worker_type`, and — on the CGo paths —
-`cgo_memory_allocated_bytes`.
+JSON, one file per role under `logs/<role>.log` rather than stdout/stderr —
+the terminal belongs to the live dashboard while a run is in flight (§9.5).
+`worker_type` is on every line (`internal/telemetry`); `trace_id`, `doc_id`,
+`workspace_id`, and `parent_doc_id` (on children) are attached at the call
+sites that have them, not enforced by the logger itself. There is no
+`span_id` field or CGo memory gauge in the logs today — tracing is joined on
+`trace_id` alone (§9.2).
 
-### 9.5 Alerting
+### 9.4 Alerting
 
-```yaml
-apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMRule
-metadata:
-  name: rag-ingestion-alerts
-  namespace: pocket-advisor
-spec:
-  groups:
-  - name: RAGIngestionAlerts
-    rules:
-    - alert: RAGIngestionHighQueueBacklog
-      expr: nats_stream_messages{stream="INGESTION"} > 5000
-      for: 5m
-      labels: {severity: warning}
-      annotations:
-        summary: "Ingestion queue backlog growing on {{ $labels.stream }}"
+There is no Alertmanager or scrape config in this deployment (§9.1) — these
+are the signals worth an operator's attention, checked manually or wired up
+against whatever the operator points at `/metrics`, not rules already firing
+anywhere today:
 
-    - alert: RAGDeadLetterQueueSpike
-      expr: increase(rag_dlq_total[5m]) > 10
-      for: 1m
-      labels: {severity: critical}
-      annotations:
-        summary: "Documents failing that should have parsed ({{ $labels.reason }})"
+* **High queue backlog** — JetStream's own `/jsz?streams=true` (README §4)
+  reports `INGESTION` growing rather than draining.
+* **Dead-letter spike** — `rag_dlq_total` increasing: documents failing that
+  should have parsed.
+* **Stale pending documents** — `rag_discovery_stale_pending` above 0 after a
+  `--reconcile` run: documents stuck PENDING, the write-then-publish gap not
+  closing (§2.2).
+* **Unstubbed objects** — `rag_discovery_unstubbed_objects` above 0 after a
+  `--scan`: bytes accepted into Tier 1 but never ingested into Tier 2.
 
-    - alert: RAGStalePendingDocuments
-      expr: rag_discovery_stale_pending > 0
-      for: 30m
-      labels: {severity: warning}
-      annotations:
-        summary: "Documents stuck PENDING — write-then-publish gap not closing (§2.2)"
+There is no memory gauge for the CGo paths today (§9.1) — a suspected leak is
+diagnosed from host-level RSS for the `pocket-advisor` process, not from a
+metric this system exports.
 
-    - alert: RAGUnstubbedObjects
-      expr: rag_discovery_unstubbed_objects > 0
-      for: 30m
-      labels: {severity: warning}
-      annotations:
-        summary: "Objects in raw/ with no documents row — bytes accepted but never ingested"
-
-    - alert: RAGWorkerMemorySpike
-      expr: container_memory_working_set_bytes{container=~"document-extractor.*"}
-            / container_spec_memory_limit_bytes > 0.85
-      for: 3m
-      labels: {severity: warning}
-      annotations:
-        summary: "Extractor pod {{ $labels.pod }} nearing memory limit (possible CGo leak)"
-```
-
-`RAGStalePendingDocuments` firing at all means documents are being accepted
+Stale pending firing at all means documents are being accepted
 and then lost — it is the highest-signal alert in the set, because that
 failure is otherwise invisible.
 
-### 9.6 Live Terminal Display
+### 9.5 Live Terminal Display
 
 Prometheus remains the record for anything asked *after* a run. During one,
 the terminal shows live state, because the monolith removed the thing that
@@ -1471,22 +1446,22 @@ escapes written to a file are unreadable.
 ## 10. Verification & Operational Lifecycle
 
 ```
-[ Phase 1: Setup ]
-  │── Run Schema Bootstrap: probe embedding endpoint, resolve (model_id, N) (§4.4)
-  │── Apply Storage Schemas with N interpolated (PostgreSQL DDL & HNSW Indices)
-  └── Provision NATS JetStream Streams & Retries (WorkQueue mode, MaxDeliver=3, AckWait=5m)
+[ Phase 1: Stores ]
+  │── make deploy-infra: helm upgrade --install, wait for the rustfs-setup Job
+  │     Job: rustfs-setup-<revision>  bucket + both scoped identities + policies
+  └── make build: produces bin/pocket-advisor (mise-pinned Go + CGo)
 
-[ Phase 2: Deployment ]
-  │── helm upgrade --install pocket-advisor infra/charts/pocket-advisor
-  │     Job:  rustfs-setup-<revision> bucket + identities + notification
-  │     hook: schema-bootstrap        probe endpoint, apply DDL with resolved N
-  └── Wait for rustfs-setup Complete before uploading
+[ Phase 2: Schema ]
+  └── ./bin/pocket-advisor --bootstrap-schema
+        probes the embedding endpoint, resolves (model_id, N) (§4.4),
+        applies the DDL with N interpolated — a CLI mode now, not a Helm hook (§6.2)
 
-[ Phase 2b: Corpus Load ]
-  │── helm upgrade --set uploader.enabled=true --set uploader.hostPath=...
-  └── helm upgrade --set discovery.scan.enabled=true --set discovery.scan.workspace=...
+[ Phase 3: Corpus Load ]
+  └── ./bin/pocket-advisor --ingest-all --workspace-id <id>
+        uploads every collection the registry resolves, enqueues what is new,
+        runs every pool until drained, live dashboard on stdout (§9.5)
 
-[ Phase 3: Observability & Tuning ]
+[ Phase 4: Observability & Tuning ]
   │── Trace Execution via OpenTelemetry Spans (root span = discovery)
   │── Track CGo Heap Allocations & Process Recycling Thresholds
   └── Monitor Dynamic Micro-Batch Budgets against Embedding Latencies
@@ -1499,7 +1474,7 @@ escapes written to a file are unreadable.
 1. Running the uploader twice over the same folder uploads every file once; the second run reports all of them as `duplicate` and issues zero `PutObject` calls.
 2. The same file present twice under different names produces one object, one `doc_id`, and both names recorded (`source_filename` plus alias).
 3. A worker service account attempting to write, rename, or delete under `raw/` is refused by the RustFS policy, not by application code.
-4. `--wipe` removes objects **and** the corresponding `documents` rows; a wipe that cannot reach PostgreSQL aborts without touching the bucket.
+4. `--delete-data` removes objects **and** the corresponding `documents` rows; a run that cannot reach PostgreSQL aborts without touching the bucket.
 5. Deleting a file from the source folder and re-running the uploader does **not** remove it from Tier 1 — only `--forget` does.
 6. Nothing in the running system reads a user filesystem path: the cluster has no corpus volume mount and ingestion succeeds with the source folder unmounted.
 
@@ -1507,8 +1482,8 @@ escapes written to a file are unreadable.
 
 7. Every object under `raw/` has a `documents` row after a bucket scan; the anti-join returns empty.
 8. An object whose bytes disagree with its key hash is rejected at discovery rather than becoming a document.
-9. Killing the process between the Tier 2 commit and the NATS publish leaves a `PENDING` row that the reconciler re-publishes within one cycle, and the document reaches `COMPLETED` with **no duplicate chunks**.
-10. A dropped bucket notification costs a delay, not a document: the next scan picks it up.
+9. Killing the process between the Tier 2 commit and the NATS publish leaves a `PENDING` row that `--reconcile` re-publishes, and the document reaches `COMPLETED` with **no duplicate chunks**.
+10. Interrupting a run costs a delay, not a document: the objects left in `raw/` with no `documents` row are exactly what the next `--scan` (or `--ingest-all`) enqueues.
 11. A file whose extension disagrees with its magic bytes routes on magic bytes.
 12. A scan of a corpus larger than the high-water mark completes with zero JetStream publish rejections.
 
@@ -1522,8 +1497,8 @@ escapes written to a file are unreadable.
 **Failure handling**
 
 10. A corrupt PDF is delivered exactly 3 times, lands on `ingest.dlq` with `X-Failure-Reason` and `X-Traceparent` headers, and its Tier 2 row is `FAILED`.
-11. A zip bomb terminates at the depth or expansion limit without OOM-killing the pod.
-12. OCR of a 40-page scanned PDF stays within the pod memory limit.
+11. A zip bomb terminates at the depth or expansion limit without OOM-killing the host process.
+12. OCR of a 40-page scanned PDF stays within the CPU semaphore's implied memory bound (§6.3).
 
 **Index integrity (retrieval contract, §7)**
 

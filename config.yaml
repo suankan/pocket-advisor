@@ -1,21 +1,17 @@
-# Platform-layer configuration — no user/workspace/case content
-# (`docs_old/DESIGN.md` tenet 10). Committed with the repo. Every key is
-# optional; omitted keys fall back to modules/config.py. Unknown keys
-# abort loudly (typo protection).
+# Platform-layer configuration — no user/workspace/case content. Committed
+# with the repo. `internal/config` loads only the `infra:` section below;
+# every key in it is optional and falls back to a built-in default.
 #
-# NOTE: everything below `infra` predates the v3 Go pipeline and is read by
-# nothing in it. `infra` is the only section internal/config loads.
+# Precedence: built-in defaults < this file < environment variables < flags.
+# Put secrets in the environment rather than here; the file is committed.
 
 # ============================================================================
-# Infrastructure endpoints (v3 Go pipeline)
+# Infrastructure endpoints
 #
 # pocket-advisor runs on the host; its three stores stay in the local OrbStack
 # cluster. These defaults match a `pocket-advisor` Helm release in the
 # `pocket-advisor` namespace, so a stock local cluster needs no edits here —
 # this section exists to point at a different one.
-#
-# Precedence: built-in defaults < this file < environment variables < flags.
-# Put secrets in the environment rather than here; the file is committed.
 # ============================================================================
 infra:
   rustfs:
@@ -60,98 +56,3 @@ infra:
     # One file per role. The terminal belongs to the live dashboard, so these
     # files are the complete record of what each role did.
     log_dir: logs
-#
-# Three-class knob discipline (`docs_old/DESIGN.md`):
-#   - query / ingestion.ocr / ingestion.thread_* / ingestion.doc_date_* /
-#     ingestion.embed_text: FREE, change anytime.
-#   - ingestion.chunking / models.mlx_model_embed_text: INDEX-INVALIDATING.
-#     Model changes select a separate cache on the next
-#     `pocket-advisor.py ingest embed`.
-#     Chunking only WARNs — no
-#     automated re-chunk pipeline (`docs_old/specs/config-yaml.md`).
-
-workspaces:
-  # Parent directory for all matters (relative to repo root). Active
-  # workspace + evidence collections are declared in the gitignored user
-  # registry: {dir}/workspace-config.yaml
-  # See docs_old/specs/workspace-config-v2.md and its example YAML.
-  dir: workspaces
-
-# Optional legacy (ignored when workspace-config.yaml is present):
-# workspace:
-#   dir: workspaces/my-matter
-
-query:
-  # How many candidates the BM25/FTS5 keyword-search leg pulls before
-  # fusion. Higher = more lexical recall considered, more CPU/latency.
-  fts_candidates: 50
-  # How many candidates the dense vector/embedding-search leg pulls
-  # before fusion. Higher = more semantic recall considered.
-  vec_candidates: 50
-  # Reciprocal Rank Fusion constant: combined_score = sum(1/(rrf_k +
-  # rank + 1)) across the FTS and vector rankings. Higher flattens the
-  # weighting given to top-ranked vs lower-ranked candidates within
-  # each leg; lower makes top ranks dominate more strongly.
-  rrf_k: 60
-  # Number of thread packets returned by default (overridable by --top-k).
-  default_top_k: 15
-  # Whether the cross-encoder reranker re-scores the fused RRF
-  # candidate list before the top-k cut. See docs_old/specs/reranker.md
-  # for the measured accuracy/latency tradeoff; false falls back to
-  # plain RRF ordering.
-  rerank_enabled: true
-  # How many characters of each candidate's (whitespace-collapsed)
-  # text are fed to the reranker. Reranker cost scales ~linearly with
-  # this value (measured: ~140ms/candidate at ~1000 chars vs ~47ms at
-  # 300 chars) — latency/thoroughness dial; see docs_old/specs/reranker.md.
-  rerank_text_chars: 600
-  # Listwise rerank window: how many fused candidates the reranker reads and
-  # re-orders in one prompt. The reranker concatenates every candidate into a
-  # single sequence, so keep this small — the tail keeps its RRF order and
-  # only the top-k is displayed. 24 covers the default top_k=15 with margin.
-  rerank_candidates: 24
-  # Query uses the selected workspace's local warm daemon when available;
-  # --no-daemon forces cold retrieval and --require-daemon fails closed.
-  daemon_auto: true
-  daemon_idle_sec: 1800
-  # One shared readable-context budget across all result packets.
-  thread_context_chars: 120000
-
-ingestion:
-  chunking:
-    # Target chunk size in characters. Splitting prefers a paragraph
-    # break, then any newline, within the last 40% of the target
-    # length. INDEX-INVALIDATING for *new* chunks only — existing
-    # chunks keep original size (no automated re-chunk); ingest /
-    # embed warns when config no longer matches vector metadata.
-    chars: 1500
-    # Overlap between adjacent chunks of the same source. Same
-    # INDEX-INVALIDATING caveat as chars.
-    overlap: 200
-  ocr:
-    # OCR language flags, e.g. "eng+rus" for a bilingual corpus.
-    # Missing a language here makes OCR on that script fail silently
-    # into plausible-looking garbage — no error, just wrong text.
-    langs: eng+rus
-  # Fallback threading when headers lack In-Reply-To/References:
-  # same normalized subject + ≥1 shared participant within this window.
-  thread_fallback_window_days: 60
-  # Header/letterhead window (chars) for standalone document dates
-  # before full-text / filename / mtime fallback.
-  doc_date_header_window_chars: 6000
-  # Whether stage `all` builds the text vector index. An explicit
-  # `ingest embed` runs the stage regardless of this flag.
-  embed_text: true
-  # Generation can be disabled independently; summary staleness maintenance
-  # still runs on every full ingest.
-  summarize_threads: true
-  thread_summary_max_tokens: 600
-
-models:
-  # Inference endpoints. Defaults point to a local oMLX instance; override
-  # for remote or paid APIs. The engine loads no models itself.
-  # embed_dim is auto-detected from the first embedding response; set
-  # explicitly only if the endpoint returns non-standard dimensions.
-  embedding_endpoint: "http://127.0.0.1:8000/v1/embeddings"
-  reranker_endpoint: "http://127.0.0.1:8000/v1/rerank"
-  summarisation_endpoint: "http://127.0.0.1:8000/v1/chat/completions"

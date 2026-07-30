@@ -785,6 +785,15 @@ same backpressure check as before: listing a bucket enqueues far faster than
 OCR drains, so it pauses above a high-water mark of pending messages and
 resumes below a low one.
 
+TODO: Assess a possibility to still use the RustFS ObjectCreated/ObjectUpdated
+events, but somehow route them directly into the queue without a need to implement
+webhooks, HTTP listener and other overhead. The goal is: As soon as the first object
+lands into a RustFS bucket - it is picked up for processing without waiting for the
+Scanner to identify it as a candidate for further ingestion and processing.
+This could effectively invalidate the use case of the Scanner, but should not
+invalidate the need of the Scanner for the use case when a User only wants to
+scan/reconsile his RustFS storage and e.g. to reingest the Bucket content.
+
 #### Durable identity
 
 Identity is content, never path:

@@ -8,6 +8,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
@@ -23,9 +24,11 @@ type App struct {
 	Logs *telemetry.Logs
 	Log  *slog.Logger
 
-	// Two Tier 1 clients for two scoped identities. Vault is the worker
-	// identity used by discovery and the extractors; Uploads is the uploader
-	// identity, the only one permitted to write raw/ or delete (§5.1).
+	// Two Vaults over the same workspace-scoped RustFS identity and bucket
+	// (workspace-isolation.md §2.2). Vault is constructed with RoleWorker and
+	// Uploads with RoleUploader — the raw/-vs-extracted/ write-authority
+	// split (§5.1) that used to be two separate RustFS identities is now
+	// enforced by that Role field in application code (workspace-isolation.md §9).
 	Vault   *rustfs.Vault
 	Uploads *rustfs.Vault
 
@@ -51,9 +54,14 @@ type Needs struct {
 
 // New builds what the requested modes need and nothing more.
 //
+// workspaceID selects whose Postgres database, RustFS bucket, and NATS
+// account to connect to (workspace-isolation.md §2) — every store this
+// process touches is scoped to one workspace, never a shared identity.
+// Required whenever any Need is set; New returns an error otherwise.
+//
 // ctx governs connection setup and is retained by the stores; the caller owns
 // signal handling, because shutdown ordering is the supervisor's business.
-func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Needs) (*App, error) {
+func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Needs, workspaceID string) (*App, error) {
 	a := &App{
 		Cfg:  cfg,
 		Logs: logs,
@@ -66,14 +74,21 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		a.stopFns = append(a.stopFns, func() { _ = shutdown(context.Background()) })
 	}
 
-	if needs.RustFS || needs.Uploader {
-		if err := cfg.RequireRustFS(); err != nil {
+	var w config.Workspace
+	if workspaceID != "" {
+		var err error
+		w, err = cfg.Workspace(workspaceID)
+		if err != nil {
 			return nil, err
 		}
 	}
 
+	if (needs.RustFS || needs.Uploader || needs.Postgres || needs.NATS) && workspaceID == "" {
+		return nil, fmt.Errorf("a workspace id is required")
+	}
+
 	if needs.RustFS {
-		v, err := rustfs.NewWorker(cfg.RustFS)
+		v, err := rustfs.NewForWorkspace(cfg.RustFS, workspaceID, workspaceID, w.RustFSSecretKey, rustfs.RoleWorker)
 		if err != nil {
 			return nil, err
 		}
@@ -81,12 +96,12 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Uploader {
-		u, err := rustfs.NewUploader(cfg.RustFS)
+		u, err := rustfs.NewForWorkspace(cfg.RustFS, workspaceID, workspaceID, w.RustFSSecretKey, rustfs.RoleUploader)
 		if err != nil {
 			return nil, err
 		}
-		// Only the uploader identity may create the bucket, so this is the one
-		// place the check belongs.
+		// The bucket already exists from --create-workspace; this is a
+		// harmless, idempotent safety net, not the primary creation path.
 		if err := u.EnsureBucket(ctx); err != nil {
 			return nil, err
 		}
@@ -94,10 +109,11 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Postgres {
-		if err := cfg.RequirePostgres(); err != nil {
+		dsn, err := cfg.WorkspacePostgresDSN(workspaceID)
+		if err != nil {
 			return nil, err
 		}
-		db, err := postgres.Connect(ctx, cfg.Postgres.DSN, cfg.Postgres.MaxConns)
+		db, err := postgres.Connect(ctx, dsn, cfg.Postgres.MaxConns)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +124,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.NATS {
-		b, err := bus.Connect(ctx, cfg.NATS.URL)
+		b, err := bus.Connect(ctx, cfg.NATS.URL, workspaceID, w.NATSPassword)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +137,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
+		"workspace_id", workspaceID,
 		"rustfs", cfg.RustFS.Endpoint,
 		"nats", cfg.NATS.URL,
 		"metrics_port", cfg.MetricsPort)

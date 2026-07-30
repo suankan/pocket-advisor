@@ -14,6 +14,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -26,37 +27,48 @@ import (
 const (
 	defaultRustFSEndpoint = "pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000"
 	defaultNATSURL        = "nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222"
-	defaultPostgresDSN    = "postgres://postgres:postgrespassword@" +
+	// The maintenance connection used only to CREATE/DROP per-workspace
+	// databases and roles (workspace-isolation.md §3) — never used for
+	// document data, which lives in a database per workspace.
+	defaultPostgresAdminDSN = "postgres://postgres:postgrespassword@" +
 		"pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/" +
-		"rag_ingestion?sslmode=disable"
+		"postgres?sslmode=disable"
 	// The embedding endpoint is a plain localhost address now: the process that
 	// calls it runs on the machine that serves it, so the host.docker.internal
 	// indirection the in-cluster workers needed is gone.
 	defaultEmbeddingEndpoint = "http://localhost:8000/v1/embeddings"
 
+	// Matches the CLI's own --workspace-config default (internal/cli).
+	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
+
 	// DefaultPath is where Load looks unless told otherwise.
 	DefaultPath = "config.yaml"
 )
 
-// RustFS holds the connection and credential settings for Tier 1.
+// RustFS holds the connection and credential settings for Tier 1. Bucket is
+// vestigial now that buckets are per-workspace (workspace-isolation.md §2.2)
+// — nothing reads it except the root-owned "pocket-advisor" bucket the chart
+// still creates, which the pipeline itself no longer uses.
 type RustFS struct {
 	Endpoint string
 	Bucket   string
 	UseSSL   bool
 
-	// Two scoped identities, preserved even though one process now performs
-	// both roles. The uploader is the only writer to raw/ and the only identity
-	// permitted to delete; everything else reads anywhere but writes only under
-	// extracted/. Collapsing them into one root credential would demote a
-	// server-enforced policy back to a convention (§5.1).
-	UploaderAccessKey string
-	UploaderSecretKey string
-	WorkerAccessKey   string
-	WorkerSecretKey   string
+	// Root credentials, previously chart-only (values.yaml). Needed here too
+	// because the host binary itself now creates and deletes per-workspace
+	// buckets and identities (--create-workspace / --delete-workspace,
+	// workspace-isolation.md §3, §6) rather than only a one-time Helm-owned
+	// setup Job.
+	RootAccessKey string
+	RootSecretKey string
 }
 
 type Postgres struct {
-	DSN string
+	// AdminDSN is the maintenance connection used only to CREATE/DROP
+	// per-workspace databases and roles (workspace-isolation.md §3, §6). It
+	// is never used to read or write document data — that always goes
+	// through a workspace's own database (Config.WorkspacePostgresDSN).
+	AdminDSN string
 	// MaxConns must cover every lane that can hold a connection at once. The
 	// pgxpool default is max(4, NumCPU), far below the lane count once all
 	// roles share a process.
@@ -65,6 +77,32 @@ type Postgres struct {
 
 type NATS struct {
 	URL string
+	// MonitorPort serves NATS's HTTP monitoring endpoints (/varz, /accountz),
+	// used by --create-workspace to confirm a new account is live after the
+	// server restarts (workspace-isolation.md §8). Not the client port.
+	MonitorPort int
+}
+
+// Kubernetes holds what --create-workspace / --delete-workspace need to
+// reach the cluster's own API, for the NATS account provisioning step
+// (workspace-isolation.md §8). Nothing else in pocket-advisor talks to the
+// Kubernetes API — every other interaction is with RustFS, Postgres, or NATS
+// over their own protocols.
+type Kubernetes struct {
+	Namespace       string
+	NATSStatefulSet string
+	NATSConfigMap   string
+}
+
+// Workspace holds the per-workspace secrets --create-workspace provisions
+// against. Everything else about a workspace's resources (database name,
+// role name, bucket name, identity name, NATS account/user name) is derived
+// from its id by convention (workspace-isolation.md §2) — only the
+// passwords need to be recorded anywhere.
+type Workspace struct {
+	PostgresPassword string
+	RustFSSecretKey  string
+	NATSPassword     string
 }
 
 type Embedding struct {
@@ -76,10 +114,20 @@ type Embedding struct {
 }
 
 type Config struct {
-	RustFS    RustFS
-	Postgres  Postgres
-	NATS      NATS
-	Embedding Embedding
+	RustFS     RustFS
+	Postgres   Postgres
+	NATS       NATS
+	Kubernetes Kubernetes
+	Embedding  Embedding
+
+	// WorkspacesConfigPath points at the workspace registry
+	// (workspaces/workspace-config.yaml by default) — the same file
+	// internal/workspace reads for collections and paths. Per-workspace
+	// secrets (workspace-isolation.md §3) live there too, not in this file:
+	// that registry is already gitignored (it holds collection paths and,
+	// for bank collections, account details), so it is the natural home for
+	// credentials as well, while this file stays committed and secret-free.
+	WorkspacesConfigPath string
 
 	MetricsPort int
 	LogLevel    string
@@ -94,21 +142,25 @@ type Config struct {
 type file struct {
 	Infra struct {
 		RustFS struct {
-			Endpoint          string `yaml:"endpoint"`
-			Bucket            string `yaml:"bucket"`
-			UseSSL            *bool  `yaml:"use_ssl"`
-			UploaderAccessKey string `yaml:"uploader_access_key"`
-			UploaderSecretKey string `yaml:"uploader_secret_key"`
-			WorkerAccessKey   string `yaml:"worker_access_key"`
-			WorkerSecretKey   string `yaml:"worker_secret_key"`
+			Endpoint      string `yaml:"endpoint"`
+			Bucket        string `yaml:"bucket"`
+			UseSSL        *bool  `yaml:"use_ssl"`
+			RootAccessKey string `yaml:"root_access_key"`
+			RootSecretKey string `yaml:"root_secret_key"`
 		} `yaml:"rustfs"`
 		NATS struct {
-			URL string `yaml:"url"`
+			URL         string `yaml:"url"`
+			MonitorPort int    `yaml:"monitor_port"`
 		} `yaml:"nats"`
 		Postgres struct {
-			DSN      string `yaml:"dsn"`
+			AdminDSN string `yaml:"admin_dsn"`
 			MaxConns int32  `yaml:"max_conns"`
 		} `yaml:"postgres"`
+		Kubernetes struct {
+			Namespace       string `yaml:"namespace"`
+			NATSStatefulSet string `yaml:"nats_statefulset"`
+			NATSConfigMap   string `yaml:"nats_configmap"`
+		} `yaml:"kubernetes"`
 		Embedding struct {
 			Endpoint    string `yaml:"endpoint"`
 			Model       string `yaml:"model"`
@@ -121,6 +173,26 @@ type file struct {
 			LogDir      string `yaml:"log_dir"`
 		} `yaml:"observability"`
 	} `yaml:"infra"`
+
+	// Workspaces is a top-level key, sibling to infra — it only points at
+	// the registry file; it does not carry secrets itself (workspace-isolation.md §3).
+	Workspaces struct {
+		Config string `yaml:"config"`
+	} `yaml:"workspaces"`
+}
+
+// registryFile mirrors just enough of workspaces/workspace-config.yaml (the
+// same file internal/workspace parses more fully for collections and paths)
+// to extract one workspace's secrets. Kept deliberately separate from
+// internal/workspace's own types — this package only ever needs three
+// strings per workspace, not collection resolution.
+type registryFile struct {
+	Workspaces []struct {
+		ID               string `yaml:"id"`
+		PostgresPassword string `yaml:"postgres_password"`
+		RustFSSecretKey  string `yaml:"rustfs_secret_key"`
+		NATSPassword     string `yaml:"nats_password"`
+	} `yaml:"workspaces"`
 }
 
 // Load resolves configuration from defaults, then path, then the environment.
@@ -140,16 +212,20 @@ func Load(path string) (*Config, error) {
 func defaults() *Config {
 	return &Config{
 		RustFS: RustFS{
-			Endpoint:          defaultRustFSEndpoint,
-			Bucket:            "pocket-advisor",
-			UseSSL:            false,
-			UploaderAccessKey: "pa-uploader",
-			UploaderSecretKey: "pa-uploader-secret",
-			WorkerAccessKey:   "pa-worker",
-			WorkerSecretKey:   "pa-worker-secret",
+			Endpoint:      defaultRustFSEndpoint,
+			Bucket:        "pocket-advisor",
+			UseSSL:        false,
+			RootAccessKey: "rustfsadmin",
+			RootSecretKey: "rustfsadminpassword",
 		},
-		Postgres: Postgres{DSN: defaultPostgresDSN, MaxConns: 50},
-		NATS:     NATS{URL: defaultNATSURL},
+		Postgres: Postgres{AdminDSN: defaultPostgresAdminDSN, MaxConns: 50},
+		NATS:     NATS{URL: defaultNATSURL, MonitorPort: 8222},
+		Kubernetes: Kubernetes{
+			Namespace:       "pocket-advisor",
+			NATSStatefulSet: "pocket-advisor-nats",
+			NATSConfigMap:   "pocket-advisor-nats-config",
+		},
+		WorkspacesConfigPath: defaultWorkspacesConfigPath,
 		Embedding: Embedding{
 			Endpoint:    defaultEmbeddingEndpoint,
 			Model:       "jina-embeddings-v5-text-small-mlx",
@@ -185,17 +261,24 @@ func applyFile(c *Config, path string) error {
 	if in.RustFS.UseSSL != nil {
 		c.RustFS.UseSSL = *in.RustFS.UseSSL
 	}
-	setStr(&c.RustFS.UploaderAccessKey, in.RustFS.UploaderAccessKey)
-	setStr(&c.RustFS.UploaderSecretKey, in.RustFS.UploaderSecretKey)
-	setStr(&c.RustFS.WorkerAccessKey, in.RustFS.WorkerAccessKey)
-	setStr(&c.RustFS.WorkerSecretKey, in.RustFS.WorkerSecretKey)
+	setStr(&c.RustFS.RootAccessKey, in.RustFS.RootAccessKey)
+	setStr(&c.RustFS.RootSecretKey, in.RustFS.RootSecretKey)
 
 	setStr(&c.NATS.URL, in.NATS.URL)
+	if in.NATS.MonitorPort > 0 {
+		c.NATS.MonitorPort = in.NATS.MonitorPort
+	}
 
-	setStr(&c.Postgres.DSN, in.Postgres.DSN)
+	setStr(&c.Postgres.AdminDSN, in.Postgres.AdminDSN)
 	if in.Postgres.MaxConns > 0 {
 		c.Postgres.MaxConns = in.Postgres.MaxConns
 	}
+
+	setStr(&c.Kubernetes.Namespace, in.Kubernetes.Namespace)
+	setStr(&c.Kubernetes.NATSStatefulSet, in.Kubernetes.NATSStatefulSet)
+	setStr(&c.Kubernetes.NATSConfigMap, in.Kubernetes.NATSConfigMap)
+
+	setStr(&c.WorkspacesConfigPath, f.Workspaces.Config)
 
 	setStr(&c.Embedding.Endpoint, in.Embedding.Endpoint)
 	setStr(&c.Embedding.Model, in.Embedding.Model)
@@ -225,15 +308,20 @@ func applyEnv(c *Config) {
 	c.RustFS.Endpoint = env("RUSTFS_ENDPOINT", c.RustFS.Endpoint)
 	c.RustFS.Bucket = env("RUSTFS_BUCKET", c.RustFS.Bucket)
 	c.RustFS.UseSSL = envBool("RUSTFS_USE_SSL", c.RustFS.UseSSL)
-	c.RustFS.UploaderAccessKey = env("RUSTFS_UPLOADER_ACCESS_KEY", c.RustFS.UploaderAccessKey)
-	c.RustFS.UploaderSecretKey = env("RUSTFS_UPLOADER_SECRET_KEY", c.RustFS.UploaderSecretKey)
-	c.RustFS.WorkerAccessKey = env("RUSTFS_WORKER_ACCESS_KEY", c.RustFS.WorkerAccessKey)
-	c.RustFS.WorkerSecretKey = env("RUSTFS_WORKER_SECRET_KEY", c.RustFS.WorkerSecretKey)
+	c.RustFS.RootAccessKey = env("RUSTFS_ROOT_ACCESS_KEY", c.RustFS.RootAccessKey)
+	c.RustFS.RootSecretKey = env("RUSTFS_ROOT_SECRET_KEY", c.RustFS.RootSecretKey)
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
+	c.NATS.MonitorPort = envInt("NATS_MONITOR_PORT", c.NATS.MonitorPort)
 
-	c.Postgres.DSN = env("POSTGRES_DSN", c.Postgres.DSN)
+	c.Postgres.AdminDSN = env("POSTGRES_ADMIN_DSN", c.Postgres.AdminDSN)
 	c.Postgres.MaxConns = int32(envInt("POSTGRES_MAX_CONNS", int(c.Postgres.MaxConns)))
+
+	c.Kubernetes.Namespace = env("KUBERNETES_NAMESPACE", c.Kubernetes.Namespace)
+	c.Kubernetes.NATSStatefulSet = env("NATS_STATEFULSET", c.Kubernetes.NATSStatefulSet)
+	c.Kubernetes.NATSConfigMap = env("NATS_CONFIGMAP", c.Kubernetes.NATSConfigMap)
+
+	c.WorkspacesConfigPath = env("WORKSPACES_CONFIG", c.WorkspacesConfigPath)
 
 	c.Embedding.Endpoint = env("EMBEDDING_ENDPOINT", c.Embedding.Endpoint)
 	c.Embedding.APIKey = env("EMBEDDING_API_KEY", c.Embedding.APIKey)
@@ -246,38 +334,86 @@ func applyEnv(c *Config) {
 	c.LogDir = env("LOG_DIR", c.LogDir)
 }
 
-// RequireRustFS validates the credentials for both scoped identities.
-func (c *Config) RequireRustFS() error {
-	var missing []string
-	if c.RustFS.UploaderAccessKey == "" {
-		missing = append(missing, "infra.rustfs.uploader_access_key")
-	}
-	if c.RustFS.UploaderSecretKey == "" {
-		missing = append(missing, "infra.rustfs.uploader_secret_key")
-	}
-	if c.RustFS.WorkerAccessKey == "" {
-		missing = append(missing, "infra.rustfs.worker_access_key")
-	}
-	if c.RustFS.WorkerSecretKey == "" {
-		missing = append(missing, "infra.rustfs.worker_secret_key")
-	}
-	return report(missing)
-}
-
-// RequirePostgres validates the subset every stateful component needs.
-func (c *Config) RequirePostgres() error {
-	if c.Postgres.DSN == "" {
-		return report([]string{"infra.postgres.dsn"})
-	}
-	return nil
-}
-
 // RequireEmbedding validates the subset the indexer and schema bootstrap need.
 func (c *Config) RequireEmbedding() error {
 	if c.Embedding.Endpoint == "" {
 		return report([]string{"infra.embedding.endpoint"})
 	}
 	return nil
+}
+
+// RequireProvisioning validates what --create-workspace and
+// --delete-workspace need beyond a resolved Workspace: the admin/root
+// credentials used to create or drop the workspace's own resources
+// (workspace-isolation.md §3, §6).
+func (c *Config) RequireProvisioning() error {
+	var missing []string
+	if c.Postgres.AdminDSN == "" {
+		missing = append(missing, "infra.postgres.admin_dsn")
+	}
+	if c.RustFS.RootAccessKey == "" {
+		missing = append(missing, "infra.rustfs.root_access_key")
+	}
+	if c.RustFS.RootSecretKey == "" {
+		missing = append(missing, "infra.rustfs.root_secret_key")
+	}
+	if c.Kubernetes.Namespace == "" {
+		missing = append(missing, "infra.kubernetes.namespace")
+	}
+	if c.Kubernetes.NATSStatefulSet == "" {
+		missing = append(missing, "infra.kubernetes.nats_statefulset")
+	}
+	if c.Kubernetes.NATSConfigMap == "" {
+		missing = append(missing, "infra.kubernetes.nats_configmap")
+	}
+	if c.WorkspacesConfigPath == "" {
+		missing = append(missing, "workspaces.config")
+	}
+	return report(missing)
+}
+
+// Workspace resolves a workspace's secrets by id. Everything else about its
+// resources (database, role, bucket, identity, NATS account/user names) is
+// derived from id by convention (workspace-isolation.md §2), not stored.
+func (c *Config) Workspace(id string) (Workspace, error) {
+	raw, err := os.ReadFile(c.WorkspacesConfigPath)
+	if err != nil {
+		return Workspace{}, fmt.Errorf("read workspace registry %s: %w", c.WorkspacesConfigPath, err)
+	}
+	var rf registryFile
+	if err := yaml.Unmarshal(raw, &rf); err != nil {
+		return Workspace{}, fmt.Errorf("parse workspace registry %s: %w", c.WorkspacesConfigPath, err)
+	}
+	for _, w := range rf.Workspaces {
+		if w.ID == id {
+			return Workspace{
+				PostgresPassword: w.PostgresPassword,
+				RustFSSecretKey:  w.RustFSSecretKey,
+				NATSPassword:     w.NATSPassword,
+			}, nil
+		}
+	}
+	return Workspace{}, fmt.Errorf("workspace %q has no entry under workspaces: in %s", id, c.WorkspacesConfigPath)
+}
+
+// WorkspacePostgresDSN builds the connection string a workspace's own role
+// uses, from the admin DSN's host/port and the workspace's own database,
+// role, and password (workspace-isolation.md §2.1, §3).
+func (c *Config) WorkspacePostgresDSN(id string) (string, error) {
+	w, err := c.Workspace(id)
+	if err != nil {
+		return "", err
+	}
+	if w.PostgresPassword == "" {
+		return "", fmt.Errorf("workspace %q has no postgres_password in %s", id, c.WorkspacesConfigPath)
+	}
+	u, err := url.Parse(c.Postgres.AdminDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse infra.postgres.admin_dsn: %w", err)
+	}
+	u.User = url.UserPassword(id, w.PostgresPassword)
+	u.Path = "/" + id
+	return u.String(), nil
 }
 
 func setStr(dst *string, v string) {

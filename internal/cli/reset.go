@@ -23,7 +23,7 @@ import (
 func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
-	a, err := app.New(ctx, cfg, logs, app.Needs{Uploader: true, Postgres: true})
+	a, err := app.New(ctx, cfg, logs, app.Needs{Uploader: true, Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -88,16 +88,18 @@ func describe(ctx context.Context, docs *postgres.DocumentRepo, workspaceID stri
 }
 
 // runBootstrap resolves the vector dimension from the embedding endpoint and
-// applies the DDL.
+// (re-)applies the DDL to one workspace's own database.
 //
 // halfvec(N) is a typed SQL column, so N must be known before the first CREATE
 // TABLE — but the authority on N is the model, not a design document. Pinning a
 // literal in checked-in DDL is how an index silently ends up the wrong shape
-// when the endpoint changes (§4.4).
+// when the endpoint changes (§4.4). --create-workspace already runs this once
+// as part of provisioning (workspace-isolation.md §6) — this mode exists for
+// re-probing an existing workspace after a model change.
 func runBootstrap(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
-	a, err := app.New(ctx, cfg, logs, app.Needs{Postgres: true})
+	a, err := app.New(ctx, cfg, logs, app.Needs{Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}

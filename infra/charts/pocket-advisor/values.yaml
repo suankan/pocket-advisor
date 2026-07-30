@@ -84,7 +84,6 @@ postgres:
   replicaCount: 1
   port: 5432
   credentials:
-    db: rag_ingestion
     user: postgres
     password: postgrespassword
   persistence:

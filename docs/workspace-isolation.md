@@ -1,13 +1,45 @@
 # Workspace Isolation
 
-**Version:** `1.1.0`
+**Version:** `1.4.0`
 
-**Status:** implementation-ready design of record for how workspaces are
-kept apart across all three stores. Peer to `docs/ingestion-design.md`
-(write path), `docs/retrieval-design.md` (read path), and
-`docs/api-server-design.md` (longer-term interface direction) — this file
-owns the isolation boundary those build on top of, not the pipeline or
-query mechanics themselves. Nothing in this document is implemented yet.
+**Changes in 1.4.0:** removed the last remnant of the pre-isolation shared
+database. `rag_ingestion` — auto-created by the chart's Postgres
+StatefulSet via `POSTGRES_DB` (`values.yaml`'s `postgres.credentials.db`)
+— served no purpose once §13 landed: it was empty, and `--bootstrap-schema`
+was its only remaining reader via the old `infra.postgres.dsn` fallback.
+Removed `POSTGRES_DB` from the chart, removed `Config.Postgres.DSN` /
+`RequirePostgres()` / the `dsn` config key entirely, and
+`--bootstrap-schema` now requires `--workspace-id` like every other mode —
+it applies (or re-applies, after a model change) exactly one workspace's
+schema, the same DDL `--create-workspace` already runs once during
+provisioning (§6). The live `rag_ingestion` database (confirmed empty) was
+dropped from the cluster. `infra.postgres.admin_dsn` is now the only
+Postgres connection string this project has, used exclusively for
+CREATE/DROP DATABASE/ROLE.
+
+**Status:** implemented and verified against a live cluster (§12, §13).
+Design of record for how workspaces are kept apart across all three
+stores, and — as of 1.3.0 — for how the existing ingestion pipeline
+reaches them. Peer to `docs/ingestion-design.md` (write path),
+`docs/retrieval-design.md` (read path), and `docs/api-server-design.md`
+(longer-term interface direction).
+
+**Changes in 1.3.0:** the ingestion pipeline itself (`--ingest-all`,
+`--scan`, `--reconcile`, `--delete-data`, `--forget`) now connects as the
+workspace it's operating on, not the old shared identities — see §13.
+Verified end-to-end: a real `--ingest-all` run against an isolated
+workspace uploaded, processed, and indexed a full corpus with zero
+dead-lettered documents, landing in that workspace's own Postgres
+database. Closes the gap `--create-workspace`/`--delete-workspace`'s own
+1.2.0 verification deliberately didn't cover — provisioning a workspace and
+actually using it are different code paths, and only the former had been
+tested until now.
+
+**Changes in 1.2.0:** `--create-workspace`/`--delete-workspace` run
+end-to-end against a live cluster for the first time and fully verified in
+all three stores (§12) — two real bugs found and fixed (Postgres extension
+privileges, `public` schema ownership since PG15) and one design item
+closed (`madmin-go` against RustFS, previously unverified, §10 item 2).
 
 **Changes in 1.1.0:** resolved from a design sketch into a concrete build
 plan — package layout, exact per-store provisioning sequences, the
@@ -119,16 +151,24 @@ Kubernetes API access — see §8.
 ## 3. Credentials & Config Shape
 
 Every workspace's Postgres role password, RustFS secret key, and NATS user
-password are hardcoded per-workspace in `config.yaml` — an explicit,
-deliberate starting point, not deferred by oversight. Expect this to need
-real secret management later; that is a known, accepted gap.
+password are hardcoded per-workspace — an explicit, deliberate starting
+point, not deferred by oversight. Expect this to need real secret
+management later; that is a known, accepted gap.
+
+**They live in `workspaces/workspace-config.yaml`, not `config.yaml`.**
+That registry is already gitignored — it holds collection paths and, for
+bank collections, account details (`ingestion-design.md` §5.1) — so it is
+the natural home for credentials too, on the same per-workspace entries the
+registry already has. `config.yaml` stays committed and secret-free,
+carrying only a pointer to where the registry lives:
 
 ```yaml
+# config.yaml — committed, no secrets
 infra:
   postgres:
-    # Now the ADMIN connection only — a superuser, pointed at the
-    # `postgres` maintenance database, used solely to CREATE/DROP
-    # per-workspace databases and roles. No pipeline data lives here.
+    # The ADMIN connection only — a superuser, pointed at the `postgres`
+    # maintenance database, used solely to CREATE/DROP per-workspace
+    # databases and roles. No pipeline data lives here.
     admin_dsn: postgres://postgres:postgrespassword@.../postgres?sslmode=disable
 
   rustfs:
@@ -139,14 +179,20 @@ infra:
     root_secret_key: rustfsadminpassword
 
 workspaces:
-  matter:
+  config: workspaces/workspace-config.yaml
+```
+
+```yaml
+# workspaces/workspace-config.yaml — gitignored, carries real secrets
+workspaces:
+  - id: matter
+    path: matter
+    title: The Matter
     postgres_password: ...
     rustfs_secret_key: ...
     nats_password: ...
-  other:
-    postgres_password: ...
-    rustfs_secret_key: ...
-    nats_password: ...
+    collections:
+      - id: correspondence
 ```
 
 Each workspace's own connection strings are **derived**, not stored:
@@ -154,9 +200,14 @@ Postgres DSN = `postgres://<id>:<postgres_password>@<host>/<id>`; RustFS
 identity = access key `<id>` / secret `<rustfs_secret_key>`, bucket `<id>`;
 NATS user = `<id>` / `<nats_password>`, account `<id>`.
 
-`internal/config` gains a `Workspace(id string) (WorkspaceCreds, error)`
-lookup over the `workspaces:` map, alongside the existing `RustFS`/
-`Postgres`/`NATS` structs, which now hold only the admin/root credentials.
+`internal/config.Config.Workspace(id string) (Workspace, error)` parses
+`workspaces/workspace-config.yaml` directly (a minimal, non-strict read —
+just the `id`/`postgres_password`/`rustfs_secret_key`/`nats_password`
+fields, ignoring everything else in that file) rather than holding the
+secrets in memory from `config.yaml`. This is deliberately independent of
+`internal/workspace`'s own, fuller parse of the same file for collections
+and paths — the two packages read the same file for two unrelated
+reasons, and neither depends on the other.
 
 ---
 
@@ -360,15 +411,18 @@ boundary.
 ## 10. Open Decisions
 
 Narrower than 1.0.0's four — most of those are resolved above.
+`--create-workspace`/`--delete-workspace` have now been run end-to-end
+against a live cluster (2026-07-29) and verified in all three stores, which
+closed item 2 below and surfaced two implementation bugs, both fixed —
+recorded in §12.
 
 1. **Schema migration tool.** `jackc/tern` proposed (§4) — `pgx` is
    already the driver — but not yet adopted. Needed before the first real
    schema change has to land across N workspace databases consistently
    rather than once.
-2. **`madmin-go` against RustFS, unverified.** `mc admin` (built on the
-   same library family) is confirmed compatible (`ingestion-design.md`
-   §12.7); `madmin-go` used directly from Go has not been tried against
-   RustFS in this project. Verify before relying on §6/§7's RustFS steps.
+2. ~~`madmin-go` against RustFS, unverified.~~ **Verified 2026-07-29** —
+   `AddCannedPolicy`/`AddUser`/`AttachPolicy` and bucket create/remove all
+   confirmed working against a live RustFS instance.
 3. **Kubernetes RBAC hardening.** Ambient kubeconfig (§8) is the right
    call for a single-user local cluster today; revisit if this project
    ever runs against a shared or remote cluster where the operator's
@@ -390,3 +444,130 @@ actual provisioning logic as plain, transport-agnostic Go functions
 (`internal/provision`, §4) that a CLI flag handler calls, not inline in
 flag-parsing code, so a future API handler can call the same functions
 unchanged.
+
+---
+
+## 12. Findings From the First Live Run (2026-07-29)
+
+`--create-workspace`/`--delete-workspace` were run end-to-end against a
+real cluster for the first time on 2026-07-29 and fully verified (database,
+role, and tables in Postgres; identity and bucket in RustFS; account in
+NATS — each checked directly, not just inferred from a clean exit). Two
+real bugs surfaced and were fixed; recorded here rather than only in commit
+history because both are exactly the kind of thing §6's design looked
+complete without.
+
+1. **`CREATE EXTENSION` needs superuser, and pgvector is not "trusted."**
+   The first live run failed with `permission denied to create extension
+   "vector"` — `applyWorkspaceSchema` was running the full DDL (which opens
+   with `CREATE EXTENSION IF NOT EXISTS vector`) as the workspace's own,
+   deliberately unprivileged role. Fixed by adding a `prepareWorkspaceDatabase`
+   step in §6 that installs the extension as admin, inside the workspace's
+   database, before handing off to the workspace role for the rest of the
+   schema.
+2. **PostgreSQL 15+ does not grant `CREATE` on `public` to new roles.** The
+   next run got past the extension and failed with `permission denied for
+   schema public` on the first `CREATE TABLE` — `GRANT ALL PRIVILEGES ON
+   DATABASE` does not touch schema-level privileges, and a freshly created
+   database's `public` schema is owned by the bootstrap superuser, not
+   grantable-by-default the way it was on older PostgreSQL. Fixed in the
+   same `prepareWorkspaceDatabase` step: `ALTER SCHEMA public OWNER TO
+   <id>`.
+3. **NATS's `/accountz` field is `accounts`, not `account_list`.** §8's
+   `waitForAccount` polling never found the newly created account even
+   though it had loaded correctly (confirmed via `nats-server`'s own logs
+   and a direct query) — the JSON field name in `accountPresent` was an
+   unverified guess that was simply wrong. Fixed; this specific field name
+   is now confirmed against a live server, not assumed.
+
+One more thing worth recording rather than chasing further: during this
+testing, one `--create-workspace` attempt failed at the NATS step (the
+`accounts` vs `account_list` bug above) and its rollback of the RustFS step
+itself failed with `The Access Key Id you provided does not exist in our
+records` — even though that identity had authenticated successfully
+moments earlier within the same run. All pods had also just restarted
+independently of this tool around the same time. Most likely an
+eventual-consistency gap in RustFS's IAM system rather than a bug in
+`internal/provision` — a subsequent clean run (stable pods, no restarts)
+completed without incident, both create and delete. Not chased further
+because it did not recur; revisit if it does.
+
+---
+
+## 13. Wiring the Existing Pipeline (2026-07-29)
+
+`--create-workspace` provisions a workspace; it does not, by itself, make
+`--ingest-all` (or `--scan`, `--reconcile`, `--delete-data`, `--forget`)
+usable against it. Those modes still connected with the old shared
+identities — no auth on NATS at all, and the old global RustFS/Postgres
+credentials — so once §8's chart change made NATS require an account, every
+one of them broke: `nats connect ...: nats: Authorization Violation`.
+Fixed the same day.
+
+**`internal/app.New`** gained a `workspaceID string` parameter. Every store
+connection it builds now resolves that workspace's own credentials via
+`cfg.Workspace(workspaceID)` instead of the old shared ones:
+
+* **RustFS:** `rustfs.NewForWorkspace(cfg.RustFS, workspaceID, workspaceID,
+  w.RustFSSecretKey, role)` for both `Vault` (`RoleWorker`) and `Uploads`
+  (`RoleUploader`) — the same single per-workspace identity and bucket for
+  both, with the write-authority split enforced by the `Role` field (§9),
+  not by two different credentials any more.
+* **Postgres:** `cfg.WorkspacePostgresDSN(workspaceID)`, derived from
+  `infra.postgres.admin_dsn` — there is no other Postgres connection string
+  left in this project (§14 removed the old shared `cfg.Postgres.DSN`
+  entirely).
+* **NATS:** `bus.Connect(ctx, cfg.NATS.URL, workspaceID, w.NATSPassword)` —
+  `bus.Connect` gained `natsUser`/`natsPassword` parameters and now always
+  authenticates; there is no anonymous path left, matching NATS itself no
+  longer allowing one.
+
+`workspaceID` is required whenever any `Needs` field is set —
+structurally guaranteed by the CLI, since every mode requires
+`--workspace-id` (`cli.go`'s `validate()`), `--bootstrap-schema` included
+as of §14.
+
+**Dead code removed as a direct consequence**, not left as unused
+surface: `rustfs.NewUploader`/`NewWorker` (the two-global-identity
+constructors), `config.RustFS`'s `UploaderAccessKey`/`UploaderSecretKey`/
+`WorkerAccessKey`/`WorkerSecretKey` fields, `Config.RequireRustFS()`, and
+the corresponding `config.yaml` keys. **Deliberately left alone:**
+`infra/charts/pocket-advisor/templates/job-rustfs-setup.yaml` still
+provisions a global `pocket-advisor` bucket and `pa-uploader`/`pa-worker`
+identities on every `helm upgrade` — now entirely unused by the Go
+pipeline, but removing it is a chart-level infra decision distinct from
+this code cleanup, not made here.
+
+**Verified end-to-end** (§ header): `--ingest-all --workspace-id test`
+against a live cluster — 78 files uploaded, 95 documents `COMPLETED`, 349
+chunks, zero dead-lettered, all confirmed landed in the `test` workspace's
+own isolated Postgres database via direct query, not inferred from exit
+code.
+
+---
+
+## 14. Removing the Last Shared Database (2026-07-29)
+
+Prompted by a direct question — "why do we still have db rag_ingestion?" —
+that surfaced a genuine leftover: `rag_ingestion`, auto-created by the
+official Postgres image's `POSTGRES_DB` env var
+(`values.yaml`'s `postgres.credentials.db`), predating per-workspace
+databases entirely. Checked before touching anything: empty, no
+`documents` table, confirming nothing had used it since §13 landed.
+
+* Removed `POSTGRES_DB` from `templates/postgres.yaml` and
+  `postgres.credentials.db` from `values.yaml` — nothing needs a
+  pre-created database any more; admin operations use Postgres's own
+  built-in `postgres` maintenance database via `infra.postgres.admin_dsn`.
+* Removed `Config.Postgres.DSN`, `Config.RequirePostgres()`, and the
+  `infra.postgres.dsn` config key entirely — its only remaining reader was
+  `--bootstrap-schema`'s no-workspace fallback path.
+* `--bootstrap-schema` now requires `--workspace-id` like every other
+  mode (`cli.go`'s `validate()` no longer exempts it) and applies its DDL
+  through `cfg.WorkspacePostgresDSN`, the same path every other mode uses.
+  There is no mode left that operates without a workspace.
+* Dropped the live `rag_ingestion` database from the cluster after
+  confirming it was empty.
+
+`infra.postgres.admin_dsn` is now the only Postgres connection string this
+project has.

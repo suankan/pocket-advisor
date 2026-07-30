@@ -49,8 +49,12 @@ type Bus struct {
 	js jetstream.JetStream
 }
 
-func Connect(ctx context.Context, url string) (*Bus, error) {
+// Connect authenticates as one workspace's NATS user (workspace-isolation.md
+// §2.3) — every account is a fully separate subject space, so this is what
+// scopes a connection to its own workspace's streams and nothing else's.
+func Connect(ctx context.Context, url, natsUser, natsPassword string) (*Bus, error) {
 	nc, err := nats.Connect(url,
+		nats.UserInfo(natsUser, natsPassword),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
 	)

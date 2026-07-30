@@ -155,37 +155,61 @@ func provenanceFrom(userMeta map[string]string) Provenance {
 	return p
 }
 
+// Role gates which prefixes a Vault may write or delete under. It is a
+// property of how a Vault was constructed, not of the credential behind it —
+// per-workspace deployments (workspace-isolation.md §2.2) collapse to one
+// RustFS identity per workspace, so the raw/-vs-extracted/ split that used to
+// be a server-enforced policy across two identities is now enforced here
+// instead, on whichever role the caller declared at construction. Weaker
+// than policy enforcement — a bug in this package bypasses it — but it
+// limits the blast radius of an application bug rather than leaving nothing
+// at all (workspace-isolation.md §9).
+type Role int
+
+const (
+	// RoleUploader may write and delete anywhere, matching today's
+	// two-identity model's uploader.
+	RoleUploader Role = iota
+	// RoleWorker may read anywhere but may not write or delete under raw/,
+	// matching today's two-identity model's worker.
+	RoleWorker
+)
+
 // Vault is the Tier 1 client.
 type Vault struct {
 	c      *minio.Client
 	bucket string
+	role   Role
 }
 
-// NewUploader returns a client bound to the uploader identity: the only one
-// allowed to write raw/ and the only one allowed to delete.
-func NewUploader(cfg config.RustFS) (*Vault, error) {
-	return newVault(cfg, cfg.UploaderAccessKey, cfg.UploaderSecretKey)
+// NewForWorkspace returns a client bound to one workspace's single scoped
+// identity and bucket (workspace-isolation.md §2.2), with role enforced in
+// application code rather than by RustFS policy (§9). Used by
+// internal/provision and, once per-workspace routing lands in the pipeline
+// itself, by uploader/discovery/worker construction.
+func NewForWorkspace(cfg config.RustFS, bucket, accessKey, secretKey string, role Role) (*Vault, error) {
+	return newVault(cfg.Endpoint, bucket, accessKey, secretKey, cfg.UseSSL, role)
 }
 
-// NewWorker returns a client bound to the worker identity: reads anywhere,
-// writes only under extracted/.
-//
-// One process now performs both roles, so the split is no longer implied by
-// which binary is running. Keeping two clients is what keeps RustFS enforcing
-// it rather than this code promising it (§5.1).
-func NewWorker(cfg config.RustFS) (*Vault, error) {
-	return newVault(cfg, cfg.WorkerAccessKey, cfg.WorkerSecretKey)
-}
-
-func newVault(cfg config.RustFS, accessKey, secretKey string) (*Vault, error) {
-	c, err := minio.New(cfg.Endpoint, &minio.Options{
+func newVault(endpoint, bucket, accessKey, secretKey string, useSSL bool, role Role) (*Vault, error) {
+	c, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: cfg.UseSSL,
+		Secure: useSSL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("minio client: %w", err)
 	}
-	return &Vault{c: c, bucket: cfg.Bucket}, nil
+	return &Vault{c: c, bucket: bucket, role: role}, nil
+}
+
+// refuseRawWrite is the application-level guard replacing RustFS policy
+// enforcement for a Vault backed by a single per-workspace identity
+// (workspace-isolation.md §9).
+func (v *Vault) refuseRawWrite(op, key string) error {
+	if v.role == RoleWorker && strings.HasPrefix(key, "raw/") {
+		return fmt.Errorf("worker role: refusing to %s under raw/ (key %q)", op, key)
+	}
+	return nil
 }
 
 // EnsureBucket creates the bucket if it does not exist. Safe to call from
@@ -208,6 +232,19 @@ func (v *Vault) EnsureBucket(ctx context.Context) error {
 	return nil
 }
 
+// RemoveBucket deletes the bucket. The caller must have already emptied it
+// (RemovePrefix) — RustFS, like S3, refuses to remove a non-empty bucket,
+// and that refusal is the safety net this depends on rather than duplicates.
+func (v *Vault) RemoveBucket(ctx context.Context) error {
+	if err := v.c.RemoveBucket(ctx, v.bucket); err != nil {
+		if ok, checkErr := v.c.BucketExists(ctx, v.bucket); checkErr == nil && !ok {
+			return nil
+		}
+		return fmt.Errorf("remove bucket %q: %w", v.bucket, err)
+	}
+	return nil
+}
+
 // Exists reports whether an object is already present. This is the uploader's
 // skip-if-present check (§5.1): exact rather than heuristic, because the key
 // is the content hash.
@@ -224,6 +261,9 @@ func (v *Vault) Exists(ctx context.Context, key string) (bool, Provenance, error
 
 // Put writes an object with its provenance attached.
 func (v *Vault) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string, p Provenance) error {
+	if err := v.refuseRawWrite("write", key); err != nil {
+		return err
+	}
 	_, err := v.c.PutObject(ctx, v.bucket, key, r, size, minio.PutObjectOptions{
 		ContentType:  contentType,
 		UserMetadata: p.toUserMetadata(),
@@ -309,6 +349,8 @@ func (v *Vault) List(ctx context.Context, prefix string) ([]ObjectRef, error) {
 
 // RemovePrefix deletes every object under a prefix. Only the uploader calls
 // this, and only as part of a reset that also cascades into Tier 2 (§5.1).
+// A worker-role Vault refuses per-key rather than on the prefix argument
+// itself, since a prefix of "" or a workspace root still reaches raw/ keys.
 func (v *Vault) RemovePrefix(ctx context.Context, prefix string) (int, error) {
 	objects := make(chan minio.ObjectInfo)
 	go func() {
@@ -318,6 +360,9 @@ func (v *Vault) RemovePrefix(ctx context.Context, prefix string) (int, error) {
 			Recursive: true,
 		}) {
 			if o.Err != nil {
+				continue
+			}
+			if v.refuseRawWrite("delete", o.Key) != nil {
 				continue
 			}
 			select {
@@ -352,6 +397,9 @@ func (v *Vault) RemovePrefix(ctx context.Context, prefix string) (int, error) {
 
 // Remove deletes a single object.
 func (v *Vault) Remove(ctx context.Context, key string) error {
+	if err := v.refuseRawWrite("delete", key); err != nil {
+		return err
+	}
 	if err := v.c.RemoveObject(ctx, v.bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("remove %q: %w", key, err)
 	}

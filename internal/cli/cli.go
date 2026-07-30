@@ -28,12 +28,14 @@ type Options struct {
 	WorkspaceConfig string
 	WorkspaceID     string
 
-	IngestAll  bool
-	Scan       bool
-	Reconcile  bool
-	DeleteData bool
-	Forget     string
-	Bootstrap  bool
+	IngestAll       bool
+	Scan            bool
+	Reconcile       bool
+	DeleteData      bool
+	Forget          string
+	Bootstrap       bool
+	CreateWorkspace bool
+	DeleteWorkspace bool
 
 	DryRun      bool
 	Yes         bool
@@ -55,7 +57,12 @@ Modes (exactly one):
   --reconcile         re-publish documents stuck PENDING, then process
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
-  --bootstrap-schema  probe the embedding endpoint and apply the DDL
+  --bootstrap-schema  probe the embedding endpoint and (re-)apply this
+                      workspace's DDL — --create-workspace already does
+                      this once; use this to re-probe after a model change
+  --create-workspace  provision this workspace's Postgres DB+role, RustFS
+                      bucket+identity, and NATS account+user
+  --delete-workspace  tear down the same three, in reverse order
 
 Common:
   --workspace-id <id>       workspace from the registry (required by most modes)
@@ -93,6 +100,8 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.BoolVar(&o.Bootstrap, "bootstrap-schema", false, "probe the embedding endpoint and apply the DDL")
+	fs.BoolVar(&o.CreateWorkspace, "create-workspace", false, "provision this workspace's database, bucket, and NATS account")
+	fs.BoolVar(&o.DeleteWorkspace, "delete-workspace", false, "tear down this workspace's database, bucket, and NATS account")
 
 	fs.BoolVar(&o.DryRun, "dry-run", false, "report what would be uploaded, write nothing")
 	fs.BoolVar(&o.Yes, "yes", false, "skip destructive confirmation prompts")
@@ -123,6 +132,8 @@ func (o *Options) modes() []string {
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
 		{o.Bootstrap, "--bootstrap-schema"},
+		{o.CreateWorkspace, "--create-workspace"},
+		{o.DeleteWorkspace, "--delete-workspace"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -136,14 +147,18 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, " +
-			"--delete-data, --forget, --bootstrap-schema (--help for details)")
+			"--delete-data, --forget, --bootstrap-schema, --create-workspace, --delete-workspace " +
+			"(--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
 
-	// Every mode but the schema bootstrap acts on one workspace, and a mode
-	// that silently defaulted to the wrong one could purge the wrong corpus.
-	if !o.Bootstrap && o.WorkspaceID == "" {
+	// Every mode acts on one workspace, and a mode that silently defaulted to
+	// the wrong one could purge the wrong corpus. --bootstrap-schema is no
+	// exception: there is no shared database left to bootstrap without one
+	// (workspace-isolation.md §13) — it applies (or re-applies) exactly one
+	// workspace's schema, the same as --create-workspace's own schema step.
+	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
 	}
 	if o.Forget != "" && len(o.Forget) != 64 {
@@ -191,6 +206,10 @@ func Run(o *Options) error {
 		return runBootstrap(o, cfg, logs)
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
+	case o.CreateWorkspace:
+		return runCreateWorkspace(o, cfg, logs)
+	case o.DeleteWorkspace:
+		return runDeleteWorkspace(o, cfg, logs)
 	default:
 		return runIngest(o, cfg, logs)
 	}

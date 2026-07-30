@@ -17,27 +17,43 @@ infra:
   rustfs:
     # OrbStack routes *.svc.cluster.local from macOS via the system resolver.
     endpoint: pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
+    # Vestigial: nothing reads this bucket any more now that every workspace
+    # has its own (workspace-isolation.md §2.2). Left as-is since the chart
+    # still provisions it; not used by the pipeline.
     bucket: pocket-advisor
     use_ssl: false
-    # Two scoped identities, not one. The uploader is the only writer to raw/
-    # and the only identity permitted to delete; the worker reads anywhere but
-    # writes only under extracted/. One process now plays both roles, so these
-    # are what keeps RustFS enforcing the split rather than the code merely
-    # promising it. Override the secrets via RUSTFS_*_SECRET_KEY.
-    uploader_access_key: pa-uploader
-    uploader_secret_key: pa-uploader-secret
-    worker_access_key: pa-worker
-    worker_secret_key: pa-worker-secret
+    # Root credentials, matching infra/charts/pocket-advisor/values.yaml.
+    # Used only by --create-workspace/--delete-workspace to create or drop a
+    # workspace's own bucket and identity (workspace-isolation.md §3, §6) —
+    # never for reading or writing documents.
+    root_access_key: rustfsadmin
+    root_secret_key: rustfsadminpassword
 
   nats:
     url: nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+    # Serves /varz and /accountz, polled by --create-workspace to confirm a
+    # new NATS account is live after the server restarts (workspace-isolation.md §8).
+    monitor_port: 8222
 
   postgres:
-    dsn: postgres://postgres:postgrespassword@pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/rag_ingestion?sslmode=disable
+    # The maintenance connection --create-workspace/--delete-workspace use to
+    # CREATE/DROP per-workspace databases and roles (workspace-isolation.md
+    # §3, §6). Never used for document data.
+    admin_dsn: postgres://postgres:postgrespassword@pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/postgres?sslmode=disable
     # Must cover every lane that can hold a connection at once. pgxpool
     # defaults to max(4, NumCPU), which becomes the pipeline's narrowest point
     # once all roles share one process.
     max_conns: 50
+
+  kubernetes:
+    # What --create-workspace/--delete-workspace need to reach the cluster's
+    # own API for the NATS account provisioning step (workspace-isolation.md
+    # §8) — nothing else in pocket-advisor talks to the Kubernetes API.
+    # Uses the operator's own ambient kubeconfig, the same context kubectl/helm
+    # already use; no separate credential lives here.
+    namespace: pocket-advisor
+    nats_statefulset: pocket-advisor-nats
+    nats_configmap: pocket-advisor-nats-config
 
   embedding:
     # Plain localhost: the process calling this now runs on the machine serving
@@ -56,3 +72,15 @@ infra:
     # One file per role. The terminal belongs to the live dashboard, so these
     # files are the complete record of what each role did.
     log_dir: logs
+
+# ============================================================================
+# Workspace registry (workspace-isolation.md)
+#
+# Per-workspace secrets (postgres_password, rustfs_secret_key, nats_password)
+# live in the registry file below, not here — that file is already
+# gitignored (it holds collection paths and, for bank collections, account
+# details), so it is the natural place for credentials too. This file stays
+# committed and secret-free, matching the header above.
+# ============================================================================
+workspaces:
+  config: workspaces/workspace-config.yaml

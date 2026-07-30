@@ -33,7 +33,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		needs.Uploader = true
 	}
 
-	a, err := app.New(ctx, cfg, logs, needs)
+	a, err := app.New(ctx, cfg, logs, needs, o.WorkspaceID)
 	if err != nil {
 		return err
 	}

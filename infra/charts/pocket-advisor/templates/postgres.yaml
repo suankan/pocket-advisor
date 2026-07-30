@@ -22,8 +22,11 @@ spec:
           ports:
             - containerPort: {{ .Values.postgres.port }}
           env:
-            - name: POSTGRES_DB
-              value: {{ .Values.postgres.credentials.db }}
+            # No POSTGRES_DB: every workspace gets its own database
+            # (--create-workspace, workspace-isolation.md §6) and admin
+            # operations use Postgres's own built-in `postgres` maintenance
+            # database (infra.postgres.admin_dsn) — nothing needs a
+            # dedicated bootstrap database created here.
             - name: POSTGRES_USER
               value: {{ .Values.postgres.credentials.user }}
             - name: POSTGRES_PASSWORD

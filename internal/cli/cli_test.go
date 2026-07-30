@@ -11,7 +11,9 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 		"delete-data":      {"--delete-data", "--workspace-id", "test"},
 		"scan":             {"--scan", "--workspace-id", "test"},
 		"reconcile":        {"--reconcile", "--workspace-id", "test"},
-		"bootstrap-schema": {"--bootstrap-schema"},
+		"bootstrap-schema": {"--bootstrap-schema", "--workspace-id", "test"},
+		"create-workspace": {"--create-workspace", "--workspace-id", "test"},
+		"delete-workspace": {"--delete-workspace", "--workspace-id", "test"},
 	}
 	for wantMode, args := range cases {
 		o, err := Parse(args)
@@ -43,15 +45,17 @@ func TestParseRequiresAMode(t *testing.T) {
 	}
 }
 
-// A mode that defaulted its workspace could purge the wrong corpus.
-func TestParseRequiresWorkspaceExceptForBootstrap(t *testing.T) {
-	for _, mode := range []string{"--ingest-all", "--delete-data", "--scan", "--reconcile"} {
+// A mode that defaulted its workspace could purge the wrong corpus, or, for
+// --bootstrap-schema, apply DDL to the wrong workspace's database. There is
+// no shared database left to fall back to (workspace-isolation.md §13).
+func TestParseRequiresWorkspace(t *testing.T) {
+	for _, mode := range []string{
+		"--ingest-all", "--delete-data", "--scan", "--reconcile",
+		"--create-workspace", "--delete-workspace", "--bootstrap-schema",
+	} {
 		if _, err := Parse([]string{mode}); err == nil {
 			t.Errorf("Parse(%s) accepted a missing --workspace-id", mode)
 		}
-	}
-	if _, err := Parse([]string{"--bootstrap-schema"}); err != nil {
-		t.Errorf("--bootstrap-schema should not require a workspace: %v", err)
 	}
 }
 
@@ -70,7 +74,7 @@ func TestParseValidatesForgetHash(t *testing.T) {
 func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 	enqueues := map[string]bool{
 		"--ingest-all": true, "--scan": true, "--reconcile": true,
-		"--delete-data": false,
+		"--delete-data": false, "--create-workspace": false, "--delete-workspace": false,
 	}
 	for mode, want := range enqueues {
 		o, err := Parse([]string{mode, "--workspace-id", "test"})
@@ -82,7 +86,7 @@ func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 		}
 	}
 
-	o, _ := Parse([]string{"--bootstrap-schema"})
+	o, _ := Parse([]string{"--bootstrap-schema", "--workspace-id", "test"})
 	if o.NeedsPipeline() {
 		t.Error("--bootstrap-schema should not start the pools")
 	}

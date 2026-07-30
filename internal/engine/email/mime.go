@@ -137,10 +137,18 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 
 	switch {
 	case mediaType == "text/plain":
-		p.BodyText += "\n" + string(raw)
+		text, terr := decodeText(raw, params["charset"])
+		if terr != nil {
+			return terr
+		}
+		p.BodyText += "\n" + text
 	case mediaType == "text/html":
 		if strings.TrimSpace(p.BodyText) == "" {
-			p.BodyText += "\n" + StripHTML(string(raw))
+			text, terr := decodeText(raw, params["charset"])
+			if terr != nil {
+				return terr
+			}
+			p.BodyText += "\n" + StripHTML(text)
 		}
 	default:
 		name := params["name"]

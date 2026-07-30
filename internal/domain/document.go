@@ -32,6 +32,12 @@ const (
 	ReasonImageNotViable    = "IMAGE_NOT_VIABLE"
 	ReasonExtractionFailed  = "EXTRACTION_FAILED"
 	ReasonEmptyExtraction   = "EMPTY_EXTRACTION"
+	// ReasonUnknownEncoding marks a body whose charset could not be
+	// determined with confidence — not declared, or declared but
+	// unrecognized. Never guessed; routed for manual review instead
+	// (ingestion-design.md's DLQ philosophy: a wrong guess would be silent
+	// content corruption, not a loud, actionable failure).
+	ReasonUnknownEncoding = "UNKNOWN_ENCODING"
 )
 
 // Document is a Tier 2 row: one node in the lineage graph.

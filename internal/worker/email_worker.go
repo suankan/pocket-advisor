@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -63,6 +64,9 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	} else {
 		parsed, perr := email.ParseEmail(data)
 		if perr != nil {
+			if errors.Is(perr, email.ErrUnknownCharset) {
+				return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, perr))
+			}
 			return WithDoc(meta.DocId, Fatal("EMAIL_PARSE_FAILED", perr))
 		}
 		children = parsed.Children

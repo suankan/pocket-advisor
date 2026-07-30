@@ -1,16 +1,24 @@
 package email
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"mime/quotedprintable"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/htmlindex"
 )
+
+// ErrUnknownCharset marks a body whose charset could not be determined with
+// confidence — not declared, or declared but unrecognized.
+var ErrUnknownCharset = errors.New("unknown charset")
 
 func newBase64Reader(r io.Reader) io.Reader {
 	// Mail clients wrap base64 at 76 columns; the decoder rejects newlines, so
@@ -46,6 +54,32 @@ func charsetReader(label string, input io.Reader) (io.Reader, error) {
 	}
 	// A legacy default is better than failing the whole header.
 	return charmap.ISO8859_1.NewDecoder().Reader(input), nil
+}
+
+// decodeText transcodes a MIME body part into UTF-8 using its declared
+// charset. Unlike charsetReader (used for headers, where a best-effort
+// fallback is fine), it does not guess a legacy encoding for an undeclared
+// or unrecognized charset: charset decoders always produce *some* valid
+// UTF-8, so a wrong guess is silent, unflagged content corruption rather
+// than a loud failure. The body is the indexed evidentiary text, so an
+// error here — routed to the DLQ by the caller — is the safer default.
+func decodeText(raw []byte, charset string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(charset)) {
+	case "", "utf-8", "utf8", "us-ascii", "ascii":
+		if utf8.Valid(raw) {
+			return string(raw), nil
+		}
+		return "", fmt.Errorf("%w: charset %q but body is not valid UTF-8", ErrUnknownCharset, charset)
+	}
+	enc, err := htmlindex.Get(charset)
+	if err != nil {
+		return "", fmt.Errorf("%w: unrecognized charset %q", ErrUnknownCharset, charset)
+	}
+	decoded, err := io.ReadAll(enc.NewDecoder().Reader(bytes.NewReader(raw)))
+	if err != nil {
+		return "", fmt.Errorf("%w: charset %q: %v", ErrUnknownCharset, charset, err)
+	}
+	return string(decoded), nil
 }
 
 // StripHTML renders HTML to plain text, discarding script, style and markup.

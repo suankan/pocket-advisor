@@ -2,10 +2,13 @@
 
 Local RAG ingestion pipeline. The pipeline is **one binary that runs on your
 host**; its three stores run in a local Kubernetes cluster. This is the
-day-to-day handbook: install, load a corpus, watch it drain, inspect state,
-remove documents, upgrade. For the "why", see
-[`docs/ingestion-design.md`](docs/ingestion-design.md) (write path) and
-[`docs/retrieval-design.md`](docs/retrieval-design.md) (read path).
+day-to-day handbook: install, provision a workspace, load a corpus, watch it
+drain, inspect state, remove documents, upgrade. For the "why", see
+[`docs/ingestion-design.md`](docs/ingestion-design.md) (write path),
+[`docs/retrieval-design.md`](docs/retrieval-design.md) (read path), and
+[`docs/workspace-isolation.md`](docs/workspace-isolation.md) (per-workspace
+physical isolation — every workspace below is its own Postgres database+role,
+RustFS bucket+identity, and NATS account+user, not a shared pool).
 
 ```
   your machine                             local cluster
@@ -34,23 +37,38 @@ kubectl config use-context pocket-advisor   # switch into it
 
 ## Concepts you need before running anything
 
+- **Every workspace is physically isolated**, not just logically separated.
+  `--workspace-id <id>` doesn't just filter what a command touches — each
+  workspace has its own Postgres database+role, its own RustFS bucket+
+  identity, and its own NATS account+user, all named `<id>`. There is no
+  shared database or bucket left; every mode requires `--workspace-id`
+  except `--create-workspace`/`--delete-workspace` (which provision or tear
+  down exactly that isolation) and `--forget`. A workspace must be
+  provisioned with `--create-workspace` before anything else can target it —
+  see [§2](#2-install).
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
   read directly by the system — it's a staging feed you push into RustFS. Once
   uploaded, a document's origin folder can move or vanish; the bucket is
   authoritative.
-- **The workspace registry decides what gets uploaded**, not CLI flags. A
-  `workspace-config.yaml` defines named *workspaces*, each a set of named
-  *collections*, each collection a path on disk. Two values identify
-  everything: the registry path and a workspace id.
+- **The workspace registry decides what gets uploaded**, not CLI flags.
+  `workspaces/workspace-config.yaml` (gitignored — it carries the per-
+  workspace secrets above, plus bank-account details for financial
+  collections) defines named *workspaces*, each a set of named *collections*,
+  each collection a path on disk. Two values identify everything: the
+  registry path and a workspace id.
 - **Ingestion is reconciliation, not events.** Every run compares the bucket
   against Postgres and processes the difference. That makes re-running free
   and interrupting safe.
 - **Everything destructive prompts unless `--yes`.** `--delete-data` and
   `--forget` both hit Postgres first, so a failure to reach it leaves the
-  bucket untouched rather than dangling a citation.
-- **Postgres is derived state, not source of truth.** If it's lost, re-running
-  ingestion rebuilds it from RustFS. Losing RustFS loses the corpus; losing
-  Postgres just costs a re-index.
+  bucket untouched rather than dangling a citation. `--delete-workspace` goes
+  further — Postgres, then RustFS, then NATS, in that order — and removes the
+  workspace's isolation itself, not just its documents.
+- **Postgres is derived state, not source of truth.** If a workspace's
+  database is lost, `--create-workspace` (idempotent — safe to re-run against
+  an already-provisioned workspace) followed by `--ingest-all` rebuilds it
+  from RustFS. Losing RustFS loses that workspace's corpus; losing its
+  Postgres database just costs a re-index.
 
 ## 1. Prerequisites
 
@@ -78,20 +96,71 @@ make deploy-infra    # helm install + wait for RustFS setup to complete
 make build           # produces bin/pocket-advisor
 ```
 
-Then resolve the vector dimension and create the schema. The vector column is
-typed `halfvec(N)`, so `N` is read from the embedding endpoint before the first
-`CREATE TABLE` — it can't be reshaped later without a full re-embed:
-
-```bash
-./bin/pocket-advisor --bootstrap-schema
-# schema ready: model=jina-embeddings-v5-text-small-mlx dimension=1024
-```
+`deploy-infra` brings up the three shared stores — Postgres, RustFS, NATS —
+with nothing workspace-specific in them yet. There is no shared database or
+bucket to bootstrap at this point; every workspace provisions its own.
 
 Infrastructure endpoints live under `infra:` in
-[`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`, so you
-only edit it to point somewhere else. Environment variables override the file
-(`POSTGRES_DSN`, `RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, …) — put secrets
-there rather than in the committed file.
+[`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,
+so you only edit it to point somewhere else. Environment variables override
+the file (`POSTGRES_ADMIN_DSN`, `RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, …) —
+put secrets there rather than in the committed file. `POSTGRES_ADMIN_DSN` is
+a maintenance connection only, used to create/drop per-workspace databases
+and roles — it is never where document data lives.
+
+### Provision your first workspace
+
+1. Add an entry to `workspaces/workspace-config.yaml` (create the file if it
+   doesn't exist yet — it's gitignored, so nothing here ships with the repo).
+   Collections are defined once at the top level, each naming a path on disk;
+   a workspace then just references collection ids. A workspace needs three
+   secrets you generate yourself (e.g. `openssl rand -base64 24`):
+   ```yaml
+   schema_version: 2
+
+   collections:
+     - id: test-correspondence
+       title: Test Correspondence
+       ingestion-type: general
+       path: corpora/test-collection/test-correspondence
+
+   workspaces:
+     - id: test
+       path: test-workspace
+       title: Test Workspace
+       postgres_password: <generate>
+       rustfs_secret_key: <generate>
+       nats_password: <generate>
+       collections:
+         - id: test-correspondence
+   ```
+   Full field reference: [`docs/workspace-isolation.md`](docs/workspace-isolation.md), §3 "Credentials & Config Shape".
+
+2. Provision it — Postgres database+role, RustFS bucket+identity, NATS
+   account+user, and (as its last step) the Tier 2/3 schema, resolved against
+   your embedding endpoint. The vector column is typed `halfvec(N)`, so `N`
+   is read from the embedding endpoint before the first `CREATE TABLE` — it
+   can't be reshaped later without a full re-embed:
+   ```bash
+   ./bin/pocket-advisor --create-workspace --workspace-id test
+   # schema ready: model=jina-embeddings-v5-text-small-mlx dimension=1024
+   ```
+   Idempotent — re-running it against an already-provisioned workspace is
+   safe and changes nothing.
+
+   `--bootstrap-schema --workspace-id <id>` is a **separate, narrower**
+   command, not an alternative first-time setup path — it only re-probes and
+   re-applies the schema against a workspace's *existing* database, so it
+   fails on a workspace `--create-workspace` hasn't provisioned yet. Reach
+   for it after switching embedding models, when you want to re-resolve the
+   vector dimension without tearing down and re-provisioning everything else:
+   ```bash
+   ./bin/pocket-advisor --bootstrap-schema --workspace-id test
+   ```
+
+Repeat step 1–2 per workspace. `--delete-workspace --workspace-id <id>` tears
+the same three back down, in reverse order — see [§5](#5-remove-documents)
+for the difference between that and `--delete-data`.
 
 OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
 and the defaults address the cluster directly:
@@ -161,13 +230,13 @@ curl -s localhost:9090/metrics | grep rag_
 kubectl exec pocket-advisor-nats-0 -- \
   sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
 
-# What actually landed
-kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d rag_ingestion -c \
+# What actually landed — -d is the workspace id, its own database
+kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d test -c \
   "select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;"
 
 # The resolved vector dimension — worth checking after any embedding model
 # change, since the column can't be reshaped without a full re-embed
-kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d rag_ingestion -c \
+kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d test -c \
   "select * from schema_metadata;"
 
 # Anything that failed for real (as opposed to being skipped)
@@ -186,12 +255,20 @@ failure if anything was dead-lettered.
 # One document, cascading into Tier 2, by sha256
 ./bin/pocket-advisor --forget <sha256> --workspace-id test
 
-# The entire workspace: every Tier 1 object AND every Tier 2 row/chunk
+# Every Tier 1 object AND every Tier 2 row/chunk — content only
 ./bin/pocket-advisor --delete-data --workspace-id test
 ```
 
 Both prompt for confirmation unless `--yes`. Absence of a file from a later
 upload run never implies deletion — removal is always explicit.
+
+`--delete-data` empties a workspace but keeps it provisioned — its Postgres
+database, RustFS bucket, and NATS account all still exist, just empty, ready
+for the next `--ingest-all`. To deprovision the workspace itself — drop the
+database and role, remove the bucket and identity, delete the NATS account —
+use `--delete-workspace --workspace-id test` instead (§2's `--create-workspace`,
+in reverse). That's the one to reach for when a workspace is being retired
+entirely, not just re-ingested.
 
 ## 6. After code changes
 
@@ -234,9 +311,10 @@ make deploy-infra    # upgrade --install, then waits for RustFS setup
 ```
 
 Prefer that over a bare `helm upgrade`. Every install and upgrade creates a new
-revision-named `rustfs-setup` Job that provisions the bucket and the two scoped
-identities the binary authenticates as; ingesting before it completes fails on
-credentials that don't exist yet. If you do run Helm directly, wait yourself:
+revision-named `rustfs-setup` Job that provisions RustFS's legacy global
+bucket/policies (unused now that every workspace has its own bucket+identity,
+kept only so upgrades don't need a chart rewrite) — running ahead of it risks
+racing that Job. If you do run Helm directly, wait yourself:
 
 ```bash
 helm upgrade pocket-advisor ./infra/charts/pocket-advisor
@@ -250,16 +328,23 @@ Two immutability traps:
   `volumeClaimTemplates` is immutable, so `helm upgrade` fails with "updates to
   statefulset spec … are forbidden". Recreate the StatefulSet to resize.
 - **A PostgreSQL major-version bump changes the on-disk format.** Delete the
-  postgres PVC first, then re-run `--bootstrap-schema` and re-ingest.
+  postgres PVC first — this takes every workspace's database with it, not
+  just one — then re-run `--create-workspace` per workspace (recreates the
+  database/role and reapplies the schema) and re-ingest each.
 
 ## 9. Uninstall
+
+To retire one workspace without touching any other, `--delete-workspace`
+(§5) is the right scope — it's the only one of these that's per-workspace
+rather than cluster-wide.
 
 ```bash
 make destroy-infra    # helm uninstall; PVCs deliberately retained
 ```
 
 PVCs survive on purpose: Tier 1 is the corpus source of truth, and the NATS
-volume is what makes an interrupted ingest resumable. To discard everything:
+volume is what makes an interrupted ingest resumable. To discard everything —
+every workspace, not just one:
 
 ```bash
 make destroy-state    # kubectl delete pvc --all

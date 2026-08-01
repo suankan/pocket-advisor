@@ -1880,3 +1880,64 @@ deliberate choice with a reason, not drift.
    that already had content *before* this change shipped — every other
    workspace's first ingest goes straight to the new shape with nothing to
    duplicate.
+
+10. **`--ingest-all` provisions its workspace by default (2026-08-01).**
+    Previously it required `--create-workspace` to have been run first —
+    `app.New` connects with the workspace's own credentials, which don't
+    exist on a fresh one. Now `runIngest` calls the same
+    `provision.CreateWorkspace` `--create-workspace` uses, gated on
+    `o.IngestAll` (not `--scan`/`--reconcile`), before `app.New`. Reuses
+    `CreateWorkspace`'s own idempotency contract unchanged — safe to call on
+    every run, not just the first.
+
+    This surfaced (not assumed away) that `internal/provision/nats.go
+    :createNATS`'s pod-restart-based reload was unconditional — it deleted
+    the NATS pod and waited for Kubernetes to recreate it *even when the
+    account already existed and nothing changed*, exactly what an earlier
+    turn diagnosed as "why is `--create-workspace` slow." Calling it on
+    every `--ingest-all` unmodified would have restarted NATS — dropping
+    every connected client, any other workspace's in-flight pipeline
+    included — on every single ingest run.
+
+    Fixed by removing the restart entirely, not just skipping it when
+    redundant: `createNATS`/`deleteNATS` now hot-reload the running
+    `nats-server` process instead (`nats-server --signal reload=1`, sent via
+    a new `execInPod` helper — `client-go/tools/remotecommand`, not
+    previously used in this codebase, no new external dependency, already a
+    transitive dependency of the pinned `k8s.io/client-go`). The ConfigMap
+    is mounted as a full volume, so Kubernetes already syncs the file into
+    the pod on its own; `reloadNATS` polls for that sync (byte-exact match
+    against the config just written, works identically for an add or a
+    remove) before signaling, since reloading a stale file would silently
+    do nothing. `waitForAccount`'s existing `/accountz` poll is unchanged —
+    already transport-agnostic to *how* the account became live.
+
+    This reload path replaces a restart that a prior session's own comment
+    on `restartNATS` explicitly chose over reload, citing that reload was
+    "unverified for newly-added accounts" — not a stale worry, a specific,
+    documented decision. Resolved live rather than by trusting general NATS
+    reload documentation, and without touching the real `test` workspace to
+    do it (`--delete-workspace` against real content is rightly gated behind
+    confirmation): added a throwaway workspace
+    (`verify-nats-reload-probe`) via `--ingest-all` alone, no separate
+    `--create-workspace` — a genuinely new NATS account, the exact case in
+    question. Confirmed in the logs: `"nats config reload signaled"`
+    immediately followed by `"nats account and user provisioned"`, and the
+    NATS pod's `AGE` never reset (27m → 30m across the run, 0 restarts,
+    matching plain elapsed wall time) while all 74 documents in the probe
+    workspace processed correctly end to end — proving the reloaded account
+    was fully usable, not just that the process didn't crash. A second
+    `--ingest-all` against the same now-provisioned workspace logged
+    `"nats account already present"` and completed in ~6s, confirming the
+    idempotent fast path costs nothing once provisioned. `--delete-workspace`
+    against the probe afterward logged the identical `"nats config reload
+    signaled"` pattern for teardown, with the pod again undisturbed.
+    Workspace deleted, its `workspace-config.yaml` entry removed — nothing
+    left behind from the test.
+
+    Consequence worth naming, not hidden: `--ingest-all` now requires the
+    same admin-level credentials `--create-workspace` does
+    (`infra.postgres.admin_dsn`, `infra.rustfs.root_*`,
+    `infra.kubernetes.*`), not just the workspace's own scoped ones. Not a
+    real restriction in this project's actual single-operator usage, but a
+    genuine widening of what the most commonly run command touches.

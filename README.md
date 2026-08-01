@@ -43,9 +43,11 @@ kubectl config use-context pocket-advisor   # switch into it
   identity, and its own NATS account+user, all named `<id>`. There is no
   shared database or bucket left; every mode requires `--workspace-id`
   except `--create-workspace`/`--delete-workspace` (which provision or tear
-  down exactly that isolation) and `--forget`. A workspace must be
-  provisioned with `--create-workspace` before anything else can target it —
-  see [§2](#2-install).
+  down exactly that isolation) and `--forget`. `--ingest-all` provisions a
+  workspace itself if needed, idempotently, so it's the only mode that
+  doesn't require `--create-workspace` to have run first — every other mode
+  (`--scan`, `--reconcile`, `--delete-data`, `--bootstrap-schema`) still
+  needs the workspace to already exist. See [§2](#2-install).
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
   read directly by the system — it's a staging feed you push into RustFS. Once
   uploaded, a document's origin folder can move or vanish; the bucket is
@@ -136,29 +138,43 @@ and roles — it is never where document data lives.
    ```
    Full field reference: [`docs/workspace-isolation.md`](docs/workspace-isolation.md), §3 "Credentials & Config Shape".
 
-2. Provision it — Postgres database+role, RustFS bucket+identity, NATS
-   account+user, and (as its last step) the Tier 2/3 schema, resolved against
-   your embedding endpoint. The vector column is typed `halfvec(N)`, so `N`
-   is read from the embedding endpoint before the first `CREATE TABLE` — it
-   can't be reshaped later without a full re-embed:
+2. That's it — `--ingest-all` provisions the workspace itself if it doesn't
+   exist yet: Postgres database+role, RustFS bucket+identity, NATS
+   account+user, and (as its last step) the Tier 2/3 schema, resolved
+   against your embedding endpoint, all before it uploads a single file. The
+   vector column is typed `halfvec(N)`, so `N` is read from the embedding
+   endpoint before the first `CREATE TABLE` — it can't be reshaped later
+   without a full re-embed. Skip straight to [§3](#3-load-a-corpus) — there
+   is no separate provisioning step to run first.
+
+   Provisioning is idempotent, so this also means every `--ingest-all` run
+   safely re-checks it — an already-provisioned workspace costs a handful of
+   fast existence checks, nothing disruptive. One consequence worth knowing:
+   `--ingest-all` now needs the same admin-level credentials
+   `--create-workspace` does (`infra.postgres.admin_dsn`,
+   `infra.rustfs.root_*`, `infra.kubernetes.*`), not just the workspace's
+   own scoped ones.
+
+   `--create-workspace --workspace-id <id>` still exists standalone, for
+   when you want a workspace provisioned *without* immediately ingesting
+   anything (e.g. setting it up ahead of the corpus being ready):
    ```bash
    ./bin/pocket-advisor --create-workspace --workspace-id test
    # schema ready: model=jina-embeddings-v5-text-small-mlx dimension=1024
    ```
-   Idempotent — re-running it against an already-provisioned workspace is
-   safe and changes nothing.
 
    `--bootstrap-schema --workspace-id <id>` is a **separate, narrower**
-   command, not an alternative first-time setup path — it only re-probes and
-   re-applies the schema against a workspace's *existing* database, so it
-   fails on a workspace `--create-workspace` hasn't provisioned yet. Reach
-   for it after switching embedding models, when you want to re-resolve the
-   vector dimension without tearing down and re-provisioning everything else:
+   command, not a first-time setup path — it only re-probes and re-applies
+   the schema against a workspace's *existing* database, so it fails on a
+   workspace nothing has provisioned yet. Reach for it after switching
+   embedding models, when you want to re-resolve the vector dimension
+   without touching anything else:
    ```bash
    ./bin/pocket-advisor --bootstrap-schema --workspace-id test
    ```
 
-Repeat step 1–2 per workspace. `--delete-workspace --workspace-id <id>` tears
+Repeat step 1 per workspace — step 2 happens automatically the first time
+you `--ingest-all` each one. `--delete-workspace --workspace-id <id>` tears
 the same three back down, in reverse order — see [§5](#5-remove-documents)
 for the difference between that and `--delete-data`.
 

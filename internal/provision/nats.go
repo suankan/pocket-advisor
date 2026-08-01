@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,13 +11,20 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/suankan/pocket-advisor/internal/config"
 )
+
+// natsContainer is the StatefulSet's single container name
+// (templates/nats.yaml) — exec targets it explicitly rather than relying on
+// a pod's default container.
+const natsContainer = "nats"
 
 const (
 	natsConfigKey  = "nats-server.conf"
@@ -26,9 +34,9 @@ const (
 )
 
 // createNATS adds the workspace's account and user to the NATS ConfigMap
-// and restarts the server to pick it up (workspace-isolation.md §8, §6 step
-// 3 — last, since it is the riskiest and slowest step: everything else has
-// already succeeded by the time this runs).
+// and hot-reloads the server to pick it up (workspace-isolation.md §8, §6
+// step 3 — last, since it is the riskiest step: everything else has already
+// succeeded by the time this runs).
 func createNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Logger) error {
 	w, err := cfg.Workspace(id)
 	if err != nil {
@@ -41,7 +49,7 @@ func createNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 		return err
 	}
 
-	clientset, err := k8sClient()
+	clientset, restConfig, err := k8sClient()
 	if err != nil {
 		return fmt.Errorf("kubernetes client: %w", err)
 	}
@@ -55,22 +63,23 @@ func createNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 	conf := cm.Data[natsConfigKey]
 	if hasAccountBlock(conf, id) {
 		log.Info("nats account already present", "workspace_id", id)
-	} else {
-		conf, err = addAccountBlock(conf, id, w.NATSPassword)
-		if err != nil {
-			return fmt.Errorf("edit nats config: %w", err)
-		}
-		if cm.Data == nil {
-			cm.Data = map[string]string{}
-		}
-		cm.Data[natsConfigKey] = conf
-		if _, err := clientset.CoreV1().ConfigMaps(cfg.Kubernetes.Namespace).
-			Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("update nats configmap: %w", err)
-		}
+		return nil
 	}
 
-	if err := restartNATS(ctx, clientset, cfg, log); err != nil {
+	conf, err = addAccountBlock(conf, id, w.NATSPassword)
+	if err != nil {
+		return fmt.Errorf("edit nats config: %w", err)
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[natsConfigKey] = conf
+	if _, err := clientset.CoreV1().ConfigMaps(cfg.Kubernetes.Namespace).
+		Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update nats configmap: %w", err)
+	}
+
+	if err := reloadNATS(ctx, clientset, restConfig, cfg, conf, log); err != nil {
 		return err
 	}
 	if err := waitForAccount(ctx, cfg, id); err != nil {
@@ -81,7 +90,7 @@ func createNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 	return nil
 }
 
-// deleteNATS removes the workspace's account and user and restarts the
+// deleteNATS removes the workspace's account and user and hot-reloads the
 // server (workspace-isolation.md §7, step 1 — first, to stop any new work
 // from being enqueuable against this workspace before anything else is torn
 // down).
@@ -90,7 +99,7 @@ func deleteNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 		return err
 	}
 
-	clientset, err := k8sClient()
+	clientset, restConfig, err := k8sClient()
 	if err != nil {
 		return fmt.Errorf("kubernetes client: %w", err)
 	}
@@ -117,7 +126,7 @@ func deleteNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 		return fmt.Errorf("update nats configmap: %w", err)
 	}
 
-	if err := restartNATS(ctx, clientset, cfg, log); err != nil {
+	if err := reloadNATS(ctx, clientset, restConfig, cfg, conf, log); err != nil {
 		return err
 	}
 
@@ -128,34 +137,49 @@ func deleteNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 // k8sClient uses the operator's own ambient kubeconfig — the same context
 // kubectl/helm already use throughout this project — rather than a
 // dedicated ServiceAccount. This is a single-user local cluster; see
-// workspace-isolation.md §8, §10 item 3.
-func k8sClient() (*kubernetes.Clientset, error) {
+// workspace-isolation.md §8, §10 item 3. Returns the *rest.Config alongside
+// the typed Clientset because reloadNATS's exec transport needs it directly
+// — the typed Clientset alone can't build the SPDY upgrade.
+func k8sClient() (*kubernetes.Clientset, *rest.Config, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	overrides := &clientcmd.ConfigOverrides{}
 	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("load kubeconfig: %w", err)
+		return nil, nil, fmt.Errorf("load kubeconfig: %w", err)
 	}
-	return kubernetes.NewForConfig(restConfig)
+	cs, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cs, restConfig, nil
 }
 
-// restartNATS deletes the single NATS pod so the StatefulSet recreates it,
-// remounting the updated ConfigMap. Simpler and more deterministic than a
-// signal-based hot reload, which is unverified for newly-added accounts
-// (workspace-isolation.md §8). JetStream data on the PVC survives untouched.
-func restartNATS(ctx context.Context, clientset *kubernetes.Clientset, cfg *config.Config, log *slog.Logger) error {
+// reloadNATS tells the running NATS process to re-read its config file —
+// picking up an added or removed account without dropping any connected
+// client's session, unlike deleting the pod. The ConfigMap is mounted as a
+// full volume (not subPath, templates/nats.yaml), so Kubernetes already
+// syncs the file into the pod on its own; this only has to wait for that
+// sync to land — signaling reload against a stale file would silently
+// reload nothing new — then tell the process to reload. want is the exact
+// config just written to the ConfigMap: an exact byte match is the least
+// assumption-laden way to confirm the mount actually caught up, and works
+// identically for both an add and a remove.
+func reloadNATS(ctx context.Context, clientset *kubernetes.Clientset, restConfig *rest.Config, cfg *config.Config, want string, log *slog.Logger) error {
 	podName := cfg.Kubernetes.NATSStatefulSet + "-0"
-	if err := clientset.CoreV1().Pods(cfg.Kubernetes.Namespace).
-		Delete(ctx, podName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete nats pod %s: %w", podName, err)
-	}
-	log.Info("nats pod restart triggered", "pod", podName)
+	namespace := cfg.Kubernetes.Namespace
 
 	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		pod, err := clientset.CoreV1().Pods(cfg.Kubernetes.Namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err == nil && podReady(pod) {
-			return nil
+	for {
+		out, err := execInPod(ctx, clientset, restConfig, namespace, podName, natsContainer,
+			[]string{"cat", "/etc/nats/nats-server.conf"})
+		if err == nil && out == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("nats-server.conf on pod %s did not sync within 2m: %w", podName, err)
+			}
+			return fmt.Errorf("nats-server.conf on pod %s did not sync within 2m", podName)
 		}
 		select {
 		case <-ctx.Done():
@@ -163,19 +187,47 @@ func restartNATS(ctx context.Context, clientset *kubernetes.Clientset, cfg *conf
 		case <-time.After(2 * time.Second):
 		}
 	}
-	return fmt.Errorf("nats pod %s did not become ready within 2m", podName)
+
+	// PID 1 in this container is nats-server itself (its own startup log
+	// confirms this: "[1] ... Starting nats-server") — targeting it
+	// explicitly rather than relying on --signal reload's own process
+	// discovery, which needs pgrep and may not find it in a minimal image.
+	if _, err := execInPod(ctx, clientset, restConfig, namespace, podName, natsContainer,
+		[]string{"nats-server", "--signal", "reload=1"}); err != nil {
+		return fmt.Errorf("signal nats reload: %w", err)
+	}
+	log.Info("nats config reload signaled", "pod", podName)
+	return nil
 }
 
-func podReady(pod *corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
+// execInPod runs command inside container of pod and returns its stdout.
+func execInPod(ctx context.Context, clientset *kubernetes.Clientset, restConfig *rest.Config,
+	namespace, pod, container string, command []string) (string, error) {
+	req := clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: container,
+			Command:   command,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+	if err != nil {
+		return "", fmt.Errorf("build executor: %w", err)
 	}
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady {
-			return c.Status == corev1.ConditionTrue
-		}
+
+	var stdout, stderr bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		return "", fmt.Errorf("exec %v: %w (stderr: %s)", command, err, stderr.String())
 	}
-	return false
+	return stdout.String(), nil
 }
 
 // waitForAccount polls the monitoring port until the new account is visible,

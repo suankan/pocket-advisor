@@ -12,6 +12,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/dashboard"
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/pipeline"
+	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/uploader"
 	"github.com/suankan/pocket-advisor/internal/workspace"
@@ -31,6 +32,18 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	needs := app.Needs{RustFS: true, Postgres: true, NATS: true, Metrics: true}
 	if o.IngestAll {
 		needs.Uploader = true
+
+		// --ingest-all provisions the workspace if it doesn't exist yet,
+		// idempotently — CreateWorkspace is safe to call against an
+		// already-provisioned workspace (README.md §2). Must happen before
+		// app.New, which connects using credentials this call is what
+		// creates on a first run.
+		if err := cfg.RequireProvisioning(); err != nil {
+			return err
+		}
+		if err := provision.CreateWorkspace(ctx, cfg, o.WorkspaceID, logs.Logger(telemetry.RoleApp)); err != nil {
+			return fmt.Errorf("ensure workspace provisioned: %w", err)
+		}
 	}
 
 	a, err := app.New(ctx, cfg, logs, needs, o.WorkspaceID)

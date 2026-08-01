@@ -47,12 +47,14 @@ func TestChunkIDStableAcrossReEmbed(t *testing.T) {
 func TestObjectKeysAndRoundTrip(t *testing.T) {
 	sha := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-	raw := RawObjectKey("ws1", sha)
-	if raw != "workspaces/ws1/raw/01/"+sha {
+	// No workspace segment: each workspace has its own bucket
+	// (workspace-isolation.md), which already provides that scoping.
+	raw := RawObjectKey(sha)
+	if raw != "raw/01/"+sha {
 		t.Fatalf("unexpected raw key: %s", raw)
 	}
-	ext := ExtractedObjectKey("ws1", sha)
-	if ext != "workspaces/ws1/extracted/01/"+sha {
+	ext := ExtractedObjectKey(sha)
+	if ext != "extracted/01/"+sha {
 		t.Fatalf("unexpected extracted key: %s", ext)
 	}
 	// raw/ and extracted/ have different write authorities, so they must never
@@ -69,12 +71,12 @@ func TestObjectKeysAndRoundTrip(t *testing.T) {
 		t.Errorf("round trip lost the hash: %s", got)
 	}
 
-	workspace, parsedSHA, err := ParseRawObjectKey(raw)
+	parsedSHA, err := ParseRawObjectKey(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workspace != "ws1" || parsedSHA != sha {
-		t.Fatalf("unexpected parsed raw key: workspace=%q sha=%q", workspace, parsedSHA)
+	if parsedSHA != sha {
+		t.Fatalf("unexpected parsed raw key: sha=%q", parsedSHA)
 	}
 }
 
@@ -91,15 +93,15 @@ func TestSHA256FromKeyRejectsNonHex(t *testing.T) {
 func TestParseRawObjectKeyRejectsNonCanonicalKeys(t *testing.T) {
 	sha := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tests := map[string]string{
-		"extracted child": ExtractedObjectKey("ws", sha),
-		"empty workspace": "workspaces//raw/01/" + sha,
-		"wrong shard":     "workspaces/ws/raw/ff/" + sha,
-		"uppercase hash":  "workspaces/ws/raw/01/" + "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
-		"extra segment":   "workspaces/ws/raw/extra/01/" + sha,
+		"extracted child": ExtractedObjectKey(sha),
+		"wrong prefix":    "notraw/01/" + sha,
+		"wrong shard":     "raw/ff/" + sha,
+		"uppercase hash":  "raw/01/" + "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+		"extra segment":   "raw/extra/01/" + sha,
 	}
 	for name, key := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := ParseRawObjectKey(key); err == nil {
+			if _, err := ParseRawObjectKey(key); err == nil {
 				t.Fatalf("expected key to be rejected: %q", key)
 			}
 		})

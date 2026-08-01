@@ -201,7 +201,7 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, c workspa
 		return 0, "", err
 	}
 
-	key := domain.RawObjectKey(opts.WorkspaceID, sum)
+	key := domain.RawObjectKey(sum)
 	rel, err := filepath.Rel(c.AbsPath, path)
 	if err != nil {
 		rel = filepath.Base(path)

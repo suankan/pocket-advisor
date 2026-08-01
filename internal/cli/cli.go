@@ -31,12 +31,14 @@ type Options struct {
 	IngestAll       bool
 	Scan            bool
 	Reconcile       bool
+	Listen          bool
 	DeleteData      bool
 	Forget          string
 	Bootstrap       bool
 	CreateWorkspace bool
 	DeleteWorkspace bool
 
+	LiveNotify  bool
 	DryRun      bool
 	Yes         bool
 	OCRLangs    string
@@ -55,6 +57,12 @@ Modes (exactly one):
   --ingest-all        upload the workspace, enqueue what is new, process to completion
   --scan              enqueue Tier 1 objects with no Tier 2 row, then process
   --reconcile         re-publish documents stuck PENDING, then process
+  --listen            run the pipeline indefinitely, processing RustFS's live
+                      notify events as they arrive — no upload, no scan, does
+                      not exit on idle. Requires RustFS's NATS notify target
+                      to actually be deployed for this workspace (§5.2); as
+                      of this writing that is only "test". Implies
+                      --live-notify.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
   --bootstrap-schema  probe the embedding endpoint and (re-)apply this
@@ -65,6 +73,11 @@ Modes (exactly one):
   --delete-workspace  tear down the same three, in reverse order
 
 Common:
+  --live-notify             valid with --ingest-all/--scan/--reconcile: Scan
+                            touches unprocessed objects instead of processing
+                            them directly, relying on RustFS's live notify
+                            path (also started in this same run) to pick the
+                            resulting event up. Implied by --listen.
   --workspace-id <id>       workspace from the registry (required by most modes)
   --workspace-config <path> registry path (default workspaces/workspace-config.yaml)
   --config <path>           infrastructure config (default config.yaml)
@@ -97,6 +110,8 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "upload, enqueue and process to completion")
 	fs.BoolVar(&o.Scan, "scan", false, "enqueue un-stubbed Tier 1 objects, then process")
 	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
+	fs.BoolVar(&o.Listen, "listen", false, "run the pipeline indefinitely on RustFS's live notify events")
+	fs.BoolVar(&o.LiveNotify, "live-notify", false, "touch instead of processing directly in --scan; implied by --listen")
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.BoolVar(&o.Bootstrap, "bootstrap-schema", false, "probe the embedding endpoint and apply the DDL")
@@ -117,6 +132,9 @@ func Parse(args []string) (*Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	if o.Listen {
+		o.LiveNotify = true
+	}
 	return o, o.validate()
 }
 
@@ -129,6 +147,7 @@ func (o *Options) modes() []string {
 		{o.IngestAll, "--ingest-all"},
 		{o.Scan, "--scan"},
 		{o.Reconcile, "--reconcile"},
+		{o.Listen, "--listen"},
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
 		{o.Bootstrap, "--bootstrap-schema"},
@@ -146,7 +165,7 @@ func (o *Options) validate() error {
 	modes := o.modes()
 	switch {
 	case len(modes) == 0:
-		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, " +
+		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
 			"--delete-data, --forget, --bootstrap-schema, --create-workspace, --delete-workspace " +
 			"(--help for details)")
 	case len(modes) > 1:
@@ -171,7 +190,7 @@ func (o *Options) validate() error {
 // drain it. In a monolith an enqueueing mode that did not run the pools would
 // publish into a void: nothing else is listening.
 func (o *Options) NeedsPipeline() bool {
-	return o.IngestAll || o.Scan || o.Reconcile
+	return o.IngestAll || o.Scan || o.Reconcile || o.Listen
 }
 
 // Mode is the selected mode's name, for the dashboard header.
@@ -210,6 +229,8 @@ func Run(o *Options) error {
 		return runCreateWorkspace(o, cfg, logs)
 	case o.DeleteWorkspace:
 		return runDeleteWorkspace(o, cfg, logs)
+	case o.Listen:
+		return runListen(o, cfg, logs)
 	default:
 		return runIngest(o, cfg, logs)
 	}

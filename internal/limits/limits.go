@@ -25,6 +25,11 @@ func EmailLanes() int  { return 2 * CPUs }
 func EmbedLanes() int  { return 2 * CPUs }
 func OfficeLanes() int { return CPUs }
 
+// RustFSEventsLanes matches EmailLanes/EmbedLanes: the work per event is a
+// JSON unmarshal plus an Ingest call, which is itself object-store and
+// database I/O, not CPU-bound.
+func RustFSEventsLanes() int { return 2 * CPUs }
+
 // DocumentLanes stays at core count rather than double it, because every lane
 // holding an open PDF also holds a PDFium WebAssembly instance for the duration
 // — an allocation heavy enough that oversubscribing lanes costs memory without

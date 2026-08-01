@@ -23,8 +23,24 @@ const (
 	SubjectEmbed  = "ingest.text.embed"
 	SubjectDLQ    = "ingest.dlq"
 
+	// SubjectRustFSEvents carries RustFS's own S3-shaped ObjectCreated/
+	// ObjectUpdated event JSON, published directly by RustFS's native NATS
+	// notify target — not a protobuf command, so it lives on its own stream
+	// rather than StreamName (ingestion-design.md §5.2).
+	SubjectRustFSEvents = "rustfs.events.raw"
+
 	StreamName = "INGESTION"
 	StreamDLQ  = "INGESTION_DLQ"
+	// StreamRustFSEvents holds RustFS's raw notify events. Separate from
+	// StreamName because it needs a much wider duplicate window: RustFS
+	// refuses to publish into a stream whose dedup window doesn't cover its
+	// own retry lifetime (~274s observed live), which StreamName's default
+	// does not need and should not carry.
+	StreamRustFSEvents = "RUSTFS_EVENTS"
+	// RustFSEventsDedupWindow must exceed RustFS's retry lifetime — live-
+	// verified against beta.12, which refused to publish into a stream with
+	// the 2-minute default. 10m leaves headroom.
+	RustFSEventsDedupWindow = 10 * time.Minute
 
 	// MaxDeliver bounds redelivery; the third attempt routes to the DLQ.
 	MaxDeliver = 3
@@ -102,6 +118,22 @@ func (b *Bus) EnsureStreams(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create stream %s: %w", StreamDLQ, err)
 	}
+
+	// RustFS's live event feed (§5.2) — WorkQueue like StreamName, for the
+	// same reason (a durable pull consumer drains it), but its own stream so
+	// its wider dedup window doesn't apply to the typed-command traffic.
+	_, err = b.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:       StreamRustFSEvents,
+		Subjects:   []string{SubjectRustFSEvents},
+		Retention:  jetstream.WorkQueuePolicy,
+		Storage:    jetstream.FileStorage,
+		Discard:    jetstream.DiscardNew,
+		MaxMsgs:    1_000_000,
+		Duplicates: RustFSEventsDedupWindow,
+	})
+	if err != nil {
+		return fmt.Errorf("create stream %s: %w", StreamRustFSEvents, err)
+	}
 	return nil
 }
 
@@ -163,9 +195,9 @@ func (b *Bus) ToDLQ(ctx context.Context, origSubject, worker, reason, traceparen
 	return nil
 }
 
-// PullConsumer creates a durable pull consumer for one subject.
-func (b *Bus) PullConsumer(ctx context.Context, durable, subject string) (jetstream.Consumer, error) {
-	c, err := b.js.CreateOrUpdateConsumer(ctx, StreamName, jetstream.ConsumerConfig{
+// PullConsumer creates a durable pull consumer for one subject on stream.
+func (b *Bus) PullConsumer(ctx context.Context, stream, durable, subject string) (jetstream.Consumer, error) {
+	c, err := b.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
 		Durable:       durable,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,

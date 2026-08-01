@@ -19,6 +19,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
+	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/engine/ocr"
 	"github.com/suankan/pocket-advisor/internal/engine/pdf"
 	"github.com/suankan/pocket-advisor/internal/limits"
@@ -29,6 +30,7 @@ import (
 // role binds one subject to its pool.
 type role struct {
 	name     string
+	stream   string
 	subject  string
 	durable  string
 	lanes    int
@@ -52,6 +54,16 @@ type Pipeline struct {
 // Options carries what the pipeline cannot derive for itself.
 type Options struct {
 	OCRLangs string
+	// RustFSEvents enables the live event role (§5.2): RustFS's native NATS
+	// notify target must actually be deployed and consumed for this to do
+	// anything, currently true only for the "test" workspace. False leaves
+	// the pipeline exactly as it was before this existed.
+	RustFSEvents bool
+	// WorkspaceID is required when RustFSEvents is true — the live-event
+	// role has no other way to know which workspace an event belongs to,
+	// since object keys carry no workspace segment (each workspace has its
+	// own bucket, which already provides that scoping).
+	WorkspaceID string
 }
 
 // New builds every pool and its consumer.
@@ -104,8 +116,23 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 			lanes: limits.EmbedLanes(), handler: embed.Handle},
 	}
 
+	if opts.RustFSEvents {
+		notify := &worker.RustFSNotifyWorker{
+			Discovery:   &discovery.Service{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleDiscover)},
+			WorkspaceID: opts.WorkspaceID,
+			Log:         a.Logger(telemetry.RoleDiscover),
+		}
+		specs = append(specs, &role{
+			name: telemetry.RoleDiscover, stream: bus.StreamRustFSEvents, subject: bus.SubjectRustFSEvents,
+			durable: "rustfs-notify", lanes: limits.RustFSEventsLanes(), handler: notify.Handle,
+		})
+	}
+
 	for _, r := range specs {
-		c, err := a.Bus.PullConsumer(ctx, r.durable, r.subject)
+		if r.stream == "" {
+			r.stream = bus.StreamName
+		}
+		c, err := a.Bus.PullConsumer(ctx, r.stream, r.durable, r.subject)
 		if err != nil {
 			return nil, fmt.Errorf("consumer %s: %w", r.durable, err)
 		}

@@ -759,7 +759,7 @@ With Tier 1 authoritative this is something the filesystem version could never
 be: an **exact reconciliation**. The invariant is "every object under `raw/`
 has a Tier 2 row", and both sides are enumerable from one store.
 
-##### Why there are no bucket notifications
+##### Bucket notifications: history and the 2026-07-31 live path
 
 Earlier revisions drove ingestion from RustFS `s3:ObjectCreated:*` events
 delivered to a long-running discovery Deployment, with the scan as a backstop.
@@ -767,32 +767,77 @@ Once the pipeline moved to a host process invoked on demand, that arrangement
 had no consumer: between runs nothing is listening, and during a run the
 uploader and discovery are in the same process. A webhook would have been a
 network round trip from RustFS back to the machine that had just written the
-object.
-
-Removing it deleted the notification target configuration, the queue
+object. Removing it deleted the notification target configuration, the queue
 directory, the HTTP listener, the reverse-networking dependency on the host,
-and the entire class of delivery bugs recorded in §12.7 — at the cost of
-nothing, because the scan was always the authority and the notification was
-only ever an optimisation for latency the batch workflow does not need.
+and the entire class of delivery bugs recorded in §12 deviation 7 — at the
+cost of nothing, because the scan was always the authority and the
+notification was only ever an optimisation for latency the batch workflow did
+not need at the time.
 
-It also produced the resume semantics of §2.6 for free. A run that is
-interrupted leaves objects in `raw/` with no Tier 2 row, which is precisely
-the difference the next scan enqueues. There is no separate resume state to
-maintain, because "what still needs doing" is derivable from the two stores.
+It also produced the resume semantics of §2.6 for free, and still does: a run
+that is interrupted leaves objects in `raw/` with no Tier 2 row, which is
+precisely the difference the next scan enqueues. There is no separate resume
+state to maintain, because "what still needs doing" is derivable from the two
+stores. **The scan remains this system's reconciliation authority — none of
+what follows changes that.**
 
-The scan runs in-process, ahead of the pools it feeds. It is bounded by the
-same backpressure check as before: listing a bucket enqueues far faster than
-OCR drains, so it pauses above a high-water mark of pending messages and
-resumes below a low one.
+What changed: RustFS's own notify subsystem gained a native NATS JetStream
+target (not available when notifications were removed), and the upstream
+regression that made bucket notifications unreliable on this project's
+first attempt (§12 deviation 7) is fixed as of `1.0.0-beta.12` for the
+disabled-notify case. That reopened the question the TODO here used to ask —
+can an object be picked up the moment it lands, without waiting for the next
+scan — and it was tested live before being built, not assumed:
 
-TODO: Assess a possibility to still use the RustFS ObjectCreated/ObjectUpdated
-events, but somehow route them directly into the queue without a need to implement
-webhooks, HTTP listener and other overhead. The goal is: As soon as the first object
-lands into a RustFS bucket - it is picked up for processing without waiting for the
-Scanner to identify it as a candidate for further ingestion and processing.
-This could effectively invalidate the use case of the Scanner, but should not
-invalidate the need of the Scanner for the use case when a User only wants to
-scan/reconsile his RustFS storage and e.g. to reingest the Bucket content.
+- **RustFS→NATS delivery works**, live-verified against `beta.12` in a
+  scratch RustFS+NATS pair: a real upload produced a correct
+  `s3:ObjectCreated:Put` event with a `Nats-Msg-Id` dedup header on a real
+  JetStream stream. Three deployment-config fixes were required to get there,
+  none of them code: `RUSTFS_NOTIFY_ENABLE` is a separate top-level gate from
+  the per-target env vars; the default queue dir (`/opt/rustfs/events`) is
+  unwritable by RustFS's non-root user (the identical bug class as the old
+  webhook target's queue-dir bug); and the target's JetStream stream needs a
+  duplicate window wider than RustFS's own retry lifetime (~274s observed),
+  or RustFS refuses to publish into it at all.
+- **The event payload is the same `Records[].s3.object.*` shape** used by
+  every notify target, including the exact form-URL-encoding of the key
+  that the pre-4.0.0 webhook handler had to decode — confirmed live with a
+  nested `workspaces/<id>/raw/...` key, not assumed from the old code. That
+  handler's translation logic (JSON-decode → `url.QueryUnescape` the key →
+  validate via `domain.ParseRawObjectKey`, rejecting `extracted/` children →
+  call `Ingest`) is reused unchanged in shape, just over NATS instead of
+  HTTP: `internal/worker.RustFSNotifyWorker` (in `internal/worker` rather
+  than `internal/discovery`, to avoid an import cycle — `internal/worker`
+  already imports `internal/discovery` for `Classify`).
+- **A touch mechanism exists**, live-verified: a same-source/dest
+  server-side copy (S3 `CopyObject` with `x-amz-metadata-directive: REPLACE`,
+  zero bytes transferred) reliably fires a fresh `s3:ObjectCreated:Copy` —
+  same eTag, no re-upload. This is what lets the scan stop being the thing
+  that does the work: `Vault.Touch` issues this copy, and when
+  `discovery.Service.LiveNotify` is set, `Scan` calls it instead of `Ingest`
+  for every gap, leaving the actual fetch/verify/classify/stub/publish to the
+  live path — the same code a fresh upload goes through.
+
+**Scoped to one workspace, deliberately.** RustFS is a single shared server
+with one server-wide notify-target config, but NATS accounts are fully
+isolated subject spaces per workspace (workspace-isolation.md) — a single
+target can only authenticate as one workspace's NATS user at a time. As of
+this writing only the `test` workspace has this wired
+(`infra/charts/pocket-advisor/values.yaml`'s `rustfs.notify.nats`, disabled
+by default). Generalizing this — auto-provisioning a notify target per
+workspace on `--create-workspace`, or routing every workspace's events
+through one dedicated relay account with per-event workspace resolution — is
+explicit follow-up work, not solved here.
+
+**How to run it.** `pocket-advisor --listen --workspace-id test` starts the
+full pipeline (every existing role plus the new live-event one) and never
+exits on idle — only an interrupt ends it, the same two-stage
+stop-then-drain every other mode uses. It does no upload and no scan; catching
+up on anything missed while it wasn't running is still the scan's job,
+now via `--scan --live-notify`, which touches instead of ingesting directly.
+Both flags require the chart's notify target to actually be deployed and
+enabled for that workspace — otherwise touched objects go nowhere, since
+nothing is listening.
 
 #### Durable identity
 
@@ -1648,8 +1693,39 @@ deliberate choice with a reason, not drift.
    footgun — see bug 1 below); the beta.9 regression is distinct and was
    reported as a new issue with the full bisection.
 
-   **Do not bump `rustfs.image` past `beta.8` without re-running the
-   bisection.** `values.yaml` carries this constraint in a comment.
+   **Update 2026-07-31: bumped to `1.0.0-beta.12`.** Root-caused from RustFS's
+   own source (`init_event_notifier()` unconditionally refreshed notify
+   config from storage before checking whether notify was even enabled) —
+   fixed for the disabled-notify case in `775279b6f`, first in `beta.12`, not
+   `beta.9`–`beta.11`. Live-verified on `beta.12` before the pin moved: clean
+   boot, full object round trip, survived a restart, no notify-related error
+   with notify disabled. §5.2's "Bucket notifications" section has the full
+   account, including the live NATS notify test this pin bump was for. Any
+   further bump past `beta.12` should still re-verify — a lot of unrelated
+   code changed across this range and only the notify-boot path and plain
+   object operations were exercised here, not the full surface this project
+   touches.
+
+   **Bug found immediately after, on the first real deployment attempt:**
+   `templates/job-rustfs-setup.yaml`'s readiness gate, `mc admin info local`,
+   exits 1 on `beta.12` — `mc: <ERROR> Unable to get service info` — hanging
+   the setup Job forever, blocking every future install/upgrade, not just the
+   notify feature. `mc --debug` showed the HTTP call itself succeeding (200
+   OK, valid JSON, ~4ms); the failure is inside `mc`'s own client-side
+   `clusterStruct.String()` formatter choking on some field `beta.12`'s
+   `/minio/admin/v3/info` now returns differently than `beta.8` did.
+   Confirmed as a genuine regression, not a pre-existing gap this project
+   never hit: a fresh, empty, single-drive `beta.8` container passes `mc
+   admin info` cleanly; the identical command against an equally fresh
+   `beta.12` container fails identically to the cluster's. `mc admin info
+   local --json` marshals the same parsed response without going through the
+   broken formatter and exits 0 cleanly on `beta.12` — confirmed directly,
+   and is the fix: the readiness gate now uses `--json`. This is exactly the
+   caveat above about unexercised surface turning something up; the other
+   `mc admin` calls later in the same script (`policy create`, `user add`,
+   `policy attach`) are simple confirmation commands, not complex struct
+   rendering, and were left as-is rather than preemptively rewritten —
+   revisit only if one of them actually fails the same way.
 
    ### Three bugs found and fixed during migration
 
@@ -1763,3 +1839,44 @@ deliberate choice with a reason, not drift.
    Both are covered by regression tests, including one that puts an encoded
    alias list through a real HTTP round trip rather than asserting on the
    encoding in isolation.
+
+9. **Tier 1 keys dropped their workspace segment (2026-08-01).**
+   `workspaces/<id>/raw/...`/`workspaces/<id>/extracted/...` became plain
+   `raw/...`/`extracted/...` — pure redundancy since per-workspace buckets
+   (workspace-isolation.md), where the bucket boundary already provides that
+   scoping, confirmed live on the `test` workspace's own bucket. `domain
+   .RawObjectKey`/`ExtractedObjectKey` dropped their `workspaceID` parameter;
+   `ParseRawObjectKey` no longer returns one. `RustFSNotifyWorker` (§5.2)
+   gained an explicit `WorkspaceID` field instead — the architecturally
+   correct source now, since object keys never carried true workspace
+   identity even before this, just a redundant label; identity comes from
+   which bucket a Vault is connected to.
+
+   Verified before changing anything, not assumed: `Vault.URI`/`KeyFromURI`
+   never reconstruct a key from a formula, every key is stored explicitly in
+   `documents.rustfs_raw_uri` and read back verbatim — so existing objects
+   under the old shape keep working forever regardless of what new uploads
+   look like. No migration, no re-ingest, no wipe was needed for that.
+
+   **One real, one-time consequence, found live rather than by inspection:**
+   the *uploader's* own skip-if-present check is keyed off the same
+   function, so on the first `--ingest-all` after this change against a
+   workspace that already had content under the old shape, every
+   previously-uploaded file's `Exists` check misses (nothing exists yet at
+   its new-shape key) and gets re-uploaded — a real, duplicate object, not
+   just a log line. Confirmed harmless to correctness: `CreateStub`'s
+   existing idempotency guard means the *document* (`doc_id` is
+   content+workspace+collection derived, not key-derived) is still
+   recognized as already known, so no duplicate rows, chunks, or re-embeds
+   result — live-verified on `test` (96→97 `COMPLETED`, exactly the one
+   genuinely new file added for this test, not 80). But the 79 re-uploaded
+   duplicates are real bytes sitting in RustFS with no
+   `rustfs_raw_uri` pointing at them, orphaned by design (the row that
+   already existed keeps pointing at the original). Left in place on `test`
+   (user's call — harmless, cheap to ignore in a throwaway workspace); a
+   proper fix would rename old-shape objects to the new shape (server-side
+   copy, the same mechanism `Vault.Touch` already uses) and repoint
+   `rustfs_raw_uri`, not delete-and-reupload. This only affects workspaces
+   that already had content *before* this change shipped — every other
+   workspace's first ingest goes straight to the new shape with nothing to
+   duplicate.

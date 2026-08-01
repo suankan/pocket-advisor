@@ -69,8 +69,18 @@ spec:
               # misread the error as an idempotent no-op, so the Job
               # "succeeded" having created nothing. Gate on the admin API
               # itself, not just bucket listing.
+              #
+              # --json, not the human-readable form: RustFS 1.0.0-beta.12
+              # returns a response shape (confirmed via mc --debug: a 200 OK
+              # with valid JSON, ~4ms) that this pinned mc's own
+              # clusterStruct.String() formatter cannot render — "Unable to
+              # get service info", exit 1, even though the server side is
+              # completely healthy. Confirmed as a beta.8→beta.12 regression
+              # by direct comparison, not present on beta.8. --json marshals
+              # the same parsed response without going through that broken
+              # formatter and exits 0 cleanly on both versions.
               echo "waiting for rustfs admin API"
-              until mc admin info local >/dev/null 2>&1; do sleep 2; done
+              until mc admin info local --json >/dev/null 2>&1; do sleep 2; done
 
               # Every step is idempotent: this hook re-runs on every
               # `helm upgrade`, so "already exists" must be success, not

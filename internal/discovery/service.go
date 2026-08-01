@@ -30,6 +30,14 @@ type Service struct {
 	Docs  *postgres.DocumentRepo
 	Bus   *bus.Bus
 	Log   *slog.Logger
+
+	// LiveNotify is false unless RustFS's native NATS notify target is
+	// actually deployed and consumed (§5.2 — currently only wired for the
+	// "test" workspace). When false, Scan keeps its original behavior:
+	// process every gap directly, exactly as before this existed, so every
+	// other workspace is unaffected by this change. When true, Scan touches
+	// each gap instead and leaves the real work to the live event path.
+	LiveNotify bool
 }
 
 // Ingest processes one Tier 1 object into a Tier 2 stub plus a dispatched
@@ -189,8 +197,7 @@ func imageDimensions(data []byte) (int, int) {
 // row" are enumerable from one store. It is the backstop that makes a dropped
 // bucket notification a delay rather than a loss (§5.2).
 func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWater uint64) (int, error) {
-	prefix := fmt.Sprintf("workspaces/%s/raw/", workspaceID)
-	objects, err := s.Vault.List(ctx, prefix)
+	objects, err := s.Vault.List(ctx, "raw/")
 	if err != nil {
 		return 0, err
 	}
@@ -205,7 +212,7 @@ func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWa
 		// documents now that bucket notifications are gone, so this is the only
 		// place the shape can be checked — and a key that is not content
 		// addressed cannot have its identity verified against its bytes below.
-		if _, _, err := domain.ParseRawObjectKey(o.Key); err != nil {
+		if _, err := domain.ParseRawObjectKey(o.Key); err != nil {
 			telemetry.DiscoveryFiles.WithLabelValues("scan", "ignored").Inc()
 			s.Log.Warn("ignoring non-canonical object under raw/", "key", o.Key, "error", err)
 			continue
@@ -222,7 +229,16 @@ func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWa
 		if err := s.waitForCapacity(ctx, highWater, lowWater); err != nil {
 			return n, err
 		}
-		if err := s.Ingest(ctx, workspaceID, key, "scan"); err != nil {
+		if s.LiveNotify {
+			// Trigger, not doer (§5.2): make RustFS re-emit a real event for
+			// this object and let the live path do the fetch/verify/classify/
+			// stub/publish work through the exact same code a fresh upload
+			// goes through, rather than duplicating that work here.
+			if err := s.Vault.Touch(ctx, key); err != nil {
+				s.Log.Error("touch failed", "key", key, "error", err)
+				continue
+			}
+		} else if err := s.Ingest(ctx, workspaceID, key, "scan"); err != nil {
 			s.Log.Error("ingest failed", "key", key, "error", err)
 			continue
 		}

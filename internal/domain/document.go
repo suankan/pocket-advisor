@@ -80,46 +80,38 @@ func SHA256Hex(b []byte) string {
 
 // RawObjectKey is the Tier 1 key for an uploaded document (§5.1). Content
 // addressed: stable before threading is known, deduplicating identical bytes
-// for free, and never renamed.
-func RawObjectKey(workspaceID, sha256hex string) string {
-	return fmt.Sprintf("workspaces/%s/raw/%s/%s", workspaceID, sha256hex[:2], sha256hex)
+// for free, and never renamed. No workspace segment: each workspace has its
+// own bucket (workspace-isolation.md), which already provides that scoping.
+func RawObjectKey(sha256hex string) string {
+	return fmt.Sprintf("raw/%s/%s", sha256hex[:2], sha256hex)
 }
 
 // ParseRawObjectKey validates and decomposes the only Tier 1 key shape that
 // may mint a root document.
-func ParseRawObjectKey(key string) (workspaceID, sha256hex string, err error) {
+func ParseRawObjectKey(key string) (sha256hex string, err error) {
 	parts := strings.Split(key, "/")
-	if len(parts) != 5 || parts[0] != "workspaces" || parts[2] != "raw" {
-		return "", "", fmt.Errorf("not a raw object key: %q", key)
-	}
-	if parts[1] == "" {
-		return "", "", fmt.Errorf("raw object key has an empty workspace: %q", key)
+	if len(parts) != 3 || parts[0] != "raw" {
+		return "", fmt.Errorf("not a raw object key: %q", key)
 	}
 
-	hash := parts[4]
+	hash := parts[2]
 	if len(hash) != sha256.Size*2 || hash != strings.ToLower(hash) {
-		return "", "", fmt.Errorf("raw object key has a non-canonical sha256: %q", key)
+		return "", fmt.Errorf("raw object key has a non-canonical sha256: %q", key)
 	}
 	if _, err := hex.DecodeString(hash); err != nil {
-		return "", "", fmt.Errorf("raw object key has an invalid sha256: %q", key)
+		return "", fmt.Errorf("raw object key has an invalid sha256: %q", key)
 	}
-	if parts[3] != hash[:2] {
-		return "", "", fmt.Errorf("raw object key shard does not match its sha256: %q", key)
+	if parts[1] != hash[:2] {
+		return "", fmt.Errorf("raw object key shard does not match its sha256: %q", key)
 	}
-	return parts[1], hash, nil
+	return hash, nil
 }
 
 // ExtractedObjectKey is the Tier 1 key for a child unrolled out of a
 // container. A separate prefix from raw/ because the two have different write
 // authorities (§5.1).
-func ExtractedObjectKey(workspaceID, sha256hex string) string {
-	return fmt.Sprintf("workspaces/%s/extracted/%s/%s", workspaceID, sha256hex[:2], sha256hex)
-}
-
-// WorkspacePrefix is everything belonging to a workspace, the unit --wipe
-// operates on.
-func WorkspacePrefix(workspaceID string) string {
-	return fmt.Sprintf("workspaces/%s/", workspaceID)
+func ExtractedObjectKey(sha256hex string) string {
+	return fmt.Sprintf("extracted/%s/%s", sha256hex[:2], sha256hex)
 }
 
 // SHA256FromKey recovers the content hash from a Tier 1 object key. Discovery

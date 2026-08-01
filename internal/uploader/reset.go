@@ -44,12 +44,14 @@ func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 	}
 	r.log.Info("tier 2 cleared", "workspace_id", workspaceID, "documents_deleted", rows)
 
-	prefix := domain.WorkspacePrefix(workspaceID)
-	if _, err := r.vault.RemovePrefix(ctx, prefix); err != nil {
+	// Every workspace has its own bucket now (workspace-isolation.md), so
+	// "everything belonging to this workspace" is everything in it — an
+	// empty prefix, not a key prefix to filter by.
+	if _, err := r.vault.RemovePrefix(ctx, ""); err != nil {
 		return fmt.Errorf("tier 1 purge failed after tier 2 was cleared "+
 			"(re-run --wipe to converge): %w", err)
 	}
-	r.log.Info("tier 1 purged", "workspace_id", workspaceID, "prefix", prefix)
+	r.log.Info("tier 1 purged", "workspace_id", workspaceID)
 	return nil
 }
 
@@ -67,8 +69,8 @@ func (r *Resetter) Forget(ctx context.Context, workspaceID, sha string) error {
 	}
 
 	for _, key := range []string{
-		domain.RawObjectKey(workspaceID, sha),
-		domain.ExtractedObjectKey(workspaceID, sha),
+		domain.RawObjectKey(sha),
+		domain.ExtractedObjectKey(sha),
 	} {
 		exists, _, err := r.vault.Exists(ctx, key)
 		if err != nil {

@@ -119,7 +119,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		return nil
 	}
 	sum := domain.SHA256Hex(c.Data)
-	key := domain.ExtractedObjectKey(parent.WorkspaceId, sum)
+	key := domain.ExtractedObjectKey(sum)
 
 	exists, _, err := w.Vault.Exists(ctx, key)
 	if err != nil {

@@ -60,7 +60,8 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		"sessions", embedder.Concurrency())
 
 	stats := telemetry.NewStats()
-	pipe, err := pipeline.New(ctx, a, stats, embedder, pipeline.Options{OCRLangs: o.OCRLangs})
+	pipe, err := pipeline.New(ctx, a, stats, embedder,
+		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: o.LiveNotify, WorkspaceID: o.WorkspaceID})
 	if err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 func feed(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats) error {
 	svc := &discovery.Service{
 		Vault: a.Vault, Docs: a.Docs, Bus: a.Bus,
-		Log: a.Logger(telemetry.RoleDiscover),
+		Log: a.Logger(telemetry.RoleDiscover), LiveNotify: o.LiveNotify,
 	}
 
 	if o.IngestAll {

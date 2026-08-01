@@ -274,6 +274,30 @@ func (v *Vault) Put(ctx context.Context, key string, r io.Reader, size int64, co
 	return nil
 }
 
+// Touch re-triggers RustFS's own ObjectCreated notification for an object
+// that already exists, without re-uploading its bytes: a same-source/dest
+// server-side copy with metadata replacement, which RustFS serves as a true
+// zero-byte-transfer copy (live-verified: same eTag before and after, no
+// data re-read from the client side) and reports as a fresh
+// s3:ObjectCreated:Copy event — matching the s3:ObjectCreated:* wildcard the
+// bucket notification rule subscribes to (§5.2). This is what lets Scan
+// become a trigger rather than a doer once live notify delivery is enabled:
+// it touches the object and lets the live event path do the real work
+// through the same code a fresh upload goes through.
+func (v *Vault) Touch(ctx context.Context, key string) error {
+	if err := v.refuseRawWrite("touch", key); err != nil {
+		return err
+	}
+	_, err := v.c.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: v.bucket, Object: key, ReplaceMetadata: true},
+		minio.CopySrcOptions{Bucket: v.bucket, Object: key},
+	)
+	if err != nil {
+		return fmt.Errorf("touch %q: %w", key, err)
+	}
+	return nil
+}
+
 // AddAlias records an additional filename for content already stored. The
 // object is not rewritten — one content, one object; the alias is kept because
 // a second name is sometimes evidence in itself (§5.1).

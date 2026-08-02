@@ -28,9 +28,12 @@ resets (`ingestion-design.md` §8). The long-term direction, decided
      workspace lifecycle (`docs/workspace-isolation.md` §3), schema
      bootstrap, corpus load/reset operations currently under
      `internal/cli` (`ingestion-design.md` §8.1).
-   * **User API** — the retrieval surface, i.e. `docs/retrieval-design.md`
-     §7's `POST /v1/query` and whatever else the read path grows into. A
-     "Retrieval API" is the first concrete piece of this.
+   * **User API** — the retrieval surface, i.e. an HTTP route over
+     `docs/retrieval-design.md` §7's `internal/retrieval` package, and
+     whatever else the read path grows into. A "Retrieval API" is the first
+     concrete piece of this. Note that retrieval already follows §2's bridge
+     rule: its logic is specified as transport-agnostic Go, so this surface
+     is a thin adapter rather than a reimplementation.
 3. **A WebUI is a future client of the same API Server** — not a separate
    backend, not a reason to grow a second source of truth.
 4. **Standing rule for all new work from here on:** any new management or
@@ -82,7 +85,7 @@ of this document actionable right now.
 | Surface | Owns | Backed by |
 | --- | --- | --- |
 | Administrative API | Workspace lifecycle (create/delete), schema bootstrap, corpus load/scan/reconcile, dataset reset (delete-data/forget) | `internal/cli` modes today; `workspace-isolation.md` §3 for workspace lifecycle specifically |
-| User API | Retrieval (`POST /v1/query`) | `retrieval-design.md` §7, entirely unbuilt |
+| User API | Retrieval | `retrieval-design.md` §7 — logic specified as a transport-agnostic `internal/retrieval` package; the HTTP surface over it is this document's to define, and is unbuilt |
 
 The exact administrative/user boundary for the existing ingestion CLI
 modes (is `--ingest-all` an administrative operation, or its own
@@ -127,9 +130,11 @@ Not decided, and deliberately left open rather than guessed at:
    needs at least a stated position on this before it is built, even if
    the answer is "loopback-only, no auth, matching the single-user
    local-tool premise."
-4. **API versioning and stability.** Whether `/v1/...` (already implied by
-   `retrieval-design.md` §7.1) is a real contract from day one or informal
-   until a WebUI or external consumer exists.
+4. **API versioning and stability.** Whether `/v1/...` is a real contract
+   from day one or informal until a WebUI or external consumer exists. Note
+   that `retrieval-design.md` §7.1 no longer presumes a URL shape — it
+   specifies Go request/result types, leaving the route entirely to this
+   document.
 5. **WebUI shape.** Server-rendered vs. SPA, and whether it talks to the
    Administrative API at all or is retrieval-only — not discussed yet
    beyond "a future client of the same API Server" (§1).

@@ -395,7 +395,7 @@ flowchart TB
     DB_Writer -- "Bulk Transaction Write" --> Database
 
     %% --- RETRIEVAL ---
-    QueryAPI[["QueryService\n(see retrieval-design.md)"]]
+    QueryAPI[["internal/retrieval\n(see retrieval-design.md)"]]
     Database --> QueryAPI
 
 ```

@@ -102,11 +102,15 @@ query does — a stronger guarantee than row-level filtering or even
 Row-Level Security, both of which still depend on every query path
 applying them correctly.
 
-Every fusion query in `retrieval-design.md` §3.3 already scopes to exactly
-one `workspace_id` per request — dense and lexical legs are fused *within*
-a workspace, never across one — so per-workspace databases require no
-change to that query's shape, only which connection pool a request is
-routed to.
+This supersedes query-level scoping rather than complementing it. The
+fusion query in `retrieval-design.md` §3.3 no longer filters on
+`workspace_id` at all: in a per-workspace database that predicate matches
+every row, so it buys nothing and actively misleads — it would silently
+*hide* foreign data rather than reveal that it should not be there. The
+read path instead asserts once at startup that the connected database
+holds exactly one `workspace_id` and that it is the expected one, and
+refuses to serve otherwise (`retrieval-design.md` §3.4). What a request
+selects is a connection pool, not a filter.
 
 ### 2.2 RustFS
 

@@ -31,9 +31,6 @@ infra:
 
   nats:
     url: nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
-    # Serves /varz and /accountz, polled by --create-workspace to confirm a
-    # new NATS account is live after the server restarts (workspace-isolation.md §8).
-    monitor_port: 8222
 
   postgres:
     # The maintenance connection --create-workspace/--delete-workspace use to

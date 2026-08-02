@@ -3,13 +3,13 @@ package provision
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -116,6 +116,12 @@ func deleteNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 		return nil
 	}
 
+	// Before the account leaves the config — once it is gone there is no user
+	// left to authenticate as, and its streams become unreachable orphans.
+	if err := deleteJetStreamAssets(ctx, cfg, id, log); err != nil {
+		return err
+	}
+
 	conf, err = removeAccountBlock(conf, id)
 	if err != nil {
 		return fmt.Errorf("edit nats config: %w", err)
@@ -131,6 +137,66 @@ func deleteNATS(ctx context.Context, cfg *config.Config, id string, log *slog.Lo
 	}
 
 	log.Info("nats account and user removed", "workspace_id", id)
+	return nil
+}
+
+// deleteJetStreamAssets removes the workspace's streams through the JetStream
+// API, as that workspace's own user, while its account is still in the config.
+//
+// This has to happen *before* the account is removed, and it has to go through
+// the API. Removing the account alone orphans its JetStream assets — NATS does
+// not clean them up — and on the next --create-workspace it finds the stale
+// store, reports the old streams through /jsz as though they were healthy, and
+// never initialises JetStream for the account: every publish then fails with
+// "no response from stream" while the run reports a clean scan.
+//
+// Deleting the store directory instead does not work either, and fails in a
+// worse way: JetStream holds account state in memory as well as on disk, so
+// removing files under a running server desynchronises the two. The streams
+// keep appearing in /jsz with no backing files, and the next consumer creation
+// dies on `open .../obs/<consumer>/meta.inf.tmp: no such file or directory`.
+// Letting JetStream delete its own streams keeps both halves in step
+// (§12 deviation 12).
+func deleteJetStreamAssets(ctx context.Context, cfg *config.Config, id string, log *slog.Logger) error {
+	w, err := cfg.Workspace(id)
+	if err != nil {
+		return err
+	}
+	nc, err := nats.Connect(cfg.NATS.URL,
+		nats.UserInfo(id, w.NATSPassword),
+		nats.MaxReconnects(0),
+		nats.Timeout(5*time.Second),
+	)
+	if err != nil {
+		// The account may already be gone from a previous partial teardown.
+		// That is the state this function wants to reach, so it is not fatal.
+		log.Warn("nats connect for jetstream teardown failed; skipping",
+			"workspace_id", id, "error", err)
+		return nil
+	}
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("jetstream context: %w", err)
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var deleted int
+	names := js.StreamNames(listCtx)
+	for name := range names.Name() {
+		if err := js.DeleteStream(listCtx, name); err != nil {
+			return fmt.Errorf("delete stream %s: %w", name, err)
+		}
+		deleted++
+	}
+	if err := names.Err(); err != nil {
+		return fmt.Errorf("list streams: %w", err)
+	}
+
+	log.Info("nats jetstream streams deleted", "workspace_id", id, "streams", deleted)
 	return nil
 }
 
@@ -233,64 +299,66 @@ func execInPod(ctx context.Context, clientset *kubernetes.Clientset, restConfig 
 // waitForAccount polls the monitoring port until the new account is visible,
 // so --create-workspace does not report success before NATS actually has it
 // (workspace-isolation.md §8, step 5).
+// It proves the account is *usable*, not merely named. Polling /accountz for
+// the name — what this did originally — is not sufficient and is precisely
+// how a broken rebuild reported success: an account whose JetStream store
+// survived a previous --delete-workspace reappears in that list immediately,
+// while its JetStream never initialises. The name was present in 0.136s, a
+// genuinely new account took 11.2s, and every publish afterwards failed
+// (§12 deviation 12).
+//
+// Connecting as the workspace's own user and round-tripping the JetStream API
+// tests the thing that actually has to work, over the same path the pipeline
+// will use.
 func waitForAccount(ctx context.Context, cfg *config.Config, id string) error {
-	host := hostFromNATSURL(cfg.NATS.URL)
-	url := fmt.Sprintf("http://%s:%d/accountz", host, cfg.NATS.MonitorPort)
+	w, err := cfg.Workspace(id)
+	if err != nil {
+		return err
+	}
 
 	deadline := time.Now().Add(2 * time.Minute)
 	var lastErr error
-	for time.Now().Before(deadline) {
-		ok, err := accountPresent(ctx, url, id)
-		if err == nil && ok {
+	for {
+		lastErr = probeJetStream(ctx, cfg.NATS.URL, id, w.NATSPassword)
+		if lastErr == nil {
 			return nil
 		}
-		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("jetstream not usable for account %q after 2m: %w", id, lastErr)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
-	return fmt.Errorf("account %q not visible at %s after 2m (last error: %v)", id, url, lastErr)
 }
 
-func accountPresent(ctx context.Context, url, id string) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// probeJetStream connects as the workspace's user and asks JetStream for its
+// account info — a real $JS.API round trip. A zombie account accepts the
+// connection and then never answers, which is exactly what this catches.
+func probeJetStream(ctx context.Context, url, user, password string) error {
+	nc, err := nats.Connect(url,
+		nats.UserInfo(user, password),
+		nats.MaxReconnects(0),
+		nats.Timeout(5*time.Second),
+	)
 	if err != nil {
-		return false, err
+		return fmt.Errorf("connect as %q: %w", user, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
 	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("accountz returned %d", resp.StatusCode)
+		return fmt.Errorf("jetstream context: %w", err)
 	}
 
-	// Confirmed against a live server (workspace-isolation.md §10 item 2):
-	// /accountz's actual shape is {"accounts": [...]}, a plain string list —
-	// not "account_list", which was an unverified guess that never matched.
-	var doc struct {
-		Accounts []string `json:"accounts"`
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := js.AccountInfo(probeCtx); err != nil {
+		return fmt.Errorf("jetstream account info: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return false, err
-	}
-	for _, a := range doc.Accounts {
-		if a == id {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func hostFromNATSURL(u string) string {
-	s := strings.TrimPrefix(u, "nats://")
-	if i := strings.LastIndex(s, ":"); i > 0 {
-		s = s[:i]
-	}
-	return s
+	return nil
 }
 
 // hasAccountBlock reports whether id's account block is already present.

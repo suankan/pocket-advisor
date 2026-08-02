@@ -77,10 +77,6 @@ type Postgres struct {
 
 type NATS struct {
 	URL string
-	// MonitorPort serves NATS's HTTP monitoring endpoints (/varz, /accountz),
-	// used by --create-workspace to confirm a new account is live after the
-	// server restarts (workspace-isolation.md §8). Not the client port.
-	MonitorPort int
 }
 
 // Kubernetes holds what --create-workspace / --delete-workspace need to
@@ -149,8 +145,7 @@ type file struct {
 			RootSecretKey string `yaml:"root_secret_key"`
 		} `yaml:"rustfs"`
 		NATS struct {
-			URL         string `yaml:"url"`
-			MonitorPort int    `yaml:"monitor_port"`
+			URL string `yaml:"url"`
 		} `yaml:"nats"`
 		Postgres struct {
 			AdminDSN string `yaml:"admin_dsn"`
@@ -219,7 +214,7 @@ func defaults() *Config {
 			RootSecretKey: "rustfsadminpassword",
 		},
 		Postgres: Postgres{AdminDSN: defaultPostgresAdminDSN, MaxConns: 50},
-		NATS:     NATS{URL: defaultNATSURL, MonitorPort: 8222},
+		NATS:     NATS{URL: defaultNATSURL},
 		Kubernetes: Kubernetes{
 			Namespace:       "pocket-advisor",
 			NATSStatefulSet: "pocket-advisor-nats",
@@ -265,9 +260,6 @@ func applyFile(c *Config, path string) error {
 	setStr(&c.RustFS.RootSecretKey, in.RustFS.RootSecretKey)
 
 	setStr(&c.NATS.URL, in.NATS.URL)
-	if in.NATS.MonitorPort > 0 {
-		c.NATS.MonitorPort = in.NATS.MonitorPort
-	}
 
 	setStr(&c.Postgres.AdminDSN, in.Postgres.AdminDSN)
 	if in.Postgres.MaxConns > 0 {
@@ -312,7 +304,6 @@ func applyEnv(c *Config) {
 	c.RustFS.RootSecretKey = env("RUSTFS_ROOT_SECRET_KEY", c.RustFS.RootSecretKey)
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
-	c.NATS.MonitorPort = envInt("NATS_MONITOR_PORT", c.NATS.MonitorPort)
 
 	c.Postgres.AdminDSN = env("POSTGRES_ADMIN_DSN", c.Postgres.AdminDSN)
 	c.Postgres.MaxConns = int32(envInt("POSTGRES_MAX_CONNS", int(c.Postgres.MaxConns)))

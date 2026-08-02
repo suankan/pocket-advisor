@@ -2137,3 +2137,57 @@ deliberate choice with a reason, not drift.
     cycle. `make build` (which routes through mise for `CGO_ENABLED` and the
     tesseract paths, §8.3) must run before any `./bin/pocket-advisor`
     invocation that is meant to exercise new code.
+
+12. **`--delete-workspace` orphaned the workspace's NATS JetStream assets,
+    poisoning the next `--create-workspace` (found and fixed 2026-08-03).**
+    Deviation 10 replaced the NATS pod restart with a `SIGHUP` config reload,
+    verified for *adding* an account to a running server. Delete-then-recreate
+    — what every rebuild does — was not covered, and it failed.
+
+    `removeAccountBlock` deleted the account from the ConfigMap; nothing
+    deleted its JetStream assets. On the next create, the reload re-added the
+    account, NATS found the orphaned store and reported its streams through
+    `/jsz` — `INGESTION` with five consumers, apparently healthy — while never
+    initialising JetStream for the account. No error in the server log; simply
+    no initialisation line at all. Every publish then failed
+    `nats: no response from stream`, every consumer fetch failed
+    `nats: no responders available`, and the whole corpus sat `PENDING` while
+    the run reported a clean `scan complete`. `--reconcile` does not recover
+    it either — it republishes into the same dead streams and reports
+    `republished: 0`. Only a NATS restart cleared it.
+
+    **The first fix was wrong, in an instructive way.** Removing the store
+    directory (`rm -rf /data/jetstream/<id>`) under a running server made
+    things worse: JetStream holds account state in memory *and* on disk, so
+    deleting files desynchronises the two. The streams kept appearing in
+    `/jsz` with no backing files, and the next consumer creation died on
+    `open .../obs/email-processor/meta.inf.tmp: no such file or directory`.
+    Fighting a subsystem's own lifecycle management rarely ends well.
+
+    The fix is to let JetStream delete its own streams. `deleteJetStreamAssets`
+    connects as the workspace's own user and deletes every stream through the
+    API, **before** the account leaves the config — once it is gone there is no
+    user left to authenticate as and the streams become unreachable orphans.
+    Both halves of JetStream's state then stay in step.
+
+    `waitForAccount` was also rewritten. It polled `/accountz` for the account
+    *name*, which an orphaned account satisfies immediately — so provisioning
+    reported success on a dead account. It now connects as the workspace user
+    and round-trips `js.AccountInfo()`, testing the thing that actually has to
+    work over the same path the pipeline uses. Note that a fast return is not
+    itself suspicious once the probe is honest: the verification run below
+    completed the probe in 87ms against a genuinely healthy account. The
+    original 0.136s was a symptom of the orphaned store, not the defect.
+
+    `infra.nats.monitor_port` was removed as a side effect: nothing in Go read
+    it once the `/accountz` poll was gone, and the chart carries its own
+    `nats.monitorPort`. Dead config, deleted rather than left with a comment
+    describing something that no longer happens.
+
+    Verified live: `--delete-workspace` logged `nats jetstream streams deleted
+    streams=3`, then `--ingest-all` rebuilt the workspace **without the NATS
+    pod being restarted** (age 20m → 23m across the cycle) — 79 uploaded, 57
+    emails, 36 PDFs, 3 images, 96 embedded, **0 dead-lettered**, in 1m22s,
+    against the 4m30s of nothing the broken path produced. Corpus verified
+    afterwards: 96 `COMPLETED`, 348 chunks all carrying a context header, and
+    offsets resolving 348 of 348.

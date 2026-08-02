@@ -453,7 +453,9 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 | - processing_status (ENUM: PENDING, PROCESSING, COMPLETED, SKIPPED, FAILED)       |
 | - doc_type & mime_type (VARCHAR)                                                  |
 | - rustfs_raw_uri & raw_sha256 (TEXT/VARCHAR)                                      |
-| - normalized_text (TEXT)                                                          |
+| - normalized_text (TEXT)         -- body prose only; headers are columns, §5.3    |
+| - email_subject / email_from / email_to (TEXT), email_date (TIMESTAMPTZ, Indexed) |
+| - context_header (TEXT)          -- what each chunk carries into the index, §5.6  |
 | - metadata_headers (JSONB)       -- incl. skip/failure reason codes               |
 | - created_at / updated_at (TIMESTAMPTZ)                                           |
 +-----------------------------------------------------------------------------------+
@@ -468,7 +470,8 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 | - workspace_id (VARCHAR, Composite Index)                                         |
 | - chunk_index (INT)                                                               |
 | - start_char_offset & end_char_offset (INT)                                       |
-| - chunk_text (TEXT)                                                               |
+| - chunk_text (TEXT)              -- exactly normalized_text[start:end], §5.6      |
+| - context_header (TEXT)          -- prepended for embedding, never stored in text |
 | - embed_model (VARCHAR)          -- index namespace; see §4.4                     |
 | - embedding (halfvec(N), HNSW Cosine Index m=16, ef_construction=64)              |
 | - fulltext_search (TSVECTOR GENERATED, GIN Index for Hybrid Search)               |
@@ -486,8 +489,13 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 
 ```sql
 fulltext_search tsvector
-  GENERATED ALWAYS AS (to_tsvector('simple', chunk_text)) STORED
+  GENERATED ALWAYS AS (to_tsvector('simple', context_header || ' ' || chunk_text)) STORED
 ```
+
+The context header is indexed alongside the body so a subject line stays
+keyword-searchable even though it is no longer part of any chunk's text
+(§5.6). It is folded in *here* rather than into `chunk_text`, because
+`chunk_text` has to stay byte-identical to the character range it names.
 
 The corpus is bilingual (`ingestion.ocr.langs: eng+rus`). English stemming applied to Russian text produces wrong stems silently, and Postgres cannot pick a stemmer per row. `simple` does no stemming, matching the recall behaviour of v2's SQLite FTS5 index.
 
@@ -922,6 +930,34 @@ Discovery **starts the trace**. It creates the root span (`discovery.ingest_file
 
 **Recursion bound.** Nested containers are adversarially unbounded — a zip bomb or a mail loop can recurse until the host process OOMs. Unrolling stops at depth 8 and at a cumulative expansion ratio of 100×, whichever comes first; exceeding either sets the child `SKIPPED` with reason `RECURSION_LIMIT`.
 
+**Headers are columns, not body text.** `normalized_text` holds body prose
+only. `Subject`, `From`, `To` and `Date` are written to their own columns
+(§4.2) instead of being rendered into a block above the body, which is what
+earlier versions did so that a retrieved chunk showed who wrote what and when.
+
+That block turned out to be actively harmful. It is identical for every
+message in a thread — same subject, the same two participants swapping places
+— so it pulled a whole conversation into one embedding neighbourhood.
+Measured against this corpus (two real threads, 33 messages): dropping
+`From`/`To`/`Date` from the embedded text left same-thread similarity
+essentially unchanged (0.676 → 0.627) while *improving* thread-vs-thread
+separation (0.200 → 0.212) and improving match quality on a Russian-language
+question (0.688 → 0.745). Those three headers were contributing noise and
+nothing else. Dates written as `2026-01-07 08:12:30 +1100` in particular are
+close to meaningless to an embedding model, while being highly repetitive.
+
+The subject is the exception and is kept, re-attached per chunk rather than
+inline — see §5.6. Removing it too dropped same-thread similarity much
+further (0.627 → 0.389), but by destroying signal rather than by fixing
+anything: it also halved thread separation, and 75% of this corpus's emails
+are a single chunk whose only topical anchor is the subject. The shortest
+message in that thread is `Сегодня в 22.00` — 15 characters that mean nothing
+without knowing which conversation they belong to.
+
+"Who wrote what and when" is still answerable, from the row rather than from
+the prose — and now it is answerable by *query*, which it never was while the
+data lived only inside a text blob.
+
 ### 5.4 Document Extractor Service (`DocumentExtractorWorker`)
 
 **Renamed from `PdfExtractorWorker`,** and now consumes both `ingest.pdfs.raw` and `ingest.images.raw`.
@@ -1002,6 +1038,79 @@ Legacy binary Office formats are declined rather than attempted: there is no cre
 * Performs transactional multi-row writes across Tier 2 (updating status to `COMPLETED`) and Tier 3 (delete-then-insert by `doc_id`).
 
 **Chunk boundary preference.** v2 split at a paragraph break, then any newline, within the last 40% of the target length, rather than at a hard token count. A plain sliding window regresses that: it cuts mid-sentence and mid-table-row, and the resulting chunk embeds a truncated fragment. v3 keeps the v2 behaviour — prefer a paragraph break, then a newline, within the final 40% of the window; fall back to a hard cut only when neither exists.
+
+**Context headers: what is embedded is not what is stored.** Every chunk is
+embedded as `context_header + "\n\n" + chunk_text`, while `chunk_text` is
+persisted bare. The header is rendered by the worker that extracted the
+document — the email worker writes `Subject: <subject>` (§5.3) — so the
+indexer needs no knowledge of document types; it copies one column and
+concatenates.
+
+This exists because a chunk past the first has no idea what it belongs to.
+The old inline header block only ever landed in chunk 0, leaving every
+continuation chunk topicless. Measured across the 14 multi-chunk emails in
+this corpus, re-attaching the subject helped those tail chunks roughly 2.4×
+more than it helped chunk 0 (+0.055 versus +0.023 against a topical query).
+
+Two constraints make this a prepend-at-embed-time mechanism rather than
+something written into the text:
+
+* **Citations resolve by character range.** `chunk_text` must stay
+  byte-identical to `normalized_text[start_char_offset:end_char_offset]`.
+  Anything synthetic inside it makes the range point at text the document
+  does not contain.
+* **Keyword search still has to see it.** Since the subject is in neither
+  `normalized_text` nor `chunk_text`, the full-text index is generated from
+  both columns (§4.2) — otherwise an exact phrase from a subject line would
+  match nothing anywhere in the system.
+
+**Every document type carries one.** Emails use their subject; everything else
+uses its own filename, rendered by `domain.ContextHeaderFromFilename`
+(extension dropped, a leading `3. ` index dropped, underscores spaced). It is
+written once at stub time in `CreateStub`, so no document type can be missed,
+and the email worker overwrites it with the subject once the message is
+parsed — falling back to the filename if a message has no subject.
+
+**An attachment does not inherit its parent email's subject**, even though the
+lineage is right there and the intuition to use it is strong. The context
+header carries what a document is *about*; a covering email's subject is *how
+it arrived*. For an email those coincide, which is exactly why the subject
+works there; for an attachment they come apart — a solicitor's covering email
+is about the matter, while the PDF it carries is a drug test report.
+
+Measured over the 14 email-attached PDFs in this corpus (61 chunks, 47 of them
+continuation chunks with no anchor at all — proportionally worse than email):
+
+| context header | anchors tail chunks | blurs distinct documents together |
+| --- | --- | --- |
+| none | 0.4014 | 0.2871 |
+| parent email subject | 0.4116 (+0.010) | 0.3929 (+0.106) |
+| own filename | **0.4767 (+0.075)** | 0.3309 (+0.044) |
+
+The parent subject is the worst available trade: ten times as much blurring as
+findability. Those 14 attachments share only 8 distinct parent subjects, all
+variations of one case reference, so stamping it on each of them makes
+genuinely unrelated documents look alike — the thread-concentration failure
+mode, spread to a new document type. Filenames are fully distinct across all
+14 and describe what each document is.
+
+Nothing is lost by leaving provenance out of the embedding: `parent_doc_id`
+and `thread_id` are still recorded, so the covering email reaches the reader
+through the read path's lineage expansion, which is where provenance belongs.
+
+Sample caveat, recorded honestly: 14 documents and 15 probed tail chunks, and
+the figures are similarity deltas rather than a demonstrated ranking
+improvement — a document-level ranking test was too easy to discriminate
+(all three variants scored 5/5).
+
+**Known interaction, recorded so it is not rediscovered as a bug.** Putting
+the subject on *every* chunk means there is more subject text in the index
+than before, not less: same-thread chunk similarity rises (0.366 → 0.514).
+Thread-vs-thread separation improves at the same time (0.015 → 0.063), so
+this is sharper thread identity rather than blurrier retrieval — but it does
+mean result sets concentrate within a thread more readily, and the read path
+is expected to cap matches per `thread_id` rather than relying on
+per-document deduplication alone. That cap belongs to `retrieval-design.md`.
 
 ---
 
@@ -1943,3 +2052,88 @@ deliberate choice with a reason, not drift.
     `infra.kubernetes.*`), not just the workspace's own scoped ones. Not a
     real restriction in this project's actual single-operator usage, but a
     genuine widening of what the most commonly run command touches.
+
+11. **Email headers moved out of `normalized_text` into columns, and the
+    subject is re-attached per chunk at embed time (2026-08-03).** Previously
+    `EmailProcessorWorker.renderBody` rendered `Subject`/`From`/`To`/`Date`
+    into a block above the body, and that block became part of
+    `normalized_text`, part of chunk 0, and part of what was embedded. It is
+    now four columns plus a `context_header` column on `documents`, copied
+    onto every chunk and prepended only for the embedding call (§5.3, §5.6).
+
+    The measurements behind each half of that decision are recorded in §5.3
+    (why `From`/`To`/`Date` are dropped entirely) and §5.6 (why the subject
+    is kept but re-attached per chunk instead of left inline). Both were taken
+    against the live `test` workspace and its real corpus rather than reasoned
+    about, because the intuition here was wrong in both directions: removing
+    the whole header block looked obviously right and would have cost real
+    recall on short messages, while the header's contribution to one thread
+    dominating a result set turned out to be much smaller than assumed.
+
+    Three consequences worth naming:
+
+    * **`chunk_text` is now a strict invariant, not an incidental property.**
+      It must equal `normalized_text[start_char_offset:end_char_offset]`. The
+      context header is deliberately excluded from it and folded into
+      `fulltext_search` instead, so citations keep resolving while subject
+      lines stay keyword-searchable.
+
+      Stating that invariant is what exposed the fact that it had never held.
+      Verifying it byte-exactly against the rebuilt corpus, **255 of 348
+      chunks failed**: `embed.Split` trimmed each piece with
+      `strings.TrimSpace` but recorded the *pre-trim* `start`/`end`, so every
+      chunk's stored range ran 1–3 bytes wider than its text at each boundary
+      — and because `boundary()` prefers to split at newlines, nearly every
+      chunk landed on whitespace. `Split` also trimmed its whole input while
+      offsets were read against the untrimmed `normalized_text`, shifting one
+      document further still. Both are fixed: offsets are now computed
+      against the original string and adjusted for the per-piece trim, and
+      the rebuilt corpus verifies **348 of 348 chunks resolving byte-exactly**
+      against `normalized_text`, against 93 of 348 before the fix.
+
+      This predates the header change and was never introduced by it — it was
+      latent because the existing test asserted
+      `strings.Contains(text[c.Start:c.End], c.Text[:20])`, which a range a
+      few bytes too wide satisfies happily. `internal/engine/embed/offsets_test.go`
+      now asserts equality over ASCII, Cyrillic, mixed, newline-heavy and
+      leading/trailing-whitespace inputs.
+    * **This is a schema change with no migration path.** `ApplySchema`
+      returns early once `schema_metadata` exists, so `CREATE TABLE IF NOT
+      EXISTS` will not add the new columns to an existing workspace. An
+      existing workspace has to be dropped and rebuilt
+      (`--delete-workspace`, then `--ingest-all`, which now provisions on its
+      own — deviation 10). That is not extra cost imposed by the schema: the
+      change alters `normalized_text` itself, so every document needs
+      re-extracting and re-embedding regardless.
+    * **A bodyless message is no longer a blank row.** It still gets no
+      chunks, but its headers are persisted, so it stays answerable by
+      subject, sender and date instead of disappearing from Tier 2 as an
+      empty record. Zero of the 57 emails in the current corpus are affected;
+      the branch exists so the case is handled rather than latent.
+
+    Verified against a live rebuild of the `test` workspace (104 documents,
+    96 `COMPLETED`, 348 chunks, 8 `SKIPPED` for `IMAGE_NOT_VIABLE` /
+    `UNSUPPORTED_FORMAT` as before): all 57 emails carry `email_subject`,
+    `email_from`, `email_date` and `context_header`; no body begins with a
+    header block; every email chunk carries its subject as `context_header`.
+    The eight chunks whose text still contains a `Subject:` line are quoted or
+    forwarded correspondence inside the body — source text the sender actually
+    wrote, correctly preserved. Chunk offsets resolve byte-exactly, 348 of 348.
+
+    The filename context header for non-email documents (§5.6) was added
+    afterwards and verified on a further rebuild: **348 of 348 chunks carry a
+    context header** — 86 email (18 distinct subjects), 259 PDF (36 distinct,
+    one per document), 3 image — with offsets still resolving 348 of 348.
+
+    A populated column is not proof the embeddings used it, so that was
+    checked separately: re-embedding a PDF continuation chunk as
+    `context_header + "\n\n" + chunk_text` reproduces its stored vector at
+    cosine `1.0000`, against `0.904` for the bare text. The header reaches the
+    index, not just the row.
+
+    Build note: `bin/pocket-advisor` is not rebuilt by any of these commands.
+    The first attempt at this verification ran a two-day-old binary and
+    silently re-applied the *old* schema, costing a full destroy-and-reingest
+    cycle. `make build` (which routes through mise for `CGO_ENABLED` and the
+    tesseract paths, §8.3) must run before any `./bin/pocket-advisor`
+    invocation that is meant to exercise new code.

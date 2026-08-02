@@ -39,7 +39,19 @@ CREATE TABLE IF NOT EXISTS documents (
     rustfs_raw_uri    TEXT    NOT NULL DEFAULT '',
     raw_sha256        VARCHAR NOT NULL DEFAULT '',
     source_filename   TEXT    NOT NULL DEFAULT '',
+    -- Body prose only. RFC822 headers live in the columns below, not inline
+    -- here: they are metadata, they repeat identically across every message
+    -- in a thread, and keeping them out keeps this column exactly what a
+    -- person wrote (§5.3).
     normalized_text   TEXT,
+    email_subject     TEXT    NOT NULL DEFAULT '',
+    email_from        TEXT    NOT NULL DEFAULT '',
+    email_to          TEXT    NOT NULL DEFAULT '',
+    email_date        TIMESTAMPTZ,
+    -- Rendered by the worker that extracted the document, because only it
+    -- knows how to describe its own type. Copied onto every chunk at embed
+    -- time (§5.6).
+    context_header    TEXT    NOT NULL DEFAULT '',
     metadata_headers  JSONB   NOT NULL DEFAULT '{}'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -54,6 +66,9 @@ CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';
 -- Drives the bucket-scan anti-join (§5.2).
 CREATE INDEX IF NOT EXISTS documents_raw_uri_idx    ON documents(rustfs_raw_uri);
+-- Chronological ordering and date-range filters over messages (§5.3).
+CREATE INDEX IF NOT EXISTS documents_email_date_idx
+    ON documents(email_date DESC NULLS LAST);
 
 CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_id          UUID PRIMARY KEY,
@@ -62,13 +77,20 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_index       INT     NOT NULL,
     start_char_offset INT     NOT NULL,
     end_char_offset   INT     NOT NULL,
+    -- Exactly normalized_text[start_char_offset:end_char_offset]. The context
+    -- header is deliberately NOT folded in here: a citation resolves by
+    -- character range, so anything synthetic in this column would make that
+    -- range point at text the document does not contain (§5.6).
     chunk_text        TEXT    NOT NULL,
+    context_header    TEXT    NOT NULL DEFAULT '',
     embed_model       VARCHAR NOT NULL,
     embedding         halfvec(%[1]d),
     -- 'simple', not 'english': the corpus is bilingual and Postgres cannot
-    -- select a stemmer per row (§4.2).
+    -- select a stemmer per row (§4.2). The context header is indexed with the
+    -- body so a subject line stays keyword-searchable even though it is no
+    -- longer part of any chunk's text.
     fulltext_search   TSVECTOR GENERATED ALWAYS AS
-                          (to_tsvector('simple', chunk_text)) STORED
+                          (to_tsvector('simple', context_header || ' ' || chunk_text)) STORED
 );
 
 CREATE INDEX IF NOT EXISTS chunks_doc_idx       ON document_chunks(doc_id);

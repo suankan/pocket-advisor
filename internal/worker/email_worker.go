@@ -55,6 +55,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 	var children []email.Child
 	var bodyText, threadID string
+	var headers domain.EmailHeaders
 
 	if isArchive(meta.MimeType) {
 		children, err = email.UnrollArchive(data, meta.SourceFilename)
@@ -71,13 +72,14 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		}
 		children = parsed.Children
 		threadID = resolveThread(parsed)
-		bodyText = renderBody(parsed)
+		headers = headersOf(parsed)
+		bodyText = strings.TrimSpace(parsed.BodyText)
 	}
 
 	// Body text first: the embed command carries a reference, so the text has
 	// to be durable before the command goes out (§4.1).
-	if strings.TrimSpace(bodyText) != "" {
-		if err := w.Docs.SaveText(ctx, meta.DocId, bodyText, "email", threadID); err != nil {
+	if bodyText != "" {
+		if err := w.Docs.SaveEmailText(ctx, meta.DocId, bodyText, threadID, headers); err != nil {
 			return WithDoc(meta.DocId, err)
 		}
 		child := trace.Child(meta.Traceparent)
@@ -90,6 +92,15 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	} else {
 		// A container with no body of its own is complete once its children
 		// are dispatched — it is not an error and not an empty document.
+		//
+		// A bodyless *message* still has headers worth keeping: nothing gets
+		// indexed, but the row stays answerable by subject, sender and date
+		// rather than being a blank record.
+		if headers != (domain.EmailHeaders{}) {
+			if err := w.Docs.SaveEmailText(ctx, meta.DocId, "", threadID, headers); err != nil {
+				return WithDoc(meta.DocId, err)
+			}
+		}
 		if err := w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusCompleted, ""); err != nil {
 			return WithDoc(meta.DocId, err)
 		}
@@ -215,25 +226,18 @@ func resolveThread(p *email.Parsed) string {
 	return email.ThreadKey(p.Subject, p.From)
 }
 
-// renderBody keeps the headers that carry evidential weight inline with the
-// body, so a retrieved chunk shows who wrote what and when.
-func renderBody(p *email.Parsed) string {
-	var b strings.Builder
-	if p.Subject != "" {
-		fmt.Fprintf(&b, "Subject: %s\n", p.Subject)
+// headersOf lifts the headers that carry evidential weight out of the message.
+// They used to be rendered inline above the body so a retrieved chunk showed
+// who wrote what and when; they are now columns instead, and the subject alone
+// is re-attached per chunk at embed time (§5.3). Who wrote what and when is
+// still answerable — from the row rather than from the prose.
+func headersOf(p *email.Parsed) domain.EmailHeaders {
+	return domain.EmailHeaders{
+		Subject: p.Subject,
+		From:    p.From,
+		To:      p.To,
+		Date:    p.Date,
 	}
-	if p.From != "" {
-		fmt.Fprintf(&b, "From: %s\n", p.From)
-	}
-	if p.To != "" {
-		fmt.Fprintf(&b, "To: %s\n", p.To)
-	}
-	if !p.Date.IsZero() {
-		fmt.Fprintf(&b, "Date: %s\n", p.Date.Format("2006-01-02 15:04:05 -0700"))
-	}
-	b.WriteString("\n")
-	b.WriteString(p.BodyText)
-	return strings.TrimSpace(b.String())
 }
 
 func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, threadID, tp string) *ingestionv1.DocumentMetadata {

@@ -4,6 +4,7 @@ package embed
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -38,13 +39,19 @@ type Chunk struct {
 // resulting chunk embeds a truncated fragment. v2 split at a paragraph break,
 // then any newline, within the last 40% of the target length; v3 keeps that
 // behaviour and falls back to a hard cut only when neither exists (§5.6).
-func Split(text string) []Chunk {
-	text = strings.TrimSpace(text)
+func Split(full string) []Chunk {
+	text := strings.TrimSpace(full)
 	if text == "" {
 		return nil
 	}
+	// Offsets index `full` — the string as stored in normalized_text — not the
+	// trimmed working copy. A citation resolves by character range, so
+	// full[Start:End] must equal Text exactly; recording the pre-trim bounds
+	// instead makes every range a few bytes wider than the text it names.
+	base := len(full) - len(strings.TrimLeftFunc(full, unicode.IsSpace))
+
 	if utf8.RuneCountInString(text) <= TargetChars {
-		return []Chunk{{Index: 0, Start: 0, End: len(text), Text: text}}
+		return []Chunk{{Index: 0, Start: base, End: base + len(text), Text: text}}
 	}
 
 	var chunks []Chunk
@@ -57,9 +64,16 @@ func Split(text string) []Chunk {
 			end = boundary(text, start, end)
 		}
 
-		piece := strings.TrimSpace(text[start:end])
+		raw := text[start:end]
+		piece := strings.TrimSpace(raw)
 		if piece != "" {
-			chunks = append(chunks, Chunk{Index: idx, Start: start, End: end, Text: piece})
+			lead := len(raw) - len(strings.TrimLeftFunc(raw, unicode.IsSpace))
+			chunks = append(chunks, Chunk{
+				Index: idx,
+				Start: base + start + lead,
+				End:   base + start + lead + len(piece),
+				Text:  piece,
+			})
 			idx++
 		}
 

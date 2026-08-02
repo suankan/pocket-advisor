@@ -35,12 +35,16 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (bool
         INSERT INTO documents (
             doc_id, parent_doc_id, workspace_id, collection_id, thread_id,
             processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
-            source_filename, metadata_headers)
-        VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11)
+            source_filename, context_header, metadata_headers)
+        VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT (doc_id) DO NOTHING
         RETURNING doc_id::text`,
 		d.DocID, parent, d.WorkspaceID, d.Collection, d.ThreadID,
-		d.DocType, d.MimeType, d.RawURI, d.RawSHA256, d.SourceName, meta).Scan(&id)
+		d.DocType, d.MimeType, d.RawURI, d.RawSHA256, d.SourceName,
+		// Every document gets its filename as a context header at stub time;
+		// the email worker replaces it with the subject once the message is
+		// parsed (§5.6). One place, so no document type can be missed.
+		domain.ContextHeaderFromFilename(d.SourceName), meta).Scan(&id)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil // already known
@@ -95,16 +99,63 @@ func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threa
 	return nil
 }
 
-// LoadText reads normalized_text back for the embedding indexer.
-func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (string, string, error) {
-	var text, workspace *string
-	err := r.db.Pool.QueryRow(ctx,
-		`SELECT normalized_text, workspace_id FROM documents WHERE doc_id = $1`,
-		docID).Scan(&text, &workspace)
-	if err != nil {
-		return "", "", fmt.Errorf("load text %s: %w", docID, err)
+// SaveEmailText writes an email's body together with the RFC822 headers
+// promoted out of it. The headers become columns rather than staying inline in
+// normalized_text: they are metadata, they repeat identically across every
+// message in a thread, and the subject is re-attached per chunk at embed time
+// instead (§5.3).
+func (r *DocumentRepo) SaveEmailText(
+	ctx context.Context, docID, text, threadID string, h domain.EmailHeaders,
+) error {
+	var date any
+	if !h.Date.IsZero() {
+		date = h.Date
 	}
-	return deref(text), deref(workspace), nil
+	_, err := r.db.Pool.Exec(ctx, `
+        UPDATE documents
+        SET normalized_text = $2,
+            doc_type        = 'email',
+            thread_id       = COALESCE(NULLIF($3,''), thread_id),
+            email_subject   = $4,
+            email_from      = $5,
+            email_to        = $6,
+            email_date      = $7,
+            -- Falls back to the filename header set at stub time: a message
+            -- with no subject should keep some anchor rather than lose one.
+            context_header  = COALESCE(NULLIF($8,''), context_header),
+            updated_at      = now()
+        WHERE doc_id = $1`,
+		docID, text, threadID, h.Subject, h.From, h.To, date, h.ContextHeader())
+	if err != nil {
+		return fmt.Errorf("save email text %s: %w", docID, err)
+	}
+	return nil
+}
+
+// LoadedText is what the embedding indexer needs to chunk and index a
+// document: the text itself, the workspace that owns it, and the context
+// header every one of its chunks will carry.
+type LoadedText struct {
+	Text          string
+	Workspace     string
+	ContextHeader string
+}
+
+// LoadText reads normalized_text back for the embedding indexer.
+func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, error) {
+	var text, workspace, header *string
+	err := r.db.Pool.QueryRow(ctx,
+		`SELECT normalized_text, workspace_id, context_header
+         FROM documents WHERE doc_id = $1`,
+		docID).Scan(&text, &workspace, &header)
+	if err != nil {
+		return LoadedText{}, fmt.Errorf("load text %s: %w", docID, err)
+	}
+	return LoadedText{
+		Text:          deref(text),
+		Workspace:     deref(workspace),
+		ContextHeader: deref(header),
+	}, nil
 }
 
 // ClaimStalePending returns documents stuck PENDING past the threshold, for

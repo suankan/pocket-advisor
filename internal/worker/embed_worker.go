@@ -36,20 +36,21 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	}
 
 	// The command carries a reference, not the text (§4.1).
-	text, workspace, err := w.Docs.LoadText(ctx, meta.DocId)
+	loaded, err := w.Docs.LoadText(ctx, meta.DocId)
 	if err != nil {
 		return WithDoc(meta.DocId, err)
 	}
-	if strings.TrimSpace(text) == "" {
+	if strings.TrimSpace(loaded.Text) == "" {
 		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
+	workspace := loaded.Workspace
 	if workspace == "" {
 		workspace = meta.WorkspaceId
 	}
 
 	// Chunk first, then batch: the token budget must bound what leaves the
 	// process, and the chunker is what multiplies token count (§2.4).
-	pieces := embed.Split(text)
+	pieces := embed.Split(loaded.Text)
 	if len(pieces) == 0 {
 		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
@@ -58,10 +59,25 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	chunks := make([]domain.Chunk, 0, len(pieces))
 
 	for _, batch := range embed.Batches(pieces) {
+		// Build the chunks first so the embedding input is derived from the
+		// same value that gets stored — the header is prepended for the model
+		// and for reranking, never written into chunk_text (§5.6).
+		batchChunks := make([]domain.Chunk, len(batch))
 		inputs := make([]string, len(batch))
 		for i, c := range batch {
-			inputs[i] = c.Text
-			telemetry.EmbeddingTokens.Add(float64(len(c.Text) / embed.CharsPerToken))
+			batchChunks[i] = domain.Chunk{
+				ChunkID:       domain.NewChunkID(meta.DocId, model, c.Index),
+				DocID:         meta.DocId,
+				Workspace:     workspace,
+				Index:         c.Index,
+				StartChar:     c.Start,
+				EndChar:       c.End,
+				Text:          c.Text,
+				ContextHeader: loaded.ContextHeader,
+				EmbedModel:    model,
+			}
+			inputs[i] = batchChunks[i].EmbedInput()
+			telemetry.EmbeddingTokens.Add(float64(len(inputs[i]) / embed.CharsPerToken))
 		}
 
 		vectors, err := w.Embedder.Embed(ctx, inputs)
@@ -71,18 +87,9 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 			return WithDoc(meta.DocId, err)
 		}
 
-		for i, c := range batch {
-			chunks = append(chunks, domain.Chunk{
-				ChunkID:    domain.NewChunkID(meta.DocId, model, c.Index),
-				DocID:      meta.DocId,
-				Workspace:  workspace,
-				Index:      c.Index,
-				StartChar:  c.Start,
-				EndChar:    c.End,
-				Text:       c.Text,
-				EmbedModel: model,
-				Embedding:  vectors[i],
-			})
+		for i := range batchChunks {
+			batchChunks[i].Embedding = vectors[i]
+			chunks = append(chunks, batchChunks[i])
 		}
 	}
 

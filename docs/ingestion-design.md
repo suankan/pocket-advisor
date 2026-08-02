@@ -480,6 +480,8 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 
 `embed_model` exists so a model swap writes into a distinct namespace rather than silently mixing incomparable vectors in one index — the same guarantee v2 got from separate cache directories.
 
+`metadata_headers` is write-mostly provenance and failure auditing — nothing in the codebase queries into it; it exists for a human to inspect via `psql` when a document is stuck or failed. `source_path` inside it looks redundant with the top-level `source_filename` column because every collection today is ingested flat: `source_path` is `filepath.Rel` against the collection root (`internal/uploader/uploader.go`) and `source_filename` is just `filepath.Base`, so they coincide whenever there are no subdirectories under a collection. They are not the same field — `source_path` is the one that would carry real information if a collection ever gained nested subdirectories.
+
 **Full-text configuration.** `fulltext_search` is a generated column using the `simple` text-search configuration, not `english`:
 
 ```sql

@@ -1,11 +1,21 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.2.0`
+**Version:** `2.3.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.3.0:** the lexical leg is disjunction-only. 2.2.0 specified an
+AND-then-OR fallback; measurement showed the AND branch essentially never
+fires, because three specific terms rarely co-occur inside one ~2000-character
+atomic chunk. An LLM keyword-extraction stage was tested as the fix and
+rejected — the extraction was good (0.94 s, clean output, well-chosen terms)
+and AND still returned zero, while the same terms disjoined returned 91. §3.3
+records the experiment so keyword quality is not offered later as the missing
+piece. Removes `lexical_min_hits`, the `lexical_or_fallback` warning and its
+counter.
 
 **Changes in 2.2.0:** four changes, all measured against the live corpus.
 The lexical leg was **inert** — `websearch_to_tsquery` ANDs every word and
@@ -293,7 +303,7 @@ WITH lex AS (
           WHERE c.fulltext_search @@ (quote_literal(lexeme))::tsquery) df
   FROM unnest(to_tsvector('simple', $1))
 )
-SELECT string_agg(quote_literal(lexeme), ' | ')::tsquery   -- or ' & '
+SELECT string_agg(quote_literal(lexeme), ' | ')::tsquery
 FROM lex WHERE df < (SELECT count(*) * 0.5 FROM document_chunks);
 ```
 
@@ -328,29 +338,56 @@ Any threshold aggressive enough to remove `what` would remove `balance` and
 `closing` first. Frequency identifies noise at the extreme top; it cannot
 separate signal from grammar in general.
 
-**AND first, then OR.** Both operators have a failure mode, so the leg tries
-the precise form and falls back:
-
-1. Build the conjunction over the surviving lexemes. If it yields at least
-   `lexical_min_hits` (5) candidates, use it.
-2. Otherwise rebuild as a disjunction and flag `lexical_or_fallback`.
-
-Measured justification for needing both:
+**Disjunction, always.** The terms are joined with `|`, never `&`. This was
+not the first answer — an AND-then-OR fallback was specified and removed once
+measured — and the reasoning matters, because conjunction is the intuitive
+choice and looks strictly more precise.
 
 | form | behaviour |
 | --- | --- |
 | AND, 2 terms (`closing & balance`) | 55 candidates — precise and correct |
-| AND, 3 terms (`solicitor & drug & testing`) | 2 candidates — marginal |
-| **AND, 4 terms** | **0 candidates** — every four-term set tried |
+| AND, 3 terms (`agreed & children & school`) | **0** |
+| AND, 4 terms | **0** — every four-term set tried |
 | OR, unfiltered | 280 of 348 candidates, top-ranked by `the` density — **confidently wrong** |
 | **OR, frequency-filtered** | 179 candidates, bank statements ranked top — correct |
 
-AND degrades sharply with term count because it demands co-occurrence inside
-one chunk, and it is *structurally* incapable of serving a multi-topic
-question: no chunk contains keywords from two topics that live in different
-documents. OR always yields a ranked list, which is what RRF actually
-consumes — the leg's job is to contribute an ordered 50, not to be a filter,
-and the reranker already exists to discard the tail.
+AND survives two terms and dies at three. The cause is the chunking decision,
+not the query: `chunk_text` is an atomic passage of ~2000 characters
+(`ingestion-design.md` deviation 13), and requiring three specific words to
+co-occur inside one such passage is simply an unlikely event. **The more
+atomic the chunk, the less satisfiable any conjunction becomes** — the two
+decisions are in direct tension, and chunk atomicity wins because it is load
+bearing for the dense leg.
+
+It is also *structurally* incapable of serving a multi-topic question: no
+chunk contains keywords from two topics that live in different documents.
+
+**Better keywords do not rescue it**, and this was tested directly rather
+than assumed. Asking `Qwen3.5-4B-MLX-4bit` for five FTS keywords from *"What
+did we agree about the children's school holidays in July during our last
+email exchange?"* produced, in 0.94 s and with no preamble,
+`agreed, children, school, holidays, July` — a good extraction. Through
+`websearch_to_tsquery` with AND it returned **zero**. Two independent causes:
+
+* `holidays` matches no chunk; the corpus says `holiday`, and `simple` does
+  not stem. One zero-matching term zeroes the conjunction. The same failure
+  appears in Russian more severely — the model lemmatises `Россию` to
+  `Россия`, which matches nothing at all, while the surface form matches five
+  chunks.
+* Removing that term changes nothing. `agreed & children & school`, three
+  terms present in 17, 66 and 15 chunks, still returns zero.
+
+The same five keywords under OR returned 91 candidates, ranked sensibly. So
+an LLM keyword-extraction stage is viable and fast, but it earns nothing: for
+OR its output is what the question's own lexemes already give, minus a
+network call, minus the lemmatisation hazard, and minus a non-deterministic
+dependency in a path that should be reproducible. It is recorded here as
+tested and rejected specifically so that "the keywords weren't good enough"
+is not offered as an explanation later — they were.
+
+OR always yields a ranked list, which is what RRF actually consumes. The
+leg's job is to contribute an ordered 50, not to be a filter; the reranker
+already exists to discard the tail.
 
 **Injection safety comes free.** `to_tsvector` reduces input to lexemes
 before any operator can be interpreted, and `quote_literal` handles embedded
@@ -867,7 +904,6 @@ mechanism that can quietly reduce quality reports itself:
 | --- | --- | --- |
 | `dense_leg_underfill` | dense leg returned materially fewer rows than requested | §3.4 |
 | `lexical_query_empty` | the query produced an empty tsquery | §3.3 |
-| `lexical_or_fallback` | the AND form under-filled; served on OR | §3.3 |
 | `decomposition_unavailable` | decomposer failed; served on the original question | §3.6 |
 | `pool_floor_applied` | a reserved floor displaced a higher-scoring candidate | §4.1 |
 | `reranker_unavailable` | served on RRF order after a reranker failure | §4 |
@@ -914,7 +950,6 @@ query:
 
   # Lexical query construction (§3.3)
   lexical_df_ceiling: 0.5          # drop lexemes present in >50% of chunks
-  lexical_min_hits: 5              # below this, AND falls back to OR
 
   # Query decomposition (§3.6)
   decompose_enabled: true
@@ -947,7 +982,6 @@ configuration) belong to ingestion and are not restated here.
 | `rag_query_reranker_fallback_total` | Counter | Queries served on RRF order after reranker failure |
 | `rag_query_thread_capped_total` | Counter | Queries where the per-thread cap displaced a result (§5.1) |
 | `rag_query_lexical_candidates` | Histogram | Lexical yield — a mode at zero means the leg is inert (§3.3) |
-| `rag_query_lexical_or_fallback_total` | Counter | Queries where AND under-filled and OR was used (§3.3) |
 | `rag_query_sub_queries` | Histogram | Sub-queries per question; a mode at 1 means decomposition rarely fires (§3.6) |
 | `rag_query_pool_floor_total` | Counter | Queries where a reserved floor displaced a candidate (§4.1) |
 | `rag_query_budget_truncated_total` | Counter | Answers where context was dropped to fit the budget |
@@ -1005,8 +1039,10 @@ is ~99% of query latency by design, so it is the first thing to regress.
     inert leg while the design claimed hybrid retrieval. It must be exercised
     with a full question — "What was the closing balance?" — not a keyword
     phrase, and in both languages.
-15. An AND form yielding fewer than `lexical_min_hits` falls back to OR and
-    reports `lexical_or_fallback` (§3.3).
+15. A three-or-more-term question still yields lexical candidates. This is
+    the criterion that would have caught the conjunction failure: good
+    keywords ANDed together returned zero while the same terms disjoined
+    returned 91 (§3.3).
 16. A multi-topic question retrieves both topics. Concretely: a question
     combining a bank-statement topic and a correspondence topic returns at
     least one document of each, which the undecomposed form does not (§3.6).
@@ -1071,18 +1107,18 @@ re-litigated from scratch.
    about the same subject. The cap is load-bearing on its own merits.
 
 5. **Threshold values in §8 are unswept.** `lexical_df_ceiling` (0.5),
-   `lexical_min_hits` (5), `pool_floor_dense_only` (6) and
-   `pool_floor_per_sub_query` (4) were each chosen to satisfy a measured
-   case, not by sweeping. They are cheap to change and index-invariant, and
+   `pool_floor_dense_only` (6) and `pool_floor_per_sub_query` (4) were each
+   chosen to satisfy a measured case, not by sweeping. They are cheap to change and index-invariant, and
    each has an acceptance criterion; tune once there is a query log rather
    than a handful of examples.
 
-6. **Whether the lexical leg should stay coupled to decomposition.** §3.3's
-   AND-then-OR fallback is independent of §3.6 by design, but decomposition
-   materially changes what the leg receives — short keyword phrases behave
-   very differently from full questions under both operators. If decomposition
-   becomes reliably keyword-style, the AND path would fire far more often and
-   the thresholds above would need revisiting together rather than separately.
+6. **Whether chunk size and the lexical leg should be tuned together.**
+   §3.3 found conjunction unusable because three terms rarely co-occur inside
+   one ~2000-character chunk. That is a property of the chunk size, not of the
+   query: larger chunks would make AND viable and blunt the dense leg, smaller
+   ones sharpen the dense leg and push the lexical leg further toward pure
+   disjunction. The two have been tuned independently so far, and the
+   interaction is unmeasured.
 
 7. **Whether thread-walk expansion is sufficient for one-line replies
    (§3.5).** The intended answer is that a contentless message arrives as a

@@ -1,11 +1,18 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.5.0`
+**Version:** `2.6.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.6.0:** adds a relevance floor to selection (§5.1). `top_k`
+previously returned fifteen results whether or not fifteen were relevant,
+which is harmless for a human skimming and actively harmful for the agent
+that §6.1 makes the consumer. The threshold is calibrated rather than
+guessed: off-domain questions score every candidate below zero, so zero is
+the model's own boundary and the system can now return nothing and mean it.
 
 **Changes in 2.5.0:** generation is decided — Claude, over MCP, outside this
 codebase (§6.1), with the local LLM restricted to query preparation. No
@@ -766,9 +773,59 @@ candidate, so the intervention is visible rather than silent.
 
 ## 5. Selection, Expansion, and Packets
 
-### 5.1 One match per document, capped per thread
+### 5.1 Selection: relevance floor, one per document, capped per thread
 
-Reranked chunks are reduced to **one per document**, best-ranked chunk wins.
+Applied in that order, and the floor is absolute — a candidate below it is
+never returned, not even to backfill a slot freed by the thread cap.
+
+#### The relevance floor
+
+Candidates scoring below `min_relevance_score` (**0.0**) are discarded, even
+when that leaves fewer than `top_k` results — including zero.
+
+Unlike every other threshold in this document, this one is not a tuned guess.
+`jina-reranker-v3-mlx` returns scores centred on zero, and zero turns out to
+be the model's own relevant/not-relevant boundary. Measured over 24
+candidates per query:
+
+| query | max score | above zero |
+| --- | --- | --- |
+| *"what did we agree about the children's school holidays?"* | **+0.172** | 6 / 24 |
+| *"what is the recipe for sourdough bread?"* | **−0.030** | **0 / 24** |
+| *"how do I configure a Kubernetes ingress controller?"* | **−0.041** | **0 / 24** |
+
+For questions with nothing relevant in the corpus, *every* candidate lands
+below zero. So the floor gives the system something it otherwise cannot do:
+**return nothing, and mean it.** A query about sourdough should produce no
+packets, not fifteen family-law passages ranked by which is least unlike
+bread.
+
+**Why this matters more than it first appears.** Without a floor, `top_k: 15`
+returns fifteen results regardless of whether fifteen are relevant. A real
+query measured on this corpus scored `0.246, 0.164, 0.083, 0.012, 0.006,
+0.000, -0.007, -0.014` — three genuinely relevant, the rest noise. A human
+reading packets skims past the tail harmlessly; **an agent treats everything
+in its context as evidence**, and §6.1's generation stage is an agent. In the
+demonstration recorded there the model cited sources scoring 0.012 and 0.006
+as supporting evidence for claims about the case.
+
+**What the floor does not fix, stated so it is not over-credited.** Both
+attribution errors in §6.1 came from a source scoring **0.083** — a genuinely
+relevant document, misread by a weak model. No floor calibrated on relevance
+would have prevented them, because relevance was not the problem there. The
+floor removes noise from the context; it does not make a model read the
+remaining sources correctly. That is why §6.1 changes the model rather than
+relying on this.
+
+Returning fewer results is therefore not a degradation to hide but the
+correct behaviour, and it is reported: `relevance_floor_applied` when the
+floor reduced the count below what would otherwise have been returned, and
+zero packets when nothing clears it.
+
+#### One match per document
+
+Reranked chunks are then reduced to **one per document**, best-ranked chunk
+wins.
 
 That alone is not enough, and the live corpus proves it. The fusion query for
 *"What did we agree about the children's school holidays?"* returns **10 of
@@ -777,7 +834,9 @@ That alone is not enough, and the live corpus proves it. The fusion query for
 sees nothing wrong, and the answer is fifteen slices of one argument with the
 bank statement and the solicitor's letter never surfacing.
 
-So results are additionally **capped at `max_per_thread` (3) per
+#### Capped per thread
+
+Results are additionally **capped at `max_per_thread` (3) per
 `thread_id`**, with freed slots backfilled from the next-best documents in
 other threads.
 
@@ -1006,6 +1065,7 @@ mechanism that can quietly reduce quality reports itself:
 | `decomposition_unavailable` | decomposer failed; served on the original question | §3.6 |
 | `pool_floor_applied` | a reserved floor displaced a higher-scoring candidate | §4.1 |
 | `reranker_unavailable` | served on RRF order after a reranker failure | §4 |
+| `relevance_floor_applied` | results were dropped for scoring below the floor | §5.1 |
 | `thread_capped` | the per-thread cap displaced at least one result | §5.1 |
 | `budget_truncated` | context was dropped to fit the answer budget | §5.3 |
 
@@ -1070,6 +1130,7 @@ query:
   default_top_k: 15
   rerank_enabled: true
   rerank_candidates: 24            # ~2 s at real chunk sizes (§4)
+  min_relevance_score: 0.0         # reranker's own boundary, not a guess (§5.1)
   max_per_thread: 3                # §5.1
   answer_context_chars: 120000     # per ANSWER, shared across packets (§5.3)
 
@@ -1085,8 +1146,9 @@ query:
   pool_floor_per_sub_query: 4
 ```
 
-`lexical_df_ceiling` and the two pool floors are the least-grounded numbers
-here. They work on 348 chunks against the queries in this document; none has
+`min_relevance_score` is the exception to what follows: it is calibrated
+against the model rather than chosen (§5.1). `lexical_df_ceiling` and the two
+pool floors are the least-grounded numbers here. They work on 348 chunks against the queries in this document; none has
 been swept. Each has an acceptance criterion (§10) rather than a claim to
 being tuned.
 
@@ -1106,6 +1168,7 @@ configuration) belong to ingestion and are not restated here.
 | `rag_query_dense_underfill_total` | Counter | Dense leg returned fewer rows than requested (§3.4) |
 | `rag_query_reranker_fallback_total` | Counter | Queries served on RRF order after reranker failure |
 | `rag_query_thread_capped_total` | Counter | Queries where the per-thread cap displaced a result (§5.1) |
+| `rag_query_floored_candidates` | Histogram | Candidates dropped below the relevance floor; a mode at 0 means the floor is inert (§5.1) |
 | `rag_query_lexical_candidates` | Histogram | Lexical yield — a mode at zero means the leg is inert (§3.3) |
 | `rag_query_sub_queries` | Histogram | Sub-queries per question; a mode at 1 means decomposition rarely fires (§3.6) |
 | `rag_query_pool_floor_total` | Counter | Queries where a reserved floor displaced a candidate (§4.1) |
@@ -1178,6 +1241,13 @@ is ~99% of query latency by design, so it is the first thing to regress.
 19. A cross-lingual query, whose lexical leg cannot fire, still places its
     top dense-only candidates in the rerank pool rather than having them
     displaced by lower-ranked dual-leg candidates (§4.1).
+20. **A question with no relevant answer in the corpus returns zero packets**,
+    not a ranked list of the least-irrelevant ones. Exercised with an
+    off-domain question — a cooking recipe, a systems-administration
+    question — against which every candidate scores below the floor (§5.1).
+21. A query whose results are reduced by the floor reports
+    `relevance_floor_applied`, and returning fewer than `top_k` for that
+    reason is not treated as an error (§5.1).
 
 ---
 

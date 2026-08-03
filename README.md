@@ -335,22 +335,28 @@ returns nothing rather than the least-irrelevant fifteen documents.
 ./bin/pocket-advisor --mcp --workspace-id test
 ```
 
-That speaks MCP over stdio. Register it with any MCP client:
+That speaks MCP over stdio. **`.mcp.json` in the repo root already registers
+it** for clients that read project-scoped configuration, one server per
+workspace:
 
 ```json
 {
   "mcpServers": {
-    "pocket-advisor": {
-      "command": "/absolute/path/to/pocket-advisor/bin/pocket-advisor",
-      "args": ["--mcp", "--workspace-id", "test"],
-      "cwd": "/absolute/path/to/pocket-advisor"
-    }
+    "case-documents":    { "command": "./bin/pocket-advisor",
+                           "args": ["--mcp", "--workspace-id", "case-documents-demo"] },
+    "finance-documents": { "command": "./bin/pocket-advisor",
+                           "args": ["--mcp", "--workspace-id", "personal-finance-demo"] }
   }
 }
 ```
 
-`cwd` matters — the binary reads `config.yaml` and the workspace registry
-relative to it.
+Paths are relative on purpose: the binary reads `config.yaml` and the
+workspace registry from its working directory, which for a project-scoped
+server is the repository root. A client configured elsewhere needs absolute
+paths and an explicit `cwd`.
+
+Add an entry per workspace you want reachable — a server binds to one
+workspace at startup and refuses to serve if its database holds another.
 
 The agent then searches the corpus and writes the answer, citing each claim.
 **Case data leaves the machine only when you put it in a conversation**, never

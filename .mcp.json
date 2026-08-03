@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "case-documents": {
+      "command": "./bin/pocket-advisor",
+      "args": ["--mcp", "--workspace-id", "case-documents-demo"]
+    },
+    "finance-documents": {
+      "command": "./bin/pocket-advisor",
+      "args": ["--mcp", "--workspace-id", "personal-finance-demo"]
+    }
+  }
+}

@@ -39,9 +39,27 @@ type Logs struct {
 	dir   string
 	level slog.Level
 
+	stderr  bool
 	mu      sync.Mutex
 	files   []io.Closer
 	loggers map[string]*slog.Logger
+}
+
+// StderrLogs sends every role to stderr and touches no files.
+//
+// For the read path this is the right destination, not a fallback. --query is
+// a one-shot command whose operator is watching the terminal, and --mcp is
+// launched by a client that captures the server's stderr into its own log —
+// which is exactly where someone debugging a failed server will look. Both
+// may also be started from a directory they cannot write to, which is fatal
+// for the file-backed logger and meaningless for them.
+func StderrLogs(level string) *Logs {
+	return &Logs{
+		dir:     "",
+		stderr:  true,
+		level:   parseLevel(level),
+		loggers: make(map[string]*slog.Logger),
+	}
 }
 
 // OpenLogs prepares the log directory. Files are opened lazily, one per role
@@ -73,6 +91,13 @@ func (l *Logs) Logger(role string) *slog.Logger {
 	defer l.mu.Unlock()
 
 	if lg, ok := l.loggers[role]; ok {
+		return lg
+	}
+
+	if l.stderr {
+		lg := slog.New(slog.NewJSONHandler(os.Stderr,
+			&slog.HandlerOptions{Level: l.level})).With("worker_type", role)
+		l.loggers[role] = lg
 		return lg
 	}
 

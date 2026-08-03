@@ -259,9 +259,24 @@ func Run(o *Options) error {
 		cfg.Embedding.Concurrency = o.EmbedConc
 	}
 
-	logs, err := telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
-	if err != nil {
-		return err
+	// The read path logs to stderr rather than to per-role files. Those files
+	// exist to separate five concurrent worker pools during an ingest; a query
+	// has no pools, and an MCP server's stderr is captured by the client that
+	// launched it, which is where anyone debugging a failed server looks.
+	//
+	// It also has to be this way: a client launches the server from a working
+	// directory it may not be able to write to, and creating a relative "logs"
+	// directory there fails outright — which is precisely how the first
+	// Claude Desktop attempt died, before the handshake and with the reason
+	// only visible in the client's own log.
+	var logs *telemetry.Logs
+	if o.MCP || o.Query != "" {
+		logs = telemetry.StderrLogs(cfg.LogLevel)
+	} else {
+		logs, err = telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
+		if err != nil {
+			return err
+		}
 	}
 	defer logs.Close()
 

@@ -1,9 +1,9 @@
 # pocket-advisor — Operator Guide
 
-Local RAG ingestion pipeline. The pipeline is **one binary that runs on your
-host**; its three stores run in a local Kubernetes cluster. This is the
-day-to-day handbook: install, provision a workspace, load a corpus, watch it
-drain, inspect state, remove documents, upgrade. For the "why", see
+Local RAG corpus — ingestion and retrieval. Both are **one binary that runs
+on your host**; its three stores run in a local Kubernetes cluster. This is
+the day-to-day handbook: install, provision a workspace, load a corpus, watch
+it drain, ask it questions, remove documents, upgrade. For the "why", see
 [`docs/ingestion-design.md`](docs/ingestion-design.md) (write path),
 [`docs/retrieval-design.md`](docs/retrieval-design.md) (read path), and
 [`docs/workspace-isolation.md`](docs/workspace-isolation.md) (per-workspace
@@ -13,8 +13,12 @@ RustFS bucket+identity, and NATS account+user, not a shared pool).
 ```
   your machine                             local cluster
   pocket-advisor  ─────────────────────►   RustFS      Tier 1 — source of truth
-  (uploader, discovery,                    PostgreSQL  Tier 2 lineage + Tier 3 vectors
-   4 worker pools, live display)           NATS        JetStream queues between pools
+  write: uploader, discovery,              PostgreSQL  Tier 2 lineage + Tier 3 vectors
+         4 worker pools                    NATS        JetStream queues between pools
+  read:  --query, --mcp
+        │
+        └──────────────────────────────►   local model endpoint
+                                           embedding · reranking · query prep
 ```
 
 The chart deploys those three stores and nothing else — no pipeline code runs
@@ -66,6 +70,13 @@ kubectl config use-context pocket-advisor   # switch into it
   bucket untouched rather than dangling a citation. `--delete-workspace` goes
   further — Postgres, then RustFS, then NATS, in that order — and removes the
   workspace's isolation itself, not just its documents.
+- **Retrieval returns sources, not answers.** `--query` gives you the
+  passages that match, each traceable to a Tier 1 object and a character
+  range. Turning those into prose is generation, and it deliberately happens
+  outside this binary — `--mcp` exposes retrieval to an agent, which reads the
+  passages and writes the cited answer. Nothing here calls a cloud API, so
+  case data leaves the machine only when you put it in a conversation. See
+  [§5](#5-ask-the-corpus).
 - **Postgres is derived state, not source of truth.** If a workspace's
   database is lost, `--create-workspace` (idempotent — safe to re-run against
   an already-provisioned workspace) followed by `--ingest-all` rebuilds it
@@ -175,7 +186,7 @@ and roles — it is never where document data lives.
 
 Repeat step 1 per workspace — step 2 happens automatically the first time
 you `--ingest-all` each one. `--delete-workspace --workspace-id <id>` tears
-the same three back down, in reverse order — see [§5](#5-remove-documents)
+the same three back down, in reverse order — see [§6](#6-remove-documents)
 for the difference between that and `--delete-data`.
 
 OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
@@ -265,7 +276,111 @@ format the system knowingly declines (a tracking pixel, a legacy `.doc`), a
 dead letter is work that should have succeeded and didn't. A run reports
 failure if anything was dead-lettered.
 
-## 5. Remove documents
+## 5. Ask the corpus
+
+Retrieval is a separate path from ingestion: it touches Postgres and the model
+endpoints only — no RustFS, no NATS, no worker pools.
+
+```bash
+./bin/pocket-advisor --query "when did Svetlana agree to the children travelling to Russia?" \
+  --workspace-id test
+```
+
+```
+searched as:  when did Svetlana agree to the children travelling to Russia?   [not decomposed]
+warnings:     relevance_floor_applied, budget_truncated
+budget:       119868 / 120000 chars · 2.7s
+
+1. Re: 265642, Kan | Family | Children Abduction prevention
+   email · 2026-05-27 · John Doe <john@example.com>
+   score +0.320 · both · chars 9604-10675
+   cite: s3://test/raw/26/2689417301f2354ca6f2660d1e8623bf60a3eb48e92aa31002…
+   "…your client agreed on 7 January 2026 to travel alone and leave the
+    children in my care…"
+   related: 8 same-thread (5 over budget, citations kept)
+```
+
+**You get sources, not an answer.** That is deliberate: generation happens
+outside this binary (see `--mcp` below). For an evidence corpus the primary
+material is usually what you want anyway — the answer above is visible in the
+first result.
+
+Three parts of that output are worth knowing:
+
+* **`searched as`** — a multi-topic question is split before searching, because
+  one embedding of two topics lands between them and can lose one entirely.
+  This shows what was actually run.
+* **`warnings`** — anything that quietly reduced quality says so. Here the
+  relevance floor dropped weak matches and the context budget omitted some
+  neighbours. A search that silently degrades is worse than one that errors.
+* **`cite`** — every result resolves to a Tier 1 object and a character range
+  in that document's extracted text. A result you cannot trace to a file is
+  not a result.
+
+```bash
+--top-k 5          # fewer results (default 15)
+--json             # machine-readable
+--no-rerank        # skip the cross-encoder; faster, worse ranking
+--no-decompose     # do not split a multi-topic question
+```
+
+Zero results is a real answer, not a failure: ask it about sourdough and it
+returns nothing rather than the least-irrelevant fifteen documents.
+
+### As an MCP tool
+
+`--query` gives you sources. To get a *cited answer*, let an agent read them:
+
+```bash
+./bin/pocket-advisor --mcp --workspace-id test
+```
+
+That speaks MCP over stdio. Register it with any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "pocket-advisor": {
+      "command": "/absolute/path/to/pocket-advisor/bin/pocket-advisor",
+      "args": ["--mcp", "--workspace-id", "test"],
+      "cwd": "/absolute/path/to/pocket-advisor"
+    }
+  }
+}
+```
+
+`cwd` matters — the binary reads `config.yaml` and the workspace registry
+relative to it.
+
+The agent then searches the corpus and writes the answer, citing each claim.
+**Case data leaves the machine only when you put it in a conversation**, never
+as an automatic consequence of running a query: nothing in this binary calls a
+cloud API.
+
+One workspace per server process. Run a second instance with a different
+`--workspace-id` to expose another corpus — each connects to its own database
+and refuses to start if that database holds anything else.
+
+### What it needs running
+
+Both modes need the local model endpoint up (§1), serving:
+
+| role | model | note |
+| --- | --- | --- |
+| embedding | `jina-embeddings-v5-text-small-mlx` | must match what the index was built with |
+| reranking | `jina-reranker-v3-mlx` | fixed, not configurable |
+| query preparation | `Qwen3.5-4B-MLX-4bit` | fixed; **disable thinking** on it |
+
+Thinking is not a preference on that last one: with it enabled the call takes
+five times as long and returns chain-of-thought where queries were expected.
+
+If the reranker or the preparation model is unreachable, queries still succeed
+— degraded, and they say so in `warnings`.
+
+Pin all three in your model server if you can. They idle out otherwise, and a
+cold load costs ~7s on a query that is otherwise ~3s.
+
+## 6. Remove documents
 
 ```bash
 # One document, cascading into Tier 2, by sha256
@@ -286,7 +401,7 @@ use `--delete-workspace --workspace-id test` instead (§2's `--create-workspace`
 in reverse). That's the one to reach for when a workspace is being retired
 entirely, not just re-ingested.
 
-## 6. After code changes
+## 7. After code changes
 
 ```bash
 make build          # rebuild the binary — no images, no rollout
@@ -298,7 +413,7 @@ make lint           # gofmt, go vet, helm lint
 Nothing in the cluster runs pipeline code, so a code change never needs a
 `helm upgrade`.
 
-## 7. Tuning
+## 8. Tuning
 
 Pool sizes derive from your host's CPU count and aren't configurable — one
 machine doesn't need six knobs to misconfigure it. On a 10-core host:
@@ -320,7 +435,7 @@ endpoint rather than to your CPU count:
 
 Set it in `config.yaml` under `infra.embedding.concurrency` to make it stick.
 
-## 8. Upgrading the chart
+## 9. Upgrading the chart
 
 ```bash
 make deploy-infra    # upgrade --install, then waits for RustFS setup
@@ -348,10 +463,10 @@ Two immutability traps:
   just one — then re-run `--create-workspace` per workspace (recreates the
   database/role and reapplies the schema) and re-ingest each.
 
-## 9. Uninstall
+## 10. Uninstall
 
 To retire one workspace without touching any other, `--delete-workspace`
-(§5) is the right scope — it's the only one of these that's per-workspace
+(§6) is the right scope — it's the only one of these that's per-workspace
 rather than cluster-wide.
 
 ```bash

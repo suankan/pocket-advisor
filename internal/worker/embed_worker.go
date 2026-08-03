@@ -59,25 +59,27 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	chunks := make([]domain.Chunk, 0, len(pieces))
 
 	for _, batch := range embed.Batches(pieces) {
-		// Build the chunks first so the embedding input is derived from the
-		// same value that gets stored — the header is prepended for the model
-		// and for reranking, never written into chunk_text (§5.6).
+		// A chunk is embedded as exactly its own text — no subject, no
+		// filename, nothing borrowed from the document or thread it belongs
+		// to. Sharing a prefix across every chunk of a container pulls them
+		// into one neighbourhood and blunts the distinctions a query needs;
+		// what a chunk is part of is recovered at retrieval by doc_id, which
+		// is an exact lookup rather than a lossy encoding (§5.6).
 		batchChunks := make([]domain.Chunk, len(batch))
 		inputs := make([]string, len(batch))
 		for i, c := range batch {
 			batchChunks[i] = domain.Chunk{
-				ChunkID:       domain.NewChunkID(meta.DocId, model, c.Index),
-				DocID:         meta.DocId,
-				Workspace:     workspace,
-				Index:         c.Index,
-				StartChar:     c.Start,
-				EndChar:       c.End,
-				Text:          c.Text,
-				ContextHeader: loaded.ContextHeader,
-				EmbedModel:    model,
+				ChunkID:    domain.NewChunkID(meta.DocId, model, c.Index),
+				DocID:      meta.DocId,
+				Workspace:  workspace,
+				Index:      c.Index,
+				StartChar:  c.Start,
+				EndChar:    c.End,
+				Text:       c.Text,
+				EmbedModel: model,
 			}
-			inputs[i] = batchChunks[i].EmbedInput()
-			telemetry.EmbeddingTokens.Add(float64(len(inputs[i]) / embed.CharsPerToken))
+			inputs[i] = c.Text
+			telemetry.EmbeddingTokens.Add(float64(len(c.Text) / embed.CharsPerToken))
 		}
 
 		vectors, err := w.Embedder.Embed(ctx, inputs)

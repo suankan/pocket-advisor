@@ -37,7 +37,7 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 		for _, c := range chunks {
 			rows = append(rows, []any{
 				c.ChunkID, c.DocID, c.Workspace, c.Index,
-				c.StartChar, c.EndChar, c.Text, c.ContextHeader, c.EmbedModel,
+				c.StartChar, c.EndChar, c.Text, c.EmbedModel,
 				formatVector(c.Embedding),
 			})
 		}
@@ -62,12 +62,11 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 }
 
 func insertChunks(ctx context.Context, tx pgx.Tx, rows [][]any) error {
-	const cols = 10
+	const cols = 9
 	var b strings.Builder
 	b.WriteString(`INSERT INTO document_chunks
         (chunk_id, doc_id, workspace_id, chunk_index,
-         start_char_offset, end_char_offset, chunk_text, context_header,
-         embed_model, embedding)
+         start_char_offset, end_char_offset, chunk_text, embed_model, embedding)
         VALUES `)
 
 	args := make([]any, 0, len(rows)*cols)

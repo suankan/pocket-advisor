@@ -455,7 +455,6 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 | - rustfs_raw_uri & raw_sha256 (TEXT/VARCHAR)                                      |
 | - normalized_text (TEXT)         -- body prose only; headers are columns, §5.3    |
 | - email_subject / email_from / email_to (TEXT), email_date (TIMESTAMPTZ, Indexed) |
-| - context_header (TEXT)          -- what each chunk carries into the index, §5.6  |
 | - metadata_headers (JSONB)       -- incl. skip/failure reason codes               |
 | - created_at / updated_at (TIMESTAMPTZ)                                           |
 +-----------------------------------------------------------------------------------+
@@ -470,8 +469,7 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 | - workspace_id (VARCHAR, Composite Index)                                         |
 | - chunk_index (INT)                                                               |
 | - start_char_offset & end_char_offset (INT)                                       |
-| - chunk_text (TEXT)              -- exactly normalized_text[start:end], §5.6      |
-| - context_header (TEXT)          -- prepended for embedding, never stored in text |
+| - chunk_text (TEXT)              -- exactly normalized_text[start:end]; all of it, §5.6 |
 | - embed_model (VARCHAR)          -- index namespace; see §4.4                     |
 | - embedding (halfvec(N), HNSW Cosine Index m=16, ef_construction=64)              |
 | - fulltext_search (TSVECTOR GENERATED, GIN Index for Hybrid Search)               |
@@ -489,13 +487,13 @@ All five carry `DocumentMetadata` as their first field. `traceparent` is mandato
 
 ```sql
 fulltext_search tsvector
-  GENERATED ALWAYS AS (to_tsvector('simple', context_header || ' ' || chunk_text)) STORED
+  GENERATED ALWAYS AS (to_tsvector('simple', chunk_text)) STORED
 ```
 
-The context header is indexed alongside the body so a subject line stays
-keyword-searchable even though it is no longer part of any chunk's text
-(§5.6). It is folded in *here* rather than into `chunk_text`, because
-`chunk_text` has to stay byte-identical to the character range it names.
+It indexes the chunk's own text and nothing else — not the document's subject
+or filename. Folding a shared subject line in here would make every chunk of a
+thread match on it, which is the same cross-contamination in the lexical leg
+that atomic embedding avoids in the dense one (§5.6).
 
 The corpus is bilingual (`ingestion.ocr.langs: eng+rus`). English stemming applied to Russian text produces wrong stems silently, and Postgres cannot pick a stemmer per row. `simple` does no stemming, matching the recall behaviour of v2's SQLite FTS5 index.
 
@@ -946,13 +944,19 @@ question (0.688 → 0.745). Those three headers were contributing noise and
 nothing else. Dates written as `2026-01-07 08:12:30 +1100` in particular are
 close to meaningless to an embedding model, while being highly repetitive.
 
-The subject is the exception and is kept, re-attached per chunk rather than
-inline — see §5.6. Removing it too dropped same-thread similarity much
-further (0.627 → 0.389), but by destroying signal rather than by fixing
-anything: it also halved thread separation, and 75% of this corpus's emails
-are a single chunk whose only topical anchor is the subject. The shortest
-message in that thread is `Сегодня в 22.00` — 15 characters that mean nothing
-without knowing which conversation they belong to.
+The subject goes the same way, and for the same reason: nothing about a
+message's container reaches its indexed text (§5.6). An intermediate design
+kept the subject and re-attached it per chunk; that was removed on
+2026-08-03 once it was clear it solved a retrieval problem at indexing time.
+
+The cost is real and is accepted with open eyes. Removing the subject drops
+same-thread similarity from 0.627 to 0.389, and 75% of this corpus's emails
+are a single chunk. The shortest message in that thread is `Сегодня в 22.00`
+— 15 characters that mean nothing without knowing which conversation they
+belong to, and that no amount of embedding will make findable on its own.
+Recovering that meaning is the read path's problem, solved by walking to the
+parent and the thread (`retrieval-design.md` §3.5), not ingestion's problem
+to pre-solve by contaminating the index.
 
 "Who wrote what and when" is still answerable, from the row rather than from
 the prose — and now it is answerable by *query*, which it never was while the
@@ -1039,78 +1043,78 @@ Legacy binary Office formats are declined rather than attempted: there is no cre
 
 **Chunk boundary preference.** v2 split at a paragraph break, then any newline, within the last 40% of the target length, rather than at a hard token count. A plain sliding window regresses that: it cuts mid-sentence and mid-table-row, and the resulting chunk embeds a truncated fragment. v3 keeps the v2 behaviour — prefer a paragraph break, then a newline, within the final 40% of the window; fall back to a hard cut only when neither exists.
 
-**Context headers: what is embedded is not what is stored.** Every chunk is
-embedded as `context_header + "\n\n" + chunk_text`, while `chunk_text` is
-persisted bare. The header is rendered by the worker that extracted the
-document — the email worker writes `Subject: <subject>` (§5.3) — so the
-indexer needs no knowledge of document types; it copies one column and
-concatenates.
+**Chunks are atomic. Nothing is borrowed from their container.**
 
-This exists because a chunk past the first has no idea what it belongs to.
-The old inline header block only ever landed in chunk 0, leaving every
-continuation chunk topicless. Measured across the 14 multi-chunk emails in
-this corpus, re-attaching the subject helped those tail chunks roughly 2.4×
-more than it helped chunk 0 (+0.055 versus +0.023 against a topical query).
+A chunk is embedded as exactly its own text — no subject line, no filename,
+nothing about the document or thread it belongs to. `chunk_text` is
+byte-identical to `normalized_text[start_char_offset:end_char_offset]`, that
+string is what goes to the embedding endpoint, and `fulltext_search` indexes
+the same string and no more.
 
-Two constraints make this a prepend-at-embed-time mechanism rather than
-something written into the text:
+An earlier version of this design did the opposite: it carried a
+`context_header` column (an email's subject, a document's filename) that was
+prepended to every chunk before embedding and folded into the full-text index.
+It was removed on 2026-08-03, and the reason is worth recording because the
+measurements at the time appeared to support it.
 
-* **Citations resolve by character range.** `chunk_text` must stay
-  byte-identical to `normalized_text[start_char_offset:end_char_offset]`.
-  Anything synthetic inside it makes the range point at text the document
-  does not contain.
-* **Keyword search still has to see it.** Since the subject is in neither
-  `normalized_text` nor `chunk_text`, the full-text index is generated from
-  both columns (§4.2) — otherwise an exact phrase from a subject line would
-  match nothing anywhere in the system.
+**Why it was removed.** It conflated two different jobs. Retrieval has to
+*locate* a passage and separately *situate* it — and situating is not a
+similarity problem, because the answer is already stored exactly, as
+`parent_doc_id`, `thread_id`, `email_subject`. Encoding a known-exact fact
+into a lossy 1024-dimensional approximation, then recovering it approximately
+at query time, is strictly worse than a join.
 
-**Every document type carries one.** Emails use their subject; everything else
-uses its own filename, rendered by `domain.ContextHeaderFromFilename`
-(extension dropped, a leading `3. ` index dropped, underscores spaced). It is
-written once at stub time in `CreateStub`, so no document type can be missed,
-and the email worker overwrites it with the subject once the message is
-parsed — falling back to the filename if a message has no subject.
+Three concrete costs followed from that:
 
-**An attachment does not inherit its parent email's subject**, even though the
-lineage is right there and the intuition to use it is strong. The context
-header carries what a document is *about*; a covering email's subject is *how
-it arrived*. For an email those coincide, which is exactly why the subject
-works there; for an attachment they come apart — a solicitor's covering email
-is about the matter, while the PDF it carries is a drug test report.
+* **It committed, at write time, to a tradeoff that is query-dependent.**
+  A shared subject helps a question about what a thread is broadly about and
+  is pure noise for a question about a specific fact — and worse, noise that
+  is *identical* across every message in the thread, so it compresses exactly
+  the distinctions the second kind of question needs. Same-thread chunk
+  similarity rose to 0.514 under prefixing, against a measured 0.403
+  without it (0.270 cross-thread, over 586 same-thread pairs on the live
+  corpus). Worth being precise about what that did and did not buy back:
+  removing the prefix moved the retrieval result for a thread-dominated
+  query from 10 of 10 to 9 of 10 hits in that thread. The prefix made
+  concentration worse; it was never its main cause.
+* **It spent representation capacity in inverse proportion to what a chunk
+  says.** For a 15-character body like `Сегодня в 22.00` behind a 54-character
+  subject, the vector predominantly encodes the subject. The chunks most in
+  need of a faithful representation got the least faithful one.
+* **It coupled index content to policy.** Any change to what context a chunk
+  carries meant a full re-embed. As a retrieval-time lookup it is free to
+  change.
 
-Measured over the 14 email-attached PDFs in this corpus (61 chunks, 47 of them
-continuation chunks with no anchor at all — proportionally worse than email):
+The supporting measurements were also weaker than they looked. They compared
+similarity against *topical* queries — precisely the query class that benefits
+from a title — and never measured the cost on specific-fact queries where the
+prefix is noise. The one test that measured ranking rather than raw similarity
+could not discriminate at all (every variant scored 5/5). So the honest
+summary of that evidence is "prefixing raises similarity on the queries
+designed to benefit from it", which is a good deal weaker than "prefixing
+improves retrieval".
 
-| context header | anchors tail chunks | blurs distinct documents together |
-| --- | --- | --- |
-| none | 0.4014 | 0.2871 |
-| parent email subject | 0.4116 (+0.010) | 0.3929 (+0.106) |
-| own filename | **0.4767 (+0.075)** | 0.3309 (+0.044) |
+**Removed from the lexical index too, not just the vector.** Keeping the
+subject in `fulltext_search` was tempting — it costs no vector-space
+distortion, and subjects are mostly proper nouns and identifiers, which is
+what the lexical leg is good at. But it reproduces the same failure one leg
+over: every chunk of a thread matches on the shared subject, so a single
+thread can consume most of the lexical candidate budget. Subject matching
+belongs at the document level, against `documents.email_subject`, where it is
+one row per message rather than one per chunk.
 
-The parent subject is the worst available trade: ten times as much blurring as
-findability. Those 14 attachments share only 8 distinct parent subjects, all
-variations of one case reference, so stamping it on each of them makes
-genuinely unrelated documents look alike — the thread-concentration failure
-mode, spread to a new document type. Filenames are fully distinct across all
-14 and describe what each document is.
+**What replaces it.** Nothing, at ingestion. The associations are all
+recorded — `parent_doc_id`, `thread_id`, `email_subject`, `email_from`,
+`email_date`, `source_filename` — and reassembling them is the read path's
+job: match atomic chunks, then walk to the parent document and the thread by
+key. `retrieval-design.md` §3.5 owns that side, including the case this makes
+hardest: a one-line reply whose meaning lives entirely in what it replied to.
 
-Nothing is lost by leaving provenance out of the embedding: `parent_doc_id`
-and `thread_id` are still recorded, so the covering email reaches the reader
-through the read path's lineage expansion, which is where provenance belongs.
-
-Sample caveat, recorded honestly: 14 documents and 15 probed tail chunks, and
-the figures are similarity deltas rather than a demonstrated ranking
-improvement — a document-level ranking test was too easy to discriminate
-(all three variants scored 5/5).
-
-**Known interaction, recorded so it is not rediscovered as a bug.** Putting
-the subject on *every* chunk means there is more subject text in the index
-than before, not less: same-thread chunk similarity rises (0.366 → 0.514).
-Thread-vs-thread separation improves at the same time (0.015 → 0.063), so
-this is sharper thread identity rather than blurrier retrieval — but it does
-mean result sets concentrate within a thread more readily, and the read path
-is expected to cap matches per `thread_id` rather than relying on
-per-document deduplication alone. That cap belongs to `retrieval-design.md`.
+**Quoted reply chains stay stripped** (§5.3). They are duplication of text
+indexed elsewhere, and keeping the embedded messages lean is the same
+principle as keeping chunks atomic. This does discard a linking signal — a
+message quoting another is evidence of a reply edge that survives broken
+threading — and that is an accepted cost, not an oversight.
 
 ---
 
@@ -2054,7 +2058,12 @@ deliberate choice with a reason, not drift.
     genuine widening of what the most commonly run command touches.
 
 11. **Email headers moved out of `normalized_text` into columns, and the
-    subject is re-attached per chunk at embed time (2026-08-03).** Previously
+    subject is re-attached per chunk at embed time (2026-08-03).**
+    **Partly superseded by deviation 13** — the header promotion to columns
+    stands, the per-chunk re-attachment was reversed the same day. The record
+    below is left intact because the measurements in it are what deviation 13
+    argues against, and because the reasoning it contains was wrong in an
+    instructive way. Previously
     `EmailProcessorWorker.renderBody` rendered `Subject`/`From`/`To`/`Date`
     into a block above the body, and that block became part of
     `normalized_text`, part of chunk 0, and part of what was embedded. It is
@@ -2191,3 +2200,49 @@ deliberate choice with a reason, not drift.
     against the 4m30s of nothing the broken path produced. Corpus verified
     afterwards: 96 `COMPLETED`, 348 chunks all carrying a context header, and
     offsets resolving 348 of 348.
+
+13. **Chunks made atomic: the per-chunk context header is removed entirely
+    (2026-08-03, same day as deviation 11).** `context_header` is dropped from
+    both `documents` and `document_chunks`, `fulltext_search` reverts to
+    indexing `chunk_text` alone, and a chunk is embedded as exactly its own
+    text. The header promotion from deviation 11 stands — `email_subject`,
+    `email_from`, `email_to` and `email_date` remain columns, and
+    `normalized_text` remains body prose only.
+
+    The full reasoning is in §5.6. In short: prefixing every chunk with its
+    container's subject or filename solved a *retrieval* problem — knowing
+    what a passage is part of — inside the *indexing* stage, where the answer
+    has to be encoded lossily into a vector instead of looked up exactly
+    through `doc_id`. It committed at write time to a tradeoff that depends on
+    the query, spent representation capacity in inverse proportion to what a
+    chunk actually says, and coupled index content to a policy that should be
+    free to change.
+
+    **On the evidence in deviation 11.** It was not fabricated, but it was
+    weaker than it read. It measured similarity against topical queries — the
+    query class a title helps — and never measured the cost on specific-fact
+    queries where the prefix is noise. The one ranking test could not
+    discriminate (5/5 for every variant). "Prefixing raises similarity on
+    queries designed to benefit from it" is a much narrower claim than
+    "prefixing improves retrieval", and only the first was ever shown.
+
+    **What this makes harder, deliberately.** A one-line reply — `Сегодня в
+    22.00` — is now close to unfindable by vector search alone, because it has
+    almost no semantic content of its own. That is not a regression being
+    overlooked: it is the read path's problem, and the read path has the
+    lineage to solve it properly (`retrieval-design.md` §3.5). The previous
+    design did not make such a message findable either; it made it findable
+    *as a member of its thread*, which is the thread being the real retrieval
+    unit, expressed badly.
+
+    Quoted reply chains remain stripped (§5.3). Keeping messages lean is the
+    same principle; the linking signal that discards is an accepted cost.
+
+    Verified on a live rebuild: `context_header` is absent from both tables,
+    `fulltext_search` is back to `to_tsvector('simple', chunk_text)`, and
+    stored vectors reproduce **bare** `chunk_text` at cosine 0.9999–1.0000
+    while diverging from header-plus-text (0.954, 0.990) — the embeddings are
+    genuinely atomic, not merely the column dropped. 104 documents, 96
+    `COMPLETED`, 348 chunks, offsets resolving 348 of 348, and all 57 emails
+    still carrying their promoted headers.
+

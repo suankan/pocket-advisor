@@ -59,9 +59,4 @@ func TestHeadersOfToleratesMissingHeaders(t *testing.T) {
 	if h.Subject != "" || h.From != "" || h.To != "" || !h.Date.IsZero() {
 		t.Fatalf("expected zero headers, got %+v", h)
 	}
-	// No subject means no context header, not a stray "Subject: " prefix on
-	// every chunk of the document.
-	if got := h.ContextHeader(); got != "" {
-		t.Fatalf("context header = %q, want empty", got)
-	}
 }

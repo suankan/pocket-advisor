@@ -1,11 +1,18 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.0.0`
+**Version:** `2.1.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.1.0:** chunks are atomic — `ingestion-design.md` deviation 13
+removed the per-chunk context header from both the vector and the lexical
+index, so §3.5 is rewritten from "the reranker must see header + text" to the
+opposite, and situating a passage becomes wholly this document's job. Adds the
+one-line reply problem and the typed-edge constraint that any later
+conversation-graph work has to respect (§3.5, §12 item 5).
 
 **Changes in 2.0.0:** stabilised from a design sketch into an
 implementation-ready specification, and corrected against the shipped code.
@@ -92,7 +99,7 @@ flowchart TB
         direction TB
         Embed["Query Embedder\n(warm client, 1 call)"]
         Fuse["Hybrid Fusion Query\n(dense + lexical + RRF in SQL)"]
-        Rerank["Reranker\n(24 candidates, header + text)"]
+        Rerank["Reranker\n(24 candidates, chunk text only)"]
         Select["Selection\n(1/document, capped per thread)"]
         Expand["Lineage Expansion\n(thread / parent / attachments)"]
         Budget["Answer Budgeter\n(one shared allowance)"]
@@ -196,8 +203,7 @@ fused AS (
          + COALESCE(1.0 / ($6 + l.rank), 0) AS rrf_score   -- rrf_k = 60
     FROM dense d FULL OUTER JOIN lexical l USING (chunk_id)
 )
-SELECT f.chunk_id, c.doc_id, d.thread_id,
-       c.context_header, c.chunk_text,
+SELECT f.chunk_id, c.doc_id, d.thread_id, c.chunk_text,
        c.start_char_offset, c.end_char_offset, f.rrf_score
 FROM fused f
 JOIN document_chunks c USING (chunk_id)
@@ -285,36 +291,83 @@ with dead leading bytes. Narrowing it to `btree(embed_model)` belongs to
 `ingestion-design.md`'s schema, not here, and is worth doing next time that
 DDL changes for another reason.
 
-### 3.5 What a chunk is — alignment with ingestion
+### 3.5 What a chunk is, and where context comes from
 
-This changed in `ingestion-design.md` deviation 11, and the read path has to
-match it exactly or it will rank something different from what it matched.
+Chunks are **atomic**. `chunk_text` is exactly
+`normalized_text[start:end]`, that string alone is what was embedded, and
+`fulltext_search` indexes the same string and no more. Nothing about the
+document or thread a chunk belongs to is encoded into it
+(`ingestion-design.md` deviation 13).
 
-| column | contains | role in retrieval |
+That is a deliberate division of labour, and it puts a job squarely on this
+document. Retrieval does three different things:
+
+| job | question | mechanism |
 | --- | --- | --- |
-| `chunk_text` | exactly `normalized_text[start:end]` | what a citation resolves to; what a packet shows |
-| `context_header` | `Subject: …` for email, `Document: …` for everything else | prepended for embedding, and therefore for reranking |
-| `fulltext_search` | generated from `context_header \|\| ' ' \|\| chunk_text` | the lexical leg already covers both |
+| **Locate** | which passage answers this? | vector / lexical similarity |
+| **Situate** | what is this passage part of? | **lookup** — a foreign key |
+| **Disambiguate** | which of several similar passages? | ranking signal |
 
-Three consequences the implementation must honour:
+Situating is not a similarity problem. `parent_doc_id`, `thread_id`,
+`email_subject`, `email_date` and `source_filename` are exact, stored, and
+indexed — recovering them is a join, not an approximation. Ingestion
+deliberately declines to pre-solve it by stamping context into vectors, so
+the read path solves it properly instead.
 
-1. **The reranker is shown `context_header + "\n\n" + chunk_text`** — the
-   same string that was embedded. Reranking bare `chunk_text` would judge a
-   different text from the one that produced the match, and would strip the
-   only topical anchor a continuation chunk has. `domain.Chunk.EmbedInput()`
-   already renders this and should be reused rather than reimplemented.
-2. **Citations resolve against `chunk_text` alone.** It is byte-identical to
-   the character range it names — an invariant now pinned by
-   `internal/engine/embed/offsets_test.go` and verified 348/348 on the live
-   corpus. Nothing synthetic may be written into it.
-3. **Packets surface the context header as a labelled field**, not merged
-   into the passage text. A reader needs to know a fragment came from
-   *"Subject: Re: Про твою поездку"* without that string appearing to be part
-   of what the sender wrote.
+**Consequences for the implementation:**
 
-Structured email metadata (`email_subject`, `email_from`, `email_to`,
-`email_date`) is also now available on `documents`, which is what unblocks
-the date and sender filters in §12 item 3.
+1. **The reranker is shown `chunk_text` and nothing else** — the same string
+   that was embedded, so it judges what actually matched. (Version 1.0.0 of
+   this document, and briefly the code, prepended a context header here. Both
+   are wrong now.)
+2. **Context is attached after selection, not before matching.** §5.2's
+   expansion is the *only* context mechanism; it walks lineage by key.
+3. **Subject and filename matching is a document-level query**, against
+   `documents.email_subject` / `documents.source_filename`, not a chunk-level
+   one. One row per message rather than one per chunk, so a single thread
+   cannot flood the candidate budget on a shared subject.
+
+#### The one-line reply problem
+
+This is the case atomic chunking makes hardest, and it is named here rather
+than hidden. A message whose entire body is `Сегодня в 22.00` has almost no
+semantic content. No query embedding will find it on its own merits, and its
+meaning lives entirely in what it replied to.
+
+Three things are true about that, and they bound what a solution must do:
+
+* **The previous design did not solve it either.** Prefixing the thread
+  subject made such a message findable *as a member of its thread* — which is
+  the thread being the real retrieval unit, expressed as a per-chunk hack.
+* **Similarity is the wrong tool for the relation involved.** The relation
+  that matters is *response*, and a response is frequently semantically
+  distant from what it answers: "Will you agree to the July dates?" → "No.";
+  "Can you cover the school fees?" → "I've lost my job." The
+  highest-similarity pairs in an email corpus tend to be restatements, not
+  exchanges. Any approach that adds edges on cosine alone builds a topic
+  graph and mislabels it a conversation.
+* **The deterministic signal is available and unused.** `thread_id`,
+  `parent_doc_id` and `email_date` already order a conversation exactly.
+
+So the intended shape is: match on chunks that *do* carry content, then walk
+to the thread and present the exchange in order, letting a one-liner arrive
+as a positioned neighbour of the message that gives it meaning rather than as
+a standalone hit. Whether that is sufficient is genuinely unknown until the
+linear pipeline is running and can be measured — see §12 item 5.
+
+**On edge types, if this is later extended.** A metadata edge asserts a fact
+about the world (*B was composed as a reply to A*); a similarity edge asserts
+a measurement against a chosen threshold. These must stay separately typed
+and never collapsed. §5.4 already forbids presenting chronological adjacency
+as a reply edge; an inferred semantic edge is *more* dangerous than a
+chronological one precisely because it looks more like a real relation, and
+for this corpus "she replied agreeing" and "she wrote something similar that
+week" are different claims with different evidential weight.
+
+Note also that a semantic edge does not need to be stored. Given a retrieved
+chunk, its semantic neighbours are just another query against the index
+already present — computed for the handful of nodes in play, not
+precomputed all-pairs.
 
 ---
 
@@ -326,10 +379,10 @@ returns the top `top_k` (15). The tail beyond 24 keeps its RRF order.
 **Whole passages, no truncation.** Version 1.0.0 specified
 `rerank_text_chars: 600`, carried over from v2's tuning. Against the actual
 index that truncates **93% of candidates** (324 of 348) — chunks are
-`TargetChars = 2048` with a measured median of 1956 characters, so the reranker would judge each
-candidate on its first third, of which the first ~120 characters are an
-identical context header. The setting is deleted rather than retuned; the
-reranker sees what was indexed.
+`TargetChars = 2048` with a measured median of 1956 characters, so the
+reranker would judge each candidate on its first third. The setting is
+deleted rather than retuned; the reranker sees exactly what was embedded
+(§3.5).
 
 Measured warm on `jina-reranker-v3-mlx`, the model this endpoint serves:
 
@@ -387,9 +440,10 @@ empty `thread_id` are each their own group and are never capped against one
 another.
 
 This interacts with ingestion and the interaction is deliberate: putting the
-subject on every chunk raised same-thread chunk similarity from 0.366 to
-0.514 (`ingestion-design.md` §5.6). The cap is what makes that safe, which is
-why it is not optional.
+subject on every chunk raised same-thread chunk similarity (`ingestion-design.md`
+§5.6); removing it lowered it again, to a measured 0.403 same-thread versus
+0.270 cross-thread over the whole live corpus. But the cap is not merely a
+counterweight to that — see below.
 
 `rag_query_thread_capped_total` counts queries where the cap displaced at
 least one result, so its effect is observable rather than assumed.
@@ -400,7 +454,8 @@ Selected documents are expanded through Tier 2 lineage. Each packet carries:
 
 * the matched document, its match provenance, and the matched chunk's
   character range;
-* the matched chunk's `context_header` as a labelled field (§3.5);
+* the matched document's subject or filename as a labelled field — read from
+  `documents`, not from the chunk (§3.5);
 * the readable text of the matched document;
 * `parent_doc_id` and direct children — an attachment's parent email, an
   email's attachments;
@@ -527,7 +582,7 @@ Request{ Question string; TopK int; Rerank *bool }
 
 Result{
   Packets  []Packet   // doc_id, thread_id, match{chunk_id, start, end, score},
-                      // context_header, text, lineage{...},
+                      // text, lineage{...},
                       // citation{raw_uri, raw_sha256}
   Warnings []string
   Budget   struct{ CharsUsed, CharsAllowed int }
@@ -631,9 +686,9 @@ is ~99% of query latency by design, so it is the first thing to regress.
 8. Every returned packet resolves to a Tier 1 object URI, and its
    `chunk_text` is byte-identical to `normalized_text[start:end]` of its
    document.
-9. The reranker is given `context_header + "\n\n" + chunk_text`, matching
-   what was embedded (§3.5), and no packet presents the context header as
-   part of the passage text.
+9. The reranker is given `chunk_text` alone, matching what was embedded
+   (§3.5). No document-level metadata reaches the matching or ranking path;
+   it is attached to packets after selection, as labelled fields.
 10. No returned text is model-generated — packets contain only ingested
     source text.
 11. With the reranker endpoint down, queries still succeed on RRF ordering
@@ -685,3 +740,22 @@ re-litigated from scratch.
    a `top_k` of 15. A much smaller `top_k` would make the cap nearly
    inactive; a much larger one would make it aggressive. Left fixed until
    there is usage to tune against.
+
+   Measured after atomic chunking shipped: the cap is **not** mostly a
+   counterweight to context prefixing, which an earlier draft of this section
+   claimed. Removing the prefix dropped same-thread chunk similarity from
+   0.514 to a measured 0.403 (against 0.270 cross-thread, over 586 same-thread
+   pairs on the live corpus) — but the query that returned 10 of 10 results
+   from one thread still returns **9 of 10**. The concentration is
+   overwhelmingly genuine topical clustering: those 23 messages really are
+   about the same subject. The cap is load-bearing on its own merits.
+
+5. **Whether thread-walk expansion is sufficient for one-line replies
+   (§3.5).** The intended answer is that a contentless message arrives as a
+   positioned neighbour in its thread rather than as a standalone hit.
+   Unknown until the linear pipeline runs and can be measured. If it is not
+   sufficient, the candidates are thread-level aggregation (score a thread by
+   its best chunks, return the thread as the unit) or a typed edge model —
+   **not** reintroducing context into the index, which was tried and removed.
+   Any edge work must keep deterministic and inferred edges separately typed
+   and must not present an inferred edge in reply-to language.

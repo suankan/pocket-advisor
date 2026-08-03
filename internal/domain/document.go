@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -71,45 +69,10 @@ type EmailHeaders struct {
 	Date    time.Time // zero when the message carried no parsable Date
 }
 
-// ContextHeader renders the part of an email's metadata worth re-attaching to
-// every chunk. Subject only: it is what the message is *about*, so it anchors
-// a chunk that would otherwise be a topicless fragment. From/To/Date are
-// deliberately excluded — measured against this corpus they add no retrieval
-// signal, and they are the most repetitive text in a thread.
-func (h EmailHeaders) ContextHeader() string {
-	if h.Subject == "" {
-		return ""
-	}
-	return "Subject: " + h.Subject
-}
-
-var leadingIndexRe = regexp.MustCompile(`^\d+\.\s*`)
-
-// ContextHeaderFromFilename renders a document's own name as its context
-// header. Everything that is not an email uses this: a PDF or spreadsheet has
-// no subject line, and its continuation chunks are otherwise topicless.
-//
-// A *parent* email's subject is deliberately not used for an attachment, even
-// though the lineage is right there. The context header carries what a
-// document is about; a covering email's subject is how it arrived. For email
-// those coincide, which is why the subject works there — for an attachment
-// they come apart, and measured against this corpus the parent subject bought
-// almost no findability (+0.010) while blurring distinct documents together
-// an order of magnitude more (+0.106), because attachments on one matter all
-// share one case reference. The filename gained 7.5x as much at under half
-// the cost. Provenance still reaches the reader through parent_doc_id and
-// thread_id, which is where it belongs.
-func ContextHeaderFromFilename(name string) string {
-	s := strings.TrimSuffix(name, path.Ext(name))
-	s = leadingIndexRe.ReplaceAllString(s, "") // solicitor-style "3. Brochure"
-	s = strings.TrimSpace(strings.ReplaceAll(s, "_", " "))
-	if s == "" {
-		return ""
-	}
-	return "Document: " + s
-}
-
-// Chunk is a Tier 3 row.
+// Chunk is a Tier 3 row — an atomic passage, carrying nothing borrowed from
+// the document or thread it belongs to. What a chunk is *part of* is a
+// retrieval-time lookup through doc_id, not something encoded into its vector
+// (retrieval-design.md §3.5).
 type Chunk struct {
 	ChunkID   string
 	DocID     string
@@ -117,25 +80,12 @@ type Chunk struct {
 	Index     int
 	StartChar int
 	EndChar   int
-	Text      string
-	// ContextHeader anchors a chunk to what it is part of — an email's
-	// subject, and later a statement's account line. It is prepended to Text
-	// for embedding and reranking, and folded into the full-text index, but
-	// is never stored inside Text: chunk_text must stay byte-identical to
-	// normalized_text[StartChar:EndChar] or citations stop resolving (§5.6).
-	ContextHeader string
-	EmbedModel    string
-	Embedding     []float32
-}
-
-// EmbedInput is what actually gets embedded: the chunk's own text with its
-// context header in front. Chunks past the first would otherwise carry no
-// indication of what document they belong to.
-func (c Chunk) EmbedInput() string {
-	if c.ContextHeader == "" {
-		return c.Text
-	}
-	return c.ContextHeader + "\n\n" + c.Text
+	// Text is exactly normalized_text[StartChar:EndChar]. It is both what gets
+	// embedded and what a citation resolves to; nothing synthetic is ever
+	// added to it.
+	Text       string
+	EmbedModel string
+	Embedding  []float32
 }
 
 // SHA256Hex returns the lowercase hex digest of b.

@@ -48,10 +48,6 @@ CREATE TABLE IF NOT EXISTS documents (
     email_from        TEXT    NOT NULL DEFAULT '',
     email_to          TEXT    NOT NULL DEFAULT '',
     email_date        TIMESTAMPTZ,
-    -- Rendered by the worker that extracted the document, because only it
-    -- knows how to describe its own type. Copied onto every chunk at embed
-    -- time (§5.6).
-    context_header    TEXT    NOT NULL DEFAULT '',
     metadata_headers  JSONB   NOT NULL DEFAULT '{}'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -77,20 +73,20 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_index       INT     NOT NULL,
     start_char_offset INT     NOT NULL,
     end_char_offset   INT     NOT NULL,
-    -- Exactly normalized_text[start_char_offset:end_char_offset]. The context
-    -- header is deliberately NOT folded in here: a citation resolves by
-    -- character range, so anything synthetic in this column would make that
-    -- range point at text the document does not contain (§5.6).
+    -- Exactly normalized_text[start_char_offset:end_char_offset], and nothing
+    -- else. A chunk is an atomic passage: nothing about the document or thread
+    -- it belongs to is folded in here or into its vector. That association is
+    -- a retrieval-time lookup through doc_id (§5.6).
     chunk_text        TEXT    NOT NULL,
-    context_header    TEXT    NOT NULL DEFAULT '',
     embed_model       VARCHAR NOT NULL,
     embedding         halfvec(%[1]d),
     -- 'simple', not 'english': the corpus is bilingual and Postgres cannot
-    -- select a stemmer per row (§4.2). The context header is indexed with the
-    -- body so a subject line stays keyword-searchable even though it is no
-    -- longer part of any chunk's text.
+    -- select a stemmer per row (§4.2). Indexes the chunk's own text only —
+    -- folding a shared subject line in here would make every chunk of a thread
+    -- match on it, which is the same cross-contamination in the lexical leg
+    -- that atomic embedding avoids in the dense one.
     fulltext_search   TSVECTOR GENERATED ALWAYS AS
-                          (to_tsvector('simple', context_header || ' ' || chunk_text)) STORED
+                          (to_tsvector('simple', chunk_text)) STORED
 );
 
 CREATE INDEX IF NOT EXISTS chunks_doc_idx       ON document_chunks(doc_id);

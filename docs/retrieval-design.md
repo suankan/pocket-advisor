@@ -1,11 +1,19 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.3.1`
+**Version:** `2.4.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.4.0:** the reranker and the general-purpose LLM are fixed at
+`jina-reranker-v3-mlx` and `Qwen3.5-4B-MLX-4bit` rather than configured — every
+figure here was measured against those two, and both slots degrade silently
+when filled wrongly. §4's latency figures are restored and no longer
+provisional: the 2.5x regression that prompted the warning was sustained-load
+throttling, not a real change, and the original numbers reproduce on an idle
+machine.
 
 **Changes in 2.3.1:** records the endpoint constraint that makes the
 decomposition stage stateless (§3.6) and the multi-turn session boundary
@@ -110,7 +118,7 @@ question
          union candidates; reserve pool floors        §4.1
                  │
          rerank ONCE against the original question    §4
-         (24 candidates, whole passages)
+         (24 candidates, whole passages, ~2 s)
                  │
          one match per document, capped per thread
                  │
@@ -153,8 +161,10 @@ flowchart TB
 
 Measured against the live `test` workspace (96 documents, 348 chunks). The
 reranker dominates: decomposition adds ~1.1 s and fanning out three
-sub-queries adds ~84 ms, against seconds for a single rerank pass — which is
-the entire reason the union is reranked once rather than per sub-query.
+sub-queries adds ~84 ms, against ~2 s for a single rerank pass — which is
+the entire reason the union is reranked once rather than per sub-query. End
+to end a decomposed query is roughly 3 s, of which the reranker is two
+thirds.
 
 ---
 
@@ -577,7 +587,8 @@ query pattern demands it" — this is that pattern.
 
 **Mechanism.** An LLM splits the question into independent search queries, or
 returns it unchanged when it asks one thing. Measured on
-`Qwen3.5-4B-MLX-4bit` at temperature 0, thinking disabled: **~1.1 s**, clean
+`Qwen3.5-4B-MLX-4bit` — fixed, not configurable (§8) — at temperature 0 with
+thinking disabled: **~1.1 s**, clean
 one-query-per-line output, and a single-topic question correctly returned
 verbatim (0.86 s). Because the no-op case is handled by the model, it is
 called unconditionally — no "should I decompose?" classifier is needed.
@@ -590,7 +601,7 @@ enough to exploit:
 | --- | --- | --- |
 | embed | 23 ms | **yes**, per sub-query |
 | fuse | 5 ms | **yes**, per sub-query |
-| rerank | seconds | **no** — union the candidates, rerank **once** against the *original* question |
+| rerank | ~2 s | **no** — union the candidates, rerank **once** against the *original* question |
 
 Three sub-queries therefore add ~84 ms of retrieval, not three rerank passes.
 The reranker is given the user's actual question, not a sub-query, because
@@ -662,27 +673,42 @@ reranker would judge each candidate on its first third. The setting is
 deleted rather than retuned; the reranker sees exactly what was embedded
 (§3.5).
 
-**Latency figures below are provisional.** They were measured warm on
-`jina-reranker-v3-mlx`, then re-measured after a server-side change and came
-back **2.5x higher** — 509 ms to 1287 ms at 600 chars, 1872 ms to 4707 ms at
-2048. The regression is stable across runs and is not memory pressure: it
-reproduces with only the embedding and reranker models resident, exactly the
-state of the original measurement. It is unattributed. Treat the table as the
-shape of the trade rather than a settled budget, and re-measure before tuning
-`rerank_candidates` against it.
+**The reranker is fixed at `jina-reranker-v3-mlx`**, not configurable. It is
+the model every figure here was measured against, and the slot is unusually
+easy to get wrong: a non-cross-encoder placed here degrades ranking silently
+rather than erroring. `Qwen3-Reranker-0.6B-4bit` is also served and behaves
+comparably, but nothing is gained by making the choice a knob.
 
-Measured warm on `jina-reranker-v3-mlx`, the model this endpoint serves:
+Thinking must be disabled on it server-side. That is an operational
+requirement, not a config value, and it applies to every model this design
+calls (§3.6).
+
+Measured warm, on an otherwise idle machine:
 
 | candidates | @600 chars | @1024 | @2048 (real chunk size) |
 | --- | --- | --- | --- |
 | 12 | 237 ms | 378 ms | 898 ms |
-| 24 | 509 ms | 995 ms | **1872 ms** |
+| 24 | ~0.6 s | 995 ms | **~2.0 s** |
 | 50 | 1504 ms | 2155 ms | 4373 ms |
 
-So the specified configuration costs ~1.9 s per query, against ~0.5 s for the
-truncated version. That is the deliberate trade: 1.4 s for the reranker
-seeing the whole passage, on a single-user local tool where the alternative
-is silently judging a third of each candidate.
+So the specified configuration costs ~2 s per query against ~0.6 s truncated.
+That is the deliberate trade: roughly 1.4 s for the reranker seeing the whole
+passage, on a single-user local tool where the alternative is silently judging
+a third of each candidate.
+
+**Measure on an idle machine.** These figures moved by **2.5x** mid-design —
+24 candidates at 2048 chars read 1872 ms early, then 4707 ms after several
+hours of continuous embedding, reranking and generation, then 2045 ms again
+after a quiet interval. The high readings were stable across runs and were
+*not* memory pressure: they reproduced with only the embedding and reranker
+models resident. It was sustained-load throttling on Apple Silicon.
+
+Two things are worth carrying forward from that. A change made shortly before
+a measurement moves is not evidence it caused it — the shift was initially
+attributed to a coinciding server setting, wrongly. And every latency figure
+in this document was taken while the endpoint was under heavy sequential
+testing, so all of them carry the same exposure; the reranker is simply where
+it was large enough to notice.
 
 Note that v2's "~47 ms per candidate at 600 characters" was roughly right
 (~21 ms measured) — the figure was not wrong, it was measured against a
@@ -931,26 +957,51 @@ mechanism that can quietly reduce quality reports itself:
 
 ## 8. Configuration
 
-Reranking needs its own endpoint block. Version 1.0.0 specified
-`rerank_enabled` and friends while never saying which model or where it
-lives, which is an implementation blocker: `config.yaml` has no reranking
-section at all today. It follows the shape of `infra.embedding`:
+The read path calls two models beyond the embedder, and neither is a
+configurable choice. Version 1.0.0 required a reranker while never saying
+which one or where it lived — an implementation blocker — so both are named
+here, and only their location is a setting:
 
 ```yaml
 infra:
   reranking:
     endpoint: http://localhost:8000/v1/rerank
-    model: jina-reranker-v3-mlx     # Qwen3-Reranker-0.6B-4bit also served
     timeout: 60s
-  decomposition:
+  llm:
     endpoint: http://localhost:8000/v1/chat/completions
-    model: Qwen3.5-4B-MLX-4bit      # temperature 0; thinking must be disabled
     timeout: 30s
 ```
 
-Thinking is not a preference on the decomposition model, it is a requirement:
-with it enabled the same call took 5.2 s and returned a chain-of-thought
-preamble instead of queries, against 1.1 s and clean output with it off.
+```go
+// Fixed, not configurable. Both were selected by measurement (§4, §3.6), and
+// both slots fail silently rather than loudly when filled wrongly.
+const (
+    RerankModel = "jina-reranker-v3-mlx"
+    LLMModel    = "Qwen3.5-4B-MLX-4bit"
+)
+```
+
+**Why fixed rather than a knob.** The project's standing rule is that a
+setting exists when a real case forces it, and nothing forces these. Every
+latency and quality figure in this document was measured against these two
+models specifically, so a swapped model invalidates the numbers the design is
+built on. Both slots also degrade quietly when filled wrongly: a
+non-cross-encoder in the rerank slot reorders badly rather than erroring, and
+a reasoning model in the LLM slot returns chain-of-thought where queries were
+expected. The embedding model stays configurable by contrast, because it has
+a real forcing case — `schema_metadata` records it and the vector dimension
+must match (`ingestion-design.md` §4.4).
+
+`infra.llm` is named for what it is rather than for its first use. Query
+decomposition is currently the only thing that calls it; naming it
+`decomposition` would misdescribe a general-purpose chat model and invite a
+second block the first time anything else needs one.
+
+**Thinking must be disabled on both, server-side.** It is an operational
+requirement rather than a config value, and it is not a preference: with
+thinking enabled the decomposition call took 5.2 s and returned a
+chain-of-thought preamble instead of queries, against ~1 s and clean output
+with it off.
 
 Query-side tuning, none of which invalidates the index:
 
@@ -961,7 +1012,7 @@ query:
   rrf_k: 60
   default_top_k: 15
   rerank_enabled: true
-  rerank_candidates: 24            # see §4 — latency figure is provisional
+  rerank_candidates: 24            # ~2 s at real chunk sizes (§4)
   max_per_thread: 3                # §5.1
   answer_context_chars: 120000     # per ANSWER, shared across packets (§5.3)
 

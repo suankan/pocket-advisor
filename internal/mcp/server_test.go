@@ -94,8 +94,10 @@ func TestToolsListDescribesTheTool(t *testing.T) {
 		t.Fatalf("got %d tools, want 1", len(tools))
 	}
 	tool := tools[0].(map[string]any)
-	if tool["name"] != toolName {
-		t.Errorf("name = %v", tool["name"])
+	// Unique per workspace: two servers sharing a tool name would leave the
+	// agent choosing a corpus on description alone.
+	if tool["name"] != "search_test" {
+		t.Errorf("name = %v, want search_test", tool["name"])
 	}
 	schema := tool["inputSchema"].(map[string]any)
 	req := schema["required"].([]any)

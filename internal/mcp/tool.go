@@ -19,12 +19,31 @@ import (
 type QueryTool struct {
 	Service   *retrieval.Service
 	Workspace string
+
+	// Title and Corpus describe what this workspace actually holds, taken
+	// from the registry. Without them every server advertises an identical
+	// tool and the agent has no basis to choose between "my bank statements"
+	// and "my solicitor correspondence" beyond a workspace id.
+	Title  string
+	Corpus []string
 }
 
-// toolName is deliberately specific. An agent picks tools by name and
-// description, and "search" or "query" would invite use for things this cannot
-// do — it searches one ingested corpus, not the web or the filesystem.
-const toolName = "search_case_documents"
+// Name is unique per workspace. Two servers advertising the same tool name
+// leaves the agent disambiguating on description alone, and picking the wrong
+// corpus is not a soft failure here — it answers a financial question from
+// legal correspondence, or vice versa, and cites confidently either way.
+func (t *QueryTool) Name() string {
+	return "search_" + strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + 32
+		default:
+			return '_'
+		}
+	}, t.Workspace)
+}
 
 // Describe returns the tool definition sent in tools/list.
 //
@@ -33,11 +52,23 @@ const toolName = "search_case_documents"
 // them should carry the citation shipped alongside. Retrieval's whole value is
 // traceability to bytes; an agent that paraphrases without citing discards it.
 func (t *QueryTool) Describe() map[string]any {
+	title := t.Title
+	if title == "" {
+		title = t.Workspace
+	}
+	contents := ""
+	if len(t.Corpus) > 0 {
+		contents = "\n\nThis corpus contains:\n  - " + strings.Join(t.Corpus, "\n  - ") + "\n"
+	}
+
 	return map[string]any{
-		"name": toolName,
-		"description": "Search the ingested case corpus for '" + t.Workspace + "' " +
-			"(emails, letters, bank statements, PDFs) and return the source passages " +
-			"that match, with citations.\n\n" +
+		"name": t.Name(),
+		"description": "Search " + title + " — an ingested corpus of this user's own " +
+			"documents — and return the source passages that match, with citations." +
+			contents + "\n" +
+			"Use this only for questions about what these documents say. Other servers " +
+			"may hold different corpora; choose by the contents listed above rather " +
+			"than by guessing.\n\n" +
 			"Returns evidence, not an answer: read the passages and write the answer " +
 			"yourself, citing each claim as [n]. Quote or attribute only what the " +
 			"passages actually say — attributing a statement to the wrong person is " +
@@ -80,7 +111,7 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (map[string]a
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid tool arguments: %w", err)
 	}
-	if p.Name != "" && p.Name != toolName {
+	if p.Name != "" && p.Name != t.Name() {
 		return nil, fmt.Errorf("unknown tool %q", p.Name)
 	}
 	question := strings.TrimSpace(p.Arguments.Question)

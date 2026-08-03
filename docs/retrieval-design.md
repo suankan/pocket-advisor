@@ -1,11 +1,22 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.1.0`
+**Version:** `2.2.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.2.0:** four changes, all measured against the live corpus.
+The lexical leg was **inert** — `websearch_to_tsquery` ANDs every word and
+`simple` strips no stopwords, so real questions matched nothing and every
+fusion query run during this design was dense-only; §3.3 replaces it with
+lexeme-derived construction, frequency-based noise filtering, and an
+AND-then-OR fallback. Query decomposition is adopted (§3.6) after a
+two-topic question was measured losing one topic entirely. The rerank pool
+reserves floors for structurally disadvantaged candidates (§4.1), since a
+chunk ranked last by both legs outscores the best dense-only match. And §4's
+latency figures are marked provisional after an unattributed 2.5x regression.
 
 **Changes in 2.1.0:** chunks are atomic — `ingestion-design.md` deviation 13
 removed the per-chunk context header from both the vector and the lexical
@@ -71,15 +82,21 @@ without pre-empting the rest of it.
 ```text
 question
    │
-   ├─► query embedding (one HTTP call, ~23 ms warm)
+   ├─► decompose into 1..4 independent queries (~1.1 s)   §3.6
    │
-   ├─────────────┬──────────────┐
- dense leg   lexical leg
- HNSW cosine  GIN tsvector
-   │             │
-   └──────► RRF fusion (in-database, one round trip, ~5 ms)
+   ├── per sub-query, concurrently ──────────────┐
+   │      │                                      │
+   │   query embedding (~23 ms)                  │
+   │      ├─────────────┬──────────────┐         │
+   │    dense leg   lexical leg                  │
+   │    HNSW cosine  GIN tsvector                │
+   │      └──────► RRF fusion (~5 ms)            │
+   └──────────────────────────────────────────── ┘
                  │
-         listwise rerank (24 candidates, whole passages, ~1.9 s)
+         union candidates; reserve pool floors        §4.1
+                 │
+         rerank ONCE against the original question    §4
+         (24 candidates, whole passages)
                  │
          one match per document, capped per thread
                  │
@@ -97,17 +114,20 @@ flowchart TB
 
     subgraph R["internal/retrieval (transport-agnostic)"]
         direction TB
-        Embed["Query Embedder\n(warm client, 1 call)"]
-        Fuse["Hybrid Fusion Query\n(dense + lexical + RRF in SQL)"]
-        Rerank["Reranker\n(24 candidates, chunk text only)"]
+        Decomp["Decomposer\n(1..4 sub-queries)"]
+        Embed["Query Embedder\n(per sub-query, ~23 ms)"]
+        Fuse["Hybrid Fusion Query\n(per sub-query; dense + lexical + RRF in SQL)"]
+        Union["Union candidates\n+ reserved pool floors"]
+        Rerank["Reranker\n(once, vs original question)"]
         Select["Selection\n(1/document, capped per thread)"]
         Expand["Lineage Expansion\n(thread / parent / attachments)"]
         Budget["Answer Budgeter\n(one shared allowance)"]
 
-        Embed --> Fuse --> Rerank --> Select --> Expand --> Budget
+        Decomp --> Embed --> Fuse --> Union --> Rerank --> Select --> Expand --> Budget
     end
 
-    Embed -- "POST /v1/embeddings" --> Models[["Local model endpoint"]]
+    Decomp -- "POST /v1/chat/completions" --> Models[["Local model endpoint"]]
+    Embed -- "POST /v1/embeddings" --> Models
     Rerank -- "POST /v1/rerank" --> Models
 
     Fuse -- "1 round trip" --> PG[("workspace database\ndocuments + document_chunks")]
@@ -117,8 +137,10 @@ flowchart TB
     Packets --> Consumer[["Human / agent, or\nanswer-generation LLM"]]
 ```
 
-Measured against the live `test` workspace (96 documents, 348 chunks): the
-reranker is ~99% of query latency. Fusion is 5 ms and embedding is 23 ms.
+Measured against the live `test` workspace (96 documents, 348 chunks). The
+reranker dominates: decomposition adds ~1.1 s and fanning out three
+sub-queries adds ~84 ms, against seconds for a single rerank pass — which is
+the entire reason the union is reranked once rather than per sub-query.
 
 ---
 
@@ -134,14 +156,24 @@ reranker is ~99% of query latency. Fusion is 5 ms and embedding is 23 ms.
 Both are filtered to the active `embed_model` namespace — and **only** to it;
 see §3.4 for why the workspace filter is gone.
 
-**Neither leg is guaranteed to contribute.** A cross-lingual query
-demonstrates this: asking *"What did we agree about the children's school
-holidays?"* against a Russian thread produced ten results whose RRF scores
-were all exactly `1/(60+rank)` — the lexical leg matched nothing at all,
-because English query terms do not appear in Russian text. That is correct
-behaviour, not a fault, but it means hybrid silently degenerates to
-dense-only on cross-lingual queries and the system should not assume two
-legs always contribute.
+**Neither leg is guaranteed to contribute**, and the two reasons are worth
+keeping apart because only one of them is legitimate.
+
+*Legitimately:* a cross-lingual query. Asking *"What did we agree about the
+children's school holidays?"* against a Russian thread produced ten results
+whose RRF scores were all exactly `1/(60+rank)` — the lexical leg matched
+nothing, because English terms do not appear in Russian text. That is correct
+behaviour, but it means hybrid degenerates to dense-only on such queries, and
+§4.1 exists so those results are not then penalised for it.
+
+*Illegitimately:* the query construction in version 2.0.0, under which the
+lexical leg returned nothing for **any** natural-language question in either
+language. That was a defect, not a property of hybrid retrieval, and it is
+what §3.3 fixes. It is called out here because the symptom is identical —
+a dense-only result set — and a system that cannot tell the two apart will
+read a broken leg as a hard query. `rag_query_lexical_candidates` (§9) exists
+to distinguish them: an occasional zero is expected, a mode at zero is a
+bug.
 
 ### 3.2 No query translation
 
@@ -181,6 +213,8 @@ Postgres can fuse, so fusion is one round trip rather than transferring two
 candidate sets to the client:
 
 ```sql
+-- $4 is a prepared tsquery, built by the caller (see below) — not raw text
+-- handed to websearch_to_tsquery.
 WITH dense AS (
     SELECT chunk_id,
            ROW_NUMBER() OVER (ORDER BY embedding <=> $1::halfvec) AS rank
@@ -191,10 +225,10 @@ WITH dense AS (
 ),
 lexical AS (
     SELECT c.chunk_id,
-           ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.fulltext_search, q) DESC) AS rank
-    FROM document_chunks c, websearch_to_tsquery('simple', $4) AS q
-    WHERE c.embed_model = $2 AND c.fulltext_search @@ q
-    ORDER BY ts_rank_cd(c.fulltext_search, q) DESC
+           ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC) AS rank
+    FROM document_chunks c
+    WHERE c.embed_model = $2 AND c.fulltext_search @@ $4::tsquery
+    ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC
     LIMIT $5                                    -- fts_candidates (50)
 ),
 fused AS (
@@ -225,11 +259,123 @@ Three things are load-bearing:
   two namespaces, as two different `chunk_id`s that RRF cannot recognise as
   duplicates.
 
-**Empty query guard.** `websearch_to_tsquery('simple', …)` on a stopword-only
-or punctuation-only query yields an empty tsquery that matches nothing, so
-the lexical leg silently contributes zero. The caller checks for an empty
-tsquery before running the query and reports `lexical_query_empty` in
+#### Building the lexical query
+
+**Do not use `websearch_to_tsquery`.** Version 1.0.0 specified it and it is
+the obvious choice, which is why this says otherwise explicitly.
+
+It ANDs every term of the input, and `simple` — mandatory for a bilingual
+corpus, §3.2 — strips no stopwords. So a real question becomes a conjunction
+including its own grammar:
+
+```
+'What was the closing balance?'  →  'what' & 'was' & 'the' & 'closing' & 'balance'
+```
+
+All five must co-occur inside one ~2000-character chunk. Measured against the
+live corpus, **that returns zero**, and so does every natural-language
+question tried. The lexical leg is not merely weak under this construction,
+it is inert — every fusion query run during this design was dense-only, which
+makes principle 3 false in practice rather than in principle.
+
+Nor is this fixable by choosing a different builder: `plainto_tsquery` and
+`phraseto_tsquery` also hard-code AND, and Postgres ships no "match any term"
+constructor. Any correct behaviour here requires building the tsquery
+directly.
+
+**Construction.** Derive lexemes with `to_tsvector`, drop the ones that would
+flood, and join what remains:
+
+```sql
+WITH lex AS (
+  SELECT lexeme,
+         (SELECT count(*) FROM document_chunks c
+          WHERE c.fulltext_search @@ (quote_literal(lexeme))::tsquery) df
+  FROM unnest(to_tsvector('simple', $1))
+)
+SELECT string_agg(quote_literal(lexeme), ' | ')::tsquery   -- or ' & '
+FROM lex WHERE df < (SELECT count(*) * 0.5 FROM document_chunks);
+```
+
+**Drop by document frequency, not by a stopword list.** The threshold is not
+approximating "stopword" — it directly measures *would this term flood the
+result set*, which is the actual concern, and it is therefore language-blind.
+That matters here because a stopword list would need an English one, a
+Russian one, and maintenance forever, and would still miss corpus-specific
+noise like a case reference appearing in every solicitor email.
+
+Measured on the live corpus, `the` occupies 58% of chunks and is dropped;
+no Russian term crosses the threshold at all, because Russian is the minority
+language and its function words are globally rare. That looks like
+under-filtering and is not: a term too rare to flood needs no filtering. The
+threshold self-corrects with corpus composition.
+
+**Do not use frequency to *select* keywords.** The inverse operation fails,
+and the failure is counter-intuitive enough to be worth recording. Frequencies
+for `What was the closing balance?`:
+
+| term | % of chunks | |
+| --- | --- | --- |
+| `the` | 58.0% | stopword |
+| **`balance`** | **38.5%** | **content** |
+| **`closing`** | **16.1%** | **content** |
+| `what` | 8.6% | stopword |
+| `was` | 8.3% | stopword |
+
+The content words are *more common* than the stopwords, because in a domain
+corpus every bank statement says "balance" and almost nothing says "what".
+Any threshold aggressive enough to remove `what` would remove `balance` and
+`closing` first. Frequency identifies noise at the extreme top; it cannot
+separate signal from grammar in general.
+
+**AND first, then OR.** Both operators have a failure mode, so the leg tries
+the precise form and falls back:
+
+1. Build the conjunction over the surviving lexemes. If it yields at least
+   `lexical_min_hits` (5) candidates, use it.
+2. Otherwise rebuild as a disjunction and flag `lexical_or_fallback`.
+
+Measured justification for needing both:
+
+| form | behaviour |
+| --- | --- |
+| AND, 2 terms (`closing & balance`) | 55 candidates — precise and correct |
+| AND, 3 terms (`solicitor & drug & testing`) | 2 candidates — marginal |
+| **AND, 4 terms** | **0 candidates** — every four-term set tried |
+| OR, unfiltered | 280 of 348 candidates, top-ranked by `the` density — **confidently wrong** |
+| **OR, frequency-filtered** | 179 candidates, bank statements ranked top — correct |
+
+AND degrades sharply with term count because it demands co-occurrence inside
+one chunk, and it is *structurally* incapable of serving a multi-topic
+question: no chunk contains keywords from two topics that live in different
+documents. OR always yields a ranked list, which is what RRF actually
+consumes — the leg's job is to contribute an ordered 50, not to be a filter,
+and the reranker already exists to discard the tail.
+
+**Injection safety comes free.** `to_tsvector` reduces input to lexemes
+before any operator can be interpreted, and `quote_literal` handles embedded
+quotes. Verified against adversarial input: `balance & !parenting` yields
+`'balance' | 'parenting'`, `foo' | 'bar` yields `'bar' | 'foo'`, and
+`;drop table documents;--` yields three inert lexemes.
+
+**What this gives up.** `websearch_to_tsquery` supports user-typed search
+syntax — `"quoted phrases"`, `OR`, `-exclusion`. Lexeme construction discards
+all of it: `closing <-> balance` becomes a plain disjunction. That costs
+nothing today because nothing can type a quote — there is no search box, no
+API, no UI, and queries are natural-language questions. If a UI appears and
+phrase search is wanted, route queries containing explicit syntax through
+`websearch_to_tsquery` and keep lexeme construction for plain questions.
+Not before.
+
+**Empty query guard.** A stopword-only or punctuation-only input yields an
+empty tsquery matching nothing — `!!! ???` and `''` both produce one. The
+caller checks before executing and reports `lexical_query_empty` in
 `warnings` (§7.1) rather than letting it look like a lexical miss.
+
+**Cost.** 2.9 ms including the per-term frequency counts, at 348 chunks.
+Those counts are GIN lookups and stay cheap, but they are per query term and
+per query; at substantially larger corpora, precompute a term-frequency table
+refreshed after ingest rather than counting inline.
 
 ### 3.4 The post-filter recall trap — now about `embed_model`
 
@@ -369,6 +515,84 @@ chunk, its semantic neighbours are just another query against the index
 already present — computed for the handful of nodes in play, not
 precomputed all-pairs.
 
+### 3.6 Query decomposition
+
+**Runs before §3.1–§3.3**, despite appearing after them here.
+
+A single embedding of a multi-topic question lands *between* its topics
+rather than on either. Measured, and the failure is total rather than
+marginal — for *"What was the closing balance and what did the solicitor say
+about parenting arrangements?"*:
+
+| | top 8 |
+| --- | --- |
+| compound query | **zero bank statements** — entirely parenting-side |
+| sub-query "What was the closing balance?" | 8/8 bank statements |
+| sub-query "What did the solicitor say about parenting arrangements?" | parenting emails and letters |
+
+The compound query did not rank the balance topic poorly; it lost it
+completely. Version 1.0.0 listed decomposition as deferred "until a real
+query pattern demands it" — this is that pattern.
+
+**Mechanism.** An LLM splits the question into independent search queries, or
+returns it unchanged when it asks one thing. Measured on
+`Qwen3.5-4B-MLX-4bit` at temperature 0, thinking disabled: **~1.1 s**, clean
+one-query-per-line output, and a single-topic question correctly returned
+verbatim (0.86 s). Because the no-op case is handled by the model, it is
+called unconditionally — no "should I decompose?" classifier is needed.
+
+**Fan out cheaply, rerank once.** The naive shape — N sub-queries through the
+whole pipeline — multiplies the only expensive stage. The costs are lopsided
+enough to exploit:
+
+| stage | cost | fan out? |
+| --- | --- | --- |
+| embed | 23 ms | **yes**, per sub-query |
+| fuse | 5 ms | **yes**, per sub-query |
+| rerank | seconds | **no** — union the candidates, rerank **once** against the *original* question |
+
+Three sub-queries therefore add ~84 ms of retrieval, not three rerank passes.
+The reranker is given the user's actual question, not a sub-query, because
+that is what the answer must be relevant to.
+
+**Guards, each with a measured reason:**
+
+* **Cap sub-queries at 4.** Observed over-decomposition: the drug-testing /
+  cruise question produced three sub-queries where two sufficed, one being a
+  superset of the others. Harmless at 28 ms each, but unbounded splitting
+  would turn one good query into several vague ones.
+* **Reserve rerank-pool slots per sub-query** (§4). Without it a sub-query
+  whose topic is under-represented in the union can be entirely crowded out,
+  which reintroduces the failure decomposition exists to fix.
+* **Fall back to the original question as a single sub-query** if the model
+  fails or is unavailable, and flag `decomposition_unavailable`. Same
+  degradation pattern as the reranker (§4).
+* **Record the sub-queries in the result.** Silently transforming someone's
+  question is exactly the kind of invisible behaviour §7.1 exists to prevent,
+  and for an evidence corpus the reader must be able to see what was searched.
+
+**Two known behaviours, neither disqualifying:**
+
+*Context leaks between clauses.* *"Compare the January and April bank
+statements and tell me about the drug test"* produced
+`"Find information about drug test in bank statements"` — an invented
+constraint. Measured damage is mild: the drug test report slips from rank 3
+to rank 4, because the semantic pull of the real terms still dominates.
+Degradation, not corruption.
+
+*Output style varies by question and cannot be controlled.* At temperature 0
+decomposition is deterministic — identical across runs, which matters for
+reproducibility — but the *style* is input-dependent. The balance/parenting
+question yielded full sentences; the drug-testing/cruise question yielded
+keyword phrases. Both are reproducible; neither is predictable.
+
+That last point is why decomposition must not be relied on to fix the lexical
+leg. Keyword-style output happens to strip stopwords and revive it — measured,
+`solicitor drug testing` and `solicitor cruise` each produced dual-leg hits
+where the compound question produced none — but sentence-style output does
+not, and you cannot tell in advance which you will get. The lexical fix
+belongs in query construction (§3.3), where it is deterministic.
+
 ---
 
 ## 4. Reranking
@@ -383,6 +607,15 @@ index that truncates **93% of candidates** (324 of 348) — chunks are
 reranker would judge each candidate on its first third. The setting is
 deleted rather than retuned; the reranker sees exactly what was embedded
 (§3.5).
+
+**Latency figures below are provisional.** They were measured warm on
+`jina-reranker-v3-mlx`, then re-measured after a server-side change and came
+back **2.5x higher** — 509 ms to 1287 ms at 600 chars, 1872 ms to 4707 ms at
+2048. The regression is stable across runs and is not memory pressure: it
+reproduces with only the embedding and reranker models resident, exactly the
+state of the original measurement. It is unattributed. Treat the table as the
+shape of the trade rather than a settled budget, and re-measure before tuning
+`rerank_candidates` against it.
 
 Measured warm on `jina-reranker-v3-mlx`, the model this endpoint serves:
 
@@ -412,6 +645,38 @@ is identical either way.
 Reranking is on by default. When the endpoint is unavailable the service
 falls back to RRF ordering and reports `reranker_unavailable` rather than
 failing the query: a slightly worse ranking is more useful than no answer.
+
+### 4.1 Reserved slots in the rerank pool
+
+The 24-candidate pool is filled by RRF score, and RRF systematically favours
+candidates that both legs found. That is usually the point — agreement is
+evidence — but it is wrong whenever a leg *cannot* fire rather than having
+declined to.
+
+The arithmetic is stark:
+
+| candidate | RRF score |
+| --- | --- |
+| ranked **1st by dense**, absent from lexical | 1/61 = **0.01639** |
+| ranked **50th (last) by both legs** | 1/110 + 1/110 = **0.01818** |
+
+A chunk ranked dead last by both legs outscores the single best dense-only
+match. Two situations make that a systematic bias rather than a curiosity:
+
+* **Cross-lingual queries.** An English question against Russian text cannot
+  produce lexical hits at all — verified, the lexical leg contributed exactly
+  zero to a Russian thread's top ten. Treating a script mismatch as absence of
+  evidence penalises the entire minority-language corpus.
+* **Decomposition (§3.6).** Candidates from a sub-query whose topic is
+  thinly represented can be crowded out by another sub-query's dual-leg hits,
+  reintroducing the topic loss decomposition exists to prevent.
+
+So the pool reserves a floor rather than filling purely by score: a minimum
+share for top dense-only candidates, and a minimum share per sub-query when
+decomposition ran. Both are the same mechanism — protecting a stream that is
+structurally disadvantaged rather than genuinely less relevant — and both
+report `pool_floor_applied` when the floor displaced a higher-scoring
+candidate, so the intervention is visible rather than silent.
 
 ---
 
@@ -578,15 +843,21 @@ query-side Go code at all. `internal/domain`, `internal/storage/postgres`,
 ### 7.1 Request and result
 
 ```
-Request{ Question string; TopK int; Rerank *bool }
+Request{ Question string; TopK int; Rerank *bool; Decompose *bool }
 
 Result{
-  Packets  []Packet   // doc_id, thread_id, match{chunk_id, start, end, score},
+  Packets    []Packet // doc_id, thread_id, match{chunk_id, start, end, score},
                       // text, lineage{...},
                       // citation{raw_uri, raw_sha256}
-  Warnings []string
-  Budget   struct{ CharsUsed, CharsAllowed int }
+  SubQueries []string // what was actually searched; 1 entry when not decomposed
+  Warnings   []string
+  Budget     struct{ CharsUsed, CharsAllowed int }
 }
+
+`SubQueries` is not diagnostics. The system may silently rewrite the user's
+question into several different ones, and for an evidence corpus a reader has
+to be able to see what was actually asked of the index before trusting what
+came back.
 ```
 
 `Warnings` is not decorative — it is principle 7 made concrete. Every
@@ -596,6 +867,9 @@ mechanism that can quietly reduce quality reports itself:
 | --- | --- | --- |
 | `dense_leg_underfill` | dense leg returned materially fewer rows than requested | §3.4 |
 | `lexical_query_empty` | the query produced an empty tsquery | §3.3 |
+| `lexical_or_fallback` | the AND form under-filled; served on OR | §3.3 |
+| `decomposition_unavailable` | decomposer failed; served on the original question | §3.6 |
+| `pool_floor_applied` | a reserved floor displaced a higher-scoring candidate | §4.1 |
 | `reranker_unavailable` | served on RRF order after a reranker failure | §4 |
 | `thread_capped` | the per-thread cap displaced at least one result | §5.1 |
 | `budget_truncated` | context was dropped to fit the answer budget | §5.3 |
@@ -615,7 +889,15 @@ infra:
     endpoint: http://localhost:8000/v1/rerank
     model: jina-reranker-v3-mlx     # Qwen3-Reranker-0.6B-4bit also served
     timeout: 60s
+  decomposition:
+    endpoint: http://localhost:8000/v1/chat/completions
+    model: Qwen3.5-4B-MLX-4bit      # temperature 0; thinking must be disabled
+    timeout: 30s
 ```
+
+Thinking is not a preference on the decomposition model, it is a requirement:
+with it enabled the same call took 5.2 s and returned a chain-of-thought
+preamble instead of queries, against 1.1 s and clean output with it off.
 
 Query-side tuning, none of which invalidates the index:
 
@@ -626,10 +908,27 @@ query:
   rrf_k: 60
   default_top_k: 15
   rerank_enabled: true
-  rerank_candidates: 24            # ~1.9 s at real chunk sizes (§4)
+  rerank_candidates: 24            # see §4 — latency figure is provisional
   max_per_thread: 3                # §5.1
   answer_context_chars: 120000     # per ANSWER, shared across packets (§5.3)
+
+  # Lexical query construction (§3.3)
+  lexical_df_ceiling: 0.5          # drop lexemes present in >50% of chunks
+  lexical_min_hits: 5              # below this, AND falls back to OR
+
+  # Query decomposition (§3.6)
+  decompose_enabled: true
+  max_sub_queries: 4
+
+  # Reserved rerank-pool slots (§4.1)
+  pool_floor_dense_only: 6         # of rerank_candidates
+  pool_floor_per_sub_query: 4
 ```
+
+`lexical_df_ceiling` and the two pool floors are the least-grounded numbers
+here. They work on 348 chunks against the queries in this document; none has
+been swept. Each has an acceptance criterion (§10) rather than a claim to
+being tuned.
 
 `rerank_text_chars` is deliberately absent — see §4.
 
@@ -647,11 +946,15 @@ configuration) belong to ingestion and are not restated here.
 | `rag_query_dense_underfill_total` | Counter | Dense leg returned fewer rows than requested (§3.4) |
 | `rag_query_reranker_fallback_total` | Counter | Queries served on RRF order after reranker failure |
 | `rag_query_thread_capped_total` | Counter | Queries where the per-thread cap displaced a result (§5.1) |
+| `rag_query_lexical_candidates` | Histogram | Lexical yield — a mode at zero means the leg is inert (§3.3) |
+| `rag_query_lexical_or_fallback_total` | Counter | Queries where AND under-filled and OR was used (§3.3) |
+| `rag_query_sub_queries` | Histogram | Sub-queries per question; a mode at 1 means decomposition rarely fires (§3.6) |
+| `rag_query_pool_floor_total` | Counter | Queries where a reserved floor displaced a candidate (§4.1) |
 | `rag_query_budget_truncated_total` | Counter | Answers where context was dropped to fit the budget |
 | `rag_query_empty_results_total` | Counter | Queries returning zero packets |
 
-Each query is one trace: `query.embed` → `query.fuse` → `query.rerank` →
-`query.expand`. Because ingestion traces are rooted at discovery
+Each query is one trace: `query.decompose` → `query.embed` → `query.fuse` →
+`query.rerank` → `query.expand`. Because ingestion traces are rooted at discovery
 (`ingestion-design.md` §5.2), a slow query attributable to a specific
 document can be joined to that document's ingestion trace by `doc_id`.
 
@@ -697,6 +1000,23 @@ is ~99% of query latency by design, so it is the first thing to regress.
     relationships.
 13. A stopword-only query reports `lexical_query_empty` rather than silently
     returning dense-only results.
+14. **A natural-language question produces a non-empty lexical leg.** This is
+    the criterion whose absence let §3.3's original construction ship an
+    inert leg while the design claimed hybrid retrieval. It must be exercised
+    with a full question — "What was the closing balance?" — not a keyword
+    phrase, and in both languages.
+15. An AND form yielding fewer than `lexical_min_hits` falls back to OR and
+    reports `lexical_or_fallback` (§3.3).
+16. A multi-topic question retrieves both topics. Concretely: a question
+    combining a bank-statement topic and a correspondence topic returns at
+    least one document of each, which the undecomposed form does not (§3.6).
+17. A single-topic question is not decomposed — the decomposer returns it
+    unchanged and `rag_query_sub_queries` records 1 (§3.6).
+18. With the decomposer unavailable, queries still succeed on the original
+    question and report `decomposition_unavailable` (§3.6).
+19. A cross-lingual query, whose lexical leg cannot fire, still places its
+    top dense-only candidates in the rerank pool rather than having them
+    displaced by lower-ranked dual-leg candidates (§4.1).
 
 ---
 
@@ -712,8 +1032,8 @@ re-litigated from scratch.
 | **Vector-only baseline first, hybrid later** | **Rejected.** The guideline recommended starting with vector search and adding hybrid third. Principle 3 rules this out: the corpus turns on exact identifiers — account numbers, case references like `265642`, BSBs — which dense retrieval is structurally bad at. A vector-only phase would be a phase with known-broken recall on the queries that matter most. |
 | **Cross-encoder reranking** | **Adopted** (§4), and it is the single largest quality lever, as the guideline argued. |
 | **HyDE** (hypothetical document embeddings) | **Deferred.** Bridges short questions to long documents by generating a hypothetical answer first. Costs an LLM call before search and injects generated text into the matching path, which sits awkwardly with principle 1. Revisit if short queries prove to be a measured bottleneck. |
-| **Query rewriting / expansion** | **Deferred**, with one constraint fixed now: expansion must stay in English. Translating into Russian is prohibited regardless of technique — see §3.2. |
-| **Query decomposition** | **Deferred.** Multi-part questions ("compare the January and April statements") are plausible for this corpus, but nothing is built until a real query pattern demands it. |
+| **Query rewriting / expansion** | **Deferred**, with two constraints fixed now. Expansion must stay in English — translating into Russian is prohibited regardless of technique (§3.2). And rewriting must not be used to fix the lexical leg: decomposition already produces keyword-style output *sometimes*, which revives it by accident, and building on an accident that varies per question is worse than the deterministic fix in §3.3. |
+| **Query decomposition** | **Adopted** (§3.6). Deferred in 2.0.0 pending "a real query pattern"; a measured total loss of one topic in a two-topic question is that pattern. |
 | **Router / adaptive pattern** | **Rejected for now.** Skipping retrieval for greetings assumes a chat surface that does not exist; there is no interactive front end, and the cost saved is one 23 ms embedding call. |
 | **Agentic / iterative retrieval** | **Rejected for now.** Higher latency and LLM cost for a read path that is not yet built once. Reconsider only after the linear pipeline is measured and found wanting. |
 | **Parent–child / auto-merging** | **Partly adopted, differently.** The guideline's small-chunks-for-precision, large-context-for-generation idea is served by §5.2's lineage expansion, which uses real document structure — thread, parent, attachments — rather than an artificial chunk hierarchy. |
@@ -750,7 +1070,21 @@ re-litigated from scratch.
    overwhelmingly genuine topical clustering: those 23 messages really are
    about the same subject. The cap is load-bearing on its own merits.
 
-5. **Whether thread-walk expansion is sufficient for one-line replies
+5. **Threshold values in §8 are unswept.** `lexical_df_ceiling` (0.5),
+   `lexical_min_hits` (5), `pool_floor_dense_only` (6) and
+   `pool_floor_per_sub_query` (4) were each chosen to satisfy a measured
+   case, not by sweeping. They are cheap to change and index-invariant, and
+   each has an acceptance criterion; tune once there is a query log rather
+   than a handful of examples.
+
+6. **Whether the lexical leg should stay coupled to decomposition.** §3.3's
+   AND-then-OR fallback is independent of §3.6 by design, but decomposition
+   materially changes what the leg receives — short keyword phrases behave
+   very differently from full questions under both operators. If decomposition
+   becomes reliably keyword-style, the AND path would fire far more often and
+   the thresholds above would need revisiting together rather than separately.
+
+7. **Whether thread-walk expansion is sufficient for one-line replies
    (§3.5).** The intended answer is that a contentless message arrives as a
    positioned neighbour in its thread rather than as a standalone hit.
    Unknown until the linear pipeline runs and can be measured. If it is not

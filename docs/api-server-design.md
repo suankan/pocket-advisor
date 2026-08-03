@@ -85,7 +85,7 @@ of this document actionable right now.
 | Surface | Owns | Backed by |
 | --- | --- | --- |
 | Administrative API | Workspace lifecycle (create/delete), schema bootstrap, corpus load/scan/reconcile, dataset reset (delete-data/forget) | `internal/cli` modes today; `workspace-isolation.md` §3 for workspace lifecycle specifically |
-| User API | Retrieval | `retrieval-design.md` §7 — logic specified as a transport-agnostic `internal/retrieval` package; the HTTP surface over it is this document's to define, and is unbuilt |
+| User API | Retrieval | `retrieval-design.md` §7 — logic specified as a transport-agnostic `internal/retrieval` package. Two adapters are planned over it: a CLI mode, and an **MCP tool** (decided 2026-08-03) through which an agent performs answer generation. An HTTP surface remains this document's to define and is unbuilt. |
 
 The exact administrative/user boundary for the existing ingestion CLI
 modes (is `--ingest-all` an administrative operation, or its own
@@ -135,7 +135,14 @@ Not decided, and deliberately left open rather than guessed at:
    that `retrieval-design.md` §7.1 no longer presumes a URL shape — it
    specifies Go request/result types, leaving the route entirely to this
    document.
-5. **WebUI shape.** Server-rendered vs. SPA, and whether it talks to the
+5. **Whether MCP changes the process-topology question (item 1).** An MCP
+   server is long-running by nature, like the API Server, but far smaller —
+   it exposes one tool over `internal/retrieval` and holds no state
+   (`retrieval-design.md` §6.1). Whether it is a mode of the existing binary,
+   a separate small process, or the thing that settles item 1 outright is
+   unresolved.
+
+6. **WebUI shape.** Server-rendered vs. SPA, and whether it talks to the
    Administrative API at all or is retrieval-only — not discussed yet
    beyond "a future client of the same API Server" (§1).
 

@@ -1,11 +1,15 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.4.0`
+**Version:** `2.5.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.5.0:** generation is decided — Claude, over MCP, outside this
+codebase (§6.1), with the local LLM restricted to query preparation. No
+`generation-design.md` will be written; the boundary is the design.
 
 **Changes in 2.4.0:** the reranker and the general-purpose LLM are fixed at
 `jina-reranker-v3-mlx` and `Qwen3.5-4B-MLX-4bit` rather than configured — every
@@ -863,9 +867,8 @@ Retrieval ends at the content packets. They are the deliverable and are
 complete on their own — the immediate consumer is a human or agent reading
 the result.
 
-Answer generation is **out of scope for this document** and will be specified
-in `docs/generation-design.md` when it is taken up. Only the boundary is
-fixed here:
+Answer generation stays **out of this codebase**, and the boundary is fixed
+here:
 
 * Generation is a **separate, separately-failable call**. A generation outage
   degrades the product to "here are your sources" rather than taking it down.
@@ -876,6 +879,59 @@ fixed here:
   §4.3).
 * Packets carry the provenance a generation pass needs to cite: `doc_id`,
   character range, and Tier 1 URI per packet.
+
+### 6.1 Who generates, and how
+
+**Decided 2026-08-03: generation is performed by Claude, reached over MCP.**
+Retrieval exposes `Query` as an MCP tool; the agent calls it, receives
+packets, and writes the cited answer itself. Nothing in this repository
+performs generation, so `docs/generation-design.md` is not needed — the
+boundary *is* the design.
+
+**`infra.llm` is for query preparation only and must never be used for answer
+generation.** It is already wired up, fast and local, which makes it exactly
+what someone would reach for; this is written down to stop that. The split is
+deliberate:
+
+| stage | model | why |
+| --- | --- | --- |
+| query preparation (§3.6) | `Qwen3.5-4B-MLX-4bit`, local | mechanical, low-stakes, ~1 s, runs on every query |
+| answer generation | Claude, over MCP | reasoning over evidence, where attribution must be exact |
+
+**The evidence for that split**, measured against this corpus. Feeding five
+real packets to the local 4B model produced a fluent, confident, cited answer
+that was wrong in ways this corpus cannot tolerate. Source [3] reads
+*"Valentina was surprised to hear that, she said that she was under
+impression that Svetlana and myself are in agreement on these arrangements"*;
+the model reported that as **Svetlana** confirming it — quoting text
+containing "Svetlana and myself" while attributing it to Svetlana. It also
+described Valentina, the nanny, as *"(the mother)"*, and missed entirely the
+one source that directly answered the question, a Russian email stating
+agreement to a one-month trip from mid-June to mid-July.
+
+For a family-law corpus, misattributing who said what is not a quality
+regression, it is the failure that makes output unusable. Retrieval's own
+principle 4 — every answer traceable to bytes — is worth little if the stage
+that reads those bytes reassigns them to the wrong person.
+
+**Consequences of choosing MCP over an API call from inside the binary:**
+
+* **Case data does not leave the machine as a side effect of querying.**
+  Everything in this stack is local by construction, and this corpus is
+  privileged correspondence, financial disclosure and children's matters. An
+  in-binary generation call would make every query an automatic export to a
+  third party. Over MCP the operator decides what enters a conversation, which
+  is a different thing from the system deciding for them.
+* **No new dependency.** No API key, no network egress path, no failure mode
+  added to a pipeline that currently has none.
+* **The separately-failable requirement above is satisfied structurally**
+  rather than by discipline: retrieval does not know generation exists.
+* **It is a second adapter, not a second implementation** — §7's
+  transport-agnostic package means the MCP surface sits alongside the CLI over
+  the same `Query`.
+
+`docs/api-server-design.md` owns the surface itself; this section owns only
+the constraint that generation happens there and not here.
 
 ---
 
@@ -968,6 +1024,7 @@ infra:
     endpoint: http://localhost:8000/v1/rerank
     timeout: 60s
   llm:
+    # Query preparation only. Never answer generation — see §6.1.
     endpoint: http://localhost:8000/v1/chat/completions
     timeout: 30s
 ```

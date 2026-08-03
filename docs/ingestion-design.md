@@ -2246,3 +2246,51 @@ deliberate choice with a reason, not drift.
     `COMPLETED`, 348 chunks, offsets resolving 348 of 348, and all 57 emails
     still carrying their promoted headers.
 
+14. **Two extraction filters added after the first real-corpus ingest
+    (2026-08-03).** Both were found by querying `case-documents-demo` — 1,438
+    documents against the 96-document fixture everything had been built on —
+    and neither was visible at fixture scale.
+
+    The symptom was the retrieval relevance floor "leaking": off-domain
+    questions ("what is the capital of Peru?") began returning one or two
+    packets where the fixture returned none. The leaks were not marginal
+    relevance. They were text that is not language at all — a cross-encoder
+    cannot meaningfully score character soup, so it lands near-arbitrarily
+    around zero, and with 4,501 chunks some lands above it.
+
+    * **Machine-generated tracking URLs are stripped in email compaction.**
+      Marketing and property-management mail carries click-tracking links
+      whose encoded query strings run to thousands of characters; one measured
+      chunk was nine tokens, four of them over 60 characters, the longest
+      1,792. Only URLs over 120 characters are removed — short links are
+      shared by people and can carry meaning. 213 chunks affected, all email.
+    * **The post-OCR viability gate now counts words, not characters.**
+      `MinOCRChars = 20` was far too weak: OCR over a *photograph* — a
+      kitchen, a bedroom, a building exterior — yields hundreds of tokens and
+      zero words, and passed easily. It now requires 5 tokens of 4+ letters.
+      26 of 94 completed images become `IMAGE_NOT_VIABLE`; every one is a
+      photograph or a letterhead fragment.
+
+    **Both thresholds were set by measurement, and two earlier candidates were
+    rejected by it.** Filtering on "fraction of characters in long tokens"
+    would have destroyed bank statements, whose extracted dotted leader runs
+    look like long tokens — statements are a primary document class here, and
+    the filter scored them *worse* than the garbage it was meant to catch.
+    Filtering on alphanumeric ratio failed the same way: PDFs bottom out at
+    0.117 against the worst image at 0.285.
+
+    The word-count gate separates cleanly where those did not: real payment
+    screenshots hold 14, 24 and 47 words; the noise holds 0 to 4. Worth
+    recording that this only became visible on **whole** extractions — judged
+    on a truncated preview even the 47-word screenshot looks marginal, and
+    calibrating against previews would have set the threshold too low to catch
+    anything.
+
+    What is lost is a handful of letterhead logos whose few words (a firm or
+    school name) already appear in the surrounding document text. Nothing is
+    deleted: the image stays in Tier 1, its document row stays, and the
+    decline is recorded as `IMAGE_NOT_VIABLE` rather than being silent.
+
+    Applying either filter to existing data requires a re-ingest — both change
+    extraction, not the schema.
+

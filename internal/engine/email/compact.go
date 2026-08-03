@@ -121,6 +121,24 @@ var (
 	quotePrefixRe = regexp.MustCompile(`(?m)^\s*>+\s?`)
 	replyHeaderRe = regexp.MustCompile(`(?mi)^\s*(On .{5,120}\bwrote:\s*$|-{2,}\s*Original Message\s*-{2,}|_{5,}\s*$|From:\s.+\nSent:\s.+)`)
 
+	// Machine-generated tracking URLs. Marketing and property-management mail
+	// carries click-tracking links whose query strings run to hundreds or
+	// thousands of characters of encoded opaque state — one measured chunk was
+	// nine tokens, four of them over 60 characters, the longest 1792.
+	//
+	// Removing them is the same operation as removing quoted chains: noise
+	// that carries no evidential weight, deleted rather than rewritten. They
+	// matter beyond tidiness — a chunk that is mostly encoded blob cannot be
+	// meaningfully scored by a cross-encoder, so it lands near-arbitrarily
+	// around zero and surfaces against unrelated questions.
+	//
+	// The length bound is deliberate. Short URLs are shared by people and can
+	// carry meaning (a maps link, a document link); long ones are generated.
+	// Measured against a real corpus, this matches only email — zero PDF,
+	// text, or spreadsheet chunks — so extracted statements, whose long dotted
+	// leader runs superficially resemble long tokens, are untouched.
+	longURLRe = regexp.MustCompile(`https?://[^\s>)\]]{120,}`)
+
 	// Signature boilerplate.
 	sigDelimRe = regexp.MustCompile(`(?m)^--\s*$`)
 
@@ -133,7 +151,8 @@ var (
 // This is deliberately not summarisation: it strips quoted chains, HTML and
 // signature boilerplate, all of which are either duplicated elsewhere in the
 // corpus or carry no evidential value. The author's own words survive intact
-// (§4.3).
+// (§4.3), and strips machine-generated tracking URLs, which carry no words at
+// all.
 func Compact(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 
@@ -148,6 +167,7 @@ func Compact(s string) string {
 	}
 
 	s = quotePrefixRe.ReplaceAllString(s, "")
+	s = longURLRe.ReplaceAllString(s, "")
 	s = spaceRunRe.ReplaceAllString(s, " ")
 	s = blankRunRe.ReplaceAllString(s, "\n\n")
 

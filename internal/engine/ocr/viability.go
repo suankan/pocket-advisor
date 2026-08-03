@@ -28,7 +28,29 @@ const (
 	MinDimension = 200
 	MinArea      = 40_000
 	MinBytes     = 8 << 10
-	MinOCRChars  = 20
+
+	// MinOCRWords is the post-OCR gate: how many word-like tokens the
+	// extracted text must contain to be worth indexing.
+	//
+	// This replaces a 20-alphanumeric-character threshold that was far too
+	// weak. Measured against a real corpus, OCR over a *photograph* — a room,
+	// a building exterior — reliably produces hundreds of tokens and zero
+	// words: "| | | | | fare я — = р = ——,_ | —< ГИ". That passed the old
+	// gate easily, and such chunks then scored spuriously against unrelated
+	// questions, because a cross-encoder cannot meaningfully rank character
+	// soup and lands near-arbitrarily around zero.
+	//
+	// Five is where the corpus separates. Below it sits photography and
+	// letterhead fragments; at and above it sits real content — payment
+	// screenshots ("Reference no. E1907241453 Amount $4,333.55"), forms,
+	// scanned correspondence. The cost is a handful of logo images whose few
+	// words (a firm or school name) already appear in the surrounding
+	// document text.
+	MinOCRWords = 5
+
+	// minWordRunes is what counts as a word. Shorter runs are the noise OCR
+	// hallucinates out of edges and texture.
+	minWordRunes = 4
 )
 
 // Viable reports whether an image is worth OCRing, and why not if it is not.
@@ -54,16 +76,35 @@ func Viable(data []byte, width, height int) (bool, string) {
 }
 
 // EnoughText applies the post-hoc half of the gate: an image that OCRs to
-// almost nothing is recorded as not viable rather than retried.
+// almost nothing — or to nothing meaningful — is recorded as not viable
+// rather than retried.
+//
+// Counting characters is not enough. A photograph yields plenty of letters
+// and no words, so the test is how many *word-like* tokens survive: runs of
+// at least minWordRunes letters. Digits deliberately do not count toward a
+// word, since OCR noise is dense in stray digits, but a token may mix them.
 func EnoughText(s string) bool {
-	n := 0
+	words, run := 0, 0
+	flush := func() {
+		if run >= minWordRunes {
+			words++
+		}
+		run = 0
+	}
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			n++
-			if n >= MinOCRChars {
+		switch {
+		case unicode.IsLetter(r):
+			run++
+		case unicode.IsDigit(r):
+			// Neither extends nor breaks a word: "E1907241453" is not a word,
+			// but "Grammar2" should still count as one.
+		default:
+			flush()
+			if words >= MinOCRWords {
 				return true
 			}
 		}
 	}
-	return false
+	flush()
+	return words >= MinOCRWords
 }

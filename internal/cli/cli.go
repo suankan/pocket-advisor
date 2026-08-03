@@ -126,7 +126,7 @@ func Parse(args []string) (*Options, error) {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 
 	fs.StringVar(&o.ConfigPath, "config", config.DefaultPath, "infrastructure config path")
-	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "workspaces/workspace-config.yaml", "workspace registry path")
+	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "", "workspace registry path (default: infra config's workspaces.config)")
 	fs.StringVar(&o.WorkspaceID, "workspace-id", "", "workspace id within the registry")
 
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "upload, enqueue and process to completion")
@@ -235,6 +235,20 @@ func (o *Options) Mode() string {
 // Run dispatches to the selected mode.
 func Run(o *Options) error {
 	cfg, err := config.Load(o.ConfigPath)
+	if err == nil {
+		// Reconcile the flag and the config onto one path, in both directions.
+		// The flag previously reached only the two modes that passed it to
+		// workspace.Load directly; anything resolving through cfg.Workspace
+		// kept the config's own value, so --workspace-config silently did
+		// nothing for most modes. That is invisible when the process runs from
+		// the repository root and fatal when it does not — which is exactly
+		// how an MCP client launches it.
+		if o.WorkspaceConfig != "" {
+			cfg.WorkspacesConfigPath = o.WorkspaceConfig
+		} else {
+			o.WorkspaceConfig = cfg.WorkspacesConfigPath
+		}
+	}
 	if err != nil {
 		return err
 	}

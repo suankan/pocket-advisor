@@ -352,8 +352,29 @@ workspace:
 
 Paths are relative on purpose: the binary reads `config.yaml` and the
 workspace registry from its working directory, which for a project-scoped
-server is the repository root. A client configured elsewhere needs absolute
-paths and an explicit `cwd`.
+server is the repository root.
+
+**Claude Desktop is different** — it has its own global config and launches
+servers from an arbitrary directory, so relative paths will not resolve. Edit
+`~/Library/Application Support/Claude/claude_desktop_config.json` and give
+absolute paths for the binary *and* both config files:
+
+```json
+{
+  "mcpServers": {
+    "case-documents": {
+      "command": "/Users/you/code/pocket-advisor/bin/pocket-advisor",
+      "args": ["--mcp", "--workspace-id", "case-documents-demo",
+               "--config", "/Users/you/code/pocket-advisor/config.yaml",
+               "--workspace-config", "/Users/you/code/pocket-advisor/workspaces/workspace-config.yaml"]
+    }
+  }
+}
+```
+
+`--workspace-config` is required as well as `--config`, because the registry
+path inside `config.yaml` is itself relative. Restart Claude Desktop after
+editing; the tool appears in the tools menu once the server starts.
 
 Add an entry per workspace you want reachable — a server binds to one
 workspace at startup and refuses to serve if its database holds another.

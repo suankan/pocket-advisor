@@ -38,6 +38,7 @@ type Options struct {
 	CreateWorkspace bool
 	DeleteWorkspace bool
 	Query           string
+	MCP             bool
 
 	LiveNotify  bool
 	TopK        int
@@ -72,6 +73,10 @@ Modes (exactly one):
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
                       (retrieval-design.md §6.1)
+  --mcp               serve the read path as an MCP tool over stdio, so an
+                      agent can search the corpus and write cited answers.
+                      This is where answer generation happens — outside this
+                      binary (retrieval-design.md §6.1)
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
   --bootstrap-schema  probe the embedding endpoint and (re-)apply this
@@ -110,6 +115,7 @@ Every other pool is sized from the host's CPU count and is not configurable.
 Examples:
   pocket-advisor --ingest-all --workspace-id test
   pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
+  pocket-advisor --mcp --workspace-id test
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -134,6 +140,7 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.CreateWorkspace, "create-workspace", false, "provision this workspace's database, bucket, and NATS account")
 	fs.BoolVar(&o.DeleteWorkspace, "delete-workspace", false, "tear down this workspace's database, bucket, and NATS account")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
+	fs.BoolVar(&o.MCP, "mcp", false, "serve the read path as an MCP tool over stdio")
 
 	fs.IntVar(&o.TopK, "top-k", 0, "maximum results for --query (0 = config default)")
 	fs.BoolVar(&o.JSON, "json", false, "emit --query results as JSON")
@@ -176,6 +183,7 @@ func (o *Options) modes() []string {
 		{o.CreateWorkspace, "--create-workspace"},
 		{o.DeleteWorkspace, "--delete-workspace"},
 		{o.Query != "", "--query"},
+		{o.MCP, "--mcp"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -189,8 +197,8 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --delete-data, --forget, --bootstrap-schema, --create-workspace, " +
-			"--delete-workspace (--help for details)")
+			"--query, --mcp, --delete-data, --forget, --bootstrap-schema, " +
+			"--create-workspace, --delete-workspace (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -254,6 +262,8 @@ func Run(o *Options) error {
 		return runDeleteWorkspace(o, cfg, logs)
 	case o.Query != "":
 		return runQuery(o, cfg, logs)
+	case o.MCP:
+		return runMCP(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

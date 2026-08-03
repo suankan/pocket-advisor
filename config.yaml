@@ -63,6 +63,22 @@ infra:
     concurrency: 16
     timeout: 60s
 
+  # Read path (retrieval-design.md §8). Only where the models live is a
+  # setting — which model is fixed in code, because every latency and quality
+  # figure in that design was measured against a specific pair, and both slots
+  # degrade silently rather than erroring when filled wrongly.
+  reranking:
+    endpoint: http://localhost:8000/v1/rerank
+    timeout: 60s
+
+  # Query preparation only — decomposition. Never answer generation, which
+  # happens outside this codebase over MCP (§6.1). Thinking must be disabled
+  # on this model server-side: with it on, the call takes 5x as long and
+  # returns chain-of-thought instead of queries.
+  llm:
+    endpoint: http://localhost:8000/v1/chat/completions
+    timeout: 30s
+
   observability:
     metrics_port: 9090
     log_level: info

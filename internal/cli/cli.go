@@ -37,8 +37,13 @@ type Options struct {
 	Bootstrap       bool
 	CreateWorkspace bool
 	DeleteWorkspace bool
+	Query           string
 
 	LiveNotify  bool
+	TopK        int
+	JSON        bool
+	NoRerank    bool
+	NoDecompose bool
 	DryRun      bool
 	Yes         bool
 	OCRLangs    string
@@ -63,6 +68,10 @@ Modes (exactly one):
                       to actually be deployed for this workspace (§5.2); as
                       of this writing that is only "test". Implies
                       --live-notify.
+  --query <question>  ask the corpus a question and print the matching
+                      sources, with citations. Returns evidence, not an
+                      answer: generation happens outside this binary
+                      (retrieval-design.md §6.1)
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
   --bootstrap-schema  probe the embedding endpoint and (re-)apply this
@@ -82,6 +91,12 @@ Common:
   --workspace-config <path> registry path (default workspaces/workspace-config.yaml)
   --config <path>           infrastructure config (default config.yaml)
 
+Query options:
+  --top-k N                 maximum results (default 15)
+  --json                    machine-readable output
+  --no-rerank               skip the cross-encoder; serve fused order
+  --no-decompose            do not split a multi-topic question
+
 Options:
   --yes                     skip destructive confirmation prompts
   --dry-run                 report what would be uploaded, write nothing
@@ -94,6 +109,7 @@ Every other pool is sized from the host's CPU count and is not configurable.
 
 Examples:
   pocket-advisor --ingest-all --workspace-id test
+  pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -117,6 +133,12 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Bootstrap, "bootstrap-schema", false, "probe the embedding endpoint and apply the DDL")
 	fs.BoolVar(&o.CreateWorkspace, "create-workspace", false, "provision this workspace's database, bucket, and NATS account")
 	fs.BoolVar(&o.DeleteWorkspace, "delete-workspace", false, "tear down this workspace's database, bucket, and NATS account")
+	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
+
+	fs.IntVar(&o.TopK, "top-k", 0, "maximum results for --query (0 = config default)")
+	fs.BoolVar(&o.JSON, "json", false, "emit --query results as JSON")
+	fs.BoolVar(&o.NoRerank, "no-rerank", false, "skip reranking; serve fused order (--query)")
+	fs.BoolVar(&o.NoDecompose, "no-decompose", false, "do not split the question into sub-queries (--query)")
 
 	fs.BoolVar(&o.DryRun, "dry-run", false, "report what would be uploaded, write nothing")
 	fs.BoolVar(&o.Yes, "yes", false, "skip destructive confirmation prompts")
@@ -153,6 +175,7 @@ func (o *Options) modes() []string {
 		{o.Bootstrap, "--bootstrap-schema"},
 		{o.CreateWorkspace, "--create-workspace"},
 		{o.DeleteWorkspace, "--delete-workspace"},
+		{o.Query != "", "--query"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -166,8 +189,8 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--delete-data, --forget, --bootstrap-schema, --create-workspace, --delete-workspace " +
-			"(--help for details)")
+			"--query, --delete-data, --forget, --bootstrap-schema, --create-workspace, " +
+			"--delete-workspace (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -229,6 +252,8 @@ func Run(o *Options) error {
 		return runCreateWorkspace(o, cfg, logs)
 	case o.DeleteWorkspace:
 		return runDeleteWorkspace(o, cfg, logs)
+	case o.Query != "":
+		return runQuery(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

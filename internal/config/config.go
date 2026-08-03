@@ -37,12 +37,28 @@ const (
 	// calls it runs on the machine that serves it, so the host.docker.internal
 	// indirection the in-cluster workers needed is gone.
 	defaultEmbeddingEndpoint = "http://localhost:8000/v1/embeddings"
+	defaultRerankEndpoint    = "http://localhost:8000/v1/rerank"
+	defaultLLMEndpoint       = "http://localhost:8000/v1/chat/completions"
 
 	// Matches the CLI's own --workspace-config default (internal/cli).
 	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
 
 	// DefaultPath is where Load looks unless told otherwise.
 	DefaultPath = "config.yaml"
+)
+
+// The read path's models are fixed rather than configured
+// (retrieval-design.md §8). Every latency and quality figure in that design
+// was measured against these two, so a swap silently invalidates the numbers
+// it rests on — and both slots fail quietly rather than loudly when filled
+// wrongly: a non-cross-encoder in the rerank slot reorders badly without
+// erroring, and a reasoning model in the LLM slot returns chain-of-thought
+// where queries were expected. The embedding model stays configurable by
+// contrast because it has a real forcing case: schema_metadata records it and
+// the vector dimension must match (ingestion-design.md §4.4).
+const (
+	RerankModel = "jina-reranker-v3-mlx"
+	LLMModel    = "Qwen3.5-4B-MLX-4bit"
 )
 
 // RustFS holds the connection and credential settings for Tier 1. Bucket is
@@ -109,12 +125,54 @@ type Embedding struct {
 	Concurrency int
 }
 
+// Reranking and LLM carry only where the model lives. Which model is not
+// configurable — see RerankModel / LLMModel and retrieval-design.md §8: every
+// latency and quality figure in that design was measured against those two
+// specifically, and both slots degrade silently rather than erroring when
+// filled wrongly.
+type Reranking struct {
+	Endpoint string
+	APIKey   string
+	Timeout  time.Duration
+}
+
+// LLM is for query preparation only — decomposition (retrieval-design.md
+// §3.6). It is never used for answer generation, which happens outside this
+// codebase entirely (§6.1). It is local, fast and already wired up, which is
+// exactly what makes that worth stating.
+type LLM struct {
+	Endpoint string
+	APIKey   string
+	Timeout  time.Duration
+}
+
+// Query is the read-path tuning surface. None of it invalidates the index.
+type Query struct {
+	VecCandidates        int
+	FTSCandidates        int
+	RRFK                 int
+	DefaultTopK          int
+	RerankEnabled        bool
+	RerankCandidates     int
+	MinRelevanceScore    float64
+	MaxPerThread         int
+	AnswerContextChars   int
+	LexicalDFCeiling     float64
+	DecomposeEnabled     bool
+	MaxSubQueries        int
+	PoolFloorDenseOnly   int
+	PoolFloorPerSubQuery int
+}
+
 type Config struct {
 	RustFS     RustFS
 	Postgres   Postgres
 	NATS       NATS
 	Kubernetes Kubernetes
 	Embedding  Embedding
+	Reranking  Reranking
+	LLM        LLM
+	Query      Query
 
 	// WorkspacesConfigPath points at the workspace registry
 	// (workspaces/workspace-config.yaml by default) — the same file
@@ -162,6 +220,14 @@ type file struct {
 			Concurrency int    `yaml:"concurrency"`
 			Timeout     string `yaml:"timeout"`
 		} `yaml:"embedding"`
+		Reranking struct {
+			Endpoint string `yaml:"endpoint"`
+			Timeout  string `yaml:"timeout"`
+		} `yaml:"reranking"`
+		LLM struct {
+			Endpoint string `yaml:"endpoint"`
+			Timeout  string `yaml:"timeout"`
+		} `yaml:"llm"`
 		Observability struct {
 			MetricsPort int    `yaml:"metrics_port"`
 			LogLevel    string `yaml:"log_level"`
@@ -227,6 +293,24 @@ func defaults() *Config {
 			Timeout:     60 * time.Second,
 			Concurrency: 8,
 		},
+		Reranking: Reranking{Endpoint: defaultRerankEndpoint, Timeout: 60 * time.Second},
+		LLM:       LLM{Endpoint: defaultLLMEndpoint, Timeout: 30 * time.Second},
+		Query: Query{
+			VecCandidates:        50,
+			FTSCandidates:        50,
+			RRFK:                 60,
+			DefaultTopK:          15,
+			RerankEnabled:        true,
+			RerankCandidates:     24,
+			MinRelevanceScore:    0.0,
+			MaxPerThread:         3,
+			AnswerContextChars:   120000,
+			LexicalDFCeiling:     0.5,
+			DecomposeEnabled:     true,
+			MaxSubQueries:        4,
+			PoolFloorDenseOnly:   6,
+			PoolFloorPerSubQuery: 4,
+		},
 		MetricsPort: 9090,
 		LogLevel:    "info",
 		LogDir:      "logs",
@@ -285,6 +369,24 @@ func applyFile(c *Config, path string) error {
 		c.Embedding.Timeout = d
 	}
 
+	setStr(&c.Reranking.Endpoint, in.Reranking.Endpoint)
+	if in.Reranking.Timeout != "" {
+		d, err := time.ParseDuration(in.Reranking.Timeout)
+		if err != nil {
+			return fmt.Errorf("%s: infra.reranking.timeout: %w", path, err)
+		}
+		c.Reranking.Timeout = d
+	}
+
+	setStr(&c.LLM.Endpoint, in.LLM.Endpoint)
+	if in.LLM.Timeout != "" {
+		d, err := time.ParseDuration(in.LLM.Timeout)
+		if err != nil {
+			return fmt.Errorf("%s: infra.llm.timeout: %w", path, err)
+		}
+		c.LLM.Timeout = d
+	}
+
 	if in.Observability.MetricsPort > 0 {
 		c.MetricsPort = in.Observability.MetricsPort
 	}
@@ -302,6 +404,11 @@ func applyEnv(c *Config) {
 	c.RustFS.UseSSL = envBool("RUSTFS_USE_SSL", c.RustFS.UseSSL)
 	c.RustFS.RootAccessKey = env("RUSTFS_ROOT_ACCESS_KEY", c.RustFS.RootAccessKey)
 	c.RustFS.RootSecretKey = env("RUSTFS_ROOT_SECRET_KEY", c.RustFS.RootSecretKey)
+
+	c.Reranking.Endpoint = env("RERANK_ENDPOINT", c.Reranking.Endpoint)
+	c.Reranking.APIKey = env("RERANK_API_KEY", c.Reranking.APIKey)
+	c.LLM.Endpoint = env("LLM_ENDPOINT", c.LLM.Endpoint)
+	c.LLM.APIKey = env("LLM_API_KEY", c.LLM.APIKey)
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
 

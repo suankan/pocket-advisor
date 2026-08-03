@@ -2292,5 +2292,35 @@ deliberate choice with a reason, not drift.
     decline is recorded as `IMAGE_NOT_VIABLE` rather than being silent.
 
     Applying either filter to existing data requires a re-ingest — both change
-    extraction, not the schema.
+    extraction, not the schema. Note that a re-ingest needs Tier 2 cleared
+    first (`TRUNCATE document_chunks, documents`) and nothing else: the scan
+    anti-joins the bucket against `documents`, so with rows present it
+    correctly finds nothing to do. Tier 1 is untouched, so the uploader
+    re-verifies all objects as duplicates and transfers nothing — 6m55s
+    against ~20 minutes for the original ingest.
+
+    **Verified, including what it did not fix.** After re-ingest: long URLs in
+    chunks went 213 to zero, `IMAGE_NOT_VIABLE` went 55 to 80, chunks 4,501 to
+    4,345, and no document was lost — declined images keep their row and their
+    Tier 1 object. Of three off-domain questions that previously leaked
+    packets, two now return nothing.
+
+    The third still returns two, and neither is worth chasing:
+
+    * One photograph OCR chunk survives with **14** word-like tokens — the
+      same count as a genuine payment screenshot ("Reference no. E1907241453
+      Amount $4,333.55"). Real content and noise are interleaved from 5 words
+      upward: an awards image at 5, an email signature block at 7, property
+      photographs at 6 and 7. No threshold separates them, so the gate is at
+      its useful limit and raising it would trade financial evidence for one
+      noisy chunk.
+    * The other is not noise at all — a real email whose entire body is
+      "Спасибо". A one-word message has almost no semantic content and scores
+      near-arbitrarily, which is the limitation `retrieval-design.md` §12
+      item 8 already records, not something these filters introduced.
+
+    The lesson worth keeping is that extraction filters have a floor set by
+    the corpus, not by the filter: past a point, the noise and the evidence
+    are statistically indistinguishable, and the honest move is to stop rather
+    than tune until something valuable disappears.
 

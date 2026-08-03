@@ -1,11 +1,15 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.3.0`
+**Version:** `2.3.1`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+
+**Changes in 2.3.1:** records the endpoint constraint that makes the
+decomposition stage stateless (§3.6) and the multi-turn session boundary
+(§12 item 7), both with measurements. No design changes.
 
 **Changes in 2.3.0:** the lexical leg is disjunction-only. 2.2.0 specified an
 AND-then-OR fallback; measurement showed the AND branch essentially never
@@ -33,7 +37,7 @@ removed the per-chunk context header from both the vector and the lexical
 index, so §3.5 is rewritten from "the reranker must see header + text" to the
 opposite, and situating a passage becomes wholly this document's job. Adds the
 one-line reply problem and the typed-edge constraint that any later
-conversation-graph work has to respect (§3.5, §12 item 5).
+conversation-graph work has to respect (§3.5, §12 item 8).
 
 **Changes in 2.0.0:** stabilised from a design sketch into an
 implementation-ready specification, and corrected against the shipped code.
@@ -536,7 +540,7 @@ So the intended shape is: match on chunks that *do* carry content, then walk
 to the thread and present the exchange in order, letting a one-liner arrive
 as a positioned neighbour of the message that gives it meaning rather than as
 a standalone hit. Whether that is sufficient is genuinely unknown until the
-linear pipeline is running and can be measured — see §12 item 5.
+linear pipeline is running and can be measured — see §12 item 8.
 
 **On edge types, if this is later extended.** A metadata edge asserts a fact
 about the world (*B was composed as a reply to A*); a similarity edge asserts
@@ -607,6 +611,19 @@ that is what the answer must be relevant to.
 * **Record the sub-queries in the result.** Silently transforming someone's
   question is exactly the kind of invisible behaviour §7.1 exists to prevent,
   and for an evidence corpus the reader must be able to see what was searched.
+
+**Use `/v1/chat/completions`, never `/v1/responses`.** The endpoint choice is
+a correctness constraint, not a preference. `chat/completions` is stateless —
+verified: a codeword given in one call is entirely unknown to the next, since
+each request carries its own complete `messages` array. `/v1/responses`
+exposes `previous_response_id`, `store` and `conversation`, which is
+server-side conversation state, and it is the newer and apparently more
+capable API — exactly the one a developer would reach for by default.
+
+Statelessness here is what makes principle 6 true rather than aspirational.
+The only way anything reaches the model is by being composed into the prompt,
+so there is no accidental context channel to defend against, and the same
+question always produces the same search.
 
 **Two known behaviours, neither disqualifying:**
 
@@ -1120,7 +1137,49 @@ re-litigated from scratch.
    disjunction. The two have been tuned independently so far, and the
    interaction is unmeasured.
 
-7. **Whether thread-walk expansion is sufficient for one-line replies
+7. **Multi-turn sessions are entirely out of scope, deliberately.** `Request`
+   carries a question, not a conversation, and there is no chat surface, API
+   or UI to have a session with. Recording the decision because the failure
+   mode is someone appending history to the decomposition prompt casually.
+
+   Measured against `Qwen3.5-4B-MLX-4bit` with two turns of history:
+
+   * *Contamination is milder than expected.* A topic pivot — bank statements
+     in history, "what about the children's school holidays?" as the question
+     — produced no bank-statement leakage.
+   * *But references go unresolved unless explicitly asked for.* "When was
+     that agreed?" passed through untouched and would embed to nothing.
+   * *And asking for resolution causes inflation.* A self-contained question
+     was expanded from one sub-query into three; a pivot produced the same
+     sub-query twice.
+
+   That last one is the real hazard, and it is not contamination. Duplicate
+   and near-duplicate sub-queries collide with the reserved pool floors
+   (§4.1): three near-identical sub-queries would claim twelve of
+   twenty-four slots for one topic, so the floors amplify redundancy instead
+   of protecting diversity — the exact inverse of their purpose.
+
+   If a session surface is ever built, the shape that preserves everything
+   else in this document is: **contextualisation and decomposition are one
+   call**, since both transform an utterance into the queries actually run,
+   and **that stage's output is a self-contained question**. Everything
+   downstream then still receives a complete question and stays stateless.
+   With bounded history (2-3 turns, questions only, never retrieved content),
+   sub-query deduplication before fan-out, floors applied per *distinct*
+   sub-query, and the rewritten question recorded alongside the original.
+
+   The constraint that makes this safe already holds: `/v1/chat/completions`
+   keeps no state, so history can only reach the model by being composed into
+   a prompt deliberately (§3.6).
+
+   Reproducibility is the reason to be careful rather than the reason to
+   avoid it. Today the same question always searches for the same thing; with
+   history it would not, and for an evidence corpus "why did this return
+   different documents last time" must be answerable. Recording the rewritten
+   question makes the session an auditable *input* to a reproducible query
+   rather than an invisible modifier of one.
+
+8. **Whether thread-walk expansion is sufficient for one-line replies
    (§3.5).** The intended answer is that a contentless message arrives as a
    positioned neighbour in its thread rather than as a standalone hit.
    Unknown until the linear pipeline runs and can be measured. If it is not

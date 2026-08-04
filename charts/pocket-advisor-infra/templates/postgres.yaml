@@ -20,9 +20,9 @@ database, so pgvector would be installed where nothing uses it and the
 halfvec(N) DDL would fail on a type the application database has never heard
 of. Verified against the CRD schema, which says so explicitly.
 
-The schema itself is still applied by --create-workspace from the host: the
-vector dimension is resolved by probing the embedding endpoint on localhost,
-which nothing inside the cluster can reach.
+The schema itself is still applied from the host, by --ingest-all and --listen
+on every run: the vector dimension is resolved by probing the embedding
+endpoint on localhost, which nothing inside the cluster can reach.
 */}}
 {{- range $.Values.workspaces }}
 ---
@@ -79,8 +79,8 @@ spec:
       secret:
         name: postgres-app
       postInitApplicationSQL:
-        # Superuser-only, and the reason this cannot be folded into the DDL
-        # --create-workspace applies as the application user.
+        # Superuser-only, and the reason this cannot be folded into the DDL the
+        # host applies as the application user.
         - CREATE EXTENSION IF NOT EXISTS vector;
 
   storage:

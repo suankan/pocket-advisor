@@ -38,12 +38,13 @@ GO    := mise exec -- go
 GOFMT := mise exec -- gofmt
 endif
 
-.PHONY: all build test race vet fmt lint require-workspace deploy-operator \
-        deploy-infra deploy-all destroy-infra destroy-state clean
+.PHONY: all build test race vet fmt lint deploy-infra destroy-infra \
+        destroy-state clean
 
-# Every cluster-facing target acts on exactly one workspace, and getting it
-# wrong would deploy into — or destroy — the wrong namespace. Fail before
-# touching anything rather than defaulting to something plausible.
+# No target takes a workspace. One release renders every workspace from
+# WS_VALUES, so adding or removing one is an edit to that file followed by
+# `make deploy-infra` — there is no per-workspace command to point at the
+# wrong namespace.
 
 all: build
 
@@ -66,11 +67,13 @@ lint: fmt vet
 	helm lint $(CHART)
 	@# The NATS account and the JetStream streams are chart-rendered now, not
 	@# created by Go, so the unit tests that covered addAccountBlock and
-	@# EnsureStreams went with them. The account is keyed by workspace id —
-	@# unlike the bucket and database, it shares one server (deviation 23). This replaces both: render a throwaway
+	@# EnsureStreams went with them. This replaces both: render a throwaway
 	@# workspace and check its account reaches nats-server.conf and its streams
-	@# reach Stream CRDs. --set rather than a committed fixture, so the chart's
-	@# own values.yaml stays the single source of truth for the shape.
+	@# reach Stream CRDs. The account is keyed by workspace id — unlike the
+	@# bucket and database, it shares one server (deviation 23) — so grepping
+	@# for the id is what proves the account block rendered at all.
+	@# --set rather than a committed fixture, so the chart's own values.yaml
+	@# stays the single source of truth for the shape.
 	@helm template $(RELEASE) $(CHART) \
 	  --set rustfs.credentials.rootUser=lint \
 	  --set rustfs.credentials.rootPassword=lint \

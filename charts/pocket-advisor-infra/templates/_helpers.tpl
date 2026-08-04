@@ -43,7 +43,7 @@ name "should be the app name, reflecting the entire app" and version "can be
 set to {{ .Chart.AppVersion }}". Helm's reading assumes one app per chart and
 leaves component to distinguish the pieces, which is what we do: every object
 is name: pocket-advisor, and component says object-store / database /
-message-bus / rustfs-setup.
+message-bus.
 
 An earlier revision used the Kubernetes reading, with name per workload and
 version from the image tag. Reverted deliberately — the image tag is still on
@@ -51,10 +51,11 @@ the pod spec, so nothing is lost that was not already visible, and having one
 answer to "what is app.kubernetes.io/name here" is worth more than a second
 copy of the image version.
 
-app.kubernetes.io/part-of is load-bearing rather than decorative: the
+app.kubernetes.io/part-of is load-bearing rather than decorative. The
 VMServiceScrape selector matches on it, so a workload missing this label is
-silently not scraped (ingestion-design.md §9.2). `make destroy-infra` likewise
-selects the setup Jobs on app.kubernetes.io/component.
+silently not scraped (ingestion-design.md §9.2), and `make deploy-infra` and
+`make destroy-state` both enumerate workspace namespaces by it — a namespace
+rendered without it would be waited on by nothing and wiped by nothing.
 
 None of this is a deletion index. Helm does not consult labels to decide what
 to remove on uninstall — that is driven entirely by the release manifest stored

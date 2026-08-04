@@ -26,9 +26,9 @@ import (
 // Cluster Service DNS defaults, matching a `pocket-advisor` release in the
 // `pocket-advisor` namespace.
 const (
-	// One release per workspace, one namespace per workspace, and the namespace
-	// *is* the workspace id. Every address below is therefore the same service
-	// name in a different namespace — hence one %s each, filled with the id.
+	// One namespace per workspace, and the namespace *is* the workspace id.
+	// Every address below is therefore the same service name in a different
+	// namespace — hence one %s each, filled with the id.
 	defaultRustFSEndpoint = "rustfs-io.%s.svc.cluster.local:9000"
 	// Not templated by workspace, unlike RustFS and Postgres: NACK does not
 	// deploy NATS, and its model is one server serving Stream CRDs across many
@@ -51,13 +51,13 @@ const (
 	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
 	defaultWorkspacesValuesPath = "workspaces/pocket-advisor-infra.yaml"
 
-	// Match charts/pocket-advisor/values.yaml's postgres.appUser and
+	// Match charts/pocket-advisor-infra/values.yaml's postgres.appUser and
 	// appDatabase: the owner and database CloudNativePG creates in every
 	// workspace cluster. Both are the same everywhere — the cluster is already
 	// per-workspace, so neither name carries information.
 	defaultPostgresAppUser = "app_user"
 
-	// Match charts/pocket-advisor/values.yaml's workspace.name: the bucket, the
+	// Match charts/pocket-advisor-infra/values.yaml's workspace.name: the bucket, the
 	// NATS account and the Postgres database are all called this, in every
 	// namespace. The namespace already says whose they are.
 	defaultWorkspaceResourceName = "workspace"
@@ -130,10 +130,10 @@ type NATS struct {
 // three systems agree with it.
 type Workspace struct {
 	ID string
-	// Namespace is the workspace id: one Helm release per workspace, installed
-	// into a namespace of its own. Every address below is the same service
-	// name inside it, which is why the names are constants — the namespace
-	// already says whose they are (deviation 21).
+	// Namespace is the workspace id: one release for the whole cluster, but a
+	// namespace per workspace. Every address below is the same service name
+	// inside it, which is why the names are constants — the namespace already
+	// says whose they are (deviations 21, 24).
 	Namespace  string
 	ValuesPath string
 
@@ -290,9 +290,9 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// valuesFile mirrors workspaces/values-<id>.yaml — the private override Helm
-// is given with -f, parsed per workspace so one file configures both the chart
-// and this binary and the two cannot disagree about a password.
+// valuesFile mirrors workspaces/pocket-advisor-infra.yaml — the private
+// override Helm is given with -f, so one file configures both the chart and
+// this binary and the two cannot disagree about a password.
 //
 // Credentials only. Every resource name is a constant now: one release per
 // namespace means the namespace identifies the workspace, so a name derived
@@ -486,9 +486,10 @@ func (c *Config) RequireEmbedding() error {
 	return nil
 }
 
-// Workspace resolves a workspace's secrets by id. Everything else about its
-// resources (database, role, bucket, identity, NATS account/user names) is
-// derived from id by convention (workspace-isolation.md §2), not stored.
+// Workspace resolves a workspace's secrets by id, and returns every address
+// and name already resolved so callers never derive one themselves. Only the
+// NATS account is named after the id; the bucket, database and owner are
+// constants, because a namespace holds one of each (workspace-isolation.md §2).
 func (c *Config) Workspace(id string) (Workspace, error) {
 	if id == "" {
 		return Workspace{}, fmt.Errorf("workspace id is required")
@@ -568,8 +569,9 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 }
 
 // WorkspacePostgresDSN builds the connection string a workspace's own role
-// uses, from the admin DSN's host/port and the workspace's own database,
-// role, and password (workspace-isolation.md §2.1, §3).
+// uses, from its cluster's primary Service and its own database, owner and
+// password (workspace-isolation.md §2.1, §3). It is the only Postgres
+// connection string in this project: there is no administrative one.
 func (c *Config) WorkspacePostgresDSN(id string) (string, error) {
 	w, err := c.Workspace(id)
 	if err != nil {

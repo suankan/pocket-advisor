@@ -85,9 +85,9 @@ func describe(ctx context.Context, docs *postgres.DocumentRepo, workspaceID stri
 	return fmt.Sprintf("%d document(s) currently indexed", len(known)), nil
 }
 
-// --bootstrap-schema lived here and was removed. It duplicated
-// provision.applyWorkspaceSchema step for step — workspace DSN, RequireEmbedding,
-// Probe, resolve model, ApplySchema — without calling it, and every use it
-// covered is covered elsewhere: --create-workspace applies the schema on every
-// run, idempotently, and VerifyDimension catches endpoint drift at the start of
-// --ingest-all and --listen rather than when someone remembers to check.
+// --bootstrap-schema lived here and was removed. It duplicated the schema step
+// in internal/provision step for step — workspace DSN, RequireEmbedding, Probe,
+// resolve model, ApplySchema — without calling it, and every use it covered is
+// covered elsewhere: provision.EnsureWorkspace applies the schema idempotently
+// at the start of --ingest-all and --listen, and VerifyDimension catches
+// endpoint drift there too, rather than when someone remembers to check.

@@ -33,14 +33,15 @@ rustfs:
   apiPort: 9000
   consolePort: 9001
 
-  # One identity, and it is an administrative one: creating a workspace's
-  # bucket and its per-workspace user needs admin rights, and nothing else in
-  # the system uses these. Every read and write of documents happens as a
-  # workspace's own identity, from workspaces/values.yaml.
+  # The only administrative credential in the system, and the only one that is
+  # cluster-wide rather than per-workspace: the operator uses it to create each
+  # tenant's bucket and identity. Nothing reads or writes documents as it — that
+  # is always a workspace's own identity, whose secret is per-workspace under
+  # `workspaces:` in the values file.
   #
-  # Empty here on purpose — supply it in workspaces/values.yaml. The templates
-  # require it, so a deploy without that file fails loudly rather than falling
-  # back to a default password.
+  # Empty here on purpose — supply it in workspaces/pocket-advisor-infra.yaml.
+  # The templates `required` it, so a deploy without that file fails loudly
+  # rather than falling back to a default password.
   #
   # There used to be three identities: this one plus a global `pa-uploader`
   # and `pa-worker` pair, whose policies enforced the raw/-vs-extracted/ write
@@ -52,13 +53,12 @@ rustfs:
   credentials:
     rootUser: ""
     rootPassword: ""
-    # The identity every document read and write uses. Its access key is the
-    # workspace.name constant; only the secret varies per install.
-    secretKey: ""
 
   # Bucket notifications. There is no enable flag: the target's identity is
-  # written by `--create-workspace` into an optional Secret, so "configured"
-  # and "enabled" are the same fact (§5.2). Only the shape lives here.
+  # rendered into a Secret by templates/rustfs.yaml, which already holds every
+  # workspace's NATS password, so "configured" and "enabled" are the same fact
+  # (§5.2). Only the shape lives here. Which bucket publishes to that target is
+  # the one piece the CRD cannot express, so --ingest-all sets it (deviation 24).
   notify:
     subject: rustfs.events.raw
     jetstreamStreamName: RUSTFS_EVENTS
@@ -84,9 +84,10 @@ rustfs:
 # Pipeline Bus: NATS JetStream
 # ============================================================================
 nats:
-  # Empty here; supplied per install in workspaces/values-<id>.yaml.
-  credentials:
-    password: ""
+  # No credentials block here, unlike RustFS. NATS accounts are configuration
+  # this chart renders rather than resources an operator creates, so nothing
+  # ever authenticates to it as an administrator — every password is a
+  # workspace's own, under `workspaces:` in the values file.
 
   # RUSTFS_EVENTS' duplicate window. Must exceed RustFS's retry lifetime —
   # live-verified against beta.12, which refused to publish into a stream
@@ -110,8 +111,8 @@ nats:
 # ============================================================================
 postgres:
   # Managed by the CloudNativePG operator, one Cluster per workspace. The
-  # operator is a cluster-wide prerequisite, not part of this chart:
-  # `make deploy-operator`.
+  # operator installs with this chart as a dependency — see the Operators
+  # section at the bottom.
   #
   # The image is CNPG's own Postgres 18 build, which already carries pgvector —
   # so there is no separate pgvector image to keep in step with the server
@@ -126,11 +127,11 @@ postgres:
   # The owner of every workspace database. One name across all of them, because
   # each workspace has its own cluster now — there is nothing to separate
   # *within* one, so per-workspace roles bought nothing. Passwords still
-  # differ, one per workspace, from workspaces/values.yaml.
+  # differ, one per workspace, from workspaces/pocket-advisor-infra.yaml.
   appUser: app_user
-  # Empty here; supplied per install in workspaces/values-<id>.yaml.
-  credentials:
-    password: ""
+  # No credentials block here either: CloudNativePG creates each cluster and
+  # its owner, so there is no administrative connection to hold. Each
+  # workspace's own password lives under `workspaces:` in the values file.
 
   # The database inside every cluster. One name everywhere, because the cluster
   # is already per-workspace — see templates/postgres.yaml.
@@ -148,25 +149,39 @@ postgres:
     limits:   {cpu: "1000m", memory: "1Gi"}
 
 # ============================================================================
-# Workspace identity
+# Workspaces
 #
-# There is no list. One release per workspace, one namespace per workspace —
-# `make deploy-infra WORKSPACE=<id>` installs this chart into namespace <id>
-# with workspaces/values-<id>.yaml. The workspace this release serves is the
-# namespace it is in, so the chart never needs to be told an id.
+# The one list this chart is driven by, and the only place anything private
+# belongs. Empty here on purpose: this file is committed, and the real list
+# lives in the gitignored workspaces/pocket-advisor-infra.yaml that
+# `make deploy-infra` passes with -f. Every secret in it is `required` in the
+# templates, so a deploy that forgets -f fails loudly rather than falling back
+# to a published default.
 #
-# That is also why every resource name below is a constant: the bucket, the
-# NATS account and the Postgres database are all `workspace`. Naming them after
-# the workspace would repeat, in three places, what the namespace already says.
+# One release renders every workspace: a namespace each, holding that
+# workspace's Postgres Cluster, RustFS Tenant and three JetStream Streams,
+# plus its account block in the shared NATS config (deviation 24).
 #
-# Only credentials vary between installs, and they live in
-# workspaces/values-<id>.yaml — empty here, and `required` in the templates, so
-# a deploy without that file fails loudly rather than falling back to a
-# published default.
+# Entries carry credentials and nothing else:
+#
+#   workspaces:
+#     - id: test
+#       rustfs:    {credentials: {secretKey: ...}}
+#       postgres:  {credentials: {password: ...}}
+#       nats:      {credentials: {password: ...}}
+#
+# `id` is the namespace, and it is the NATS account and user name — accounts
+# share one server, so the id is the only thing keeping them apart. Everything
+# else is the constant below.
 # ============================================================================
+workspaces: []
+
+# The bucket, the Postgres database and the RustFS identity, in every
+# workspace. One value, because they are deliberately identical: each lives
+# alone in a namespace named after its workspace, so a workspace-derived name
+# would repeat, in three places, what the address already says. Note the NATS
+# account is *not* this — see above.
 workspace:
-  # The bucket, NATS account and Postgres database name. One value, because
-  # they are deliberately identical.
   name: workspace
 
 # ============================================================================

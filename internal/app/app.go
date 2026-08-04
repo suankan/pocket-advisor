@@ -100,7 +100,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		if err != nil {
 			return nil, err
 		}
-		// The bucket already exists from --create-workspace; this is a
+		// The bucket is declared by the workspace's Tenant CRD; this is a
 		// harmless, idempotent safety net, not the primary creation path.
 		if err := u.EnsureBucket(ctx); err != nil {
 			return nil, err

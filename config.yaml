@@ -83,8 +83,9 @@ infra:
 workspaces:
   # What each workspace holds: its collections and where they live on disk.
   config: workspaces/workspace-config.yaml
-  # Its infrastructure credentials, the same file
-  # `make deploy-infra` passes to helm with -f, so the chart and
-  # this binary cannot disagree about a password. %s is the workspace id.
-  # Gitignored; the shape is documented in charts/pocket-advisor/values.yaml.
+  # Its infrastructure credentials — and only credentials; every resource name
+  # inside a workspace's namespace is a constant. One file for every workspace,
+  # the same one `make deploy-infra` passes to helm with -f, so the chart and
+  # this binary cannot disagree about a password. Gitignored; the shape is
+  # documented in charts/pocket-advisor-infra/values.yaml.
   values: workspaces/pocket-advisor-infra.yaml

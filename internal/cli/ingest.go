@@ -54,14 +54,14 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}()
 
 	needs := app.Needs{RustFS: true, Postgres: true, NATS: true, Metrics: true}
-	// Deliberately does NOT provision. An earlier revision had --ingest-all
-	// call CreateWorkspace idempotently, which was convenient and widened the
-	// most commonly run command to require shared root credentials
-	// (deviation 10 recorded that as a real cost at the time). Provisioning is
-	// now --create-workspace's job alone, so everything else — ingest, query,
-	// mcp — connects with one workspace's own credentials and nothing more.
-	// --scan needs it as much as --ingest-all does: it triggers work by
-	// touching raw/ objects, which only the uploader role may do (§5.1).
+	// An earlier revision had --ingest-all call CreateWorkspace idempotently,
+	// which was convenient and widened the most commonly run command to require
+	// shared root credentials (deviation 10 recorded that as a real cost at the
+	// time). There is no provisioning left to widen it: the stores are CRDs, and
+	// every mode — ingest, query, mcp — connects with one workspace's own
+	// credentials and nothing more (deviation 24).
+	// --scan needs the uploader role as much as --ingest-all does: it triggers
+	// work by touching raw/ objects, which only that role may do (§5.1).
 	if o.IngestAll || o.Scan {
 		needs.Uploader = true
 	}

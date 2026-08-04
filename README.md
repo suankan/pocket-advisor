@@ -43,9 +43,11 @@ kubectl config use-context pocket-advisor   # switch into it
 
 - **Every workspace is physically isolated**, not just logically separated.
   `--workspace-id <id>` doesn't just filter what a command touches — each
-  workspace has its own Postgres database+role, its own RustFS bucket+
-  identity, and its own NATS account+user, all named `<id>`. There is no
-  shared database or bucket left, and every mode requires `--workspace-id`.
+  workspace gets a namespace of its own containing its own Postgres *server*
+  and its own RustFS *server*, not a database and a bucket inside shared ones.
+  NATS is the single exception: one server for the cluster, with an account
+  per workspace, because accounts are its own tenancy boundary. Every mode
+  requires `--workspace-id`.
   A workspace's infrastructure is *declared*, not provisioned: the chart
   renders a `Cluster`, a `Tenant` and three `Stream` custom resources, and
   operators reconcile them. The binary creates none of it and holds no
@@ -58,10 +60,11 @@ kubectl config use-context pocket-advisor   # switch into it
 - **A workspace is described by two files, joined on `id`.**
   `workspaces/workspace-config.yaml` says what it *holds* — named
   *collections*, each a path on disk, plus bank-account details for financial
-  ones. `workspaces/values.yaml` says how to *reach* it — the database, bucket
-  and NATS names and credentials. Both are gitignored, and the second doubles
-  as the Helm values override `make deploy-infra` passes with `-f`, so the
-  chart and the CLI read the same credentials from one place.
+  ones. `workspaces/pocket-advisor-infra.yaml` says how to *reach* it, and
+  carries credentials and nothing else: every resource name inside a
+  workspace's namespace is a constant. Both are gitignored, and the second
+  doubles as the Helm values override `make deploy-infra` passes with `-f`, so
+  the chart and the CLI read the same credentials from one place.
 - **Ingestion is reconciliation, not events.** Every run compares the bucket
   against Postgres and processes the difference. That makes re-running free
   and interrupting safe.
@@ -250,12 +253,16 @@ OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
 and the defaults address the cluster directly:
 
 ```
-pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
-pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+# RustFS and Postgres are per workspace, in the workspace's own namespace.
+# The RustFS operator exposes each tenant's S3 API as <tenant>-io, and
+# CloudNativePG exposes each cluster's primary as <cluster>-rw. Both are named
+# plainly, because the namespace already says whose they are:
+rustfs-io.<workspace-id>.svc.cluster.local:9000
+postgres-rw.<workspace-id>.svc.cluster.local:5432
 
-# Postgres is one cluster per workspace; the operator exposes each primary
-# as <cluster>-rw, and the chart names the cluster <release>-<workspace-id>:
-pocket-advisor-<workspace-id>-rw.pocket-advisor.svc.cluster.local:5432
+# NATS is shared — one server in the release namespace, an account per
+# workspace — so this address is not templated:
+nats.pocket-advisor.svc.cluster.local:4222
 ```
 
 If the binary can't reach a store, check these resolve before anything else —
@@ -265,7 +272,7 @@ resolver and will report NXDOMAIN even when everything is fine; use `nc -vz`
 or `ping` instead:
 
 ```bash
-nc -vz pocket-advisor-test-rw.pocket-advisor.svc.cluster.local 5432
+nc -vz postgres-rw.test.svc.cluster.local 5432
 ```
 
 ## 3. Load a corpus
@@ -525,20 +532,25 @@ Set it in `config.yaml` under `infra.embedding.concurrency` to make it stick.
 ## 9. Upgrading the chart
 
 ```bash
-make deploy-infra    # upgrade --install, then waits for RustFS setup
+make deploy-infra    # upgrade --install, then waits for every store to be ready
 ```
 
-Prefer that over a bare `helm upgrade` — it waits for the three StatefulSets to
-roll out. If you run Helm directly, wait yourself:
+Prefer that over a bare `helm upgrade`. It retries past the CNPG webhook race
+on a fresh cluster, waits on each workspace's `Tenant` and `Cluster` rather
+than just on the release, and applies the RustFS operator's reconcile
+workaround. If you run Helm directly, wait yourself:
 
 ```bash
-helm upgrade pocket-advisor ./charts/pocket-advisor -f workspaces/values.yaml
-kubectl rollout status statefulset/pocket-advisor-rustfs --timeout=5m
+helm upgrade pocket-advisor ./charts/pocket-advisor-infra \
+  --namespace pocket-advisor -f workspaces/pocket-advisor-infra.yaml
+kubectl wait --for=condition=Ready tenant.rustfs.com --all --all-namespaces --timeout=5m
+kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io --all --all-namespaces --timeout=10m
 ```
 
-Do not omit `-f workspaces/values.yaml`. The chart's own `workspaces:` is an
-empty list, so an upgrade without it renders `nats-server.conf` with no
-accounts at all and every workspace loses its NATS identity.
+Do not omit `-f workspaces/pocket-advisor-infra.yaml`. The chart's own
+`workspaces:` is an empty list, so an upgrade without it renders
+`nats-server.conf` with no accounts at all and every workspace loses its NATS
+identity.
 
 **Adding or changing a workspace needs a `helm upgrade`.** Everything a
 workspace has is rendered from `workspaces/pocket-advisor-infra.yaml`, so an

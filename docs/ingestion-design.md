@@ -2817,6 +2817,43 @@ deliberate choice with a reason, not drift.
     Ready; ingest of `test` at 96 COMPLETED / 8 SKIPPED / 0 dead-lettered, and
     a query returning cited passages at +0.221.
 
+23. **NATS stayed shared while every other store went per-workspace
+    (2026-08-04).** Deviation 21 gave each workspace its own namespace and its
+    own everything; deviation 22 turned each store into a CRD. NATS is the one
+    exception, and the reason is the operator rather than a judgement about
+    isolation.
+
+    **NACK does not deploy NATS.** CloudNativePG deploys a Postgres per
+    `Cluster` and the RustFS operator deploys a server per `Tenant`, so
+    "per-workspace" falls out of using them at all. NACK reconciles JetStream
+    resources against a server that already exists, and its documented model is
+    one controller and one server serving `Stream` CRDs across many namespaces.
+    Giving each workspace its own NATS would have meant deploying and
+    maintaining N servers by hand, next to three operators doing exactly that
+    job for the other two stores.
+
+    **Accounts are NATS's own tenancy boundary, so nothing is given up.** One
+    server in the release namespace, one account per workspace, each with
+    JetStream enabled independently, its own store, its own limits and one user
+    that can see nothing outside it. A workspace's three `Stream` CRDs live in
+    its own namespace and each names its own server URL, authenticating as that
+    workspace's account — NACK is deliberately configured with no default
+    server URL, so a stream cannot land in the wrong account by omission.
+
+    **It is also the one place a name still carries the workspace id.** The
+    bucket, the database and the Postgres owner are all constants, because a
+    namespace holds exactly one of each and already says whose it is
+    (deviation 21). Accounts share one server, so the id is the only thing
+    keeping them apart.
+
+    Two smaller consequences. `config.yaml`'s `nats.url` is a plain address
+    while `rustfs.endpoint` and `postgres.host_template` are `%s` templates —
+    an asymmetry that looks like an oversight and is not. And `make
+    destroy-state` has to list the release namespace as well as the workspace
+    ones: the shared server's JetStream volume lives there, and only workspace
+    namespaces carry the `part-of` label, so selecting by label alone silently
+    left it behind.
+
 24. **One chart, and the binary stopped provisioning anything (2026-08-04).**
     Deviations 20 and 22 moved each store to a CRD; this collapses what was
     left. `charts/pocket-advisor-operators` merged into

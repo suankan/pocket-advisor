@@ -29,7 +29,7 @@ metadata:
   name: nats-config
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS server config; per-workspace account blocks are appended by --create-workspace") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS server config; one account block per workspace, rendered from the values file") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}

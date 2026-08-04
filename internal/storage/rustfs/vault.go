@@ -185,10 +185,9 @@ type Vault struct {
 // and bucket (workspace-isolation.md §2.2), with role enforced in application
 // code rather than by RustFS policy (§9).
 //
-// It takes the endpoint directly rather than a config.RustFS,
-// because the endpoint is now per-workspace: one release per namespace means
-// each workspace has its own RustFS, and config only holds the template
-// (deviation 21).
+// It takes the endpoint directly rather than a config.RustFS, because the
+// endpoint is now per-workspace: each workspace has its own RustFS tenant in a
+// namespace of its own, and config only holds the template (deviation 21).
 func NewForWorkspaceAt(endpoint string, useSSL bool, bucket, accessKey, secretKey string, role Role) (*Vault, error) {
 	return newVault(endpoint, bucket, accessKey, secretKey, useSSL, role)
 }

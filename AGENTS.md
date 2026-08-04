@@ -19,9 +19,18 @@ For every task, load in order:
 3. the one holistic doc for the concern the task touches:
    - [`docs/ingestion-design.md`](docs/ingestion-design.md) — everything
      write-path: contracts, schemas, every microservice, deployment,
-     codebase layout, observability.
+     codebase layout, observability. §12 "Implementation Deviations" is the
+     record of where the shipped system diverged from the rest of the doc,
+     and is usually the fastest way to find out why something looks as it
+     does.
    - [`docs/retrieval-design.md`](docs/retrieval-design.md) — everything
      read-path: candidate generation, fusion, reranking, expansion.
+   - [`docs/workspace-isolation.md`](docs/workspace-isolation.md) — how
+     workspaces are kept apart across all three stores, what the chart
+     declares, and what little the binary still does itself.
+   - [`docs/api-server-design.md`](docs/api-server-design.md) — the
+     longer-term API-first direction. Not built; read it before adding
+     anything that couples logic to the CLI.
    - `docs/generation-design.md` — answer generation, once that concern is
      taken up. Does not exist yet; do not create it speculatively.
 
@@ -31,9 +40,10 @@ task refers to before touching any document.
 
 ## Documentation philosophy — one doc per concern, no exceptions
 
-There are exactly two design docs today, and there will only ever be a
-handful: one per major concern (ingestion, retrieval, eventually
-generation). This is a deliberate rejection of the previous approach —
+There are exactly four design docs today, and there will only ever be a
+handful: one per major concern (ingestion, retrieval, workspace isolation,
+the API-first direction, eventually generation). This is a deliberate
+rejection of the previous approach —
 per-feature design files under `docs/<concern>/<feature>.md`, plus separate
 `roadmap.md` / `work-in-progress.md` / `changelog.md` bookkeeping files.
 That structure fragmented faster than anyone could keep it honest: designs
@@ -46,11 +56,16 @@ The rule going forward:
   existing section) in the relevant concern's doc — never a new file.** If
   you're about to create `docs/<anything>.md` for a specific feature, stop;
   put it in the holistic doc instead, under the section it belongs to.
-- **Update the doc in place when the implementation changes.** Both docs
-  already carry the machinery for this: an "Open Decisions" section (§11 in
-  each) for unresolved questions, and `ingestion-design.md` §12
-  "Implementation Deviations" for places the shipped code diverged from the
-  original design. Use those instead of a separate roadmap/changelog file.
+- **Update the doc in place when the implementation changes.** They already
+  carry the machinery for this: an "Open Decisions" section in each
+  (`ingestion-design.md` §11, `retrieval-design.md` §12,
+  `workspace-isolation.md` §10) for unresolved questions, and
+  `ingestion-design.md` §12 "Implementation Deviations" for places the
+  shipped code diverged from the original design. Use those instead of a
+  separate roadmap/changelog file. A design doc that still describes a
+  deleted mechanism is the failure mode this section exists to prevent —
+  rewrite the section, and keep only what explains why something present
+  looks the way it does.
 - **Git history is the changelog.** There is no `docs/changelog.md` to
   update — a descriptive commit message on the design-doc edit and the
   matching implementation is the record.

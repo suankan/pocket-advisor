@@ -25,7 +25,7 @@ func createRustFS(ctx context.Context, cfg *config.Config, id string, log *slog.
 		return err
 	}
 	if w.RustFSSecretKey == "" {
-		return fmt.Errorf("workspace %q has no rustfs_secret_key in config.yaml", id)
+		return fmt.Errorf("workspace %q has no rustfs.credentials.secretKey in %s", id, cfg.WorkspacesValuesPath)
 	}
 
 	admin, err := madmin.New(cfg.RustFS.Endpoint, cfg.RustFS.RootAccessKey, cfg.RustFS.RootSecretKey, cfg.RustFS.UseSSL)
@@ -52,7 +52,7 @@ func createRustFS(ctx context.Context, cfg *config.Config, id string, log *slog.
 		return fmt.Errorf("attach policy: %w", err)
 	}
 
-	v, err := rustfs.NewForWorkspace(cfg.RustFS, id, id, w.RustFSSecretKey, rustfs.RoleUploader)
+	v, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
 	if err != nil {
 		return fmt.Errorf("bucket client: %w", err)
 	}
@@ -74,7 +74,7 @@ func deleteRustFS(ctx context.Context, cfg *config.Config, id string, log *slog.
 	}
 
 	if w.RustFSSecretKey != "" {
-		v, err := rustfs.NewForWorkspace(cfg.RustFS, id, id, w.RustFSSecretKey, rustfs.RoleUploader)
+		v, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
 		if err != nil {
 			return fmt.Errorf("bucket client: %w", err)
 		}

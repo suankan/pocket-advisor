@@ -30,7 +30,11 @@ const (
 	// The maintenance connection used only to CREATE/DROP per-workspace
 	// databases and roles (workspace-isolation.md §3) — never used for
 	// document data, which lives in a database per workspace.
-	defaultPostgresAdminDSN = "postgres://postgres:postgrespassword@" +
+	//
+	// Carries no user or password: those are injected from
+	// workspaces/values.yaml by applyWorkspaceValues, so no credential is
+	// committed here or in config.yaml.
+	defaultPostgresAdminDSN = "postgres://" +
 		"pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/" +
 		"postgres?sslmode=disable"
 	// The embedding endpoint is a plain localhost address now: the process that
@@ -42,6 +46,7 @@ const (
 
 	// Matches the CLI's own --workspace-config default (internal/cli).
 	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
+	defaultWorkspacesValuesPath = "workspaces/values.yaml"
 
 	// DefaultPath is where Load looks unless told otherwise.
 	DefaultPath = "config.yaml"
@@ -61,20 +66,19 @@ const (
 	LLMModel    = "Qwen3.5-4B-MLX-4bit"
 )
 
-// RustFS holds the connection and credential settings for Tier 1. Bucket is
-// vestigial now that buckets are per-workspace (workspace-isolation.md §2.2)
-// — nothing reads it except the root-owned "pocket-advisor" bucket the chart
-// still creates, which the pipeline itself no longer uses.
+// RustFS holds the connection and credential settings for Tier 1. There is no
+// bucket here: every bucket is a workspace's own (workspace-isolation.md
+// §2.2), and the shared one this used to name was deleted along with the setup
+// Job that created it (ingestion-design.md deviation 19).
 type RustFS struct {
 	Endpoint string
-	Bucket   string
 	UseSSL   bool
 
-	// Root credentials, previously chart-only (values.yaml). Needed here too
-	// because the host binary itself now creates and deletes per-workspace
-	// buckets and identities (--create-workspace / --delete-workspace,
-	// workspace-isolation.md §3, §6) rather than only a one-time Helm-owned
-	// setup Job.
+	// Administrative credentials, read from workspaces/values.yaml — the same
+	// file Helm is given — rather than from committed config. Used only to
+	// create and delete a workspace's own bucket and identity
+	// (--create-workspace / --delete-workspace, workspace-isolation.md §3,
+	// §6); never to read or write documents.
 	RootAccessKey string
 	RootSecretKey string
 }
@@ -95,26 +99,35 @@ type NATS struct {
 	URL string
 }
 
-// Kubernetes holds what --create-workspace / --delete-workspace need to
-// reach the cluster's own API, for the NATS account provisioning step
-// (workspace-isolation.md §8). Nothing else in pocket-advisor talks to the
-// Kubernetes API — every other interaction is with RustFS, Postgres, or NATS
-// over their own protocols.
+// Kubernetes holds what --create-workspace / --delete-workspace need to reach
+// the cluster's own API: writing the RustFS notify identity as a Secret and
+// restarting RustFS to pick it up (§5.2). It no longer covers NATS account
+// provisioning — the chart renders those (deviation 18). Nothing else in
+// pocket-advisor talks to the Kubernetes API.
 type Kubernetes struct {
 	Namespace       string
 	NATSStatefulSet string
 	NATSConfigMap   string
 }
 
-// Workspace holds the per-workspace secrets --create-workspace provisions
-// against. Everything else about a workspace's resources (database name,
-// role name, bucket name, identity name, NATS account/user name) is derived
-// from its id by convention (workspace-isolation.md §2) — only the
-// passwords need to be recorded anywhere.
+// Workspace is one workspace's infrastructure identity, read from the values
+// file that also configures the chart (workspaces.values).
+//
+// Names are resolved, never empty: each defaults to the workspace id, so
+// callers use these fields rather than passing the id around and assuming the
+// three systems agree with it.
 type Workspace struct {
-	PostgresPassword string
-	RustFSSecretKey  string
-	NATSPassword     string
+	DBName     string
+	DBUser     string
+	DBPassword string
+
+	BucketName      string
+	RustFSAccessKey string
+	RustFSSecretKey string
+
+	NATSAccount  string
+	NATSUser     string
+	NATSPassword string
 }
 
 type Embedding struct {
@@ -176,12 +189,16 @@ type Config struct {
 
 	// WorkspacesConfigPath points at the workspace registry
 	// (workspaces/workspace-config.yaml by default) — the same file
-	// internal/workspace reads for collections and paths. Per-workspace
-	// secrets (workspace-isolation.md §3) live there too, not in this file:
-	// that registry is already gitignored (it holds collection paths and,
-	// for bank collections, account details), so it is the natural home for
-	// credentials as well, while this file stays committed and secret-free.
+	// internal/workspace reads for collections and paths. It describes what a
+	// workspace *holds*; credentials moved out of it entirely and now live in
+	// WorkspacesValuesPath below (deviation 18).
 	WorkspacesConfigPath string
+
+	// WorkspacesValuesPath points at the private Helm values override that
+	// carries each workspace's infrastructure names and credentials. The same
+	// file `make deploy-infra` passes to helm with -f, so the chart and this
+	// binary cannot disagree about a password.
+	WorkspacesValuesPath string
 
 	MetricsPort int
 	LogLevel    string
@@ -197,7 +214,6 @@ type file struct {
 	Infra struct {
 		RustFS struct {
 			Endpoint      string `yaml:"endpoint"`
-			Bucket        string `yaml:"bucket"`
 			UseSSL        *bool  `yaml:"use_ssl"`
 			RootAccessKey string `yaml:"root_access_key"`
 			RootSecretKey string `yaml:"root_secret_key"`
@@ -239,20 +255,56 @@ type file struct {
 	// the registry file; it does not carry secrets itself (workspace-isolation.md §3).
 	Workspaces struct {
 		Config string `yaml:"config"`
+		Values string `yaml:"values"`
 	} `yaml:"workspaces"`
 }
 
-// registryFile mirrors just enough of workspaces/workspace-config.yaml (the
-// same file internal/workspace parses more fully for collections and paths)
-// to extract one workspace's secrets. Kept deliberately separate from
-// internal/workspace's own types — this package only ever needs three
-// strings per workspace, not collection resolution.
-type registryFile struct {
+// valuesFile mirrors workspaces/values.yaml — the private override Helm is
+// given with -f, parsed here so one file configures both the chart and this
+// binary and the two cannot disagree about a password.
+//
+// Deliberately separate from internal/workspace's types, which parse the
+// corpus side (collections, paths) out of workspace-config.yaml. The two files
+// are joined on id: infrastructure here, content there.
+type valuesFile struct {
+	RustFS struct {
+		Credentials struct {
+			RootUser     string `yaml:"rootUser"`
+			RootPassword string `yaml:"rootPassword"`
+		} `yaml:"credentials"`
+	} `yaml:"rustfs"`
+	Postgres struct {
+		Credentials struct {
+			User     string `yaml:"user"`
+			Password string `yaml:"password"`
+		} `yaml:"credentials"`
+	} `yaml:"postgres"`
+	// Each entry mirrors the root sections above: same names, same credentials
+	// nesting. `rustfs` means the same thing at both levels, and only the
+	// scope differs — administrative there, one workspace's own here.
 	Workspaces []struct {
-		ID               string `yaml:"id"`
-		PostgresPassword string `yaml:"postgres_password"`
-		RustFSSecretKey  string `yaml:"rustfs_secret_key"`
-		NATSPassword     string `yaml:"nats_password"`
+		ID     string `yaml:"id"`
+		RustFS struct {
+			Bucket      string `yaml:"bucket"`
+			Credentials struct {
+				AccessKey string `yaml:"accessKey"`
+				SecretKey string `yaml:"secretKey"`
+			} `yaml:"credentials"`
+		} `yaml:"rustfs"`
+		Postgres struct {
+			Database    string `yaml:"database"`
+			Credentials struct {
+				User     string `yaml:"user"`
+				Password string `yaml:"password"`
+			} `yaml:"credentials"`
+		} `yaml:"postgres"`
+		NATS struct {
+			Account     string `yaml:"account"`
+			Credentials struct {
+				User     string `yaml:"user"`
+				Password string `yaml:"password"`
+			} `yaml:"credentials"`
+		} `yaml:"nats"`
 	} `yaml:"workspaces"`
 }
 
@@ -266,18 +318,61 @@ func Load(path string) (*Config, error) {
 	if err := applyFile(c, path); err != nil {
 		return nil, err
 	}
+	// Credentials come from the values file, not from here: config.yaml is
+	// committed, and a committed file must not carry a password. Applied
+	// before applyEnv so an environment variable still wins, which is what
+	// CI and a second cluster need.
+	if err := applyWorkspaceValues(c); err != nil {
+		return nil, err
+	}
 	applyEnv(c)
 	return c, nil
+}
+
+// applyWorkspaceValues fills in the administrative credentials from
+// workspaces/values.yaml — the same file Helm is given, so the cluster and
+// this binary use one definition of "the admin password" rather than two that
+// can drift.
+//
+// A missing file is not an error. Read-path modes (--query, --mcp) need no
+// admin credentials at all, and failing to start over an absent file would
+// make them depend on provisioning config they never use.
+func applyWorkspaceValues(c *Config) error {
+	if c.WorkspacesValuesPath == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(c.WorkspacesValuesPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read workspace values %s: %w", c.WorkspacesValuesPath, err)
+	}
+	var vf valuesFile
+	if err := yaml.Unmarshal(raw, &vf); err != nil {
+		return fmt.Errorf("parse workspace values %s: %w", c.WorkspacesValuesPath, err)
+	}
+
+	setStr(&c.RustFS.RootAccessKey, vf.RustFS.Credentials.RootUser)
+	setStr(&c.RustFS.RootSecretKey, vf.RustFS.Credentials.RootPassword)
+
+	// The admin DSN is committed without credentials; they are injected here.
+	if u := vf.Postgres.Credentials.User; u != "" && c.Postgres.AdminDSN != "" {
+		parsed, err := url.Parse(c.Postgres.AdminDSN)
+		if err != nil {
+			return fmt.Errorf("parse infra.postgres.admin_dsn: %w", err)
+		}
+		parsed.User = url.UserPassword(u, vf.Postgres.Credentials.Password)
+		c.Postgres.AdminDSN = parsed.String()
+	}
+	return nil
 }
 
 func defaults() *Config {
 	return &Config{
 		RustFS: RustFS{
-			Endpoint:      defaultRustFSEndpoint,
-			Bucket:        "pocket-advisor",
-			UseSSL:        false,
-			RootAccessKey: "rustfsadmin",
-			RootSecretKey: "rustfsadminpassword",
+			Endpoint: defaultRustFSEndpoint,
+			UseSSL:   false,
 		},
 		Postgres: Postgres{AdminDSN: defaultPostgresAdminDSN, MaxConns: 50},
 		NATS:     NATS{URL: defaultNATSURL},
@@ -287,6 +382,7 @@ func defaults() *Config {
 			NATSConfigMap:   "pocket-advisor-nats-config",
 		},
 		WorkspacesConfigPath: defaultWorkspacesConfigPath,
+		WorkspacesValuesPath: defaultWorkspacesValuesPath,
 		Embedding: Embedding{
 			Endpoint:    defaultEmbeddingEndpoint,
 			Model:       "jina-embeddings-v5-text-small-mlx",
@@ -336,7 +432,6 @@ func applyFile(c *Config, path string) error {
 	in := f.Infra
 
 	setStr(&c.RustFS.Endpoint, in.RustFS.Endpoint)
-	setStr(&c.RustFS.Bucket, in.RustFS.Bucket)
 	if in.RustFS.UseSSL != nil {
 		c.RustFS.UseSSL = *in.RustFS.UseSSL
 	}
@@ -355,6 +450,7 @@ func applyFile(c *Config, path string) error {
 	setStr(&c.Kubernetes.NATSConfigMap, in.Kubernetes.NATSConfigMap)
 
 	setStr(&c.WorkspacesConfigPath, f.Workspaces.Config)
+	setStr(&c.WorkspacesValuesPath, f.Workspaces.Values)
 
 	setStr(&c.Embedding.Endpoint, in.Embedding.Endpoint)
 	setStr(&c.Embedding.Model, in.Embedding.Model)
@@ -400,7 +496,6 @@ func applyFile(c *Config, path string) error {
 // particular belong here rather than in a committed file.
 func applyEnv(c *Config) {
 	c.RustFS.Endpoint = env("RUSTFS_ENDPOINT", c.RustFS.Endpoint)
-	c.RustFS.Bucket = env("RUSTFS_BUCKET", c.RustFS.Bucket)
 	c.RustFS.UseSSL = envBool("RUSTFS_USE_SSL", c.RustFS.UseSSL)
 	c.RustFS.RootAccessKey = env("RUSTFS_ROOT_ACCESS_KEY", c.RustFS.RootAccessKey)
 	c.RustFS.RootSecretKey = env("RUSTFS_ROOT_SECRET_KEY", c.RustFS.RootSecretKey)
@@ -420,6 +515,7 @@ func applyEnv(c *Config) {
 	c.Kubernetes.NATSConfigMap = env("NATS_CONFIGMAP", c.Kubernetes.NATSConfigMap)
 
 	c.WorkspacesConfigPath = env("WORKSPACES_CONFIG", c.WorkspacesConfigPath)
+	c.WorkspacesValuesPath = env("WORKSPACES_VALUES", c.WorkspacesValuesPath)
 
 	c.Embedding.Endpoint = env("EMBEDDING_ENDPOINT", c.Embedding.Endpoint)
 	c.Embedding.APIKey = env("EMBEDDING_API_KEY", c.Embedding.APIKey)
@@ -467,6 +563,9 @@ func (c *Config) RequireProvisioning() error {
 	if c.WorkspacesConfigPath == "" {
 		missing = append(missing, "workspaces.config")
 	}
+	if c.WorkspacesValuesPath == "" {
+		missing = append(missing, "workspaces.values")
+	}
 	return report(missing)
 }
 
@@ -474,24 +573,42 @@ func (c *Config) RequireProvisioning() error {
 // resources (database, role, bucket, identity, NATS account/user names) is
 // derived from id by convention (workspace-isolation.md §2), not stored.
 func (c *Config) Workspace(id string) (Workspace, error) {
-	raw, err := os.ReadFile(c.WorkspacesConfigPath)
+	if c.WorkspacesValuesPath == "" {
+		return Workspace{}, fmt.Errorf("workspaces.values is not set in config.yaml")
+	}
+	raw, err := os.ReadFile(c.WorkspacesValuesPath)
 	if err != nil {
-		return Workspace{}, fmt.Errorf("read workspace registry %s: %w", c.WorkspacesConfigPath, err)
+		return Workspace{}, fmt.Errorf("read workspace values %s: %w", c.WorkspacesValuesPath, err)
 	}
-	var rf registryFile
-	if err := yaml.Unmarshal(raw, &rf); err != nil {
-		return Workspace{}, fmt.Errorf("parse workspace registry %s: %w", c.WorkspacesConfigPath, err)
+	var vf valuesFile
+	if err := yaml.Unmarshal(raw, &vf); err != nil {
+		return Workspace{}, fmt.Errorf("parse workspace values %s: %w", c.WorkspacesValuesPath, err)
 	}
-	for _, w := range rf.Workspaces {
-		if w.ID == id {
-			return Workspace{
-				PostgresPassword: w.PostgresPassword,
-				RustFSSecretKey:  w.RustFSSecretKey,
-				NATSPassword:     w.NATSPassword,
-			}, nil
+	for _, w := range vf.Workspaces {
+		if w.ID != id {
+			continue
 		}
+		or := func(v, fallback string) string {
+			if v == "" {
+				return fallback
+			}
+			return v
+		}
+		return Workspace{
+			DBName:     or(w.Postgres.Database, id),
+			DBUser:     or(w.Postgres.Credentials.User, id),
+			DBPassword: w.Postgres.Credentials.Password,
+
+			BucketName:      or(w.RustFS.Bucket, id),
+			RustFSAccessKey: or(w.RustFS.Credentials.AccessKey, id),
+			RustFSSecretKey: w.RustFS.Credentials.SecretKey,
+
+			NATSAccount:  or(w.NATS.Account, id),
+			NATSUser:     or(w.NATS.Credentials.User, id),
+			NATSPassword: w.NATS.Credentials.Password,
+		}, nil
 	}
-	return Workspace{}, fmt.Errorf("workspace %q has no entry under workspaces: in %s", id, c.WorkspacesConfigPath)
+	return Workspace{}, fmt.Errorf("workspace %q has no entry under workspaces: in %s", id, c.WorkspacesValuesPath)
 }
 
 // WorkspacePostgresDSN builds the connection string a workspace's own role
@@ -502,15 +619,15 @@ func (c *Config) WorkspacePostgresDSN(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if w.PostgresPassword == "" {
-		return "", fmt.Errorf("workspace %q has no postgres_password in %s", id, c.WorkspacesConfigPath)
+	if w.DBPassword == "" {
+		return "", fmt.Errorf("workspace %q has no postgres.credentials.password in %s", id, c.WorkspacesValuesPath)
 	}
 	u, err := url.Parse(c.Postgres.AdminDSN)
 	if err != nil {
 		return "", fmt.Errorf("parse infra.postgres.admin_dsn: %w", err)
 	}
-	u.User = url.UserPassword(id, w.PostgresPassword)
-	u.Path = "/" + id
+	u.User = url.UserPassword(w.DBUser, w.DBPassword)
+	u.Path = "/" + w.DBName
 	return u.String(), nil
 }
 

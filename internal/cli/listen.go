@@ -27,6 +27,13 @@ func runListen(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 	defer a.Close()
 
+	// Matters more here than anywhere else: this mode consumes nothing but
+	// notify events, so a target aimed elsewhere makes it sit at zero forever
+	// while quietly filling another workspace's account (§5.2).
+	if err := checkNotifyTarget(ctx, cfg, o.WorkspaceID, a.Log); err != nil {
+		return err
+	}
+
 	if err := cfg.RequireEmbedding(); err != nil {
 		return err
 	}

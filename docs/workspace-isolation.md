@@ -139,7 +139,7 @@ subject names (`INGESTION`, `INGESTION_DLQ`, `ingest.emails.raw`, etc.,
 because the account boundary isolates them, not the name.
 
 **This is new authentication, not an upgrade.** NATS today
-(`infra/charts/pocket-advisor/templates/nats.yaml`) runs
+(`charts/pocket-advisor/templates/nats.yaml`) runs
 `nats-server -js -m <port> -sd /data` with no config file, no accounts, no
 users — anyone who can reach the ClusterIP has full access to everything.
 Static, config-file-defined accounts are the chosen model (an
@@ -167,47 +167,78 @@ registry already has. `config.yaml` stays committed and secret-free,
 carrying only a pointer to where the registry lives:
 
 ```yaml
-# config.yaml — committed, no secrets
+# config.yaml — committed, and genuinely secret-free: not one credential.
 infra:
   postgres:
     # The ADMIN connection only — a superuser, pointed at the `postgres`
     # maintenance database, used solely to CREATE/DROP per-workspace
-    # databases and roles. No pipeline data lives here.
-    admin_dsn: postgres://postgres:postgrespassword@.../postgres?sslmode=disable
+    # databases and roles. No pipeline data lives here. Note it carries no
+    # user or password: applyWorkspaceValues injects them at load time from
+    # workspaces/values.yaml.
+    admin_dsn: postgres://pocket-advisor-postgres...:5432/postgres?sslmode=disable
 
   rustfs:
-    # Root credentials, previously chart-only (values.yaml), now also
-    # needed by the host binary to create/delete per-workspace buckets
-    # and identities via the admin API.
-    root_access_key: rustfsadmin
-    root_secret_key: rustfsadminpassword
+    endpoint: pocket-advisor-rustfs...:9000
+    # No root credentials here either — same reason.
 
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspace-config.yaml   # what each workspace holds
+  values: workspaces/values.yaml             # how to reach it
 ```
 
 ```yaml
-# workspaces/workspace-config.yaml — gitignored, carries real secrets
+# workspaces/workspace-config.yaml — gitignored. What a workspace HOLDS.
 workspaces:
   - id: matter
     path: matter
     title: The Matter
-    postgres_password: ...
-    rustfs_secret_key: ...
-    nats_password: ...
     collections:
       - id: correspondence
 ```
 
-Each workspace's own connection strings are **derived**, not stored:
-Postgres DSN = `postgres://<id>:<postgres_password>@<host>/<id>`; RustFS
-identity = access key `<id>` / secret `<rustfs_secret_key>`, bucket `<id>`;
-NATS user = `<id>` / `<nats_password>`, account `<id>`.
+```yaml
+# workspaces/values.yaml — gitignored. How to REACH it. Also the Helm values
+# override `make deploy-infra` passes with -f, so the chart renders this
+# workspace's NATS account from the same entry the CLI authenticates with.
+rustfs:
+  credentials: { rootUser: ..., rootPassword: ... }   # administrative
+postgres:
+  credentials: { user: ..., password: ... }           # administrative
+
+workspaces:
+  - id: matter
+    rustfs:
+      credentials: { secretKey: ... }   # bucket/accessKey default to the id
+    postgres:
+      credentials: { password: ... }    # database/user default to the id
+    nats:
+      credentials: { password: ... }    # account/user default to the id
+```
+
+The per-workspace entries use the same section names as the root blocks, one
+scope down: administrative credentials at the root, a workspace's own beneath
+it. There is deliberately no `nats.credentials` at the root — RustFS and
+Postgres need an administrative identity because creating a bucket or database
+is a runtime API call, while NATS accounts are configuration rendered by the
+chart, so nothing ever authenticates to NATS as an administrator.
+
+The two files are joined on `id`: content in the first, infrastructure in the
+second. Splitting them is what let the chart own the NATS accounts — it needs
+credentials but must never see a corpus path, and the CLI needs both
+(deviation 18 in `ingestion-design.md`).
+
+Each workspace's connection strings are still **derived**, now from resolved
+names rather than the id directly: Postgres DSN =
+`postgres://<postgres.credentials.user>:<…password>@<host>/<postgres.database>`;
+RustFS identity = access key `<rustfs.credentials.accessKey>` / secret
+`<…secretKey>`, bucket `<rustfs.bucket>`; NATS user =
+`<nats.credentials.user>` / `<…password>`, account `<nats.account>`. Every one of those names defaults to the workspace id, so
+the common case is unchanged — the indirection exists so an id that is legal
+here need not also satisfy the naming rules of three other systems.
 
 `internal/config.Config.Workspace(id string) (Workspace, error)` parses
-`workspaces/workspace-config.yaml` directly (a minimal, non-strict read —
-just the `id`/`postgres_password`/`rustfs_secret_key`/`nats_password`
-fields, ignoring everything else in that file) rather than holding the
+`workspaces/values.yaml` directly (a minimal, non-strict read of the `rustfs`,
+`postgres` and `nats` objects, ignoring everything else) rather than holding the
 secrets in memory from `config.yaml`. This is deliberately independent of
 `internal/workspace`'s own, fuller parse of the same file for collections
 and paths — the two packages read the same file for two unrelated
@@ -263,8 +294,8 @@ Two new mutually-exclusive modes, added to `internal/cli.Options` and its
 --delete-workspace    tear down the same three, in reverse order
 ```
 
-Both require `--workspace-id` (same validation rule as every mode but
-`--bootstrap-schema` today). Both are idempotent: re-running
+Both require `--workspace-id`, the same validation rule as every other mode.
+Both are idempotent: re-running
 `--create-workspace` against an already-provisioned workspace succeeds
 without duplicating or erroring on anything that already exists, matching
 the `ensure()`-style idempotency already used throughout
@@ -292,8 +323,10 @@ does not touch the bucket").
    probe/`schema_metadata` write (`ingestion-design.md` §4.4) — this
    folds `--bootstrap-schema`'s existing logic in as the last step here,
    rather than requiring it as a separate manual call for a new workspace.
-   `--bootstrap-schema --workspace-id <id>` remains independently
-   re-runnable afterward, for re-probing on a model change.
+   (`--bootstrap-schema` was kept as a separate mode at first, then removed
+   once it was clear it only duplicated this step — re-running
+   `--create-workspace` re-applies the schema, which is what it was for.
+   See `ingestion-design.md` deviation 16.)
 2. **RustFS.** Via `madmin-go`, authenticated with `infra.rustfs.root_*`:
    create the canned policy (`s3:*` on `arn:aws:s3:::<id>` and `/*`),
    create the identity (access key `<id>`, secret from `config.yaml`),
@@ -350,23 +383,19 @@ block, mounted into the container, and the command changed to
 `-c /etc/nats/nats-server.conf` with `jetstream: enabled` moved inside the
 config file (per-account, not the global `-js` flag).
 
-**`internal/provision/nats.go`'s create step:**
+**`internal/provision/nats.go`'s create step** is now a check, not a write.
+The account is rendered by the chart from `workspaces/values.yaml`, so
+provisioning only confirms it is live (polling `/accountz`) and fails with an
+actionable message — "run `make deploy-infra`" — if the deployed release and
+the values file disagree.
 
-1. Read the current `nats-server.conf` from the ConfigMap via the
-   Kubernetes API.
-2. Append an `accounts { "<id>": { jetstream: enabled, users: [{ user:
-   "<id>", password: "<nats_password>" }] } }` block.
-3. `Update` the ConfigMap with the new content.
-4. `Delete` the NATS pod (not a signal-based reload — simpler, and avoids
-   needing `exec` permission or relying on unverified SIGHUP-reload
-   behavior for newly-added accounts). The `StatefulSet` recreates it,
-   remounting the updated ConfigMap; JetStream data on the PVC survives
-   the restart untouched (`ingestion-design.md` §11.2's existing
-   single-replica-storage posture already accepts this class of brief
-   interruption for the whole deployment on other operations, e.g. a
-   Postgres major-version bump).
-5. Poll the monitoring port's `/varz` until it responds, then `/accountz`
-   to confirm the new account is present, before returning success.
+It used to read `nats-server.conf` from the ConfigMap, append an `accounts {
+"<id>": { jetstream: enabled, users: [...] } }` block, `Update` the ConfigMap
+and reload the server. That made Helm and this binary two writers of one
+field: every `helm upgrade` failed with a field-ownership conflict on
+`.data.nats-server.conf`, and the recovery discarded every account. It also
+cost 25-56s per workspace waiting for kubelet to propagate the patched file
+into the pod. Both are gone; see `ingestion-design.md` deviation 18.
 
 **Kubernetes access:** rather than provisioning a dedicated
 `ServiceAccount`/`Role`/`RoleBinding` for `pocket-advisor`, use the
@@ -528,15 +557,15 @@ connection it builds now resolves that workspace's own credentials via
 
 `workspaceID` is required whenever any `Needs` field is set —
 structurally guaranteed by the CLI, since every mode requires
-`--workspace-id` (`cli.go`'s `validate()`), `--bootstrap-schema` included
-as of §14.
+`--workspace-id` (`cli.go`'s `validate()`) — `--bootstrap-schema` included
+as of §14, until that mode was removed altogether.
 
 **Dead code removed as a direct consequence**, not left as unused
 surface: `rustfs.NewUploader`/`NewWorker` (the two-global-identity
 constructors), `config.RustFS`'s `UploaderAccessKey`/`UploaderSecretKey`/
 `WorkerAccessKey`/`WorkerSecretKey` fields, `Config.RequireRustFS()`, and
 the corresponding `config.yaml` keys. **Deliberately left alone:**
-`infra/charts/pocket-advisor/templates/job-rustfs-setup.yaml` still
+`charts/pocket-advisor/templates/job-rustfs-setup.yaml` still
 provisions a global `pocket-advisor` bucket and `pa-uploader`/`pa-worker`
 identities on every `helm upgrade` — now entirely unused by the Go
 pipeline, but removing it is a chart-level infra decision distinct from

@@ -1,0 +1,180 @@
+# ============================================================================
+# Global & Environment Settings
+# ============================================================================
+global:
+  namespace: pocket-advisor
+  environment: local
+  logLevel: info
+
+# ============================================================================
+# Tier 1: RustFS Object Storage — the SOLE source of truth
+#
+# User filesystems are a staging feed into this bucket, never read by the
+# system itself (ingestion-design.md §5.1).
+#
+# Migrated from MinIO: MinIO's Community Edition has been progressively
+# stripped of features since mid-2025 and the project archived in Feb 2026.
+# RustFS is Apache-2.0 and deliberately implements MinIO's admin wire
+# protocol (/minio/admin/v3), so `mc admin` tooling and our whole scoped-
+# identity model carry over unchanged.
+#
+# Pinned to beta.12, not latest: beta.9 introduced a boot-order race where
+# init_event_notifier() unconditionally refreshed notify config from storage
+# before checking whether notify was even enabled, throwing "storage layer
+# not initialized" whenever storage wasn't ready yet at that exact moment.
+# Fixed in beta.12 (rustfs/rustfs commit 775279b6f, "defer disabled bootstrap
+# storage refresh") for the disabled-notify case; beta.9-beta.11 still carry
+# it. Live-verified on beta.12 (docs/ingestion-design.md §5.2) with a scratch
+# NATS+RustFS pair: clean boot, full object round trip, survived a restart.
+# ============================================================================
+rustfs:
+  image: rustfs/rustfs:1.0.0-beta.12
+  replicaCount: 1
+  apiPort: 9000
+  consolePort: 9001
+
+  # One identity, and it is an administrative one: creating a workspace's
+  # bucket and its per-workspace user needs admin rights, and nothing else in
+  # the system uses these. Every read and write of documents happens as a
+  # workspace's own identity, from workspaces/values.yaml.
+  #
+  # Empty here on purpose — supply it in workspaces/values.yaml. The templates
+  # require it, so a deploy without that file fails loudly rather than falling
+  # back to a default password.
+  #
+  # There used to be three identities: this one plus a global `pa-uploader`
+  # and `pa-worker` pair, whose policies enforced the raw/-vs-extracted/ write
+  # split on a single shared bucket. Per-workspace isolation replaced both —
+  # each workspace has its own bucket and identity, and the write split is
+  # enforced by Vault.role in application code (workspace-isolation.md §9).
+  # Neither key was referenced by any Go code; they and the setup Job that
+  # created them were deleted (ingestion-design.md deviation 19).
+  credentials:
+    rootUser: ""
+    rootPassword: ""
+
+  # Bucket notifications. There is no enable flag: the target's identity is
+  # written by `--create-workspace` into an optional Secret, so "configured"
+  # and "enabled" are the same fact (§5.2). Only the shape lives here.
+  notify:
+    subject: rustfs.events.raw
+    jetstreamStreamName: RUSTFS_EVENTS
+    # Default (/opt/rustfs/events) is unwritable by RustFS's non-root user —
+    # identical bug class already fixed for the webhook target (§12 bug 1).
+    queueDir: /data/.rustfs-events-notify
+
+  persistence:
+    enabled: true
+    # CHANGING THIS ON A LIVE RELEASE REQUIRES RECREATING THE STATEFULSET.
+    # volumeClaimTemplates is immutable, so `helm upgrade` fails with
+    # "updates to statefulset spec ... are forbidden". See the chart README.
+    #
+    # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children.
+    # ~60x headroom: the matter is active, and re-ingestion writes new
+    # extracted/ objects without reclaiming old ones (§6.4).
+    size: 50Gi
+  resources:
+    requests: {cpu: "200m", memory: "256Mi"}
+    limits:   {cpu: "500m", memory: "768Mi"}
+
+# ============================================================================
+# Pipeline Bus: NATS JetStream
+# ============================================================================
+nats:
+  image: nats:2.14.3-alpine
+  replicaCount: 1
+  clientPort: 4222
+  monitorPort: 8222
+  persistence:
+    enabled: true
+    # Commands carry object references and doc_ids (~1Ki each), never document
+    # text (§4.1). Sized for backlog depth, not document volume.
+    size: 5Gi
+  resources:
+    requests: {cpu: "150m", memory: "128Mi"}
+    limits:   {cpu: "300m", memory: "384Mi"}
+
+# ============================================================================
+# Tier 2 & 3: PostgreSQL + pgvector
+# ============================================================================
+postgres:
+  # pgvector 0.8.5 on Postgres 18. A major-version bump changes the on-disk
+  # data directory format, so this requires deleting the postgres PVC before
+  # upgrading a live release — schema-bootstrap recreates the schema fresh.
+  image: pgvector/pgvector:0.8.5-pg18-bookworm
+  replicaCount: 1
+  port: 5432
+  # Empty here on purpose — supply in workspaces/values.yaml, same as RustFS.
+  # This is the maintenance superuser: it creates and drops per-workspace
+  # databases and roles, and never holds document data itself.
+  credentials:
+    user: ""
+    password: ""
+  persistence:
+    enabled: true
+    # Steady state for the measured corpus is ~250Mi. The headroom is for
+    # three transient operations, not the steady state: a re-embed holds two
+    # embed_model namespaces at once, REINDEX needs ~2x the index, and
+    # max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
+    size: 20Gi
+  resources:
+    requests: {cpu: "300m", memory: "512Mi"}
+    limits:   {cpu: "1000m", memory: "1536Mi"}
+
+# ============================================================================
+# Workspaces — the chart's generic interface
+#
+# Empty on purpose, and it stays empty in this file. No workspace name and no
+# credential belongs here: this is the committed chart, and the real list is a
+# private, gitignored override supplied at deploy time:
+#
+#   helm upgrade --install pocket-advisor charts/pocket-advisor \
+#     -f workspaces/values.yaml
+#
+# `make deploy-infra` does exactly that. See workspaces/values.yaml.example
+# for the shape.
+#
+# What the chart does with this list is render one NATS account per workspace
+# into nats-server.conf. That is the whole reason it needs to know the list:
+# NATS reads its accounts from a config file, so somebody has to write them,
+# and Helm owning that file is what stopped --create-workspace patching a
+# ConfigMap Helm also manages — the field-ownership conflict that used to fail
+# every `helm upgrade` and cost 25-56s of kubelet sync per workspace
+# (ingestion-design.md deviation 18).
+#
+# The Postgres database/role and the RustFS bucket/identity are NOT created
+# here. Those are API calls against a running server, not config files, so
+# --create-workspace still makes them, reading the same values file.
+#
+# Each entry mirrors the root sections above — same names, same `credentials`
+# nesting — so `rustfs:` means the same thing at both levels and the only
+# difference is scope: administrative there, one workspace's own here.
+#
+#   workspaces:
+#     - id: <workspace-id>        # required; the default for every name below
+#       rustfs:
+#         bucket: <name>          # optional, defaults to id
+#         credentials:
+#           accessKey: <key>      # optional, defaults to id
+#           secretKey: <secret>   # required
+#       postgres:
+#         database: <name>        # optional, defaults to id
+#         credentials:
+#           user: <role>          # optional, defaults to id
+#           password: <secret>    # required
+#       nats:
+#         account: <name>         # optional, defaults to id
+#         credentials:
+#           user: <user>          # optional, defaults to id
+#           password: <secret>    # required
+#
+# The optional names exist so a workspace id need not also satisfy the naming
+# rules of three different systems. Leave them out unless one bites.
+#
+# There is no `nats.credentials` at the root, unlike rustfs and postgres. That
+# is not an omission: RustFS and Postgres need an administrative identity
+# because creating a bucket or a database is a runtime API call, whereas NATS
+# accounts are configuration — rendered into nats-server.conf below and read at
+# startup. Nothing ever authenticates to NATS as an administrator, so there is
+# no such credential to hold.
+workspaces: []

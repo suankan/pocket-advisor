@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/suankan/pocket-advisor/internal/app"
-	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
@@ -86,46 +85,9 @@ func describe(ctx context.Context, docs *postgres.DocumentRepo, workspaceID stri
 	return fmt.Sprintf("%d document(s) currently indexed", len(known)), nil
 }
 
-// runBootstrap resolves the vector dimension from the embedding endpoint and
-// (re-)applies the DDL to one workspace's own database.
-//
-// halfvec(N) is a typed SQL column, so N must be known before the first CREATE
-// TABLE — but the authority on N is the model, not a design document. Pinning a
-// literal in checked-in DDL is how an index silently ends up the wrong shape
-// when the endpoint changes (§4.4). --create-workspace already runs this once
-// as part of provisioning (workspace-isolation.md §6) — this mode exists for
-// re-probing an existing workspace after a model change.
-func runBootstrap(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
-	ctx := context.Background()
-
-	a, err := app.New(ctx, cfg, logs, app.Needs{Postgres: true}, o.WorkspaceID)
-	if err != nil {
-		return err
-	}
-	defer a.Close()
-
-	if err := cfg.RequireEmbedding(); err != nil {
-		return err
-	}
-	client := embedding.New(cfg.Embedding)
-
-	info, err := client.Probe(ctx)
-	if err != nil {
-		return fmt.Errorf("probe %s: %w", cfg.Embedding.Endpoint, err)
-	}
-	model := cfg.Embedding.Model
-	if info.Model != "" {
-		model = info.Model
-	}
-	a.Log.Info("probed embedding endpoint", "model", model, "dimension", info.Dimension)
-
-	if err := a.DB.ApplySchema(ctx, postgres.SchemaMetadata{
-		EmbedModel: model,
-		EmbedDim:   info.Dimension,
-	}); err != nil {
-		return err
-	}
-
-	fmt.Printf("schema ready: model=%s dimension=%d\n", model, info.Dimension)
-	return nil
-}
+// --bootstrap-schema lived here and was removed. It duplicated
+// provision.applyWorkspaceSchema step for step — workspace DSN, RequireEmbedding,
+// Probe, resolve model, ApplySchema — without calling it, and every use it
+// covered is covered elsewhere: --create-workspace applies the schema on every
+// run, idempotently, and VerifyDimension catches endpoint drift at the start of
+// --ingest-all and --listen rather than when someone remembers to check.

@@ -17,17 +17,13 @@ infra:
   rustfs:
     # OrbStack routes *.svc.cluster.local from macOS via the system resolver.
     endpoint: pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
-    # Vestigial: nothing reads this bucket any more now that every workspace
-    # has its own (workspace-isolation.md §2.2). Left as-is since the chart
-    # still provisions it; not used by the pipeline.
-    bucket: pocket-advisor
     use_ssl: false
-    # Root credentials, matching infra/charts/pocket-advisor/values.yaml.
-    # Used only by --create-workspace/--delete-workspace to create or drop a
-    # workspace's own bucket and identity (workspace-isolation.md §3, §6) —
-    # never for reading or writing documents.
-    root_access_key: rustfsadmin
-    root_secret_key: rustfsadminpassword
+    # No root credentials here. They live in workspaces/values.yaml — the same
+    # file Helm is given — so the cluster and this binary share one definition
+    # rather than two that can drift, and this committed file stays
+    # secret-free. Used only by --create-workspace/--delete-workspace, to
+    # create or drop a workspace's own bucket and identity
+    # (workspace-isolation.md §3, §6); never to read or write documents.
 
   nats:
     url: nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
@@ -36,7 +32,10 @@ infra:
     # The maintenance connection --create-workspace/--delete-workspace use to
     # CREATE/DROP per-workspace databases and roles (workspace-isolation.md
     # §3, §6). Never used for document data.
-    admin_dsn: postgres://postgres:postgrespassword@pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/postgres?sslmode=disable
+    # Deliberately carries no user or password: those are injected from
+    # workspaces/values.yaml at load time, keeping this committed file
+    # secret-free.
+    admin_dsn: postgres://pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/postgres?sslmode=disable
     # Must cover every lane that can hold a connection at once. pgxpool
     # defaults to max(4, NumCPU), which becomes the pipeline's narrowest point
     # once all roles share one process.
@@ -89,11 +88,16 @@ infra:
 # ============================================================================
 # Workspace registry (workspace-isolation.md)
 #
-# Per-workspace secrets (postgres_password, rustfs_secret_key, nats_password)
-# live in the registry file below, not here — that file is already
-# gitignored (it holds collection paths and, for bank collections, account
-# details), so it is the natural place for credentials too. This file stays
-# committed and secret-free, matching the header above.
+# A workspace is described by two gitignored files, joined on id: one for what
+# it holds (collections, paths, bank details) and one for how to reach it
+# (database, bucket and NATS names plus credentials). Neither lives here —
+# this file stays committed and secret-free, matching the header above.
 # ============================================================================
 workspaces:
+  # What each workspace holds: its collections and where they live on disk.
   config: workspaces/workspace-config.yaml
+  # Its infrastructure: database, bucket and NATS names plus credentials.
+  # The same file `make deploy-infra` passes to helm with -f, so the chart
+  # and this binary cannot disagree about a password. Gitignored; see
+  # workspaces/values.yaml.example.
+  values: workspaces/values.yaml

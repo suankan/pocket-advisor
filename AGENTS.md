@@ -92,7 +92,7 @@ intent from the diff.
 ```bash
 go build ./... && go vet ./... && gofmt -l .
 go test ./...
-helm lint ./infra/charts/pocket-advisor
+helm lint ./charts/pocket-advisor
 ```
 
 This host has no local Go toolchain; run the Go checks in a container with a

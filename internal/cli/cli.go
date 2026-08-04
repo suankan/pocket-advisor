@@ -34,13 +34,11 @@ type Options struct {
 	Listen          bool
 	DeleteData      bool
 	Forget          string
-	Bootstrap       bool
 	CreateWorkspace bool
 	DeleteWorkspace bool
 	Query           string
 	MCP             bool
 
-	LiveNotify  bool
 	TopK        int
 	JSON        bool
 	NoRerank    bool
@@ -65,10 +63,8 @@ Modes (exactly one):
   --reconcile         re-publish documents stuck PENDING, then process
   --listen            run the pipeline indefinitely, processing RustFS's live
                       notify events as they arrive — no upload, no scan, does
-                      not exit on idle. Requires RustFS's NATS notify target
-                      to actually be deployed for this workspace (§5.2); as
-                      of this writing that is only "test". Implies
-                      --live-notify.
+                      not exit on idle. For objects arriving from something
+                      other than our own uploader.
   --query <question>  ask the corpus a question and print the matching
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
@@ -79,21 +75,16 @@ Modes (exactly one):
                       binary (retrieval-design.md §6.1)
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
-  --bootstrap-schema  probe the embedding endpoint and (re-)apply this
-                      workspace's DDL — --create-workspace already does
-                      this once; use this to re-probe after a model change
   --create-workspace  provision this workspace's Postgres DB+role, RustFS
-                      bucket+identity, and NATS account+user
-  --delete-workspace  tear down the same three, in reverse order
+                      bucket+identity, NATS account+user, and RustFS's
+                      bucket-notification target. The only mode that uses
+                      shared root credentials; everything else connects with
+                      this workspace's own (§5.2)
+  --delete-workspace  tear down the same, in reverse order
 
 Common:
-  --live-notify             valid with --ingest-all/--scan/--reconcile: Scan
-                            touches unprocessed objects instead of processing
-                            them directly, relying on RustFS's live notify
-                            path (also started in this same run) to pick the
-                            resulting event up. Implied by --listen.
-  --workspace-id <id>       workspace from the registry (required by most modes)
-  --workspace-config <path> registry path (default workspaces/workspace-config.yaml)
+  --workspace-id <id>       workspace from the registry (required by every mode)
+  --workspace-config <path> registry path (default: infra config's workspaces.config)
   --config <path>           infrastructure config (default config.yaml)
 
 Query options:
@@ -133,10 +124,8 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Scan, "scan", false, "enqueue un-stubbed Tier 1 objects, then process")
 	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
 	fs.BoolVar(&o.Listen, "listen", false, "run the pipeline indefinitely on RustFS's live notify events")
-	fs.BoolVar(&o.LiveNotify, "live-notify", false, "touch instead of processing directly in --scan; implied by --listen")
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
-	fs.BoolVar(&o.Bootstrap, "bootstrap-schema", false, "probe the embedding endpoint and apply the DDL")
 	fs.BoolVar(&o.CreateWorkspace, "create-workspace", false, "provision this workspace's database, bucket, and NATS account")
 	fs.BoolVar(&o.DeleteWorkspace, "delete-workspace", false, "tear down this workspace's database, bucket, and NATS account")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
@@ -161,9 +150,6 @@ func Parse(args []string) (*Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	if o.Listen {
-		o.LiveNotify = true
-	}
 	return o, o.validate()
 }
 
@@ -179,7 +165,6 @@ func (o *Options) modes() []string {
 		{o.Listen, "--listen"},
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
-		{o.Bootstrap, "--bootstrap-schema"},
 		{o.CreateWorkspace, "--create-workspace"},
 		{o.DeleteWorkspace, "--delete-workspace"},
 		{o.Query != "", "--query"},
@@ -197,17 +182,15 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --delete-data, --forget, --bootstrap-schema, " +
+			"--query, --mcp, --delete-data, --forget, " +
 			"--create-workspace, --delete-workspace (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
 
 	// Every mode acts on one workspace, and a mode that silently defaulted to
-	// the wrong one could purge the wrong corpus. --bootstrap-schema is no
-	// exception: there is no shared database left to bootstrap without one
-	// (workspace-isolation.md §13) — it applies (or re-applies) exactly one
-	// workspace's schema, the same as --create-workspace's own schema step.
+	// the wrong one could purge the wrong corpus. There is no shared database
+	// or bucket left to act on without one (workspace-isolation.md §13).
 	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
 	}
@@ -281,8 +264,6 @@ func Run(o *Options) error {
 	defer logs.Close()
 
 	switch {
-	case o.Bootstrap:
-		return runBootstrap(o, cfg, logs)
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
 	case o.CreateWorkspace:

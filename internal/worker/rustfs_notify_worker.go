@@ -39,19 +39,44 @@ type RustFSNotifyWorker struct {
 	Log         *slog.Logger
 }
 
-// bucketNotification mirrors the payload the deleted pre-4.0.0 webhook
-// handler parsed (cmd/discovery/main.go, removed in the monolith refactor).
-// RustFS's NATS target publishes the identical Records[].s3.object.* shape,
-// including the same form-URL-encoded key — live-verified against beta.12
-// with a nested raw/<shard>/<hash> key, not assumed from the old code.
+// bucketNotification mirrors what RustFS's NATS target actually publishes.
+//
+// It is NOT the plain S3 shape the pre-4.0.0 webhook handler parsed. RustFS
+// wraps each record, putting the S3 event one level down under "data":
+//
+//	{"Records":[{"object_name":"raw%2F..","data":{"s3":{"object":{"key":..}}}}]}
+//
+// An earlier revision of this struct read Records[].s3.object.key, matching
+// the webhook payload. Against this one that path simply does not exist, so
+// encoding/json left Key empty — it ignores unknown fields and reports no
+// error — every key failed ParseRawObjectKey, and each message was counted
+// ignored and acked. The observable result was a queue draining at full speed
+// while creating nothing: 79 events "done", zero documents, zero errors, zero
+// DLQ. Taken from a live beta.12 message, not from the webhook code.
+//
+// ObjectName is the fallback because it carries the same key at the top of the
+// record; between the two, a future payload change has to break both to go
+// unnoticed again.
 type bucketNotification struct {
 	Records []struct {
-		S3 struct {
-			Object struct {
-				Key string `json:"key"`
-			} `json:"object"`
-		} `json:"s3"`
+		ObjectName string `json:"object_name"`
+		Data       struct {
+			S3 struct {
+				Object struct {
+					Key string `json:"key"`
+				} `json:"object"`
+			} `json:"s3"`
+		} `json:"data"`
 	} `json:"Records"`
+}
+
+// key returns the object key a record refers to, preferring the nested S3
+// shape and falling back to the record's own object_name.
+func (r *bucketNotification) key(i int) string {
+	if k := r.Records[i].Data.S3.Object.Key; k != "" {
+		return k
+	}
+	return r.Records[i].ObjectName
 }
 
 func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
@@ -61,8 +86,18 @@ func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) erro
 		return Fatal("MALFORMED_NOTIFY_EVENT", err)
 	}
 
-	for _, rec := range event.Records {
-		key, err := url.QueryUnescape(rec.S3.Object.Key)
+	if len(event.Records) == 0 {
+		// Never expected: the target publishes one record per object event.
+		// Logged rather than ignored because an empty Records is exactly what
+		// a payload-shape change looks like from in here, and the previous
+		// shape mismatch stayed invisible for want of this line.
+		telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
+		w.Log.Warn("notify event carried no records", "payload", string(msg.Data()))
+		return nil
+	}
+
+	for i := range event.Records {
+		key, err := url.QueryUnescape(event.key(i))
 		if err != nil {
 			telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
 			return Fatal("MALFORMED_NOTIFY_EVENT", err)
@@ -72,6 +107,7 @@ func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) erro
 			// scoped to a raw/ prefix. They are owned by the worker that
 			// created them and must never mint root documents.
 			telemetry.DiscoveryFiles.WithLabelValues("notify", "ignored").Inc()
+			w.Log.Debug("ignoring notify event for a non-raw key", "key", key)
 			continue
 		}
 		if err := w.Discovery.Ingest(ctx, w.WorkspaceID, key, "notify"); err != nil {

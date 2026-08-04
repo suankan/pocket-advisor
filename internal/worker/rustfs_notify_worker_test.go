@@ -44,13 +44,30 @@ func testNotifyWorker(svc Ingester) *RustFSNotifyWorker {
 	}
 }
 
+// notificationMsg builds the payload RustFS's NATS target really sends, with
+// the S3 event nested under "data".
+//
+// The earlier version of this helper wrote Records[].s3.object.key — the plain
+// S3 shape from the pre-4.0.0 webhook — and the worker read the same wrong
+// path, so these tests passed against a message no server produces. Every
+// field below is copied from a live beta.12 message; the extra ones are kept
+// precisely because they are what makes it recognisable as the real thing.
 func notificationMsg(t *testing.T, encodedKey string) *notifyFakeMsg {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
+		"EventName": "s3:ObjectCreated:Put",
+		"Key":       "matter-one/" + encodedKey,
 		"Records": []any{
 			map[string]any{
-				"s3": map[string]any{
-					"object": map[string]any{"key": encodedKey},
+				"object_name": encodedKey,
+				"bucket_name": testWorkspaceID,
+				"event_name":  "s3:ObjectCreated:Put",
+				"data": map[string]any{
+					"eventName": "s3:ObjectCreated:Put",
+					"s3": map[string]any{
+						"bucket": map[string]any{"name": testWorkspaceID},
+						"object": map[string]any{"key": encodedKey},
+					},
 				},
 			},
 		},
@@ -59,6 +76,73 @@ func notificationMsg(t *testing.T, encodedKey string) *notifyFakeMsg {
 		t.Fatal(err)
 	}
 	return &notifyFakeMsg{data: body}
+}
+
+// TestRustFSNotifyWorkerRejectsWebhookShapedPayload pins the regression
+// directly: a record carrying only the old top-level "s3" path must not be
+// read as a valid event. Without this, reverting the struct to the webhook
+// shape would leave every other test in this file passing.
+func TestRustFSNotifyWorkerRejectsWebhookShapedPayload(t *testing.T) {
+	key := domain.RawObjectKey(testSHA256)
+	body, err := json.Marshal(map[string]any{
+		"Records": []any{
+			map[string]any{
+				"s3": map[string]any{
+					"object": map[string]any{"key": url.QueryEscape(key)},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &fakeIngester{}
+
+	if err := testNotifyWorker(svc).Handle(context.Background(), &notifyFakeMsg{data: body}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(svc.calls) != 0 {
+		t.Fatalf("webhook-shaped payload reached ingest: %+v", svc.calls)
+	}
+}
+
+// TestRustFSNotifyWorkerFallsBackToObjectName covers the other half of the
+// key lookup, so the fallback cannot rot unnoticed behind the nested path.
+func TestRustFSNotifyWorkerFallsBackToObjectName(t *testing.T) {
+	key := domain.RawObjectKey(testSHA256)
+	body, err := json.Marshal(map[string]any{
+		"Records": []any{
+			map[string]any{"object_name": url.QueryEscape(key)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &fakeIngester{}
+
+	if err := testNotifyWorker(svc).Handle(context.Background(), &notifyFakeMsg{data: body}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(svc.calls) != 1 {
+		t.Fatalf("expected one ingest call, got %d", len(svc.calls))
+	}
+	if svc.calls[0].key != key {
+		t.Fatalf("got key %q want %q", svc.calls[0].key, key)
+	}
+}
+
+// TestRustFSNotifyWorkerReportsEmptyRecords guards the silent-drain failure:
+// an unparsed payload must be visible, not acked as if it were handled.
+func TestRustFSNotifyWorkerReportsEmptyRecords(t *testing.T) {
+	svc := &fakeIngester{}
+
+	if err := testNotifyWorker(svc).Handle(context.Background(),
+		&notifyFakeMsg{data: []byte(`{"Records":[]}`)}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(svc.calls) != 0 {
+		t.Fatalf("empty records reached ingest: %+v", svc.calls)
+	}
 }
 
 // RustFS form-URL-encodes the forward slashes in an object key (live-

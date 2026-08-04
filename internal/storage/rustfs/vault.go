@@ -284,12 +284,30 @@ func (v *Vault) Put(ctx context.Context, key string, r io.Reader, size int64, co
 // become a trigger rather than a doer once live notify delivery is enabled:
 // it touches the object and lets the live event path do the real work
 // through the same code a fresh upload goes through.
+//
+// The existing metadata is read and written back deliberately. ReplaceMetadata
+// means "replace with what I supply", so supplying nothing does not preserve
+// provenance, it erases it — a touched object came back with userMetadata:{},
+// losing the source filename and collection id that Ingest builds the document
+// from. Re-copying the object was meant to be an identity operation; without
+// this it silently destroyed the very fields it exists to redeliver.
 func (v *Vault) Touch(ctx context.Context, key string) error {
 	if err := v.refuseRawWrite("touch", key); err != nil {
 		return err
 	}
-	_, err := v.c.CopyObject(ctx,
-		minio.CopyDestOptions{Bucket: v.bucket, Object: key, ReplaceMetadata: true},
+
+	info, err := v.c.StatObject(ctx, v.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("touch %q: stat: %w", key, err)
+	}
+
+	_, err = v.c.CopyObject(ctx,
+		minio.CopyDestOptions{
+			Bucket:          v.bucket,
+			Object:          key,
+			ReplaceMetadata: true,
+			UserMetadata:    info.UserMetadata,
+		},
 		minio.CopySrcOptions{Bucket: v.bucket, Object: key},
 	)
 	if err != nil {

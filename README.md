@@ -47,21 +47,22 @@ kubectl config use-context pocket-advisor   # switch into it
   identity, and its own NATS account+user, all named `<id>`. There is no
   shared database or bucket left; every mode requires `--workspace-id`
   except `--create-workspace`/`--delete-workspace` (which provision or tear
-  down exactly that isolation) and `--forget`. `--ingest-all` provisions a
-  workspace itself if needed, idempotently, so it's the only mode that
-  doesn't require `--create-workspace` to have run first — every other mode
-  (`--scan`, `--reconcile`, `--delete-data`, `--bootstrap-schema`) still
-  needs the workspace to already exist. See [§2](#2-install).
+  down exactly that isolation) and `--forget`. `--create-workspace` must have
+  run for a workspace before any other mode can use it. It is the only mode
+  that needs shared root credentials; everything after it — `--ingest-all`,
+  `--scan`, `--reconcile`, `--query`, `--mcp` — connects with that one
+  workspace's own credentials and nothing more. See [§2](#2-install).
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
   read directly by the system — it's a staging feed you push into RustFS. Once
   uploaded, a document's origin folder can move or vanish; the bucket is
   authoritative.
-- **The workspace registry decides what gets uploaded**, not CLI flags.
-  `workspaces/workspace-config.yaml` (gitignored — it carries the per-
-  workspace secrets above, plus bank-account details for financial
-  collections) defines named *workspaces*, each a set of named *collections*,
-  each collection a path on disk. Two values identify everything: the
-  registry path and a workspace id.
+- **A workspace is described by two files, joined on `id`.**
+  `workspaces/workspace-config.yaml` says what it *holds* — named
+  *collections*, each a path on disk, plus bank-account details for financial
+  ones. `workspaces/values.yaml` says how to *reach* it — the database, bucket
+  and NATS names and credentials. Both are gitignored, and the second doubles
+  as the Helm values override `make deploy-infra` passes with `-f`, so the
+  chart and the CLI read the same credentials from one place.
 - **Ingestion is reconciliation, not events.** Every run compares the bucket
   against Postgres and processes the difference. That makes re-running free
   and interrupting safe.
@@ -113,6 +114,15 @@ make build           # produces bin/pocket-advisor
 with nothing workspace-specific in them yet. There is no shared database or
 bucket to bootstrap at this point; every workspace provisions its own.
 
+`deploy-infra` also renders one NATS account per workspace, from
+`workspaces/values.yaml` — the chart's own `workspaces:` list is empty, and
+that file is the private override supplying it.
+
+Everything else a workspace needs is created by `--create-workspace` (below):
+the Postgres database and role, the RustFS bucket and identity, and the
+notification target. Those are API calls against a running server rather than
+config files, which is why they are the CLI's job and not the chart's.
+
 Infrastructure endpoints live under `infra:` in
 [`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,
 so you only edit it to point somewhere else. Environment variables override
@@ -123,11 +133,11 @@ and roles — it is never where document data lives.
 
 ### Provision your first workspace
 
-1. Add an entry to `workspaces/workspace-config.yaml` (create the file if it
-   doesn't exist yet — it's gitignored, so nothing here ships with the repo).
-   Collections are defined once at the top level, each naming a path on disk;
-   a workspace then just references collection ids. A workspace needs three
-   secrets you generate yourself (e.g. `openssl rand -base64 24`):
+1. Describe what the workspace **holds**, in
+   `workspaces/workspace-config.yaml` (create it if absent — it's gitignored,
+   so nothing here ships with the repo). Collections are defined once at the
+   top level, each naming a path on disk; a workspace then references
+   collection ids:
    ```yaml
    schema_version: 2
 
@@ -141,53 +151,123 @@ and roles — it is never where document data lives.
      - id: test
        path: test-workspace
        title: Test Workspace
-       postgres_password: <generate>
-       rustfs_secret_key: <generate>
-       nats_password: <generate>
        collections:
          - id: test-correspondence
    ```
+
+2. Describe how to **reach** it, in `workspaces/values.yaml` — copy
+   [`workspaces/values.yaml.example`](workspaces/values.yaml.example) and
+   generate each secret yourself (e.g. `openssl rand -base64 24`):
+   ```yaml
+   workspaces:
+     - id: test
+       rustfs:
+         credentials:
+           secretKey: <generate>
+       postgres:
+         credentials:
+           password: <generate>
+       nats:
+         credentials:
+           password: <generate>
+   ```
+   The section names match the chart's own `rustfs:` / `postgres:` / `nats:`
+   blocks — same shape, one scope down.
+   The two files are joined on `id`. This one is a Helm values override as
+   well as app config: `make deploy-infra` passes it with `-f`, and the chart
+   renders one NATS account per workspace from it, while `config.yaml`'s
+   `workspaces.values` points the binary at the same file — so Helm and the
+   CLI cannot disagree about a password.
+
+   `rustfs.bucket`, `postgres.database`, `nats.account` and the `user`/
+   `accessKey` under each `credentials` block all default to the workspace id.
+   Set them only if one of the three systems objects to an id.
+
    Full field reference: [`docs/workspace-isolation.md`](docs/workspace-isolation.md), §3 "Credentials & Config Shape".
 
-2. That's it — `--ingest-all` provisions the workspace itself if it doesn't
-   exist yet: Postgres database+role, RustFS bucket+identity, NATS
-   account+user, and (as its last step) the Tier 2/3 schema, resolved
-   against your embedding endpoint, all before it uploads a single file. The
-   vector column is typed `halfvec(N)`, so `N` is read from the embedding
-   endpoint before the first `CREATE TABLE` — it can't be reshaped later
-   without a full re-embed. Skip straight to [§3](#3-load-a-corpus) — there
-   is no separate provisioning step to run first.
+3. Apply it, so the NATS account exists:
+   ```bash
+   make deploy-infra
+   ```
 
-   Provisioning is idempotent, so this also means every `--ingest-all` run
-   safely re-checks it — an already-provisioned workspace costs a handful of
-   fast existence checks, nothing disruptive. One consequence worth knowing:
-   `--ingest-all` now needs the same admin-level credentials
-   `--create-workspace` does (`infra.postgres.admin_dsn`,
-   `infra.rustfs.root_*`, `infra.kubernetes.*`), not just the workspace's
-   own scoped ones.
-
-   `--create-workspace --workspace-id <id>` still exists standalone, for
-   when you want a workspace provisioned *without* immediately ingesting
-   anything (e.g. setting it up ahead of the corpus being ready):
+4. Provision it, once:
    ```bash
    ./bin/pocket-advisor --create-workspace --workspace-id test
-   # schema ready: model=jina-embeddings-v5-text-small-mlx dimension=1024
+   # workspace created: test
    ```
+   This creates the Postgres database+role, the RustFS bucket+identity, the
+   NATS account+user and its JetStream streams, the Tier 2/3 schema resolved
+   against your embedding endpoint, and finally the RustFS bucket
+   notification that makes uploads trigger processing on their own. The
+   vector column is typed `halfvec(N)`, so `N` is read from the embedding
+   endpoint before the first `CREATE TABLE` — it can't be reshaped later
+   without a full re-embed.
 
-   `--bootstrap-schema --workspace-id <id>` is a **separate, narrower**
-   command, not a first-time setup path — it only re-probes and re-applies
-   the schema against a workspace's *existing* database, so it fails on a
-   workspace nothing has provisioned yet. Reach for it after switching
-   embedding models, when you want to re-resolve the vector dimension
-   without touching anything else:
+   It is idempotent, so re-running it against an already-provisioned
+   workspace is safe and costs a handful of existence checks.
+
+   This is the only command that needs shared root credentials
+   (`infra.postgres.admin_dsn`, `infra.rustfs.root_*`, `infra.kubernetes.*`).
+   Everything after it uses the workspace's own scoped credentials.
+
+   **Re-run it when you switch which workspace you are working on.** RustFS
+   has a single server-wide notify target, so it points at whichever
+   workspace was provisioned last. `--ingest-all` and `--listen` refuse to
+   start if it points somewhere else, and tell you which workspace to
+   re-provision — ingesting anyway would deliver this workspace's events into
+   the other one's NATS account.
+
+   Re-running `--create-workspace` is also how you repair a workspace whose
+   schema is missing — it re-applies the DDL every time, idempotently.
+
+   **What it will not do is change the vector dimension.** `halfvec(N)` is
+   fixed at `CREATE TABLE`, so if you point the config at a model of a
+   different size it refuses rather than migrating:
+   ```
+   schema was built for <model> at 1024 dimensions, endpoint now reports 768;
+   this is a re-embed into a new embed_model namespace, not a migration
+   ```
+   That check also runs at the start of every `--ingest-all` and `--listen`,
+   so a mismatched endpoint stops the run instead of quietly writing vectors
+   that cannot be compared to their neighbours — see [§8](#8-tuning).
+
+3. Verify it before loading a corpus. A workspace that provisioned cleanly
+   has three JetStream streams in its own NATS account:
    ```bash
-   ./bin/pocket-advisor --bootstrap-schema --workspace-id test
+   kubectl exec pocket-advisor-nats-0 -n pocket-advisor -- \
+     wget -qO- 'http://localhost:8222/jsz?accounts=true&streams=true' \
+   | python3 -c "import json,sys
+   for a in json.load(sys.stdin)['account_details']:
+       print(a['name'], sorted(s['name'] for s in a.get('stream_detail', [])))"
    ```
+   ```
+   $G []
+   test ['INGESTION', 'INGESTION_DLQ', 'RUSTFS_EVENTS']
+   ```
+   `$G` is NATS' built-in global account and is always empty — ignore it.
+   Every workspace should list all three. An account showing `[]` will accept
+   uploads and process none of them; re-run `--create-workspace` for it.
 
-Repeat step 1 per workspace — step 2 happens automatically the first time
-you `--ingest-all` each one. `--delete-workspace --workspace-id <id>` tears
-the same three back down, in reverse order — see [§6](#6-remove-documents)
-for the difference between that and `--delete-data`.
+Repeat steps 1–4 per workspace.
+`--delete-workspace --workspace-id <id>` tears
+the same three back down, in reverse order, and removes the notify target if
+it points at that workspace — see [§6](#6-remove-documents) for the difference
+between that and `--delete-data`.
+
+### The order matters
+
+Each step here exists because the one before it cannot be undone by the one
+after:
+
+| | Creates | Needs |
+|---|---|---|
+| `make deploy-infra` | Postgres, RustFS, NATS — no workspace anything | — |
+| `--create-workspace` | database+role, bucket+identity, NATS account+user+streams, schema, notify target | root credentials |
+| `--ingest-all` | documents, chunks, embeddings | that workspace's own credentials |
+
+Only `--create-workspace` uses the shared root credentials. Everything after
+it — `--ingest-all`, `--scan`, `--reconcile`, `--query`, `--mcp` — connects as
+the workspace and can reach nothing else.
 
 OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
 and the defaults address the cluster directly:
@@ -468,17 +548,49 @@ Set it in `config.yaml` under `infra.embedding.concurrency` to make it stick.
 make deploy-infra    # upgrade --install, then waits for RustFS setup
 ```
 
-Prefer that over a bare `helm upgrade`. Every install and upgrade creates a new
-revision-named `rustfs-setup` Job that provisions RustFS's legacy global
-bucket/policies (unused now that every workspace has its own bucket+identity,
-kept only so upgrades don't need a chart rewrite) — running ahead of it risks
-racing that Job. If you do run Helm directly, wait yourself:
+Prefer that over a bare `helm upgrade` — it waits for the three StatefulSets to
+roll out. If you run Helm directly, wait yourself:
 
 ```bash
-helm upgrade pocket-advisor ./infra/charts/pocket-advisor
-kubectl wait --for=condition=complete job \
-  -l app.kubernetes.io/component=rustfs-setup --timeout=5m
+helm upgrade pocket-advisor ./charts/pocket-advisor -f workspaces/values.yaml
+kubectl rollout status statefulset/pocket-advisor-rustfs --timeout=5m
 ```
+
+Do not omit `-f workspaces/values.yaml`. The chart's own `workspaces:` is an
+empty list, so an upgrade without it renders `nats-server.conf` with no
+accounts at all and every workspace loses its NATS identity.
+
+**Adding or changing a workspace needs a `helm upgrade`.** The chart renders
+one NATS account per workspace from `workspaces/values.yaml`, so a workspace
+added to that file only exists in the cluster after `make deploy-infra` runs
+again. `--create-workspace` will tell you if you forget — it checks the account
+is live before doing anything else.
+
+This replaced an earlier design where `--create-workspace` patched the NATS
+ConfigMap directly. That made Helm and the CLI two writers of one field, so
+every `helm upgrade` failed with a field-ownership conflict on
+`.data.nats-server.conf` — and the recovery discarded every workspace account.
+If you are on an older release and hit that conflict, the fix is to upgrade to
+a chart that renders the accounts, not to force-apply.
+
+**RustFS restarts during `--create-workspace`.** It reads its notify target
+from the environment at startup and cannot be reconfigured at runtime, so
+changing which workspace the target points at requires a pod restart.
+Provisioning does this itself and waits for readiness; it's skipped entirely
+when the target already names that workspace. Don't run it against a workspace
+whose ingest is in flight.
+
+**Why `--create-workspace` sometimes takes a while.** Measured, so you can
+tell a slow run from a stuck one:
+
+| What changed | Time |
+|---|---|
+| Nothing — re-run against a provisioned workspace | ~1s |
+| Notify target switches workspace (RustFS restart) | ~11s |
+
+Most of that ~11s is RustFS restarting and its Service endpoint converging;
+a real S3 call succeeds about 7s after the restart. The NATS account costs
+nothing, because Helm already created it.
 
 Two immutability traps:
 
@@ -506,4 +618,26 @@ every workspace, not just one:
 
 ```bash
 make destroy-state    # kubectl delete pvc --all
+```
+
+`destroy-infra` deletes one thing after the uninstall, because `helm uninstall`
+genuinely cannot:
+
+- **The `rustfs-notify` Secret.** `--create-workspace` writes it through the
+  Kubernetes API rather than the chart, so it is not a release resource at
+  all, and leaving it strands a deleted workspace's NATS password.
+
+Worth being clear about why the recommended labels do not solve this:
+`helm uninstall` does not search the cluster by label. It reads the release
+manifest stored in `sh.helm.release.v1.<name>.v<N>` and deletes exactly the
+objects that manifest names. The `app.kubernetes.io/*` labels and
+`meta.helm.sh/release-*` annotations matter at *install* time, where they stop
+one release adopting another's resources — they are not a delete-time index.
+The orphaned Job carried all of them and was still left behind; no labelling
+scheme makes Helm delete an object it never created.
+
+To confirm a teardown is actually complete:
+
+```bash
+kubectl get all,secrets,configmaps,pvc -n pocket-advisor
 ```

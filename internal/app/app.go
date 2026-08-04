@@ -88,7 +88,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.RustFS {
-		v, err := rustfs.NewForWorkspace(cfg.RustFS, workspaceID, workspaceID, w.RustFSSecretKey, rustfs.RoleWorker)
+		v, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleWorker)
 		if err != nil {
 			return nil, err
 		}
@@ -96,7 +96,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Uploader {
-		u, err := rustfs.NewForWorkspace(cfg.RustFS, workspaceID, workspaceID, w.RustFSSecretKey, rustfs.RoleUploader)
+		u, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +124,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.NATS {
-		b, err := bus.Connect(ctx, cfg.NATS.URL, workspaceID, w.NATSPassword)
+		b, err := bus.Connect(ctx, cfg.NATS.URL, w.NATSUser, w.NATSPassword)
 		if err != nil {
 			return nil, err
 		}

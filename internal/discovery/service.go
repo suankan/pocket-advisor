@@ -31,13 +31,15 @@ type Service struct {
 	Bus   *bus.Bus
 	Log   *slog.Logger
 
-	// LiveNotify is false unless RustFS's native NATS notify target is
-	// actually deployed and consumed (§5.2 — currently only wired for the
-	// "test" workspace). When false, Scan keeps its original behavior:
-	// process every gap directly, exactly as before this existed, so every
-	// other workspace is unaffected by this change. When true, Scan touches
-	// each gap instead and leaves the real work to the live event path.
-	LiveNotify bool
+	// Uploads is the uploader-role vault, needed only by Scan.
+	//
+	// Vault is worker-role, and the worker role is refused any write under
+	// raw/ (§5.1, enforced in Vault.refuseRawWrite). Scan re-triggers events
+	// by touching raw objects, which is such a write — so with only Vault it
+	// refuses every object it was asked to touch. Left nil by callers that
+	// never scan; Scan reports the omission rather than silently doing
+	// nothing, which is exactly how this went unnoticed.
+	Uploads *rustfs.Vault
 }
 
 // Ingest processes one Tier 1 object into a Tier 2 stub plus a dispatched
@@ -197,6 +199,9 @@ func imageDimensions(data []byte) (int, int) {
 // row" are enumerable from one store. It is the backstop that makes a dropped
 // bucket notification a delay rather than a loss (§5.2).
 func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWater uint64) (int, error) {
+	if s.Uploads == nil {
+		return 0, fmt.Errorf("scan requires an uploader-role vault to touch raw/ objects")
+	}
 	objects, err := s.Vault.List(ctx, "raw/")
 	if err != nil {
 		return 0, err
@@ -229,17 +234,14 @@ func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWa
 		if err := s.waitForCapacity(ctx, highWater, lowWater); err != nil {
 			return n, err
 		}
-		if s.LiveNotify {
-			// Trigger, not doer (§5.2): make RustFS re-emit a real event for
-			// this object and let the live path do the fetch/verify/classify/
-			// stub/publish work through the exact same code a fresh upload
-			// goes through, rather than duplicating that work here.
-			if err := s.Vault.Touch(ctx, key); err != nil {
-				s.Log.Error("touch failed", "key", key, "error", err)
-				continue
-			}
-		} else if err := s.Ingest(ctx, workspaceID, key, "scan"); err != nil {
-			s.Log.Error("ingest failed", "key", key, "error", err)
+		// Trigger, not doer (§5.2): make RustFS re-emit a real event for this
+		// object and let the live path do the fetch/verify/classify/stub/
+		// publish work through the exact same code a fresh upload goes
+		// through, rather than duplicating that work here. Unconditional now
+		// that every workspace has a notify target — the scan is still the
+		// reconciliation authority, it just stops being the executor.
+		if err := s.Uploads.Touch(ctx, key); err != nil {
+			s.Log.Error("touch failed", "key", key, "error", err)
 			continue
 		}
 		n++

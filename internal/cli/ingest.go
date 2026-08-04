@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -30,20 +31,16 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
 	needs := app.Needs{RustFS: true, Postgres: true, NATS: true, Metrics: true}
-	if o.IngestAll {
+	// Deliberately does NOT provision. An earlier revision had --ingest-all
+	// call CreateWorkspace idempotently, which was convenient and widened the
+	// most commonly run command to require shared root credentials
+	// (deviation 10 recorded that as a real cost at the time). Provisioning is
+	// now --create-workspace's job alone, so everything else — ingest, query,
+	// mcp — connects with one workspace's own credentials and nothing more.
+	// --scan needs it as much as --ingest-all does: it triggers work by
+	// touching raw/ objects, which only the uploader role may do (§5.1).
+	if o.IngestAll || o.Scan {
 		needs.Uploader = true
-
-		// --ingest-all provisions the workspace if it doesn't exist yet,
-		// idempotently — CreateWorkspace is safe to call against an
-		// already-provisioned workspace (README.md §2). Must happen before
-		// app.New, which connects using credentials this call is what
-		// creates on a first run.
-		if err := cfg.RequireProvisioning(); err != nil {
-			return err
-		}
-		if err := provision.CreateWorkspace(ctx, cfg, o.WorkspaceID, logs.Logger(telemetry.RoleApp)); err != nil {
-			return fmt.Errorf("ensure workspace provisioned: %w", err)
-		}
 	}
 
 	a, err := app.New(ctx, cfg, logs, needs, o.WorkspaceID)
@@ -51,6 +48,10 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return err
 	}
 	defer a.Close()
+
+	if err := checkNotifyTarget(ctx, cfg, o.WorkspaceID, a.Log); err != nil {
+		return err
+	}
 
 	if err := cfg.RequireEmbedding(); err != nil {
 		return err
@@ -74,7 +75,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 
 	stats := telemetry.NewStats()
 	pipe, err := pipeline.New(ctx, a, stats, embedder,
-		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: o.LiveNotify, WorkspaceID: o.WorkspaceID})
+		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true, WorkspaceID: o.WorkspaceID})
 	if err != nil {
 		return err
 	}
@@ -142,8 +143,8 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 // feed puts work on the queues, by whichever route the mode selected.
 func feed(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats) error {
 	svc := &discovery.Service{
-		Vault: a.Vault, Docs: a.Docs, Bus: a.Bus,
-		Log: a.Logger(telemetry.RoleDiscover), LiveNotify: o.LiveNotify,
+		Vault: a.Vault, Uploads: a.Uploads, Docs: a.Docs, Bus: a.Bus,
+		Log: a.Logger(telemetry.RoleDiscover),
 	}
 
 	if o.IngestAll {
@@ -234,4 +235,44 @@ func reconcile(ctx context.Context, o *Options, a *app.App, svc *discovery.Servi
 	telemetry.DiscoveryStalePending.Set(float64(remaining))
 	a.Log.Info("reconcile complete", "republished", n, "remaining", remaining)
 	return nil
+}
+
+// checkNotifyTarget refuses to ingest while the notify target is aimed at a
+// different workspace.
+//
+// RustFS has a single server-wide target, so the last --create-workspace wins.
+// Ingesting anyway is not merely ineffective, it breaks isolation: the bucket
+// rule fires for *this* workspace's objects while the target authenticates as
+// the other one, so events naming this workspace's object keys are delivered
+// into another workspace's NATS account. Measured, not theorised — a run of 79
+// objects put all 79 into the wrong account before this check existed.
+//
+// Fatal rather than a warning for that reason. A warning was the first
+// version, and it is what let those 79 through: the run reported success, the
+// queues stayed at zero, and the leak was visible only by inspecting another
+// workspace's streams.
+//
+// Being unable to check is treated differently from a known mismatch. Reading
+// this needs cluster access that ingestion otherwise does not require, so an
+// unreadable target degrades to a warning instead of blocking the command.
+func checkNotifyTarget(ctx context.Context, cfg *config.Config, id string, log *slog.Logger) error {
+	active, err := provision.ActiveNotifyWorkspace(ctx, cfg)
+	switch {
+	case err != nil:
+		log.Warn("could not verify the rustfs notify target; "+
+			"proceeding, but uploads may not trigger processing",
+			"workspace_id", id, "error", err)
+		return nil
+	case active == id:
+		return nil
+	case active == "":
+		log.Warn("rustfs notify target is not configured; "+
+			"uploads will not trigger processing until --create-workspace has run",
+			"workspace_id", id)
+		return nil
+	}
+	return fmt.Errorf("rustfs notify target points at workspace %q, not %q: "+
+		"ingesting now would deliver this workspace's events into %q's NATS account. "+
+		"Run --create-workspace --workspace-id %s first",
+		active, id, active, id)
 }

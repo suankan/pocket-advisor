@@ -51,6 +51,15 @@ func CreateWorkspace(ctx context.Context, cfg *config.Config, id string, log *sl
 		return joinRollback(fmt.Errorf("nats: %w", err), rollbackErr)
 	}
 
+	// Last, because it is the only step that restarts a store: the three
+	// stores must exist before RustFS is told where to publish their events.
+	// Not rolled back on failure — a workspace whose stores exist but whose
+	// notifications are not wired is still usable via the scan, so tearing it
+	// all down would be a worse outcome than a loud error.
+	if err := configureNotify(ctx, cfg, id, log); err != nil {
+		return fmt.Errorf("rustfs notify: %w", err)
+	}
+
 	log.Info("workspace created", "workspace_id", id)
 	return nil
 }
@@ -70,6 +79,12 @@ func DeleteWorkspace(ctx context.Context, cfg *config.Config, id string, log *sl
 		return fmt.Errorf("workspace id is required")
 	}
 
+	// Before NATS, because the notify secret holds that account's password:
+	// leaving it behind after the account is gone points RustFS at
+	// credentials that no longer authenticate.
+	if err := deleteNotifySecret(ctx, cfg, id, log); err != nil {
+		return fmt.Errorf("rustfs notify: %w (nothing else touched)", err)
+	}
 	if err := deleteNATS(ctx, cfg, id, log); err != nil {
 		return fmt.Errorf("nats: %w (postgres and rustfs left untouched)", err)
 	}

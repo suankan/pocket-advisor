@@ -826,26 +826,67 @@ scan — and it was tested live before being built, not assumed:
   for every gap, leaving the actual fetch/verify/classify/stub/publish to the
   live path — the same code a fresh upload goes through.
 
-**Scoped to one workspace, deliberately.** RustFS is a single shared server
-with one server-wide notify-target config, but NATS accounts are fully
-isolated subject spaces per workspace (workspace-isolation.md) — a single
-target can only authenticate as one workspace's NATS user at a time. As of
-this writing only the `test` workspace has this wired
-(`infra/charts/pocket-advisor/values.yaml`'s `rustfs.notify.nats`, disabled
-by default). Generalizing this — auto-provisioning a notify target per
-workspace on `--create-workspace`, or routing every workspace's events
-through one dedicated relay account with per-event workspace resolution — is
-explicit follow-up work, not solved here.
+**Scoped to the workspace being operated on, and always on** (revised
+2026-08-03; the previous revision wired this for the `test` workspace only and
+left generalising it as follow-up).
 
-**How to run it.** `pocket-advisor --listen --workspace-id test` starts the
-full pipeline (every existing role plus the new live-event one) and never
-exits on idle — only an interrupt ends it, the same two-stage
-stop-then-drain every other mode uses. It does no upload and no scan; catching
-up on anything missed while it wasn't running is still the scan's job,
-now via `--scan --live-notify`, which touches instead of ingesting directly.
-Both flags require the chart's notify target to actually be deployed and
-enabled for that workspace — otherwise touched objects go nowhere, since
-nothing is listening.
+RustFS is a single server with one server-wide notify-target config, while
+NATS accounts are fully isolated subject spaces per workspace
+(`workspace-isolation.md` §2.3) — so one target can only authenticate as one
+workspace's NATS user at a time. That reads like a blocker for
+"notifications for every workspace" and is not, because **every mode is
+already scoped to exactly one workspace.** There is never a moment when two
+workspaces need notifications simultaneously. The target therefore carries the
+credentials of whichever workspace was last provisioned, and a bucket
+notification rule on that workspace's bucket alone decides what actually
+publishes.
+
+Isolation is preserved rather than traded away: RustFS authenticates to NATS
+**as the workspace user**, never as an administrator, so events land in that
+workspace's own account and nowhere else. The only administrative act is
+installing the target, which is provisioning's job.
+
+**The target is installed by `--create-workspace`, not by the chart.** The
+chart declares the environment variables unconditionally and sources their
+values from an *optional* Secret that provisioning owns. A fresh install has
+no Secret, so the variables are unset and notification is simply off; the
+first `--create-workspace` writes it and restarts RustFS. Two properties fall
+out of that arrangement: `helm upgrade` cannot revert the target, because the
+chart never contained its values; and there is no `enabled` flag, because
+"configured" and "enabled" are the same fact.
+
+**Runtime reconfiguration was tried and rejected — it crashes RustFS.**
+`madmin-go`'s `SetConfigKV` would have avoided the restart entirely, and the
+admin API is genuinely reachable: `GetConfigKV("notify_nats")` returns the
+current target and `GetBucketNotification` works normally. But *writing*
+config kills the server — a single `SetConfigKV` call took the pod down
+(`restarts=1`) and the change did not survive the restart, leaving
+`enable="off"`. Recorded so the runtime path is not attempted again on this
+version; it is the obviously better mechanism and it does not work.
+
+So installing a target restarts RustFS. That is the pattern deliberately
+removed from NATS provisioning the same day (deviation 10), and the
+distinction matters: a NATS restart drops every JetStream client mid-flight,
+whereas RustFS is restarted by `--create-workspace` before any upload begins,
+with nothing connected to lose. The restart is skipped entirely when the
+target already names the requested workspace, so repeated runs pay nothing.
+
+**One workspace at a time is now an explicit constraint, not a latent race.**
+Two concurrent `--create-workspace` runs for different workspaces would fight
+over a single target; the second would win and the first workspace's events
+would stop. Nothing enforces this, and nothing needs to for a single-operator
+tool — but it is a real limit and belongs written down rather than discovered.
+
+**How to run it.** `--create-workspace --workspace-id <id>` provisions all
+three stores and the notify target, and is the only mode that uses shared root
+credentials. Everything afterwards — `--ingest-all`, `--scan`, `--query`,
+`--mcp` — connects with that workspace's own credentials and no others.
+`--ingest-all` therefore starts processing the moment the first object lands,
+rather than waiting for the upload to finish and a scan to run.
+
+`--listen` still exists for the case where objects arrive from something other
+than our uploader, and the scan remains the reconciliation authority for
+anything a notification missed.
 
 #### Durable identity
 
@@ -1177,25 +1218,27 @@ alongside `CGO_ENABLED=1` and the Homebrew include and library paths Tesseract
 needs, so a working toolchain is checked into the repo rather than described
 in a README.
 
-**`infra/charts/pocket-advisor`** deploys RustFS, PostgreSQL+pgvector and
+**`charts/pocket-advisor`** deploys RustFS, PostgreSQL+pgvector and
 NATS, and nothing else. It builds no images. One setup task accompanies every
 install and upgrade:
 
-**`rustfs-setup-<release-revision>`** is an ordinary release-owned Job. It
-waits for the RustFS data and admin APIs, then creates the bucket and both
-scoped identities with their policies (§5.1). The revision suffix creates a
-new immutable Job on every upgrade; Helm removes the previous revision, and on
-uninstall removes the current Job, its Pod, and the release-owned policy
-ConfigMap. It is deliberately not a hook, because Helm does not track hook
-resources as part of a release. Wait for its `Complete` condition before
-ingesting.
+**There is no setup Job.** One existed until deviation 19, creating a global
+bucket and two scoped identities that per-workspace isolation had already made
+redundant; it was deleted along with them. The chart now renders only the three
+stores, their Services, the NATS config and one Secret.
 
-Schema bootstrap is no longer a Helm hook but a CLI mode,
-`pocket-advisor --bootstrap-schema`. It probes the embedding endpoint and
-applies the DDL with the resolved dimension (§4.4). Making it a hook was a way
-to guarantee it ran before the workers did; with the workers on the host, the
-binary re-probes at startup and refuses to run against a mismatched index, so
-the ordering enforces itself.
+Schema bootstrap is no longer a Helm hook. It is the last step of
+`--create-workspace`, which probes the embedding endpoint and applies the DDL
+with the resolved dimension (§4.4). Making it a hook was a way to guarantee it
+ran before the workers did; with the workers on the host, the binary re-probes
+at startup and refuses to run against a mismatched index, so the ordering
+enforces itself.
+
+It was briefly its own CLI mode, `--bootstrap-schema`. That was removed: it
+repeated provisioning's schema step without calling it, and everything it
+covered is covered by `--create-workspace` re-applying the DDL on every run
+and by `VerifyDimension` failing at the start of `--ingest-all` and
+`--listen` (deviation 16).
 
 The two RustFS identities remain the enforcement point for the write-authority
 split, and matter *more* now rather than less. `pa-uploader` holds `s3:*` on
@@ -1359,7 +1402,7 @@ pocket-advisor/                    # repo root — single Go module
 │   ├── cli/                      # flag surface + mode dispatch
 │   │   ├── cli.go                # modes, validation, two-stage interrupt (§2.6)
 │   │   ├── ingest.go             # --ingest-all | --scan | --reconcile
-│   │   └── reset.go              # --delete-data | --forget | --bootstrap-schema
+│   │   └── reset.go              # --delete-data | --forget
 │   │
 │   ├── pipeline/                 # starts every role pool, drain detection (§2.6)
 │   ├── limits/                   # CPU-derived pool sizes + CPU semaphore (§6.3)
@@ -1399,7 +1442,7 @@ pocket-advisor/                    # repo root — single Go module
 │   ├── telemetry/                # metrics, per-role log files, live stats
 │   └── bus/                      # JetStream streams, consumers, DLQ  (§2.5)
 │
-├── infra/charts/pocket-advisor/  # RustFS + PostgreSQL + NATS only
+├── charts/pocket-advisor/  # RustFS + PostgreSQL + NATS only
 ├── logs/                         # one file per role, gitignored
 └── docs/
     ├── ingestion-design.md       # this file
@@ -1622,14 +1665,21 @@ escapes written to a file are unreadable.
 
 ```
 [ Phase 1: Stores ]
-  │── make deploy-infra: helm upgrade --install, wait for the rustfs-setup Job
-  │     Job: rustfs-setup-<revision>  bucket + both scoped identities + policies
+  │── make deploy-infra: helm upgrade --install -f workspaces/values.yaml,
+  │     then wait for the three StatefulSets to roll out. Renders one NATS
+  │     account per workspace; creates nothing else workspace-specific.
   └── make build: produces bin/pocket-advisor (mise-pinned Go + CGo)
 
-[ Phase 2: Schema ]
-  └── ./bin/pocket-advisor --bootstrap-schema
-        probes the embedding endpoint, resolves (model_id, N) (§4.4),
-        applies the DDL with N interpolated — a CLI mode now, not a Helm hook (§6.2)
+[ Phase 2: Workspace ]
+  └── ./bin/pocket-advisor --create-workspace --workspace-id <id>
+        Postgres database + role, RustFS bucket + identity, NATS account +
+        user + JetStream streams, then the DDL — it probes the embedding
+        endpoint, resolves (model_id, N) (§4.4) and interpolates N — the
+        schema step is here, not a Helm hook and not its own mode (§6.2).
+        Finally points RustFS's notify target at this workspace (§5.2).
+        The only phase using shared root credentials; everything after it
+        connects as the workspace. Required — the chart cannot do any of it,
+        since all four resources are named after a workspace it never sees.
 
 [ Phase 3: Corpus Load ]
   └── ./bin/pocket-advisor --ingest-all --workspace-id <id>
@@ -2324,3 +2374,277 @@ deliberate choice with a reason, not drift.
     are statistically indistinguishable, and the honest move is to stop rather
     than tune until something valuable disappears.
 
+
+15. **Live notify never worked: four independent bugs in one path, each
+    silent (found and fixed 2026-08-04).** Turning bucket notifications on
+    for every workspace (§5.2) was supposed to be configuration work. It
+    surfaced four defects stacked on top of each other, and the reason they
+    survived this long is that not one of them produced an error message —
+    the pipeline reported success at every stage while doing nothing.
+
+    **The ARN needs two non-obvious things at once.** RustFS accepts only
+    `arn:rustfs:sqs::primary:nats`. The partition is `rustfs`, not `minio`,
+    even though RustFS implements MinIO's admin wire protocol everywhere
+    else; and the target id is lowercase `primary` even though the chart
+    declares the target as `RUSTFS_NOTIFY_NATS_*_PRIMARY`, because RustFS
+    lowercases the env suffix when registering. `SetBucketNotification`
+    validates ARN *shape* only, so the wrong-case form is accepted, stored,
+    and returned by `GetBucketNotification` — it fails later, per event, in
+    the RustFS log alone: `Matched notify target is missing from runtime`.
+    Nothing on the S3 side ever reports it. Found by trying candidate forms
+    against the live server; the two dimensions are independent, so testing
+    them one at a time finds nothing.
+
+    **Provisioning created the account but not the streams.** `EnsureStreams`
+    ran only in the pipeline, so a freshly provisioned workspace had a NATS
+    account with nothing in it, and the notify target named a stream that did
+    not exist. `--create-workspace` now creates them, as the workspace user,
+    before pointing RustFS at them.
+
+    **`Scan` was refused every touch it attempted.** Scan re-triggers events
+    by touching raw objects, but ran with the worker-role vault, and §5.1
+    refuses the worker any write under `raw/`. All 79 touches failed. The
+    errors went to the discovery log while the dashboard showed a clean
+    `scan complete`, enqueued 0. Scan now holds an uploader-role vault
+    (`Service.Uploads`) and reports its absence instead of silently doing
+    nothing.
+
+    **`Touch` erased the provenance it exists to redeliver.** `CopyObject`
+    with `ReplaceMetadata: true` means "replace with what I supply" — and it
+    supplied nothing, so every touched object came back with
+    `userMetadata:{}`, losing the source filename and collection id that
+    `Ingest` builds a document from. It now reads the existing metadata and
+    writes it back. This one did real damage: it wiped provenance across the
+    whole `test` bucket, and `--ingest-all` cannot repair it, because the
+    uploader never re-uploads an existing key — only a delete and re-upload
+    restores it. The real corpora escaped only by accident: the role guard
+    above was refusing every touch, so the wipe never reached them.
+
+    **The payload shape was wrong, and the tests encoded the same error.**
+    `bucketNotification` read `Records[].s3.object.key`, the shape the
+    pre-4.0.0 *webhook* handler parsed. RustFS's NATS target nests the S3
+    event one level down, under `data`. `encoding/json` ignores unknown
+    fields and reports no error, so the key came out empty, every key failed
+    `ParseRawObjectKey`, and each message was counted ignored and acked. The
+    signature was a queue draining at full speed and creating nothing: 79
+    events done, zero documents, zero errors, zero DLQ, zero log lines. The
+    unit tests passed throughout, because their fixture was built from the
+    same webhook payload the parser expected — they agreed with each other
+    and neither agreed with the server. The fixture is now a captured live
+    message, with a test that rejects the webhook shape outright so reverting
+    the struct cannot pass.
+
+    **A shared target is an isolation hazard, not just an inconvenience.**
+    RustFS has one server-wide notify config, so the last
+    `--create-workspace` wins. Ingesting a different workspace while the
+    target points elsewhere delivers *this* workspace's events into the
+    *other* workspace's NATS account — measured: a 79-object run put all 79
+    into the wrong account, and the run reported success. `--ingest-all` and
+    `--listen` now refuse to start on a mismatch rather than warn; a warning
+    was the first version, and it is precisely what let those 79 through.
+
+    **Verified end to end** on the `test` workspace after all five fixes:
+    `--scan` touched 82 objects, RustFS published 82 events into that
+    workspace's own `RUSTFS_EVENTS`, and the live path processed them — 58
+    emails, 36 PDFs, 3 images, 97 embeddings, 96 `COMPLETED`, 0
+    dead-lettered. No scan-side processing was involved: scan is now purely
+    a trigger, exactly as §5.2 describes.
+
+    The common thread is worth stating plainly. Every one of these failed
+    *open*: an unparsed key, a refused write, an erased metadata field, a
+    misdirected target. Each was individually invisible, and the aggregate
+    presented as "the pipeline is idle." Any code path that can decide to do
+    nothing needs to say so — the empty-`Records` warning and the nil-vault
+    error added here exist for that reason alone.
+
+16. **`--bootstrap-schema` removed: it was a second copy of provisioning's
+    schema step (2026-08-04).** The mode probed the embedding endpoint and
+    applied the DDL to one workspace's database — which is exactly what
+    `provision.applyWorkspaceSchema` does, step for step: workspace DSN,
+    `RequireEmbedding`, `Probe`, resolve model, `ApplySchema`. Neither called
+    the other. The comment on `applyWorkspaceSchema` still described
+    `--bootstrap-schema` as "a future" mode; it had been written separately
+    instead, and the two had been drifting quietly apart ever since.
+
+    Every use it served is covered without it:
+
+    * **Schema on a new workspace** — `--create-workspace`'s last step.
+    * **Repairing a database that lost its tables** — `--create-workspace`
+      re-applies the DDL on every run, idempotently. Verified against the
+      already-provisioned `case-documents-demo`: it logs `workspace schema
+      applied` and changes nothing.
+    * **Catching endpoint drift** — `VerifyDimension` is fatal at the start
+      of `--ingest-all` and `--listen`, so a mismatched dimension stops a run
+      that would have written incomparable vectors. That is strictly better
+      than a mode someone has to remember to invoke.
+
+    The one property it alone had was needing only the workspace's own
+    credentials, where `--create-workspace` needs root. Not worth a mode: a
+    workspace whose tables have vanished is already an operator-level
+    problem, and root is at hand.
+
+    Worth recording because the documentation was wrong about it in a way the
+    code was not. The README recommended reaching for it "after switching
+    embedding models, when you want to re-resolve the vector dimension" —
+    the single case where `ApplySchema` refuses outright, since `halfvec(N)`
+    is fixed at `CREATE TABLE` and a dimension change is a re-embed. A mode
+    with no unique behaviour attracts invented rationales; deleting it is
+    also how that documentation stopped being wrong.
+
+17. **RustFS had no readiness probe, so `Ready` meant nothing (2026-08-04).**
+    `--create-workspace` took ~50s whenever it changed which workspace the
+    notify target pointed at. Measured by phase, 43 of those 50 seconds were
+    two waits, and one of them was self-inflicted.
+
+    The RustFS StatefulSet declared neither a readiness nor a liveness probe.
+    With no probe, Kubernetes flips a pod's `Ready` condition as soon as the
+    container process starts — four seconds in, while RustFS is still bringing
+    its object layer up. Its own log says so at that moment: `Notification
+    runtime failed to start … storage layer not initialized`. So provisioning's
+    post-restart wait returned on a pod that could not answer, and the real
+    delay moved into `setBucketNotification`'s retry loop: one failed S3 call
+    every three seconds for 18.3 seconds.
+
+    That retry loop was doing its job — it exists precisely because the address
+    is briefly unroutable after a restart — but it was compensating for a
+    readiness signal that was wrong, which made the compensation look like the
+    cost. A retry that always retries is indistinguishable from a wait.
+
+    Both probes now hit `/minio/health/live`, RustFS's own unauthenticated
+    endpoint, served only once the object layer is up. Readiness is tight
+    (2s period, 30 failures allowed) because it gates traffic; liveness is
+    deliberately slack (30s delay, 15s period) because it kills the container,
+    and a slow start must not become a restart loop.
+
+    **Measured, same scenario before and after:**
+
+    | Phase | Before | After |
+    |---|---|---|
+    | restart → pod `Ready` | 4.0s (false) | 6.1s (true) |
+    | `Ready` → notification set | 18.3s | 1.7s |
+    | **workspace switch, total** | **~50s** | **9.9s** |
+
+    The scope is wider than this command. Anything that waits on Ready was
+    waiting on nothing: `helm upgrade --wait`, `kubectl rollout status`, and
+    any `kubectl wait --for=condition=ready` in an operator's own scripts. It
+    is a plausible contributor to earlier confusion in this session about
+    uploads starting against a RustFS that was not serving yet.
+
+    What remains is not ours to remove. Creating a *new* NATS account still
+    costs 25–56s, all of it kubelet propagating the updated ConfigMap into the
+    running pod before the reload can be signalled against a fresh file
+    (`nats.go:233`) — signalling against a stale one reloads nothing and
+    reports success. That variance is kubelet's sync period, not our code, and
+    it is the price of hot-reloading NATS rather than restarting it
+    (deviation 10). Re-running `--create-workspace` when nothing has changed
+    is 2.1s.
+
+18. **Workspace infrastructure moved into a Helm values interface, which
+    removed two long-standing problems rather than documenting them
+    (2026-08-04).** `workspaces/workspace-config.yaml` carried both what a
+    workspace *holds* (collections, paths, bank details) and how to *reach* it
+    (`postgres_password`, `rustfs_secret_key`, `nats_password`). Only the
+    second is infrastructure, and it now lives in `workspaces/values.yaml`:
+
+    * `charts/pocket-advisor/values.yaml` declares the generic interface,
+      `workspaces: []` — no workspace name, no credential, nothing private in
+      the committed chart.
+    * `workspaces/values.yaml` is the gitignored override, one entry per
+      workspace with `db`, `bucket` and `nats` objects. `make deploy-infra`
+      passes it with `-f`, and `config.yaml`'s `workspaces.values` points the
+      binary at the same file — so Helm and the CLI cannot disagree about a
+      password.
+    * `workspace-config.yaml` keeps the corpus side only. The two are joined
+      on `id`.
+
+    The three names under each object (`db.name`/`user`,
+    `bucket.name`/`accessKey`, `nats.account`/`user`) all default to the
+    workspace id, so nothing changes unless one of the three systems objects to
+    an id. `config.Workspace` resolves them once; callers no longer pass the id
+    around assuming Postgres, RustFS and NATS all agree with it.
+
+    **The chart now renders the NATS accounts, and that is the point.** Two
+    entrenched problems were both caused by provisioning patching a ConfigMap
+    Helm also owned:
+
+    * Every `helm upgrade` failed with a field-ownership conflict on
+      `.data.nats-server.conf` — Helm applies server-side, provisioning used
+      Update. The documented recovery, force-applying Helm's copy, silently
+      discarded every workspace account, leaving a running cluster whose
+      workspaces could not authenticate. That recovery is now unnecessary and
+      has been removed from the README.
+    * `--create-workspace` spent **25-56s** watching kubelet propagate the
+      patched file into the pod before it could signal a reload. Measured after
+      this change: **0.1s**, because the account is already there.
+
+    `createNATS` became a liveness check with an actionable message, since a
+    missing account now means "values.yaml and the deployed release disagree —
+    run `make deploy-infra`", which no retry can fix. `deleteNATS` still drops
+    the JetStream assets, and still before the account disappears (deviation
+    12), but no longer edits the config. `addAccountBlock`,
+    `removeAccountBlock`, `hasAccountBlock`, `reloadNATS` and `execInPod` were
+    deleted with their tests — around 180 lines. `make lint` now renders the
+    chart against `values.yaml.example` and asserts a workspace reaches
+    `nats-server.conf`, which is the behaviour those unit tests were really
+    protecting.
+
+    The trade accepted knowingly: adding a workspace now needs a
+    `helm upgrade`, which `make deploy-infra` does.
+
+    **A measurement correction.** Deviation 17 reported the notify step at 1.7s
+    and a workspace switch at 9.9s after adding the readiness probe. Repeated
+    runs give **33s**, consistently — 1.7s was the outlier, and the figure
+    should not have been published from a single observation. The cause was not
+    the probe: RustFS answers a real S3 call 7s after a restart, but
+    `setBucketNotification`'s first attempt blocked ~30s on a TCP connect to
+    the dead pod's address, so the retry loop never got to retry. Giving that
+    client a 3s dial and 5s response-header timeout makes the first attempt
+    fail fast: **38.6s → 11.4s**, close to the 7s floor. The probe was still
+    worth adding — it is what makes `Ready` mean ready for `helm --wait` and
+    `kubectl rollout status` — but it was not what fixed this.
+
+19. **Three RustFS identities reduced to one, and every credential moved out of
+    committed files (2026-08-04).** Deviation 18 moved per-workspace
+    credentials into `workspaces/values.yaml`; this finishes the job.
+
+    **The scoped identities were dead.** `pa-uploader` and `pa-worker` existed
+    to enforce the raw/-vs-extracted/ write split by policy on a single shared
+    bucket (§5.1). Per-workspace isolation replaced that: each workspace has
+    its own bucket and its own identity, and the split is enforced by
+    `Vault.role` in application code (workspace-isolation.md §9). Neither
+    access key was referenced anywhere in Go — confirmed by search, not by
+    reading the design. The global bucket was equally vestigial:
+    `cfg.RustFS.Bucket` was parsed, defaulted and env-overridable, and never
+    used to address anything.
+
+    Deleted with them: the `rustfs-setup` Job whose only remaining purpose was
+    creating those three things, the `rustfs-policies` ConfigMap it mounted,
+    the `mcImage` value, and the `RustFS.Bucket` config field. The chart went
+    from ten rendered objects to seven, and a fresh namespace no longer
+    accumulates Completed Job pods at all — which is a better answer to
+    deviation 15's leftovers than the TTL and the explicit `destroy-infra`
+    delete were.
+
+    What remains is one administrative RustFS identity, used only to create and
+    drop a workspace's bucket and user. `make deploy-infra` now waits on
+    `kubectl rollout status` for the three StatefulSets rather than on that
+    Job's completion — a real signal, and only meaningful because RustFS
+    acquired a readiness probe in deviation 17.
+
+    **Credentials left the committed files entirely.** They had been in two:
+    `charts/pocket-advisor/values.yaml` and `config.yaml` — the latter holding
+    a root access key and a full `admin_dsn` with the password inline. Both are
+    committed, so both were publishing passwords, and the two could drift from
+    each other and from the cluster.
+
+    Now the chart declares the *shape* with empty values and `required` in
+    `secret.yaml`, so a render without real values fails loudly rather than
+    silently falling back to a published default. `config.yaml` keeps
+    `admin_dsn` without any userinfo, and `applyWorkspaceValues` injects the
+    user and password at load time from the same values file Helm is given.
+    `workspaces/values.yaml` is the one place a credential is written.
+
+    `workspaces/values.yaml.example` was deleted rather than updated. A second
+    file describing the same shape is a fixture that drifts; the chart's own
+    `values.yaml` documents it, which is what a values file is for. `make lint`
+    correspondingly renders with `--set` instead of an example file.

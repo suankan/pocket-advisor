@@ -16,9 +16,8 @@ import (
 )
 
 // createPostgres provisions the workspace's own database and role, then
-// applies the Tier 2/3 schema to it — folding --bootstrap-schema's own
-// logic in as the last step, so a freshly created workspace is immediately
-// usable (workspace-isolation.md §6, step 1).
+// applies the Tier 2/3 schema to it, so a freshly created workspace is
+// immediately usable (workspace-isolation.md §6, step 1).
 //
 // Idempotent: existence is checked before every CREATE, so a retry after a
 // partial failure behaves identically to a first attempt.
@@ -27,8 +26,8 @@ func createPostgres(ctx context.Context, cfg *config.Config, id string, log *slo
 	if err != nil {
 		return err
 	}
-	if w.PostgresPassword == "" {
-		return fmt.Errorf("workspace %q has no postgres_password in config.yaml", id)
+	if w.DBPassword == "" {
+		return fmt.Errorf("workspace %q has no postgres.credentials.password in %s", id, cfg.WorkspacesValuesPath)
 	}
 
 	admin, err := pgx.Connect(ctx, cfg.Postgres.AdminDSN)
@@ -37,35 +36,36 @@ func createPostgres(ctx context.Context, cfg *config.Config, id string, log *slo
 	}
 	defer admin.Close(ctx)
 
-	ident := pgx.Identifier{id}.Sanitize()
+	dbIdent := pgx.Identifier{w.DBName}.Sanitize()
+	roleIdent := pgx.Identifier{w.DBUser}.Sanitize()
 
-	roleExists, err := existsQuery(ctx, admin, "SELECT 1 FROM pg_roles WHERE rolname = $1", id)
+	roleExists, err := existsQuery(ctx, admin, "SELECT 1 FROM pg_roles WHERE rolname = $1", w.DBUser)
 	if err != nil {
 		return fmt.Errorf("check role: %w", err)
 	}
 	if !roleExists {
 		// Password is a literal in the statement, not a bind parameter —
 		// CREATE ROLE ... PASSWORD does not accept one. Never logged.
-		stmt := fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD %s", ident, quoteLiteral(w.PostgresPassword))
+		stmt := fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD %s", roleIdent, quoteLiteral(w.DBPassword))
 		if _, err := admin.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create role: %w", err)
 		}
 		log.Info("postgres role created", "workspace_id", id)
 	}
 
-	dbExists, err := existsQuery(ctx, admin, "SELECT 1 FROM pg_database WHERE datname = $1", id)
+	dbExists, err := existsQuery(ctx, admin, "SELECT 1 FROM pg_database WHERE datname = $1", w.DBName)
 	if err != nil {
 		return fmt.Errorf("check database: %w", err)
 	}
 	if !dbExists {
-		if _, err := admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", ident)); err != nil {
+		if _, err := admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbIdent)); err != nil {
 			return fmt.Errorf("create database: %w", err)
 		}
 		log.Info("postgres database created", "workspace_id", id)
 	}
 
 	if _, err := admin.Exec(ctx, fmt.Sprintf(
-		"GRANT ALL PRIVILEGES ON DATABASE %s TO %s", ident, ident)); err != nil {
+		"GRANT ALL PRIVILEGES ON DATABASE %s TO %s", dbIdent, roleIdent)); err != nil {
 		return fmt.Errorf("grant database: %w", err)
 	}
 
@@ -91,15 +91,19 @@ func createPostgres(ctx context.Context, cfg *config.Config, id string, log *slo
 //     workspace role can connect but cannot create a single table in its
 //     own database ("permission denied for schema public").
 func prepareWorkspaceDatabase(ctx context.Context, cfg *config.Config, id string) error {
+	w, err := cfg.Workspace(id)
+	if err != nil {
+		return err
+	}
 	u, err := url.Parse(cfg.Postgres.AdminDSN)
 	if err != nil {
 		return fmt.Errorf("parse infra.postgres.admin_dsn: %w", err)
 	}
-	u.Path = "/" + id
+	u.Path = "/" + w.DBName
 
 	conn, err := pgx.Connect(ctx, u.String())
 	if err != nil {
-		return fmt.Errorf("connect as admin to %s: %w", id, err)
+		return fmt.Errorf("connect as admin to %s: %w", w.DBName, err)
 	}
 	defer conn.Close(ctx)
 
@@ -107,7 +111,7 @@ func prepareWorkspaceDatabase(ctx context.Context, cfg *config.Config, id string
 		return fmt.Errorf("create extension: %w", err)
 	}
 
-	ident := pgx.Identifier{id}.Sanitize()
+	ident := pgx.Identifier{w.DBUser}.Sanitize()
 	if _, err := conn.Exec(ctx, fmt.Sprintf("ALTER SCHEMA public OWNER TO %s", ident)); err != nil {
 		return fmt.Errorf("alter schema owner: %w", err)
 	}
@@ -117,8 +121,12 @@ func prepareWorkspaceDatabase(ctx context.Context, cfg *config.Config, id string
 // applyWorkspaceSchema connects as the workspace's own role and applies the
 // Tier 2/3 DDL, reusing postgres.DB.ApplySchema (schema.go) unchanged — one
 // implementation of the schema, whether it's a fresh workspace or a re-probe
-// after a model change (ingestion-design.md §4.4). Also callable directly by
-// a future `--bootstrap-schema --workspace-id <id>`.
+// after a model change (ingestion-design.md §4.4).
+//
+// This is now the only caller. A --bootstrap-schema CLI mode used to repeat
+// these same steps without calling this, which is exactly the drift a second
+// copy invites; it was removed once every case it served turned out to be
+// covered here or by VerifyDimension.
 func applyWorkspaceSchema(ctx context.Context, cfg *config.Config, id string, log *slog.Logger) error {
 	dsn, err := cfg.WorkspacePostgresDSN(id)
 	if err != nil {

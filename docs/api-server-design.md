@@ -70,10 +70,12 @@ CLI reaches it.
   (`ingestion-design.md` §9.5) — which becomes a client-side rendering of
   progress reported by the server, not a local view of local state.
 
-**Bridge, before any of this exists:** write new operational logic (starting
-with `--create-workspace`/`--delete-workspace`, `docs/workspace-isolation.md`
-§3) as plain, transport-agnostic Go functions in a reusable package — not
-inline in CLI flag handling. A CLI mode calls the function directly today;
+**Bridge, before any of this exists:** write new operational logic as plain,
+transport-agnostic Go functions in a reusable package — not inline in CLI flag
+handling. (The original example here was `--create-workspace`/
+`--delete-workspace`; both were deleted once the chart took over provisioning
+entirely — `ingestion-design.md` deviation 24 — which is the strongest version
+of the same point: logic that belongs somewhere else should live there.) A CLI mode calls the function directly today;
 an API handler calls the identical function later. This is the entire cost
 of being "API-first" before an API Server exists, and it's the only part
 of this document actionable right now.

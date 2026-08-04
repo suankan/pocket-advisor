@@ -1,0 +1,91 @@
+{{/*
+One CloudNativePG Cluster per workspace, plus the Secret holding that
+workspace's application password.
+
+A cluster each, not one shared server with a database each. Physical isolation
+was already the rule for RustFS buckets and NATS accounts
+(workspace-isolation.md §2); Postgres was the outlier, sharing a server and
+separating workspaces by database and role. Now a workspace's Postgres is its
+own process, its own volume, and its own failure domain, and the operator owns
+the lifecycle rather than provisioning code.
+
+That removes the whole in-database role model. Every cluster uses the same
+owner — the value of postgres.appUser — differing only by password, because
+there is nothing to separate *within* a cluster any more. CREATE ROLE, GRANT,
+ALTER SCHEMA OWNER and the superuser admin connection they needed all went
+with it (ingestion-design.md deviation 20).
+
+postInitApplicationSQL, not postInitSQL: the latter runs against the `postgres`
+database, so pgvector would be installed where nothing uses it and the
+halfvec(N) DDL would fail on a type the application database has never heard
+of. Verified against the CRD schema, which says so explicitly.
+
+The schema itself is still applied by --create-workspace from the host: the
+vector dimension is resolved by probing the embedding endpoint on localhost,
+which nothing inside the cluster can reach.
+*/}}
+{{- range $.Values.workspaces }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: {{ .id }}
+  name: postgres-app
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Application credentials for this workspace's Postgres cluster") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+# basic-auth is the shape CNPG's bootstrap.initdb.secret expects; it reads
+# username and password from these exact keys.
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ $.Values.postgres.appUser | quote }}
+  password: {{ required (printf "workspaces[%s].postgres.credentials.password is required" .id) .postgres.credentials.password | quote }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  namespace: {{ .id }}
+  name: postgres
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Postgres cluster backing this workspace") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  # One. This is a single-node local cluster, so replicas would contend for the
+  # same disk and the same page cache while buying no availability — and there
+  # are as many clusters as workspaces.
+  instances: {{ $.Values.postgres.instances }}
+  imageName: {{ $.Values.postgres.image }}
+
+  bootstrap:
+    initdb:
+      # One name for every workspace. The database name carries no information
+      # now that each workspace has its own cluster — the cluster name already
+      # says whose it is — so naming it after the workspace would only be a
+      # second place to keep in step.
+      #
+      # Not `postgres`: that database already exists, owned by the superuser,
+      # and the operator will not reassign it. Measured rather than assumed —
+      # a cluster bootstrapped with database: postgres comes up healthy and
+      # then refuses the first CREATE TABLE with "permission denied for schema
+      # public", because app_user owns nothing in it.
+      database: {{ $.Values.workspace.name | quote }}
+      owner: {{ $.Values.postgres.appUser | quote }}
+      secret:
+        name: postgres-app
+      postInitApplicationSQL:
+        # Superuser-only, and the reason this cannot be folded into the DDL
+        # --create-workspace applies as the application user.
+        - CREATE EXTENSION IF NOT EXISTS vector;
+
+  storage:
+    size: {{ $.Values.postgres.storage.size }}
+
+  resources:
+    {{- toYaml $.Values.postgres.resources | nindent 4 }}
+{{- end }}

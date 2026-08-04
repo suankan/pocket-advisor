@@ -4,15 +4,19 @@
 BIN     := bin/pocket-advisor
 PKG     := ./cmd/pocket-advisor
 RELEASE := pocket-advisor
-CHART   := charts/pocket-advisor
+CHART   := charts/pocket-advisor-infra
 
 # The private per-workspace override: names and credentials for each
 # workspace's database, bucket and NATS account. Gitignored, and the same file
 # the binary reads (config.yaml's workspaces.values), so Helm and the CLI
 # cannot disagree about a password. Overridable for a second environment:
 #   make deploy-infra WS_VALUES=workspaces/other.yaml
-WS_VALUES := workspaces/values.yaml
-NS      := pocket-advisor
+WS_VALUES := workspaces/pocket-advisor-infra.yaml
+
+# One release manages every workspace. It lives in its own namespace; the
+# workspaces' resources are rendered into namespaces of their own, named after
+# each workspace id, which the chart creates.
+NS := pocket-advisor
 
 # OCR is a CGo build against Homebrew's tesseract and leptonica. Without the
 # tag the binary still builds and runs, but scanned PDFs and images are
@@ -34,7 +38,12 @@ GO    := mise exec -- go
 GOFMT := mise exec -- gofmt
 endif
 
-.PHONY: all build test race vet fmt lint deploy-infra destroy-infra destroy-state clean
+.PHONY: all build test race vet fmt lint require-workspace deploy-operator \
+        deploy-infra deploy-all destroy-infra destroy-state clean
+
+# Every cluster-facing target acts on exactly one workspace, and getting it
+# wrong would deploy into — or destroy — the wrong namespace. Fail before
+# touching anything rather than defaulting to something plausible.
 
 all: build
 
@@ -55,62 +64,93 @@ fmt:
 
 lint: fmt vet
 	helm lint $(CHART)
-	@# The NATS accounts block is rendered by the chart now, not patched by Go
-	@# code, so the unit tests that covered addAccountBlock/removeAccountBlock
-	@# went with it. This replaces them: render with a throwaway workspace and
-	@# check it actually reaches nats-server.conf. Uses --set rather than a
-	@# committed example file, so there is one source of truth for the shape
-	@# (charts/pocket-advisor/values.yaml) and no fixture to drift from it.
+	@# The NATS account and the JetStream streams are chart-rendered now, not
+	@# created by Go, so the unit tests that covered addAccountBlock and
+	@# EnsureStreams went with them. The account is keyed by workspace id —
+	@# unlike the bucket and database, it shares one server (deviation 23). This replaces both: render a throwaway
+	@# workspace and check its account reaches nats-server.conf and its streams
+	@# reach Stream CRDs. --set rather than a committed fixture, so the chart's
+	@# own values.yaml stays the single source of truth for the shape.
 	@helm template $(RELEASE) $(CHART) \
-	  --set rustfs.credentials.rootUser=lint --set rustfs.credentials.rootPassword=lint \
-	  --set postgres.credentials.user=lint --set postgres.credentials.password=lint \
+	  --set rustfs.credentials.rootUser=lint \
+	  --set rustfs.credentials.rootPassword=lint \
 	  --set workspaces[0].id=lintws \
-	  --set workspaces[0].nats.credentials.password=lint \
-	  --set workspaces[0].postgres.credentials.password=lint \
 	  --set workspaces[0].rustfs.credentials.secretKey=lint \
-	  | grep -q '"lintws": {' \
-	  && echo "ok: chart renders workspace NATS accounts" \
-	  || (echo "FAIL: workspaces from values did not reach nats-server.conf"; exit 1)
+	  --set workspaces[0].nats.credentials.password=lint \
+	  --set workspaces[0].postgres.credentials.password=lint > /tmp/pa-lint.yaml \
+	  && grep -q '"lintws": {' /tmp/pa-lint.yaml \
+	  && test "$$(grep -c 'kind: Stream' /tmp/pa-lint.yaml)" = "3" \
+	  && grep -q 'namespace: lintws' /tmp/pa-lint.yaml \
+	  && echo "ok: chart renders the workspace account, 3 streams, namespaced" \
+	  || (echo "FAIL: rendered workspace is incomplete"; exit 1)
 
-# The chart carries RustFS, PostgreSQL+pgvector and NATS. Nothing in it runs
-# pipeline code.
+
+# The chart carries RustFS, NATS, and one CloudNativePG Cluster per workspace.
+# Nothing in it runs pipeline code.
 deploy-infra:
-	@test -f $(WS_VALUES) || (echo "missing $(WS_VALUES) — copy workspaces/values.yaml.example and fill it in"; exit 1)
+	@test -f $(WS_VALUES) || (echo "missing $(WS_VALUES)"; exit 1)
+	@# Two attempts, and the first is expected to fail on a fresh cluster.
+	@# CloudNativePG installs a mutating webhook, and applying a Cluster
+	@# requires that webhook to be serving — but one release applies the
+	@# operator Deployment and our CRs in the same pass, so on a first install
+	@# the webhook Service has no endpoints yet. The operators come up
+	@# regardless, so the retry succeeds. This is the price of one chart
+	@# instead of two; Helm cannot express "wait for a subchart to be ready"
+	@# mid-apply (ingestion-design.md deviation 24).
 	helm upgrade --install $(RELEASE) $(CHART) --namespace $(NS) --create-namespace \
-	  -f $(WS_VALUES)
-	@# Wait on the stores themselves. There used to be a rustfs-setup Job to
-	@# wait for; it created a global bucket and two scoped identities that
-	@# per-workspace isolation made redundant, and it was deleted
-	@# (ingestion-design.md deviation 19). RustFS now carries a readiness
-	@# probe, so rollout status is a real signal rather than a proxy one.
-	kubectl rollout status statefulset/$(RELEASE)-rustfs -n $(NS) --timeout=5m
-	kubectl rollout status statefulset/$(RELEASE)-postgres -n $(NS) --timeout=5m
-	kubectl rollout status statefulset/$(RELEASE)-nats -n $(NS) --timeout=5m
+	  -f $(WS_VALUES) || ( \
+	    echo "first apply failed; waiting for operator webhooks, then retrying" && \
+	    kubectl wait --for=condition=Available deploy --all -n $(NS) --timeout=5m && \
+	    helm upgrade --install $(RELEASE) $(CHART) --namespace $(NS) --create-namespace \
+	      -f $(WS_VALUES) )
+	@# Wait on the stores themselves, per workspace namespace. By label rather
+	@# than by name: a namespace mid-reconcile may not have every workload yet,
+	@# and "not found" should mean "keep waiting", not "fail".
+	@for ns in $$(kubectl get ns -l app.kubernetes.io/part-of=rag-ingestion-engine -o name 2>/dev/null | cut -d/ -f2); do \
+	  for sts in $$(kubectl get sts -n $$ns -o name 2>/dev/null); do \
+	    kubectl rollout status $$sts -n $$ns --timeout=5m || exit 1; \
+	  done; \
+	done
+	@# The RustFS operator (0.0.5) gives up on provisioning after its first
+	@# attempt fails, and the first attempt races RustFS's own storage init:
+	@# tenants sit at "failed to list RustFS canned policies" indefinitely —
+	@# observed still stuck after 3 minutes — while their pods run healthily.
+	@# A no-op annotation forces the reconcile it should retry itself. Remove
+	@# this once the operator backs off and retries provisioning on its own.
+	@for ns in $$(kubectl get ns -l app.kubernetes.io/part-of=rag-ingestion-engine -o name 2>/dev/null | cut -d/ -f2); do \
+	  kubectl annotate tenant --all -n $$ns \
+	    pocket-advisor/reconcile-ts="$$(date +%s)" --overwrite >/dev/null 2>&1 || true; \
+	done
+	@kubectl wait --for=condition=Ready tenant.rustfs.com --all \
+	  --all-namespaces --timeout=5m 2>/dev/null || true
+	@# Each workspace's Postgres is its own CNPG cluster; the operator reports
+	@# readiness on the Cluster resource rather than on a StatefulSet.
+	@kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io --all \
+	  --all-namespaces --timeout=10m 2>/dev/null || true
 	@echo
-	@echo "stores ready, with a NATS account per workspace in $(WS_VALUES). next:"
+	@echo "all workspaces ready. next:"
 	@echo "  make build"
-	@echo "  ./$(BIN) --create-workspace --workspace-id <id>   # required first"
-	@echo "  ./$(BIN) --ingest-all      --workspace-id <id>"
+	@echo "  ./$(BIN) --ingest-all --workspace-id <id>"
 	@echo
-	@echo "--create-workspace is the only step needing root credentials, and"
-	@echo "the only one that points RustFS notifications at a workspace."
-	@echo "see README.md"
+	@echo "There is no provisioning step: everything a workspace needs is"
+	@echo "declared by this chart, and --ingest-all applies the schema and the"
+	@echo "bucket notification rule itself. see README.md"
+
 
 # Keeps PVCs: Tier 1 is the corpus source of truth, and the JetStream volume is
 # what makes an interrupted ingest resumable. Pair with destroy-state to also
 # wipe them.
 #
-# The delete after uninstall is not belt-and-braces: the notify Secret is
-# written by --create-workspace through the Kubernetes API rather than by the
-# chart, so it is not a release resource and `helm uninstall` leaves it,
-# stranding a deleted workspace's NATS password.
+# Nothing needs deleting by hand any more. Every object is chart-rendered, so
+# uninstall removes it — the notify Secret used to be written by the CLI
+# through the Kubernetes API and had to be cleaned up separately, until the
+# chart took it over (deviation 24).
 #
 # --ignore-not-found on both, so a re-run — or a run after the release was
 # removed some other way — still reaches the cleanup rather than aborting on
 # the uninstall, which is how leftovers survived long enough to be noticed.
 destroy-infra:
 	helm uninstall $(RELEASE) --namespace $(NS) --ignore-not-found
-	kubectl delete secret $(RELEASE)-rustfs-notify -n $(NS) --ignore-not-found
 	@echo
 	@echo "release removed. PVCs kept — 'make destroy-state' also wipes those."
 
@@ -121,7 +161,13 @@ destroy-infra:
 # depends on ordering, but there's nothing left to delete PVCs *from* once
 # the release exists again.
 destroy-state:
-	kubectl delete pvc --all --namespace $(NS)
+	@# The release namespace as well as the workspace ones: the shared NATS
+	@# lives there, and its JetStream volume is state like any other. Only the
+	@# workspace namespaces carry the part-of label, so listing them alone
+	@# silently left that volume behind.
+	@for ns in $(NS) $$(kubectl get ns -l app.kubernetes.io/part-of=rag-ingestion-engine -o name 2>/dev/null | cut -d/ -f2); do \
+	  kubectl delete pvc --all --namespace $$ns --ignore-not-found; \
+	done
 
 clean:
 	rm -rf bin

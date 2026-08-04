@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"time"
 
@@ -30,6 +29,30 @@ const settle = 3 * time.Second
 func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
+	// Probe the embedding endpoint while the stores are being connected. Its
+	// first request on a fresh connection costs ~650ms even warm — the server
+	// does per-connection setup, reproducible with curl — and much more when
+	// it has been idle long enough to page its model back in. That is not our
+	// cost to remove, but it is ours to stop paying sequentially: connecting
+	// to RustFS, Postgres and NATS takes ~360ms and depends on none of it
+	// (deviation 24).
+	if err := cfg.RequireEmbedding(); err != nil {
+		return err
+	}
+	embedder := embedding.New(cfg.Embedding)
+
+	type probeResult struct {
+		info embedding.ModelInfo
+		took time.Duration
+		err  error
+	}
+	probeCh := make(chan probeResult, 1)
+	go func() {
+		start := time.Now()
+		i, err := embedder.Probe(ctx)
+		probeCh <- probeResult{info: i, took: time.Since(start), err: err}
+	}()
+
 	needs := app.Needs{RustFS: true, Postgres: true, NATS: true, Metrics: true}
 	// Deliberately does NOT provision. An earlier revision had --ingest-all
 	// call CreateWorkspace idempotently, which was convenient and widened the
@@ -49,31 +72,41 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 	defer a.Close()
 
-	if err := checkNotifyTarget(ctx, cfg, o.WorkspaceID, a.Log); err != nil {
-		return err
-	}
-
-	if err := cfg.RequireEmbedding(); err != nil {
-		return err
-	}
-	embedder := embedding.New(cfg.Embedding)
-
+	// The two things the chart cannot declare — the schema, which needs the
+	// embedding endpoint's vector width, and the bucket notification rule.
+	// Both idempotent and cheap, so they run on every ingest rather than
+	// needing a separate provisioning command (deviation 24).
 	// Fatal at startup, not a warning: embedding at one dimension into a column
 	// sized for another writes vectors that are silently not comparable to
 	// their neighbours (§4.4).
+	probeStart := time.Now()
 	info, err := embedder.Probe(ctx)
 	if err != nil {
 		return fmt.Errorf("embedding endpoint %s: %w", cfg.Embedding.Endpoint, err)
 	}
+	probeTook := time.Since(probeStart)
+
+	// Before VerifyDimension, which reads the schema this creates. Given the
+	// probe rather than repeating it (deviation 24).
+	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
+		return err
+	}
+
 	if err := a.DB.VerifyDimension(ctx, cfg.Embedding.Model, info.Dimension); err != nil {
 		return fmt.Errorf("dimension check failed (endpoint reports %d for %s): %w",
 			info.Dimension, cfg.Embedding.Model, err)
 	}
+	// probe_ms is here because it is the one startup cost that is not ours:
+	// a warm endpoint answers in ~13ms, an idle one that has to page its model
+	// back in can take tens of seconds, and the difference is invisible
+	// otherwise — the process simply sits at 0% CPU before the dashboard
+	// appears (deviation 24).
 	a.Log.Info("embedding endpoint verified",
 		"model", cfg.Embedding.Model, "dimension", info.Dimension,
-		"sessions", embedder.Concurrency())
+		"sessions", embedder.Concurrency(), "probe_ms", probeTook.Milliseconds())
 
 	stats := telemetry.NewStats()
+
 	pipe, err := pipeline.New(ctx, a, stats, embedder,
 		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true, WorkspaceID: o.WorkspaceID})
 	if err != nil {
@@ -235,44 +268,4 @@ func reconcile(ctx context.Context, o *Options, a *app.App, svc *discovery.Servi
 	telemetry.DiscoveryStalePending.Set(float64(remaining))
 	a.Log.Info("reconcile complete", "republished", n, "remaining", remaining)
 	return nil
-}
-
-// checkNotifyTarget refuses to ingest while the notify target is aimed at a
-// different workspace.
-//
-// RustFS has a single server-wide target, so the last --create-workspace wins.
-// Ingesting anyway is not merely ineffective, it breaks isolation: the bucket
-// rule fires for *this* workspace's objects while the target authenticates as
-// the other one, so events naming this workspace's object keys are delivered
-// into another workspace's NATS account. Measured, not theorised — a run of 79
-// objects put all 79 into the wrong account before this check existed.
-//
-// Fatal rather than a warning for that reason. A warning was the first
-// version, and it is what let those 79 through: the run reported success, the
-// queues stayed at zero, and the leak was visible only by inspecting another
-// workspace's streams.
-//
-// Being unable to check is treated differently from a known mismatch. Reading
-// this needs cluster access that ingestion otherwise does not require, so an
-// unreadable target degrades to a warning instead of blocking the command.
-func checkNotifyTarget(ctx context.Context, cfg *config.Config, id string, log *slog.Logger) error {
-	active, err := provision.ActiveNotifyWorkspace(ctx, cfg)
-	switch {
-	case err != nil:
-		log.Warn("could not verify the rustfs notify target; "+
-			"proceeding, but uploads may not trigger processing",
-			"workspace_id", id, "error", err)
-		return nil
-	case active == id:
-		return nil
-	case active == "":
-		log.Warn("rustfs notify target is not configured; "+
-			"uploads will not trigger processing until --create-workspace has run",
-			"workspace_id", id)
-		return nil
-	}
-	return fmt.Errorf("rustfs notify target points at workspace %q, not %q: "+
-		"ingesting now would deliver this workspace's events into %q's NATS account. "+
-		"Run --create-workspace --workspace-id %s first",
-		active, id, active, id)
 }

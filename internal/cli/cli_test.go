@@ -7,12 +7,10 @@ import (
 
 func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 	cases := map[string][]string{
-		"ingest-all":       {"--ingest-all", "--workspace-id", "test"},
-		"delete-data":      {"--delete-data", "--workspace-id", "test"},
-		"scan":             {"--scan", "--workspace-id", "test"},
-		"reconcile":        {"--reconcile", "--workspace-id", "test"},
-		"create-workspace": {"--create-workspace", "--workspace-id", "test"},
-		"delete-workspace": {"--delete-workspace", "--workspace-id", "test"},
+		"ingest-all":  {"--ingest-all", "--workspace-id", "test"},
+		"delete-data": {"--delete-data", "--workspace-id", "test"},
+		"scan":        {"--scan", "--workspace-id", "test"},
+		"reconcile":   {"--reconcile", "--workspace-id", "test"},
 	}
 	for wantMode, args := range cases {
 		o, err := Parse(args)
@@ -50,7 +48,6 @@ func TestParseRequiresAMode(t *testing.T) {
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{
 		"--ingest-all", "--delete-data", "--scan", "--reconcile",
-		"--create-workspace", "--delete-workspace",
 	} {
 		if _, err := Parse([]string{mode}); err == nil {
 			t.Errorf("Parse(%s) accepted a missing --workspace-id", mode)
@@ -73,7 +70,7 @@ func TestParseValidatesForgetHash(t *testing.T) {
 func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 	enqueues := map[string]bool{
 		"--ingest-all": true, "--scan": true, "--reconcile": true,
-		"--delete-data": false, "--create-workspace": false, "--delete-workspace": false,
+		"--delete-data": false,
 	}
 	for mode, want := range enqueues {
 		o, err := Parse([]string{mode, "--workspace-id", "test"})

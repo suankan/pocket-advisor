@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/dashboard"
 	"github.com/suankan/pocket-advisor/internal/pipeline"
+	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -28,28 +30,37 @@ func runListen(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	defer a.Close()
 
 	// Matters more here than anywhere else: this mode consumes nothing but
-	// notify events, so a target aimed elsewhere makes it sit at zero forever
-	// while quietly filling another workspace's account (§5.2).
-	if err := checkNotifyTarget(ctx, cfg, o.WorkspaceID, a.Log); err != nil {
-		return err
-	}
-
+	// notify events, so an unset bucket rule makes it sit at zero forever.
 	if err := cfg.RequireEmbedding(); err != nil {
 		return err
 	}
 	embedder := embedding.New(cfg.Embedding)
 
+	probeStart := time.Now()
 	info, err := embedder.Probe(ctx)
 	if err != nil {
 		return fmt.Errorf("embedding endpoint %s: %w", cfg.Embedding.Endpoint, err)
 	}
+	probeTook := time.Since(probeStart)
+
+	// Before VerifyDimension, which reads the schema this creates. Given the
+	// probe rather than repeating it (deviation 24).
+	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
+		return err
+	}
+
 	if err := a.DB.VerifyDimension(ctx, cfg.Embedding.Model, info.Dimension); err != nil {
 		return fmt.Errorf("dimension check failed (endpoint reports %d for %s): %w",
 			info.Dimension, cfg.Embedding.Model, err)
 	}
+	// probe_ms is here because it is the one startup cost that is not ours:
+	// a warm endpoint answers in ~13ms, an idle one that has to page its model
+	// back in can take tens of seconds, and the difference is invisible
+	// otherwise — the process simply sits at 0% CPU before the dashboard
+	// appears (deviation 24).
 	a.Log.Info("embedding endpoint verified",
 		"model", cfg.Embedding.Model, "dimension", info.Dimension,
-		"sessions", embedder.Concurrency())
+		"sessions", embedder.Concurrency(), "probe_ms", probeTook.Milliseconds())
 
 	stats := telemetry.NewStats()
 	pipe, err := pipeline.New(ctx, a, stats, embedder,

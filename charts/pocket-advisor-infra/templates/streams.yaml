@@ -1,0 +1,89 @@
+{{/*
+This workspace's JetStream streams, as NACK Stream CRDs.
+
+They used to be created by Go, at pipeline startup and again during
+provisioning (bus.EnsureStreams). Declaring them here puts them where the
+Postgres Cluster and RustFS Tenant already are: reconciled by an operator from
+the same manifest that creates everything else, so a workspace is either
+declared completely or not at all (ingestion-design.md deviation 22).
+
+NACK does not deploy NATS — it reconciles JetStream objects against a server
+that already exists, which is why this chart still runs its own NATS
+StatefulSet alongside these.
+
+Credentials go in the server URL rather than a Secret because NACK's auth
+options are creds files, nkeys and tokens; it has no username/password field,
+and this NATS authenticates with username and password. The password is
+therefore visible in the Stream spec — acceptable only because the whole
+namespace belongs to this one workspace, and anything able to read a Stream
+here can already read the Secret next to it.
+*/}}
+{{- range $.Values.workspaces }}
+---
+{{/* The shared NATS lives in the release namespace, so Streams in a workspace
+     namespace reach it by FQDN, authenticating as that workspace's account. */}}
+{{- $url := printf "nats://%s:%s@nats.%s.svc.cluster.local:%d"
+      .id
+      (required (printf "workspaces[%s].nats.credentials.password is required" .id) .nats.credentials.password)
+      $.Release.Namespace (int $.Values.nats.clientPort) }}
+---
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  namespace: {{ .id }}
+  name: {{ $.Release.Name }}-ingestion
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+spec:
+  name: INGESTION
+  servers: [{{ $url | quote }}]
+  subjects:
+    - ingest.emails.raw
+    - ingest.pdfs.raw
+    - ingest.docx.raw
+    - ingest.images.raw
+    - ingest.text.embed
+  # WorkQueue: a message is deleted once acked, so the stream holds backlog
+  # rather than history. Sizing follows from that (§6.3).
+  retention: workqueue
+  storage: file
+  # Reject new rather than drop pending.
+  discard: new
+  maxMsgs: 1000000
+---
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  namespace: {{ .id }}
+  name: {{ $.Release.Name }}-ingestion-dlq
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+spec:
+  name: INGESTION_DLQ
+  servers: [{{ $url | quote }}]
+  subjects: ["ingest.dlq"]
+  # Limits, not workqueue: its whole purpose is to retain messages for
+  # inspection after they have stopped being work.
+  retention: limits
+  storage: file
+  maxAge: 720h
+---
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  namespace: {{ .id }}
+  name: {{ $.Release.Name }}-rustfs-events
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+spec:
+  name: RUSTFS_EVENTS
+  servers: [{{ $url | quote }}]
+  subjects: ["rustfs.events.raw"]
+  # WorkQueue like INGESTION, for the same reason, but its own stream so its
+  # much wider duplicate window does not apply to typed-command traffic (§5.2).
+  retention: workqueue
+  storage: file
+  discard: new
+  maxMsgs: 1000000
+  duplicateWindow: {{ $.Values.nats.rustfsEventsDedupWindow }}
+{{- end }}

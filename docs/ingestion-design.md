@@ -2648,3 +2648,263 @@ deliberate choice with a reason, not drift.
     file describing the same shape is a fixture that drifts; the chart's own
     `values.yaml` documents it, which is what a values file is for. `make lint`
     correspondingly renders with `--set` instead of an example file.
+
+20. **Postgres moved to CloudNativePG: one cluster per workspace, and the
+    in-database role model deleted (2026-08-04).** A single shared server with
+    a database and a role per workspace was the last place isolation was
+    logical rather than physical — RustFS buckets and NATS accounts had been
+    separate since workspace-isolation.md §2. Each workspace now has its own
+    `Cluster` CRD: its own process, its own volume, its own failure domain,
+    reconciled by the operator rather than by provisioning code.
+
+    **What that deleted.** `createPostgres` ran CREATE ROLE, CREATE DATABASE
+    and GRANT; `prepareWorkspaceDatabase` ran CREATE EXTENSION and ALTER SCHEMA
+    public OWNER as a superuser, working around PostgreSQL 15's default that
+    only the owner may create in `public`; `deletePostgres` dropped both. All
+    of it existed because workspaces shared a server. With a cluster each there
+    is nothing to separate *within* one, so every cluster uses the same owner —
+    `app_user` — and the same database name, differing only by password. The
+    superuser admin connection went with them: `infra.postgres.admin_dsn` no
+    longer exists, and neither does the last credential in a committed file.
+
+    What could not move is the schema. Its vector column is `halfvec(N)`, and N
+    comes from probing the embedding endpoint on the operator's own machine,
+    which nothing inside the cluster can reach (§4.4). So `--create-workspace`
+    now waits for the cluster to accept connections and applies the DDL — that
+    is all it does for Postgres.
+
+    **Two things the obvious reading gets wrong, both found by testing rather
+    than by reading.**
+
+    * `postInitSQL` runs against the `postgres` database; the application
+      database needs `postInitApplicationSQL`. Using the former installs
+      pgvector where nothing uses it, and the failure surfaces much later, as
+      `halfvec` being an unknown type when the DDL runs.
+    * The application database cannot be `postgres`. The webhook accepts it and
+      the cluster comes up `Cluster in healthy state`, but `postgres` already
+      exists owned by the superuser and the operator will not reassign it, so
+      the first `CREATE TABLE` fails with `permission denied for schema
+      public`. It is named `workspace` instead — one name across every cluster,
+      since the cluster name already says whose it is and a second
+      workspace-derived name would only be another thing to keep in step.
+
+    The operator is a cluster-wide prerequisite, not a chart dependency:
+    `make deploy-operator`. It owns CRDs and its own namespace, and
+    `helm uninstall pocket-advisor` must not take unrelated Postgres clusters
+    with it. `make deploy-infra` refuses to run without it rather than failing
+    on an unrecognised kind.
+
+    **Verified** on a clean cluster: three Cluster CRDs healthy, database
+    `workspace` owned by `app_user` with pgvector present and both tables
+    created, ingest 96 COMPLETED / 8 SKIPPED / 0 dead-lettered, and a query
+    returning cited passages at +0.204.
+
+21. **One release per workspace, one namespace per workspace (2026-08-04).**
+    The chart used to deploy a shared RustFS and NATS plus a Cluster per
+    workspace, all in one namespace, driven by a `workspaces:` list. It now
+    deploys a complete stack for exactly one workspace, into a namespace named
+    after it, from `workspaces/values-<id>.yaml`:
+
+        make deploy-infra WORKSPACE=test
+
+    Every workspace gets its own RustFS, its own NATS and its own Postgres
+    cluster. Nothing is shared, so nothing needs partitioning.
+
+    **That is what let the names collapse.** Bucket, NATS account and Postgres
+    database are all the constant `workspace`, because the namespace already
+    says whose they are — a workspace-derived name would repeat, in three
+    places, information the address already carries. The values file is
+    credentials and nothing else.
+
+    **It also deleted a class of bug rather than a line of code.** The
+    cross-workspace notify guard existed because one RustFS served every
+    workspace: pointing its single notify target at the wrong one delivered a
+    run's events into another workspace's NATS account, measured at 79 objects
+    into the wrong account while the run reported success (deviation 15). With
+    a RustFS per namespace, a target here can only point here. The fatal check
+    became a warning about a local misconfiguration — uploads that trigger
+    nothing — because the isolation breach it guarded is now unreachable.
+
+    **The rename bit once, in the way renames do.** The notify Secret carried a
+    key called `workspace-id`, which RustFS passes to NATS as its *username*.
+    That was fine while the account was named after the workspace; with the
+    account renamed to `workspace` it silently became wrong, RustFS failed
+    authentication, and an ingest uploaded 79 objects and processed none —
+    queues at zero, no error anywhere. The key is now `nats-user`, named for
+    what it holds rather than what it happened to equal.
+
+    Config follows the same shape: `RustFS.Endpoint`, `NATS.URL` and
+    `Postgres.HostTemplate` are templates taking the workspace id, since each
+    is the same service name in a different namespace, and
+    `infra.kubernetes.namespace` is gone — the namespace *is* the id.
+    `Config.Workspace(id)` resolves every address and credential in one place,
+    so no caller assembles an address from parts any more.
+
+    **Verified** across three namespaces, each with 3 running pods and its own
+    healthy Cluster: ingest of `test` gives 96 COMPLETED / 8 SKIPPED / 0
+    dead-lettered.
+
+22. **RustFS and NATS streams became CRDs too; the operators moved into their
+    own chart (2026-08-04).** Postgres went to CloudNativePG in deviation 20;
+    this finishes the pattern. Every store is now declared, not provisioned:
+
+    * `Tenant` (rustfs.com/v1alpha1) — the RustFS server, its bucket, the
+      workspace identity and that identity's IAM policy.
+    * `Stream` (jetstream.nats.io/v1beta2) × 3 — INGESTION, INGESTION_DLQ and
+      RUSTFS_EVENTS.
+    * `Cluster` (postgresql.cnpg.io/v1) — unchanged from deviation 20.
+
+    `charts/pocket-advisor-operators` installs the three operators as Helm
+    dependencies, once per cluster. `charts/pocket-advisor-infra` installs
+    every workspace's CRD instances, once, rendering a namespace per workspace.
+    The split is not organisational: operators are cluster singletons owning
+    CRDs and cluster RBAC, while workspace stacks are N-per-cluster. One chart
+    holding both would install N copies of each operator — controllers fighting
+    over the same CRDs — and uninstalling one workspace would delete the CRDs
+    out from under the others.
+
+    **What this deleted.** `createRustFS` no longer runs AddCannedPolicy,
+    AddUser, AttachPolicy or EnsureBucket; it waits for the tenant to serve and
+    returns. `bucketPolicy`, `alreadyDone` and the madmin admin client went
+    with it, as `deleteRustFS`'s user and policy removal did — the Tenant owns
+    those, so removing them from the CLI would only be undone by the next
+    upgrade. `EnsureStreams`' role in provisioning went the same way.
+
+    **Four things about these CRDs are not guessable, and each was found by
+    building one and reading its status rather than its schema:**
+
+    * `Tenant.spec.users[].name` is a *Secret* name, not a username. The
+      operator reads accesskey/secretkey from it. With no such Secret it
+      reports `user Secret 'workspace' was not found` and blocks provisioning
+      while the pods themselves come up perfectly healthy.
+    * A tenant user must carry at least one policy, and a policy's document
+      must come from a ConfigMap — it cannot be inlined.
+    * `persistence.volumesPerServer` is required, but the schema only says so
+      once the rest of the object validates.
+    * NACK has no username/password authentication — only creds files, nkeys
+      and tokens. This NATS uses username and password, so the credentials go
+      in the Stream's server URL. And the duplicate-window field is
+      `duplicateWindow`, not `duplicates`; the wrong name made the CRD silently
+      absent rather than rejected.
+
+    **One operator bug is worked around rather than fixed.** The RustFS
+    operator (0.0.5) attempts provisioning once, and that attempt races
+    RustFS's own storage initialisation. When it loses, the tenant sits at
+    `failed to list RustFS canned policies` indefinitely — measured still stuck
+    after three minutes — while its pods run healthily and `kubectl get pods`
+    looks entirely normal. A no-op annotation forces the reconcile the operator
+    should retry itself, so `make deploy-infra` annotates every tenant after
+    the upgrade. That workaround should be removed once the operator backs off
+    and retries on its own.
+
+    **Rotating the RustFS root credential needs a manual pod restart.** The
+    operator updates the Secret but does not roll the StatefulSet, and env
+    from a secretKeyRef is resolved at pod start — so the server keeps the old
+    credential while the operator begins using the new one, and every tenant
+    goes to `failed to list RustFS canned policies: upstream returned 403
+    Forbidden`. Deleting the tenant pods fixes it in seconds. Found while
+    replacing the vendor-default `rustfsadmin`/`rustfsadminpassword` pair,
+    which RustFS compares by value and warns about on every start.
+
+    Two smaller things came out of the same change. The S3 endpoint is now the
+    operator's Service, `<tenant>-io`, so config.yaml's endpoint template ends
+    in `-io`. And a `range` in a Helm template needs a leading `---` inside the
+    loop: without it every iteration merges into one YAML document and only the
+    last survives — it rendered cleanly and produced 8 objects for two
+    workspaces and 11 for the third, visible only by counting per namespace.
+
+    **Verified** across three namespaces: all Tenants, Clusters and Streams
+    Ready; ingest of `test` at 96 COMPLETED / 8 SKIPPED / 0 dead-lettered, and
+    a query returning cited passages at +0.221.
+
+24. **One chart, and the binary stopped provisioning anything (2026-08-04).**
+    Deviations 20 and 22 moved each store to a CRD; this collapses what was
+    left. `charts/pocket-advisor-operators` merged into
+    `charts/pocket-advisor-infra`, which now installs the three operators as
+    dependencies *and* every workspace's CRD instances from one values file.
+
+    Merging is only safe because there is exactly one release for the whole
+    cluster. Deviation 22 argued against it, and that argument still holds for
+    the shape it was made about: a release per workspace would install N copies
+    of each operator, fighting over one set of CRDs, and uninstalling one
+    workspace would delete the CRDs out from under the others. With N=1 the
+    objection disappears.
+
+    **It costs one thing.** CloudNativePG installs a mutating webhook, and
+    applying a Cluster requires that webhook to be serving — but one release
+    applies the operator Deployment and our CRs in the same pass, so on a fresh
+    cluster the first apply fails with "no endpoints available for service
+    cnpg-webhook-service". The operators come up regardless, so a retry
+    succeeds; `make deploy-infra` does that automatically. Helm cannot express
+    "wait for a subchart to become ready" mid-apply, so this is inherent to
+    merging rather than something to fix.
+
+    **The binary now provisions nothing.** `--create-workspace` and
+    `--delete-workspace` are gone, along with `internal/provision`'s NATS,
+    RustFS and Postgres files: the notify Secret write, the RustFS restart that
+    followed it, the JetStream stream creation, the tenant/cluster/account
+    waits, and every rollback path. What remains is two functions, run by
+    `--ingest-all` and `--listen` on every invocation because both are
+    idempotent and cheap:
+
+      * the schema, because halfvec(N) needs N from an embedding endpoint on
+        localhost that nothing in the cluster can reach;
+      * the bucket notification rule, because the Tenant CRD declares buckets,
+        users and policies but has no field for which bucket publishes where.
+
+    Verified by clearing the bucket rule and running `--ingest-all` with no
+    preparation: the rule came back.
+
+    **Two things fell out of that.** The chart renders the notify identity
+    itself — it already holds every workspace's NATS password — which removed
+    the Secret write *and* the pod restart that existed only because env from a
+    secretKeyRef resolves at pod start. And the binary no longer holds
+    administrative credentials at all: setting a bucket notification is within
+    the s3:* the Tenant policy already grants its own identity, measured rather
+    than assumed. `infra.rustfs.root_*`, `infra.kubernetes.*` and
+    `RequireProvisioning` are all deleted; the root credentials still exist in
+    workspaces/pocket-advisor-infra.yaml, but only the chart ever reads them.
+
+    The upshot for an operator is one command each way: `make deploy-infra`,
+    then `--ingest-all`.
+
+    **Startup profiling, once that command was the only one.** Time to first
+    output was 2.38s, and the attribution was wrong twice before it was right.
+    Consumer creation looked like ~1.05s because it sat between two log lines;
+    measured directly it is **6ms**. The second was `pdf.NewEngine` — pdfium is
+    compiled to WebAssembly and `webassembly.Init` compiles the module, ~1.01s,
+    larger than every store connection (~360ms total) and every JetStream round
+    trip combined.
+
+    The fix is to build the instance pool on first use rather than at startup.
+    A run that touches no PDF never pays it, and one that does pays it against
+    the first document. Time to first output is now **0.11-0.34s**.
+
+    Two smaller things went with it: `app.New` was still calling
+    `EnsureStreams`, creating from Go the three streams the CRDs already own —
+    wasted round trips and a second writer of an operator-managed resource,
+    the same conflict that broke every `helm upgrade` in deviation 18. And the
+    embedding endpoint was probed twice per run, once to verify the index
+    dimension and once inside the schema check; `EnsureWorkspace` now takes the
+    probe result.
+
+    **The last item was not ours at all.** Runs still varied wildly — 18.4s
+    once, 8.0s the next — at 0% CPU, with the dashboard reporting only 6s. The
+    gap was in front of the dashboard, and it was the embedding endpoint: its
+    first request on a fresh connection costs ~650ms even warm, and far more
+    when it has been idle long enough to page its model back in. Reproducible
+    with curl, which shows ~0.68s for the first request on a new connection and
+    ~13ms for every one after it on the same keep-alive.
+
+    Two changes followed. The probe now starts before `app.New` and is
+    collected after it, so up to ~360ms of connecting to the three stores hides
+    inside it — and the log line records `probe_ms`, because a slow endpoint is
+    otherwise indistinguishable from a slow program: the process simply sits at
+    0% CPU with nothing on screen.
+
+    What remains in a no-op run is ~5.5s wall, and startup is no longer any of
+    it: **0.09-0.30s** to first paint, ~0.45s reconciling the bucket against
+    Postgres, and ~3s of `settle` — the idle window the pipeline must observe
+    before calling a run finished, because finishing an email publishes
+    attachment work that has not reached its queue yet (§2.6). On a run that
+    ingests, the settle is noise; on a no-op it is nearly the whole runtime.

@@ -1,0 +1,184 @@
+{{/*
+This workspace's RustFS, as a Tenant the operator reconciles.
+
+It replaces a hand-written StatefulFor plus a Service plus most of
+internal/provision/rustfs.go: the Tenant declares the bucket, the workspace
+identity and its IAM policy, so nothing has to create them over the admin API
+afterwards (ingestion-design.md deviation 22).
+
+Three things about the CRD are not guessable, and all three were found by
+building a Tenant and reading its status rather than its schema:
+
+  * users[].name is a *Secret* name, not a username. The operator reads
+    accesskey/secretkey out of it; with no such Secret it reports
+    "user Secret 'workspace' was not found" and blocks provisioning while the
+    pods themselves come up healthy.
+  * A user must carry at least one policy, and a policy's document must come
+    from a ConfigMap — it cannot be inlined.
+  * persistence.volumesPerServer is required, though the schema does not mark
+    it so until the rest of the object validates.
+
+The Services are the operator's, not ours: <tenant>-io carries S3 on 9000,
+which is why config.yaml's endpoint template ends in -io.
+*/}}
+{{- range .Values.workspaces }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: {{ .id }}
+  name: rustfs-root
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "RustFS root credentials, in the accesskey/secretkey shape the Tenant CRD expects") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+type: Opaque
+stringData:
+  accesskey: {{ required "rustfs.credentials.rootUser is required" $.Values.rustfs.credentials.rootUser | quote }}
+  secretkey: {{ required "rustfs.credentials.rootPassword is required" $.Values.rustfs.credentials.rootPassword | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: {{ .id }}
+  # Named for the user it defines: the Tenant refers to it by this name.
+  name: {{ $.Values.workspace.name }}
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+type: Opaque
+stringData:
+  accesskey: {{ $.Values.workspace.name | quote }}
+  secretkey: {{ required (printf "workspaces[%s].rustfs.credentials.secretKey is required" .id) .rustfs.credentials.secretKey | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: {{ .id }}
+  name: rustfs-notify
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "The NATS identity RustFS publishes bucket notifications as") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+type: Opaque
+stringData:
+  # A NATS username, not a workspace id — those were the same string until the
+  # account naming changed, and the stale key name silently broke publishing
+  # (deviation 21).
+  nats-user: {{ .id | quote }}
+  nats-password: {{ required (printf "workspaces[%s].nats.credentials.password is required" .id) .nats.credentials.password | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: {{ .id }}
+  name: rustfs-policy
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+data:
+  # Full control of this workspace's bucket and nothing else — the same "no
+  # grant, no access" isolation the Postgres cluster has by construction.
+  policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:*"],
+          "Resource": [
+            "arn:aws:s3:::{{ $.Values.workspace.name }}",
+            "arn:aws:s3:::{{ $.Values.workspace.name }}/*"
+          ]
+        }
+      ]
+    }
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  namespace: {{ .id }}
+  name: rustfs
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Object storage for this workspace — Tier 1, the corpus source of truth") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  image: {{ $.Values.rustfs.image }}
+  credsSecret:
+    name: rustfs-root
+
+  buckets:
+    - name: {{ $.Values.workspace.name }}
+  policies:
+    - name: {{ $.Values.workspace.name }}
+      document:
+        configMapKeyRef:
+          name: rustfs-policy
+          key: policy.json
+  users:
+    - name: {{ $.Values.workspace.name }}
+      policies: [{{ $.Values.workspace.name | quote }}]
+
+  pools:
+    - name: pool-0
+      servers: 1
+      persistence:
+        volumesPerServer: 1
+        volumeClaimTemplate:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: {{ $.Values.rustfs.persistence.size }}
+      resources:
+        {{- toYaml $.Values.rustfs.resources | nindent 8 }}
+
+  # Bucket notifications, configured entirely through the environment because
+  # RustFS reads its notify target at startup and madmin's SetConfigKV crashes
+  # the server (§5.2). Three details are load-bearing and each was a silent
+  # failure before it was found:
+  #
+  #   1. RUSTFS_NOTIFY_ENABLE is a separate top-level module gate; without it
+  #      no target is constructed at all, silently.
+  #   2. The default queue dir (/opt/rustfs/events) is unwritable by RustFS's
+  #      non-root user (§12 bug 1).
+  #   3. The target stream's duplicate window must exceed RustFS's retry
+  #      lifetime (~274s observed) or it refuses to publish — RUSTFS_EVENTS is
+  #      declared with 10m to match (templates/streams.yaml).
+  env:
+    - name: RUSTFS_NOTIFY_ENABLE
+      value: "true"
+    - name: RUSTFS_NOTIFY_NATS_ENABLE_PRIMARY
+      value: "on"
+    - name: RUSTFS_NOTIFY_NATS_ADDRESS_PRIMARY
+      value: {{ printf "nats.%s.svc.cluster.local:%d" $.Release.Namespace (int $.Values.nats.clientPort) | quote }}
+    - name: RUSTFS_NOTIFY_NATS_SUBJECT_PRIMARY
+      value: {{ $.Values.rustfs.notify.subject | quote }}
+    - name: RUSTFS_NOTIFY_NATS_JETSTREAM_ENABLE_PRIMARY
+      value: "on"
+    - name: RUSTFS_NOTIFY_NATS_JETSTREAM_STREAM_NAME_PRIMARY
+      value: {{ $.Values.rustfs.notify.jetstreamStreamName | quote }}
+    - name: RUSTFS_NOTIFY_NATS_QUEUE_DIR_PRIMARY
+      value: {{ $.Values.rustfs.notify.queueDir | quote }}
+    # The NATS identity RustFS publishes as. Rendered here, not written later
+    # by the CLI: this chart already holds every workspace's NATS password, so
+    # the identity is known at render time. That removed the Secret-write and
+    # the pod restart that used to follow it — provisioning had to restart
+    # RustFS because env from a secretKeyRef is resolved at pod start, so a
+    # Secret written after the fact was invisible until the pod cycled
+    # (deviation 24).
+    - name: RUSTFS_NOTIFY_NATS_USERNAME_PRIMARY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-notify
+          key: nats-user
+    - name: RUSTFS_NOTIFY_NATS_PASSWORD_PRIMARY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-notify
+          key: nats-password
+{{- end }}

@@ -28,16 +28,14 @@ type Options struct {
 	WorkspaceConfig string
 	WorkspaceID     string
 
-	IngestAll       bool
-	Scan            bool
-	Reconcile       bool
-	Listen          bool
-	DeleteData      bool
-	Forget          string
-	CreateWorkspace bool
-	DeleteWorkspace bool
-	Query           string
-	MCP             bool
+	IngestAll  bool
+	Scan       bool
+	Reconcile  bool
+	Listen     bool
+	DeleteData bool
+	Forget     string
+	Query      string
+	MCP        bool
 
 	TopK        int
 	JSON        bool
@@ -75,12 +73,6 @@ Modes (exactly one):
                       binary (retrieval-design.md §6.1)
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
-  --create-workspace  provision this workspace's Postgres DB+role, RustFS
-                      bucket+identity, NATS account+user, and RustFS's
-                      bucket-notification target. The only mode that uses
-                      shared root credentials; everything else connects with
-                      this workspace's own (§5.2)
-  --delete-workspace  tear down the same, in reverse order
 
 Common:
   --workspace-id <id>       workspace from the registry (required by every mode)
@@ -126,8 +118,6 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Listen, "listen", false, "run the pipeline indefinitely on RustFS's live notify events")
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
-	fs.BoolVar(&o.CreateWorkspace, "create-workspace", false, "provision this workspace's database, bucket, and NATS account")
-	fs.BoolVar(&o.DeleteWorkspace, "delete-workspace", false, "tear down this workspace's database, bucket, and NATS account")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.MCP, "mcp", false, "serve the read path as an MCP tool over stdio")
 
@@ -165,8 +155,6 @@ func (o *Options) modes() []string {
 		{o.Listen, "--listen"},
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
-		{o.CreateWorkspace, "--create-workspace"},
-		{o.DeleteWorkspace, "--delete-workspace"},
 		{o.Query != "", "--query"},
 		{o.MCP, "--mcp"},
 	} {
@@ -182,8 +170,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --delete-data, --forget, " +
-			"--create-workspace, --delete-workspace (--help for details)")
+			"--query, --mcp, --delete-data, --forget (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -266,10 +253,6 @@ func Run(o *Options) error {
 	switch {
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
-	case o.CreateWorkspace:
-		return runCreateWorkspace(o, cfg, logs)
-	case o.DeleteWorkspace:
-		return runDeleteWorkspace(o, cfg, logs)
 	case o.Query != "":
 		return runQuery(o, cfg, logs)
 	case o.MCP:

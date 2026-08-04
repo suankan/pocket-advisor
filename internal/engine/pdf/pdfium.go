@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"image"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -38,28 +39,54 @@ type Engine struct {
 	// was one container's 1GiB limit; in a single host process it would have
 	// collapsed every replica's rasterisation into one global lane.
 	cpu *limits.CPU
+
+	// The pool is created lazily; see NewEngine.
+	once         sync.Once
+	initErr      error
+	maxInstances int
 }
 
 // NewEngine sizes the instance pool to the number of lanes that can hold an
 // open document at once. Open() keeps its instance for the whole document, so a
 // pool smaller than the lane count starves lanes on InstanceTimeout rather than
 // queueing them briefly.
+//
+// The pool is built on first use, not here. pdfium is compiled to WebAssembly
+// and webassembly.Init compiles the module — about a second, which used to be
+// the single largest item in startup, larger than every store connection and
+// JetStream round trip combined. A run that touches no PDF now never pays it,
+// and a run that does pays it against the first document rather than in front
+// of every command (ingestion-design.md deviation 24).
 func NewEngine(maxInstances int, cpu *limits.CPU) (*Engine, error) {
 	if maxInstances < 1 {
 		maxInstances = 1
 	}
-	pool, err := webassembly.Init(webassembly.Config{
-		MinIdle:  1,
-		MaxIdle:  maxInstances,
-		MaxTotal: maxInstances,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("init pdfium: %w", err)
-	}
-	return &Engine{pool: pool, cpu: cpu}, nil
+	return &Engine{maxInstances: maxInstances, cpu: cpu}, nil
 }
 
-func (e *Engine) Close() error { return e.pool.Close() }
+// ensure builds the instance pool once, whichever lane gets there first.
+func (e *Engine) ensure() error {
+	e.once.Do(func() {
+		e.pool, e.initErr = webassembly.Init(webassembly.Config{
+			MinIdle:  1,
+			MaxIdle:  e.maxInstances,
+			MaxTotal: e.maxInstances,
+		})
+		if e.initErr != nil {
+			e.initErr = fmt.Errorf("init pdfium: %w", e.initErr)
+		}
+	})
+	return e.initErr
+}
+
+// Close is a no-op when nothing ever opened a PDF, since the pool that would
+// need closing was never built.
+func (e *Engine) Close() error {
+	if e.pool == nil {
+		return nil
+	}
+	return e.pool.Close()
+}
 
 // Classification is the outcome of the inspection pass.
 type Classification struct {
@@ -77,6 +104,9 @@ type Document struct {
 }
 
 func (e *Engine) Open(ctx context.Context, data []byte) (*Document, error) {
+	if err := e.ensure(); err != nil {
+		return nil, err
+	}
 	inst, err := e.pool.GetInstanceWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pdfium instance: %w", err)
@@ -226,6 +256,9 @@ func Classify(text string, pages int) Classification {
 // returned cleanup before rendering the next page — that discipline is what
 // bounds the number of live bitmaps to the number of CPU slots.
 func (e *Engine) RenderPage(ctx context.Context, d *Document, index, dpi int) (*image.RGBA, func(), error) {
+	if err := e.ensure(); err != nil {
+		return nil, nil, err
+	}
 	release, err := e.cpu.Acquire(ctx, limits.LabelRasterize)
 	if err != nil {
 		return nil, func() {}, err

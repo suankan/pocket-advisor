@@ -88,7 +88,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.RustFS {
-		v, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleWorker)
+		v, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleWorker)
 		if err != nil {
 			return nil, err
 		}
@@ -96,7 +96,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Uploader {
-		u, err := rustfs.NewForWorkspace(cfg.RustFS, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
+		u, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
 		if err != nil {
 			return nil, err
 		}
@@ -124,13 +124,18 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.NATS {
-		b, err := bus.Connect(ctx, cfg.NATS.URL, w.NATSUser, w.NATSPassword)
+		b, err := bus.Connect(ctx, w.NATSURL, w.NATSUser, w.NATSPassword)
 		if err != nil {
 			return nil, err
 		}
-		if err := b.EnsureStreams(ctx); err != nil {
-			return nil, err
-		}
+		// Deliberately does not create streams. They are Stream CRDs now,
+		// reconciled by NACK from charts/pocket-advisor-infra (deviation 22),
+		// and creating them here too would make Go a second writer of
+		// something an operator owns — the same conflict that broke every
+		// `helm upgrade` when provisioning patched the NATS ConfigMap
+		// (deviation 18). A missing stream now means the chart has not been
+		// deployed for this workspace, which the pipeline reports when it
+		// tries to attach a consumer.
 		a.Bus = b
 		a.stopFns = append(a.stopFns, b.Close)
 	}
@@ -138,8 +143,8 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
 		"workspace_id", workspaceID,
-		"rustfs", cfg.RustFS.Endpoint,
-		"nats", cfg.NATS.URL,
+		"rustfs", w.RustFSEndpoint,
+		"nats", w.NATSURL,
 		"metrics_port", cfg.MetricsPort)
 	return a, nil
 }

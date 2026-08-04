@@ -45,13 +45,12 @@ kubectl config use-context pocket-advisor   # switch into it
   `--workspace-id <id>` doesn't just filter what a command touches — each
   workspace has its own Postgres database+role, its own RustFS bucket+
   identity, and its own NATS account+user, all named `<id>`. There is no
-  shared database or bucket left; every mode requires `--workspace-id`
-  except `--create-workspace`/`--delete-workspace` (which provision or tear
-  down exactly that isolation) and `--forget`. `--create-workspace` must have
-  run for a workspace before any other mode can use it. It is the only mode
-  that needs shared root credentials; everything after it — `--ingest-all`,
-  `--scan`, `--reconcile`, `--query`, `--mcp` — connects with that one
-  workspace's own credentials and nothing more. See [§2](#2-install).
+  shared database or bucket left, and every mode requires `--workspace-id`.
+  A workspace's infrastructure is *declared*, not provisioned: the chart
+  renders a `Cluster`, a `Tenant` and three `Stream` custom resources, and
+  operators reconcile them. The binary creates none of it and holds no
+  administrative credentials — it connects with one workspace's own and
+  nothing more. See [§2](#2-install).
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
   read directly by the system — it's a staging feed you push into RustFS. Once
   uploaded, a document's origin folder can move or vanish; the bucket is
@@ -68,9 +67,10 @@ kubectl config use-context pocket-advisor   # switch into it
   and interrupting safe.
 - **Everything destructive prompts unless `--yes`.** `--delete-data` and
   `--forget` both hit Postgres first, so a failure to reach it leaves the
-  bucket untouched rather than dangling a citation. `--delete-workspace` goes
-  further — Postgres, then RustFS, then NATS, in that order — and removes the
-  workspace's isolation itself, not just its documents.
+  bucket untouched rather than dangling a citation. Removing a workspace
+  altogether is a chart operation, not a CLI one: drop it from
+  `workspaces/pocket-advisor-infra.yaml` and re-deploy, which takes its
+  namespace and therefore its volumes with it.
 - **Retrieval returns sources, not answers.** `--query` gives you the
   passages that match, each traceable to a Tier 1 object and a character
   range. Turning those into prose is generation, and it deliberately happens
@@ -79,9 +79,8 @@ kubectl config use-context pocket-advisor   # switch into it
   case data leaves the machine only when you put it in a conversation. See
   [§5](#5-ask-the-corpus).
 - **Postgres is derived state, not source of truth.** If a workspace's
-  database is lost, `--create-workspace` (idempotent — safe to re-run against
-  an already-provisioned workspace) followed by `--ingest-all` rebuilds it
-  from RustFS. Losing RustFS loses that workspace's corpus; losing its
+  database is lost, `--ingest-all` rebuilds it from RustFS — it applies the
+  schema itself. Losing RustFS loses that workspace's corpus; losing its
   Postgres database just costs a re-index.
 
 ## 1. Prerequisites
@@ -102,36 +101,48 @@ kubectl config use-context pocket-advisor   # switch into it
   `SKIPPED` rather than indexed.
 - **An embedding REST endpoint on localhost**, serving the model named in
   `config.yaml` (default `jina-embeddings-v5-text-small-mlx` on `:8000`).
+- Nothing else. The three operators that reconcile a workspace's stores —
+  CloudNativePG, NACK and the RustFS operator — are dependencies of the chart
+  and install with it.
 
 ## 2. Install
 
 ```bash
-make deploy-infra    # helm install + wait for RustFS setup to complete
+make deploy-infra    # helm install, then waits for every store to be ready
 make build           # produces bin/pocket-advisor
 ```
 
-`deploy-infra` brings up the three shared stores — Postgres, RustFS, NATS —
-with nothing workspace-specific in them yet. There is no shared database or
-bucket to bootstrap at this point; every workspace provisions its own.
+One release installs everything: the three operators as chart dependencies,
+and, for **every workspace listed in `workspaces/pocket-advisor-infra.yaml`**,
+a namespace of its own containing a Postgres `Cluster`, a RustFS `Tenant` and
+three JetStream `Stream` resources. NATS itself is shared — one server in the
+release namespace with an account per workspace — because NACK reconciles
+JetStream objects against a server rather than deploying one.
 
-`deploy-infra` also renders one NATS account per workspace, from
-`workspaces/values.yaml` — the chart's own `workspaces:` list is empty, and
-that file is the private override supplying it.
+The chart's own `workspaces:` list is empty; that private file is the override
+supplying it. Adding or removing a workspace means editing it and re-running
+`make deploy-infra`.
 
-Everything else a workspace needs is created by `--create-workspace` (below):
-the Postgres database and role, the RustFS bucket and identity, and the
-notification target. Those are API calls against a running server rather than
-config files, which is why they are the CLI's job and not the chart's.
+There is no provisioning command. `--ingest-all` applies the Tier 2/3 schema
+and the bucket notification rule itself — the only two things a manifest
+cannot express, since the schema's vector width comes from probing your
+embedding endpoint on localhost, and the Tenant CRD has no field for which
+bucket publishes where.
+
+> On a **fresh** cluster the first `helm upgrade` fails once, on
+> `no endpoints available for service cnpg-webhook-service`: CloudNativePG's
+> admission webhook is not serving yet when the first `Cluster` is applied.
+> `make deploy-infra` waits and retries automatically.
 
 Infrastructure endpoints live under `infra:` in
 [`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,
 so you only edit it to point somewhere else. Environment variables override
-the file (`POSTGRES_ADMIN_DSN`, `RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, …) —
-put secrets there rather than in the committed file. `POSTGRES_ADMIN_DSN` is
-a maintenance connection only, used to create/drop per-workspace databases
-and roles — it is never where document data lives.
+the file (`RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, `POSTGRES_HOST_TEMPLATE`,
+…). There is no Postgres admin connection to configure: CloudNativePG gives
+each workspace its own cluster, so nothing creates a database or a role, and
+`host_template` plus a workspace id is the whole address.
 
-### Provision your first workspace
+### Add your first workspace
 
 1. Describe what the workspace **holds**, in
    `workspaces/workspace-config.yaml` (create it if absent — it's gitignored,
@@ -155,10 +166,17 @@ and roles — it is never where document data lives.
          - id: test-correspondence
    ```
 
-2. Describe how to **reach** it, in `workspaces/values.yaml` — copy
-   [`workspaces/values.yaml.example`](workspaces/values.yaml.example) and
-   generate each secret yourself (e.g. `openssl rand -base64 24`):
+2. Describe how to **reach** it, in `workspaces/pocket-advisor-infra.yaml`.
+   Generate each secret yourself (e.g. `openssl rand -base64 24`):
    ```yaml
+   # Administrative RustFS credentials, shared by every tenant. The operator
+   # creates each workspace's bucket and identity with them; nothing reads or
+   # writes documents as this identity.
+   rustfs:
+     credentials:
+       rootUser: <generate>
+       rootPassword: <generate>
+
    workspaces:
      - id: test
        rustfs:
@@ -171,70 +189,32 @@ and roles — it is never where document data lives.
          credentials:
            password: <generate>
    ```
-   The section names match the chart's own `rustfs:` / `postgres:` / `nats:`
-   blocks — same shape, one scope down.
-   The two files are joined on `id`. This one is a Helm values override as
-   well as app config: `make deploy-infra` passes it with `-f`, and the chart
-   renders one NATS account per workspace from it, while `config.yaml`'s
-   `workspaces.values` points the binary at the same file — so Helm and the
-   CLI cannot disagree about a password.
+   The section names mirror the chart's own `rustfs:` / `postgres:` / `nats:`
+   blocks, one scope down. The shape is documented in
+   [`charts/pocket-advisor-infra/values.yaml`](charts/pocket-advisor-infra/values.yaml),
+   which is its source of truth — there is no example file to drift from it.
 
-   `rustfs.bucket`, `postgres.database`, `nats.account` and the `user`/
-   `accessKey` under each `credentials` block all default to the workspace id.
-   Set them only if one of the three systems objects to an id.
+   Credentials are all this file carries. Every resource name inside a
+   workspace's namespace is the constant `workspace` — bucket, database and,
+   for the shared NATS server, the account is the workspace id — because the
+   namespace already says whose they are.
+
+   It is a Helm values override *and* app config: `make deploy-infra` passes it
+   with `-f`, and `config.yaml`'s `workspaces.values` points the binary at the
+   same file, so Helm and the CLI cannot disagree about a password. It is
+   joined to `workspace-config.yaml` on `id`.
 
    Full field reference: [`docs/workspace-isolation.md`](docs/workspace-isolation.md), §3 "Credentials & Config Shape".
 
-3. Apply it, so the NATS account exists:
+3. Apply it:
    ```bash
    make deploy-infra
    ```
-
-4. Provision it, once:
+   This creates the workspace's namespace and everything in it. Verify before
+   loading a corpus — a workspace that reconciled cleanly has three JetStream
+   streams in its own NATS account:
    ```bash
-   ./bin/pocket-advisor --create-workspace --workspace-id test
-   # workspace created: test
-   ```
-   This creates the Postgres database+role, the RustFS bucket+identity, the
-   NATS account+user and its JetStream streams, the Tier 2/3 schema resolved
-   against your embedding endpoint, and finally the RustFS bucket
-   notification that makes uploads trigger processing on their own. The
-   vector column is typed `halfvec(N)`, so `N` is read from the embedding
-   endpoint before the first `CREATE TABLE` — it can't be reshaped later
-   without a full re-embed.
-
-   It is idempotent, so re-running it against an already-provisioned
-   workspace is safe and costs a handful of existence checks.
-
-   This is the only command that needs shared root credentials
-   (`infra.postgres.admin_dsn`, `infra.rustfs.root_*`, `infra.kubernetes.*`).
-   Everything after it uses the workspace's own scoped credentials.
-
-   **Re-run it when you switch which workspace you are working on.** RustFS
-   has a single server-wide notify target, so it points at whichever
-   workspace was provisioned last. `--ingest-all` and `--listen` refuse to
-   start if it points somewhere else, and tell you which workspace to
-   re-provision — ingesting anyway would deliver this workspace's events into
-   the other one's NATS account.
-
-   Re-running `--create-workspace` is also how you repair a workspace whose
-   schema is missing — it re-applies the DDL every time, idempotently.
-
-   **What it will not do is change the vector dimension.** `halfvec(N)` is
-   fixed at `CREATE TABLE`, so if you point the config at a model of a
-   different size it refuses rather than migrating:
-   ```
-   schema was built for <model> at 1024 dimensions, endpoint now reports 768;
-   this is a re-embed into a new embed_model namespace, not a migration
-   ```
-   That check also runs at the start of every `--ingest-all` and `--listen`,
-   so a mismatched endpoint stops the run instead of quietly writing vectors
-   that cannot be compared to their neighbours — see [§8](#8-tuning).
-
-3. Verify it before loading a corpus. A workspace that provisioned cleanly
-   has three JetStream streams in its own NATS account:
-   ```bash
-   kubectl exec pocket-advisor-nats-0 -n pocket-advisor -- \
+   kubectl exec nats-0 -n pocket-advisor -- \
      wget -qO- 'http://localhost:8222/jsz?accounts=true&streams=true' \
    | python3 -c "import json,sys
    for a in json.load(sys.stdin)['account_details']:
@@ -244,38 +224,38 @@ and roles — it is never where document data lives.
    $G []
    test ['INGESTION', 'INGESTION_DLQ', 'RUSTFS_EVENTS']
    ```
-   `$G` is NATS' built-in global account and is always empty — ignore it.
-   Every workspace should list all three. An account showing `[]` will accept
-   uploads and process none of them; re-run `--create-workspace` for it.
+   `$G` is NATS' built-in global account and is always empty. An account
+   showing `[]` will accept uploads and process none of them; re-run
+   `make deploy-infra`.
 
-Repeat steps 1–4 per workspace.
-`--delete-workspace --workspace-id <id>` tears
-the same three back down, in reverse order, and removes the notify target if
-it points at that workspace — see [§6](#6-remove-documents) for the difference
-between that and `--delete-data`.
+That is the whole setup. There is no provisioning command to run afterwards —
+go straight to [§3](#3-load-a-corpus).
 
-### The order matters
+Repeat steps 1 and 2 per workspace, then `make deploy-infra` once. Removing a
+workspace is the same operation in reverse: delete its entry and re-deploy,
+which takes its namespace and its volumes with it.
 
-Each step here exists because the one before it cannot be undone by the one
-after:
+### Who creates what
 
 | | Creates | Needs |
 |---|---|---|
-| `make deploy-infra` | Postgres, RustFS, NATS — no workspace anything | — |
-| `--create-workspace` | database+role, bucket+identity, NATS account+user+streams, schema, notify target | root credentials |
-| `--ingest-all` | documents, chunks, embeddings | that workspace's own credentials |
+| `make deploy-infra` | operators, and per workspace: namespace, Postgres `Cluster`, RustFS `Tenant`, three `Stream`s, the shared NATS account | cluster admin |
+| `--ingest-all` | the Tier 2/3 schema, the bucket notification rule, then documents | that workspace's own credentials |
 
-Only `--create-workspace` uses the shared root credentials. Everything after
-it — `--ingest-all`, `--scan`, `--reconcile`, `--query`, `--mcp` — connects as
-the workspace and can reach nothing else.
+The binary holds no administrative credentials at all. The schema is applied as
+the workspace's own Postgres role, and the notification rule as its own RustFS
+identity, which the Tenant's policy already grants.
 
 OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
 and the defaults address the cluster directly:
 
 ```
 pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
-pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432
 pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+
+# Postgres is one cluster per workspace; the operator exposes each primary
+# as <cluster>-rw, and the chart names the cluster <release>-<workspace-id>:
+pocket-advisor-<workspace-id>-rw.pocket-advisor.svc.cluster.local:5432
 ```
 
 If the binary can't reach a store, check these resolve before anything else —
@@ -285,7 +265,7 @@ resolver and will report NXDOMAIN even when everything is fine; use `nc -vz`
 or `ping` instead:
 
 ```bash
-nc -vz pocket-advisor-postgres.pocket-advisor.svc.cluster.local 5432
+nc -vz pocket-advisor-test-rw.pocket-advisor.svc.cluster.local 5432
 ```
 
 ## 3. Load a corpus
@@ -337,13 +317,14 @@ curl -s localhost:9090/metrics | grep rag_
 kubectl exec pocket-advisor-nats-0 -- \
   sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
 
-# What actually landed — -d is the workspace id, its own database
-kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d test -c \
+# What actually landed. Each workspace is its own cluster, so the pod is
+# pocket-advisor-<workspace-id>-1 and the database is always `workspace`.
+kubectl exec pocket-advisor-test-1 -c postgres -- psql -U postgres -d workspace -c \
   "select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;"
 
 # The resolved vector dimension — worth checking after any embedding model
 # change, since the column can't be reshaped without a full re-embed
-kubectl exec pocket-advisor-postgres-0 -- psql -U postgres -d test -c \
+kubectl exec pocket-advisor-test-1 -c postgres -- psql -U postgres -d workspace -c \
   "select * from schema_metadata;"
 
 # Anything that failed for real (as opposed to being skipped)
@@ -500,13 +481,12 @@ cold load costs ~7s on a query that is otherwise ~3s.
 Both prompt for confirmation unless `--yes`. Absence of a file from a later
 upload run never implies deletion — removal is always explicit.
 
-`--delete-data` empties a workspace but keeps it provisioned — its Postgres
-database, RustFS bucket, and NATS account all still exist, just empty, ready
-for the next `--ingest-all`. To deprovision the workspace itself — drop the
-database and role, remove the bucket and identity, delete the NATS account —
-use `--delete-workspace --workspace-id test` instead (§2's `--create-workspace`,
-in reverse). That's the one to reach for when a workspace is being retired
-entirely, not just re-ingested.
+`--delete-data` empties a workspace but leaves it standing — its Postgres
+database, RustFS bucket and NATS account all still exist, just empty, ready
+for the next `--ingest-all`. Retiring a workspace entirely is a chart
+operation, not a CLI one: remove its entry from
+`workspaces/pocket-advisor-infra.yaml` and re-run `make deploy-infra`, which
+deletes its namespace and every volume in it.
 
 ## 7. After code changes
 
@@ -560,53 +540,36 @@ Do not omit `-f workspaces/values.yaml`. The chart's own `workspaces:` is an
 empty list, so an upgrade without it renders `nats-server.conf` with no
 accounts at all and every workspace loses its NATS identity.
 
-**Adding or changing a workspace needs a `helm upgrade`.** The chart renders
-one NATS account per workspace from `workspaces/values.yaml`, so a workspace
-added to that file only exists in the cluster after `make deploy-infra` runs
-again. `--create-workspace` will tell you if you forget — it checks the account
-is live before doing anything else.
+**Adding or changing a workspace needs a `helm upgrade`.** Everything a
+workspace has is rendered from `workspaces/pocket-advisor-infra.yaml`, so an
+entry added there exists only after `make deploy-infra` runs again.
 
-This replaced an earlier design where `--create-workspace` patched the NATS
-ConfigMap directly. That made Helm and the CLI two writers of one field, so
-every `helm upgrade` failed with a field-ownership conflict on
-`.data.nats-server.conf` — and the recovery discarded every workspace account.
-If you are on an older release and hit that conflict, the fix is to upgrade to
-a chart that renders the accounts, not to force-apply.
-
-**RustFS restarts during `--create-workspace`.** It reads its notify target
-from the environment at startup and cannot be reconfigured at runtime, so
-changing which workspace the target points at requires a pod restart.
-Provisioning does this itself and waits for readiness; it's skipped entirely
-when the target already names that workspace. Don't run it against a workspace
-whose ingest is in flight.
-
-**Why `--create-workspace` sometimes takes a while.** Measured, so you can
-tell a slow run from a stuck one:
+**Why `make deploy-infra` can take a while.** The operators reconcile in the
+background, so the command waits for them:
 
 | What changed | Time |
 |---|---|
-| Nothing — re-run against a provisioned workspace | ~1s |
-| Notify target switches workspace (RustFS restart) | ~11s |
-
-Most of that ~11s is RustFS restarting and its Service endpoint converging;
-a real S3 call succeeds about 7s after the restart. The NATS account costs
-nothing, because Helm already created it.
+| Nothing | a few seconds |
+| A new workspace | ~1-2 min for its Cluster and Tenant to come up |
+| First install on a fresh cluster | +1 retry past the CNPG webhook race |
 
 Two immutability traps:
 
 - **`persistence.size` can't be changed on a live release.**
   `volumeClaimTemplates` is immutable, so `helm upgrade` fails with "updates to
-  statefulset spec … are forbidden". Recreate the StatefulSet to resize.
-- **A PostgreSQL major-version bump changes the on-disk format.** Delete the
-  postgres PVC first — this takes every workspace's database with it, not
-  just one — then re-run `--create-workspace` per workspace (recreates the
-  database/role and reapplies the schema) and re-ingest each.
+  statefulset spec … are forbidden". That applies to the shared NATS, the only
+  StatefulSet this chart renders directly; the Postgres and RustFS volumes
+  belong to their operators.
+- **A PostgreSQL major-version bump changes the on-disk format.** CloudNativePG
+  will not rewrite it in place, so the workspace needs a fresh volume and a
+  re-ingest. Per workspace rather than cluster-wide — each has its own
+  `Cluster`.
 
 ## 10. Uninstall
 
-To retire one workspace without touching any other, `--delete-workspace`
-(§6) is the right scope — it's the only one of these that's per-workspace
-rather than cluster-wide.
+To retire one workspace without touching any other, remove its entry from
+`workspaces/pocket-advisor-infra.yaml` and re-run `make deploy-infra` (§6).
+Everything below is cluster-wide.
 
 ```bash
 make destroy-infra    # helm uninstall; PVCs deliberately retained
@@ -620,23 +583,26 @@ every workspace, not just one:
 make destroy-state    # kubectl delete pvc --all
 ```
 
-`destroy-infra` deletes one thing after the uninstall, because `helm uninstall`
-genuinely cannot:
+Nothing needs deleting by hand. Every object is chart-rendered, so
+`helm uninstall` removes it — including the per-workspace namespaces, which
+the chart creates rather than `--create-namespace`.
 
-- **The `rustfs-notify` Secret.** `--create-workspace` writes it through the
-  Kubernetes API rather than the chart, so it is not a release resource at
-  all, and leaving it strands a deleted workspace's NATS password.
+Two things do survive, both deliberately:
 
-Worth being clear about why the recommended labels do not solve this:
-`helm uninstall` does not search the cluster by label. It reads the release
-manifest stored in `sh.helm.release.v1.<name>.v<N>` and deletes exactly the
-objects that manifest names. The `app.kubernetes.io/*` labels and
+- **PVCs**, until `destroy-state`. Tier 1 is the corpus source of truth and the
+  JetStream volume is what makes an interrupted ingest resumable.
+- **CRDs**. Helm never deletes CRDs installed from a subchart's `crds/`
+  directory. Harmless, and what lets a re-install skip straight to applying
+  custom resources.
+
+Worth being clear about why the recommended labels do not make Helm delete more
+than it does: `helm uninstall` does not search the cluster by label. It reads
+the release manifest stored in `sh.helm.release.v1.<name>.v<N>` and deletes
+exactly the objects that manifest names. The `app.kubernetes.io/*` labels and
 `meta.helm.sh/release-*` annotations matter at *install* time, where they stop
 one release adopting another's resources — they are not a delete-time index.
-The orphaned Job carried all of them and was still left behind; no labelling
-scheme makes Helm delete an object it never created.
 
-To confirm a teardown is actually complete:
+To confirm a teardown is actually complete:To confirm a teardown is actually complete:
 
 ```bash
 kubectl get all,secrets,configmaps,pvc -n pocket-advisor

@@ -1,0 +1,136 @@
+{{/*
+One NATS server for the whole cluster, with an account per workspace.
+
+Unlike Postgres and RustFS — where each workspace gets its own process, because
+CloudNativePG and the RustFS operator each deploy one — NATS is shared. NACK
+does not deploy NATS at all: it reconciles JetStream resources against a server
+that already exists, and its documented model is one controller and one server
+serving Stream CRDs across many namespaces. Accounts are NATS's own tenancy
+boundary, so a workspace still gets an isolated JetStream store and a user that
+can see nothing else (deviation 23).
+
+Rendered once, into the release namespace, rather than once per workspace. The
+Streams that authenticate against it live in the workspace namespaces and reach
+it by FQDN.
+
+Named plainly `nats`, without the release prefix. It is the only NATS in the
+cluster and its namespace holds nothing else of its kind, so the prefix added
+length without distinguishing anything — the same reasoning that names the
+operator subcharts after themselves.
+
+This is authentication, not an upgrade of it: before this file existed, NATS
+ran on bare CLI flags with no config, no accounts, no users — anyone who could
+reach the ClusterIP had full access to everything.
+*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS server config; per-workspace account blocks are appended by --create-workspace") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  nats-server.conf: |
+    port: {{ $.Values.nats.clientPort }}
+    http: {{ $.Values.nats.monitorPort }}
+
+    jetstream {
+      store_dir: /data
+    }
+
+    # This workspace's account, with its own JetStream store and its own user
+    # (workspace-isolation.md §2.3, §8).
+    # One account per workspace, each named for its workspace — unlike the
+    # bucket and database, which are both the constant `workspace`. Those live
+    # in a namespace of their own, so the namespace disambiguates them;
+    # accounts share one server, so the id is the only thing keeping them
+    # apart. The account IS the isolation boundary here: its own JetStream
+    # store, its own user, no visibility into any other (deviation 23).
+    accounts {
+    {{- range $.Values.workspaces }}
+      {{ .id | quote }}: {
+        jetstream: enabled
+        users: [
+          { user: {{ .id | quote }}, password: {{ required (printf "workspaces[%s].nats.credentials.password is required" .id) .nats.credentials.password | quote }} }
+        ]
+      }
+    {{- end }}
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS JetStream — the queues between pipeline worker pools") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: nats
+  replicas: {{ $.Values.nats.replicaCount }}
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: {{ $.Values.nats.image }}
+          command:
+            - nats-server
+            - "-c"
+            - "/etc/nats/nats-server.conf"
+          ports:
+            - containerPort: {{ $.Values.nats.clientPort }}
+            - containerPort: {{ $.Values.nats.monitorPort }}
+          resources:
+            {{- toYaml $.Values.nats.resources | nindent 12 }}
+          volumeMounts:
+            - name: nats-data
+              mountPath: /data
+            - name: nats-config
+              mountPath: /etc/nats
+              readOnly: true
+      volumes:
+        - name: nats-config
+          configMap:
+            name: nats-config
+  volumeClaimTemplates:
+    - metadata:
+        name: nats-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: {{ $.Values.nats.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Cluster-internal endpoint for the NATS client and monitoring ports") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $.Values.nats.clientPort }}
+      targetPort: {{ $.Values.nats.clientPort }}
+      name: client
+    - port: {{ $.Values.nats.monitorPort }}
+      targetPort: {{ $.Values.nats.monitorPort }}
+      name: monitor
+  selector:
+    app: nats

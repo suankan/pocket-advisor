@@ -15,3 +15,6 @@ tmp/
 # Compiled binary and the per-role run logs.
 bin/
 logs/
+# Helm resolves these from the repos pinned in Chart.yaml; Chart.lock is what
+# we commit, so the tarballs are build output.
+charts/*/charts/*.tgz

@@ -13,7 +13,6 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
@@ -182,13 +181,16 @@ type Vault struct {
 	role   Role
 }
 
-// NewForWorkspace returns a client bound to one workspace's single scoped
-// identity and bucket (workspace-isolation.md §2.2), with role enforced in
-// application code rather than by RustFS policy (§9). Used by
-// internal/provision and, once per-workspace routing lands in the pipeline
-// itself, by uploader/discovery/worker construction.
-func NewForWorkspace(cfg config.RustFS, bucket, accessKey, secretKey string, role Role) (*Vault, error) {
-	return newVault(cfg.Endpoint, bucket, accessKey, secretKey, cfg.UseSSL, role)
+// NewForWorkspaceAt returns a client bound to one workspace's scoped identity
+// and bucket (workspace-isolation.md §2.2), with role enforced in application
+// code rather than by RustFS policy (§9).
+//
+// It takes the endpoint directly rather than a config.RustFS,
+// because the endpoint is now per-workspace: one release per namespace means
+// each workspace has its own RustFS, and config only holds the template
+// (deviation 21).
+func NewForWorkspaceAt(endpoint string, useSSL bool, bucket, accessKey, secretKey string, role Role) (*Vault, error) {
+	return newVault(endpoint, bucket, accessKey, secretKey, useSSL, role)
 }
 
 func newVault(endpoint, bucket, accessKey, secretKey string, useSSL bool, role Role) (*Vault, error) {

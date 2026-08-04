@@ -1,0 +1,45 @@
+apiVersion: v2
+name: pocket-advisor-infra
+description: >
+  One workspace's infrastructure, as CRD instances the operators reconcile:
+  a RustFS Tenant, a Postgres Cluster and NATS Streams. Installed once per
+  workspace, into a namespace named after it.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+# The operators that reconcile everything this chart declares. Dependencies
+# rather than a separate release: there is exactly one release of this chart
+# for the whole cluster, so there is exactly one copy of each operator — the
+# cardinality problem that would arise from a release per workspace (N
+# controllers fighting over one set of CRDs) does not exist here.
+#
+# Their CRDs ship in crds/ directories, which Helm installs before rendering
+# any template, so the Tenant, Cluster and Stream resources below can be
+# applied in the same pass that installs the controllers. The controllers
+# themselves may still be starting when those land; a CR simply waits to be
+# reconciled, which is the normal operator contract.
+#
+# Note Helm never *upgrades* CRDs from crds/ — bumping an operator version that
+# changes its CRD schema needs the CRD applied by hand.
+dependencies:
+  # Postgres: reconciles each workspace's Cluster.
+  - name: cloudnative-pg
+    version: "0.29.0"
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cloudnative-pg.enabled
+
+  # NATS JetStream resources — Stream, Consumer, Account. Does NOT deploy NATS
+  # servers: NACK reconciles JetStream objects against a server that already
+  # exists, which is why this chart also runs one (templates/nats.yaml).
+  - name: nack
+    version: "0.34.0"
+    repository: https://nats-io.github.io/k8s/helm/charts
+    condition: nack.enabled
+
+  # Object storage: reconciles each workspace's Tenant.
+  - name: rustfs-operator
+    version: "0.0.5"
+    repository: https://operator.rustfs.com
+    condition: rustfs-operator.enabled
+

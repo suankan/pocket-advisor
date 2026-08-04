@@ -52,6 +52,9 @@ rustfs:
   credentials:
     rootUser: ""
     rootPassword: ""
+    # The identity every document read and write uses. Its access key is the
+    # workspace.name constant; only the secret varies per install.
+    secretKey: ""
 
   # Bucket notifications. There is no enable flag: the target's identity is
   # written by `--create-workspace` into an optional Secret, so "configured"
@@ -81,6 +84,14 @@ rustfs:
 # Pipeline Bus: NATS JetStream
 # ============================================================================
 nats:
+  # Empty here; supplied per install in workspaces/values-<id>.yaml.
+  credentials:
+    password: ""
+
+  # RUSTFS_EVENTS' duplicate window. Must exceed RustFS's retry lifetime —
+  # live-verified against beta.12, which refused to publish into a stream
+  # carrying the 2-minute default. 10m leaves headroom (§5.2).
+  rustfsEventsDedupWindow: 10m
   image: nats:2.14.3-alpine
   replicaCount: 1
   clientPort: 4222
@@ -98,83 +109,96 @@ nats:
 # Tier 2 & 3: PostgreSQL + pgvector
 # ============================================================================
 postgres:
-  # pgvector 0.8.5 on Postgres 18. A major-version bump changes the on-disk
-  # data directory format, so this requires deleting the postgres PVC before
-  # upgrading a live release — schema-bootstrap recreates the schema fresh.
-  image: pgvector/pgvector:0.8.5-pg18-bookworm
-  replicaCount: 1
+  # Managed by the CloudNativePG operator, one Cluster per workspace. The
+  # operator is a cluster-wide prerequisite, not part of this chart:
+  # `make deploy-operator`.
+  #
+  # The image is CNPG's own Postgres 18 build, which already carries pgvector —
+  # so there is no separate pgvector image to keep in step with the server
+  # version. A major-version bump still means new volumes: the on-disk format
+  # changes, and the operator will not rewrite it in place.
+  image: ghcr.io/cloudnative-pg/postgresql:18-standard-trixie
+
+  # One instance per cluster. See the comment in templates/postgres.yaml.
+  instances: 1
   port: 5432
-  # Empty here on purpose — supply in workspaces/values.yaml, same as RustFS.
-  # This is the maintenance superuser: it creates and drops per-workspace
-  # databases and roles, and never holds document data itself.
+
+  # The owner of every workspace database. One name across all of them, because
+  # each workspace has its own cluster now — there is nothing to separate
+  # *within* one, so per-workspace roles bought nothing. Passwords still
+  # differ, one per workspace, from workspaces/values.yaml.
+  appUser: app_user
+  # Empty here; supplied per install in workspaces/values-<id>.yaml.
   credentials:
-    user: ""
     password: ""
-  persistence:
-    enabled: true
-    # Steady state for the measured corpus is ~250Mi. The headroom is for
-    # three transient operations, not the steady state: a re-embed holds two
-    # embed_model namespaces at once, REINDEX needs ~2x the index, and
-    # max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
+
+  # The database inside every cluster. One name everywhere, because the cluster
+  # is already per-workspace — see templates/postgres.yaml.
+
+  storage:
+    # Per workspace, not shared. Steady state for the measured corpus is
+    # ~250Mi; the headroom is for transient operations rather than growth — a
+    # re-embed holds two embed_model namespaces at once, REINDEX needs ~2x the
+    # index, and max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
     size: 20Gi
+
+  # Per cluster, so this multiplies by the number of workspaces.
   resources:
-    requests: {cpu: "300m", memory: "512Mi"}
-    limits:   {cpu: "1000m", memory: "1536Mi"}
+    requests: {cpu: "200m", memory: "384Mi"}
+    limits:   {cpu: "1000m", memory: "1Gi"}
 
 # ============================================================================
-# Workspaces — the chart's generic interface
+# Workspace identity
 #
-# Empty on purpose, and it stays empty in this file. No workspace name and no
-# credential belongs here: this is the committed chart, and the real list is a
-# private, gitignored override supplied at deploy time:
+# There is no list. One release per workspace, one namespace per workspace —
+# `make deploy-infra WORKSPACE=<id>` installs this chart into namespace <id>
+# with workspaces/values-<id>.yaml. The workspace this release serves is the
+# namespace it is in, so the chart never needs to be told an id.
 #
-#   helm upgrade --install pocket-advisor charts/pocket-advisor \
-#     -f workspaces/values.yaml
+# That is also why every resource name below is a constant: the bucket, the
+# NATS account and the Postgres database are all `workspace`. Naming them after
+# the workspace would repeat, in three places, what the namespace already says.
 #
-# `make deploy-infra` does exactly that. See workspaces/values.yaml.example
-# for the shape.
+# Only credentials vary between installs, and they live in
+# workspaces/values-<id>.yaml — empty here, and `required` in the templates, so
+# a deploy without that file fails loudly rather than falling back to a
+# published default.
+# ============================================================================
+workspace:
+  # The bucket, NATS account and Postgres database name. One value, because
+  # they are deliberately identical.
+  name: workspace
+
+# ============================================================================
+# Operators
 #
-# What the chart does with this list is render one NATS account per workspace
-# into nats-server.conf. That is the whole reason it needs to know the list:
-# NATS reads its accounts from a config file, so somebody has to write them,
-# and Helm owning that file is what stopped --create-workspace patching a
-# ConfigMap Helm also manages — the field-ownership conflict that used to fail
-# every `helm upgrade` and cost 25-56s of kubelet sync per workspace
-# (ingestion-design.md deviation 18).
-#
-# The Postgres database/role and the RustFS bucket/identity are NOT created
-# here. Those are API calls against a running server, not config files, so
-# --create-workspace still makes them, reading the same values file.
-#
-# Each entry mirrors the root sections above — same names, same `credentials`
-# nesting — so `rustfs:` means the same thing at both levels and the only
-# difference is scope: administrative there, one workspace's own here.
-#
-#   workspaces:
-#     - id: <workspace-id>        # required; the default for every name below
-#       rustfs:
-#         bucket: <name>          # optional, defaults to id
-#         credentials:
-#           accessKey: <key>      # optional, defaults to id
-#           secretKey: <secret>   # required
-#       postgres:
-#         database: <name>        # optional, defaults to id
-#         credentials:
-#           user: <role>          # optional, defaults to id
-#           password: <secret>    # required
-#       nats:
-#         account: <name>         # optional, defaults to id
-#         credentials:
-#           user: <user>          # optional, defaults to id
-#           password: <secret>    # required
-#
-# The optional names exist so a workspace id need not also satisfy the naming
-# rules of three different systems. Leave them out unless one bites.
-#
-# There is no `nats.credentials` at the root, unlike rustfs and postgres. That
-# is not an omission: RustFS and Postgres need an administrative identity
-# because creating a bucket or a database is a runtime API call, whereas NATS
-# accounts are configuration — rendered into nats-server.conf below and read at
-# startup. Nothing ever authenticates to NATS as an administrator, so there is
-# no such credential to hold.
-workspaces: []
+# Each can be disabled where a cluster already runs one — CloudNativePG in
+# particular is commonly installed cluster-wide for other workloads, and a
+# second copy would leave two controllers reconciling the same CRDs.
+# ============================================================================
+cloudnative-pg:
+  enabled: true
+  # Named for the chart, not the release. These are shared operators, not part
+  # of pocket-advisor: prefixing them implies this release owns something it
+  # merely installs, and a second release would produce a second differently
+  # prefixed copy of the same controller.
+  fullnameOverride: cloudnative-pg
+
+nack:
+  enabled: true
+  # NACK defaults useLegacyNames: true, which names its Deployment after the
+  # *release* alone — so it appeared as a bare "pocket-advisor", indistinguishable
+  # from anything of ours. false switches it to the chart name.
+  useLegacyNames: false
+  nameOverride: nack
+  jetstream:
+    enabled: true
+    # No default server URL: every Stream names its own, because each
+    # authenticates as its own workspace's NATS account.
+
+rustfs-operator:
+  enabled: true
+  fullnameOverride: rustfs-operator
+  # A web UI we never open; the operator itself is what reconciles Tenants.
+  console:
+    enabled: false

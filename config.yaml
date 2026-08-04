@@ -10,46 +10,33 @@
 #
 # pocket-advisor runs on the host; its three stores stay in the local OrbStack
 # cluster. These defaults match a `pocket-advisor` Helm release in the
-# `pocket-advisor` namespace, so a stock local cluster needs no edits here —
+# a namespace per workspace, so a stock local cluster needs no edits here —
 # this section exists to point at a different one.
 # ============================================================================
 infra:
   rustfs:
     # OrbStack routes *.svc.cluster.local from macOS via the system resolver.
-    endpoint: pocket-advisor-rustfs.pocket-advisor.svc.cluster.local:9000
+    endpoint: rustfs-io.%s.svc.cluster.local:9000
     use_ssl: false
-    # No root credentials here. They live in workspaces/values.yaml — the same
-    # file Helm is given — so the cluster and this binary share one definition
-    # rather than two that can drift, and this committed file stays
-    # secret-free. Used only by --create-workspace/--delete-workspace, to
-    # create or drop a workspace's own bucket and identity
-    # (workspace-isolation.md §3, §6); never to read or write documents.
 
   nats:
-    url: nats://pocket-advisor-nats.pocket-advisor.svc.cluster.local:4222
+    url: nats://nats.pocket-advisor.svc.cluster.local:4222
 
   postgres:
-    # The maintenance connection --create-workspace/--delete-workspace use to
-    # CREATE/DROP per-workspace databases and roles (workspace-isolation.md
-    # §3, §6). Never used for document data.
-    # Deliberately carries no user or password: those are injected from
-    # workspaces/values.yaml at load time, keeping this committed file
-    # secret-free.
-    admin_dsn: postgres://pocket-advisor-postgres.pocket-advisor.svc.cluster.local:5432/postgres?sslmode=disable
-    # Must cover every lane that can hold a connection at once. pgxpool
-    # defaults to max(4, NumCPU), which becomes the pipeline's narrowest point
-    # once all roles share one process.
+    # There is no admin connection. CloudNativePG gives each workspace its own
+    # cluster, so nothing creates a database or a role — the chart declares a
+    # Cluster CRD per workspace and the operator reconciles it.
+    #
+    # A workspace's address is this template plus its id: the operator exposes
+    # each cluster's primary as <cluster>-rw, and the chart names the cluster
+    # <release>-<workspace-id>.
+    host_template: postgres-rw.%s.svc.cluster.local
+    port: 5432
+    # `require`, not `verify-full`: CNPG issues its own internal CA, so
+    # verifying the chain would mean shipping that CA to the host for no gain
+    # on a local cluster. Connections are still encrypted.
+    sslmode: require
     max_conns: 50
-
-  kubernetes:
-    # What --create-workspace/--delete-workspace need to reach the cluster's
-    # own API for the NATS account provisioning step (workspace-isolation.md
-    # §8) — nothing else in pocket-advisor talks to the Kubernetes API.
-    # Uses the operator's own ambient kubeconfig, the same context kubectl/helm
-    # already use; no separate credential lives here.
-    namespace: pocket-advisor
-    nats_statefulset: pocket-advisor-nats
-    nats_configmap: pocket-advisor-nats-config
 
   embedding:
     # Plain localhost: the process calling this now runs on the machine serving
@@ -96,8 +83,8 @@ infra:
 workspaces:
   # What each workspace holds: its collections and where they live on disk.
   config: workspaces/workspace-config.yaml
-  # Its infrastructure: database, bucket and NATS names plus credentials.
-  # The same file `make deploy-infra` passes to helm with -f, so the chart
-  # and this binary cannot disagree about a password. Gitignored; see
-  # workspaces/values.yaml.example.
-  values: workspaces/values.yaml
+  # Its infrastructure credentials, the same file
+  # `make deploy-infra` passes to helm with -f, so the chart and
+  # this binary cannot disagree about a password. %s is the workspace id.
+  # Gitignored; the shape is documented in charts/pocket-advisor/values.yaml.
+  values: workspaces/pocket-advisor-infra.yaml

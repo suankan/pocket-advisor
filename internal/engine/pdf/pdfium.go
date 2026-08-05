@@ -229,16 +229,51 @@ func (d *Document) ExtractText() (string, error) {
 // measured against a real multi-column bank-statement table.
 const xBackJumpEpsilon = 30.0
 
+// dirCommitPoints is how far a line must travel horizontally before its
+// direction is believed. Above the few points of backwards jitter kerning and
+// zero-width glyphs introduce, far below a real line's length.
+const dirCommitPoints = 5.0
+
 // writeStructuredChars concatenates one page's structured chars in order,
 // inserting a line break either where PDFium's own synthetic "\n" appears
-// (an in-text-run wrap) or where the next character's left edge falls well
-// behind the current line's rightmost extent so far (a new PDF text object
-// starting — the case PDFium's own synthetic breaks never cover, and where
-// the merged-row bug lives). Reports whether it wrote anything.
+// (an in-text-run wrap) or where the next character jumps backwards against
+// the direction the line is travelling in (a new PDF text object starting —
+// the case PDFium's own synthetic breaks never cover, and where the merged-row
+// bug lives). Reports whether it wrote anything.
+//
+// "Backwards" is the part that needs care, because it is not always leftwards.
+// A rotated run travels whichever way its text matrix points, and the rule used
+// to assume rightwards unconditionally. Upright text advances rightwards, so it
+// was right by construction; text turned 90 or 270 degrees advances vertically
+// and barely moves in x at all, so the rule never fired and each run survived
+// whole — correct, but by luck rather than design. Text turned 180 degrees
+// advances *leftwards*, so every single glyph looked like a backwards jump and
+// the run was chopped into fragments mid-word: "INVERTEDMARKER" came out as
+// "INV" + "ER" + "TE" + "DM". No character was lost and every word was, which
+// for a search index is the worse of the two.
+//
+// So the direction is measured rather than assumed. Each line starts with it
+// unknown and behaves exactly as before — rightwards — until the run has moved
+// dirCommitPoints horizontally, which settles it. Extent is then tracked along
+// that direction and a break is a retreat from it. For upright text this is the
+// same arithmetic it always was; for vertical runs x never moves far enough to
+// commit, so they keep the behaviour that already worked.
 func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStructuredChar) bool {
 	wrote := false
 	justBroke := true
-	lineMaxRight := 0.0
+
+	// Extent reached along the line's direction of travel, and that direction:
+	// +1 rightwards, -1 leftwards, 0 while still unknown.
+	lineExtent := 0.0
+	lineDir := 0.0
+	lineStartLeft := 0.0
+
+	newLine := func() {
+		lineExtent = 0
+		lineDir = 0
+		justBroke = true
+	}
+
 	for _, c := range chars {
 		switch c.Text {
 		case "\r":
@@ -248,21 +283,54 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 				b.WriteString("\n")
 				justBroke = true
 			}
-			lineMaxRight = 0
+			newLine()
 			continue
 		}
-		if !justBroke && c.PointPosition.Left < lineMaxRight-xBackJumpEpsilon {
-			b.WriteString("\n")
-			lineMaxRight = 0
-			justBroke = true
+
+		left, right := c.PointPosition.Left, c.PointPosition.Right
+
+		if justBroke {
+			lineStartLeft = left
+		} else if lineDir == 0 {
+			// Enough travel to tell direction from jitter?
+			if d := left - lineStartLeft; d >= dirCommitPoints {
+				lineDir, lineExtent = 1, right
+			} else if d <= -dirCommitPoints {
+				// Leftward: extent is measured on the leading edge, which for
+				// this direction is the left one, and compared negated so the
+				// same "further along" comparison holds.
+				lineDir, lineExtent = -1, -left
+			}
 		}
+
+		dir := lineDir
+		if dir == 0 {
+			dir = 1 // unknown behaves as it always did
+		}
+
+		leading := right
+		if dir < 0 {
+			leading = -left
+		}
+		trailing := left
+		if dir < 0 {
+			trailing = -right
+		}
+
+		if !justBroke && trailing < lineExtent-xBackJumpEpsilon {
+			b.WriteString("\n")
+			newLine()
+			lineStartLeft = left
+			dir, leading = 1, right
+		}
+
 		b.WriteString(c.Text)
 		if strings.TrimSpace(c.Text) != "" {
 			justBroke = false
 			wrote = true
 		}
-		if c.PointPosition.Right > lineMaxRight {
-			lineMaxRight = c.PointPosition.Right
+		if leading > lineExtent {
+			lineExtent = leading
 		}
 	}
 	return wrote

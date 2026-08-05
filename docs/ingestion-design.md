@@ -3301,3 +3301,43 @@ deliberate choice with a reason, not drift.
     also requires NATS, so an unreachable broker refuses the operation up front
     rather than leaving purged stores beside populated queues — the same posture
     that already makes Postgres the first step.
+
+32. **Line breaks were assumed to travel rightwards, so upside-down text was
+    shredded (2026-08-05).** A PDF stores characters and positions, not lines,
+    so `writeStructuredChars` decides where a line ends by watching for a jump
+    backwards — and it took "backwards" to mean leftwards, unconditionally.
+
+    Upright text advances rightwards, so the rule was right by construction.
+    Text turned 90 or 270 degrees advances vertically and barely moves in x, so
+    the rule never fired and each run survived whole — correct, but by luck.
+    Text turned 180 degrees advances *leftwards*, so every glyph looked like a
+    backwards jump and the run was chopped mid-word: `INVERTEDMARKER` came out
+    as `INV` + `ER` + `TE` + `DM`. No character was lost and every word was,
+    which for a search index is the worse of the two — the text is present and
+    unfindable.
+
+    The direction is now measured rather than assumed. A line starts with it
+    unknown and behaves exactly as before until the run has travelled 5 points
+    horizontally, which is above kerning jitter and far below a real line;
+    extent is then tracked along that direction and a break is a retreat from
+    it. Vertical runs never move far enough in x to commit, so they keep the
+    behaviour that already worked.
+
+    **The risk here was regressing the table tuning, not the fix itself.** The
+    30-point threshold was chosen against measurements from a real
+    bank-statement table — 4.8pt row-to-row gaps against 7.5pt of same-line
+    ascender jitter, which is why no vertical threshold works — and those are
+    the documents where exact figures matter most. So the change was verified
+    by fingerprinting the extraction of **every PDF in the corpus, 224 files,
+    before and after: zero changed**. The new behaviour reaches only the case
+    that was broken.
+
+    Guarded by `TestExtractTextKeepsWordsWholeAtEveryOrientation` over a
+    hand-written 828-byte fixture carrying one marker per quarter turn. It
+    asserts whole markers rather than character counts, because the failure
+    mode preserves every character and destroys every word.
+
+    Interleaving was expected to be the fragile case and is not: orientations
+    mixed inside a single text object reconstruct correctly, measured. pdfium
+    returns characters in content-stream order and does no reading-order
+    detection of its own, which is why this reconstruction exists at all.

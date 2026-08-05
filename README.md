@@ -424,14 +424,14 @@ workspace:
 }
 ```
 
-Paths are relative on purpose: the binary reads `config.yaml` and the
-workspace registry from its working directory, which for a project-scoped
-server is the repository root.
+Paths are relative on purpose: a project-scoped server is launched from the
+repository root, so `./bin/pocket-advisor` and the default `config.yaml`
+resolve without help.
 
 **Claude Desktop is different** — it has its own global config and launches
-servers from an arbitrary directory, so relative paths will not resolve. Edit
-`~/Library/Application Support/Claude/claude_desktop_config.json` and give
-absolute paths for the binary *and* both config files:
+servers from an arbitrary directory, so the binary and `config.yaml` both need
+absolute paths. Edit
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -439,16 +439,18 @@ absolute paths for the binary *and* both config files:
     "case-documents": {
       "command": "/Users/you/code/pocket-advisor/bin/pocket-advisor",
       "args": ["--mcp", "--workspace-id", "case-documents-demo",
-               "--config", "/Users/you/code/pocket-advisor/config.yaml",
-               "--workspace-config", "/Users/you/code/pocket-advisor/workspaces/workspace-config.yaml"]
+               "--config", "/Users/you/code/pocket-advisor/config.yaml"]
     }
   }
 }
 ```
 
-`--workspace-config` is required as well as `--config`, because the registry
-path inside `config.yaml` is itself relative. Restart Claude Desktop after
-editing; the tool appears in the tools menu once the server starts.
+`--config` is enough. The registry and credentials files are named by
+`config.yaml` with paths relative to *it*, not to the working directory, so
+pointing at the config file locates both. `--workspace-config` remains as an
+override for pointing at a different registry, not as something every client
+has to supply. Restart Claude Desktop after editing; the tool appears in the
+tools menu once the server starts.
 
 Add an entry per workspace you want reachable — a server binds to one
 workspace at startup and refuses to serve if its database holds another.

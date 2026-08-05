@@ -3020,3 +3020,47 @@ deliberate choice with a reason, not drift.
     workspaces — Tenants Ready, Clusters running, nine Streams Created. The
     chart now renders zero CustomResourceDefinitions into its template manifest
     and 20 with `--include-crds` (11 CNPG, 6 nack, 3 rustfs).
+
+26. **Workspace paths resolve against the config file, not the working
+    directory (2026-08-05).** `config.yaml` names two files —
+    `workspaces.config` and `workspaces.values` — with relative paths, and both
+    were resolved against the process's cwd. From the repository root that is
+    the same directory, so everything worked; from anywhere else the binary
+    could not find its own credentials:
+
+        read workspace values workspaces/pocket-advisor-infra.yaml:
+        open workspaces/pocket-advisor-infra.yaml: no such file or directory
+
+    **This is the second time the same bug shipped.** `--workspace-config` was
+    added precisely to work around it for the registry. The credentials file
+    was split out of the registry later (deviation 18) and got no equivalent
+    flag, so a client passing absolute paths for *both* documented flags still
+    died — the third path had no override at all, only the `WORKSPACES_VALUES`
+    environment variable.
+
+    Fixing it per-path would have meant a third flag and a third chance to
+    forget one. `applyFile` now anchors both to `filepath.Dir` of the config it
+    just read, since they name files sitting beside `config.yaml` and its
+    location is the only anchor that means anything. Absolute paths are left
+    untouched, so a registry outside the repository still works, and the
+    environment still wins and is taken literally — it is set by whoever
+    launched the process, in their own directory.
+
+    Anchoring applies to the built-in defaults as well as to what the file set,
+    because the defaults describe the same repository layout. A bare
+    `config.yaml` yields a directory of `.`, so every command run from the
+    repository root behaves exactly as before.
+
+    **`--config <abs path>` is now sufficient on its own**, which is what an
+    MCP client needs: it launches the server from a directory of its choosing.
+    `--workspace-config` stays as a genuine override for pointing at a
+    different registry, rather than as something every client configuration has
+    to carry. README §5's Claude Desktop example dropped it.
+
+    **Verified** by running the read path from three working directories with
+    no environment variable set: the previously failing invocation from `/tmp`,
+    `--config` alone from `/`, and the relative form `.mcp.json` uses from the
+    repository root. All three reach `mcp server ready` with all 18 collections
+    resolved. Unit tests cover the anchor, the defaults, an absolute path left
+    alone, the environment override, a missing config file, and that `.` is a
+    no-op.

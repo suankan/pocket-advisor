@@ -46,7 +46,7 @@ infra:
     # The one concurrency knob in the system. Every other pool is sized from
     # runtime.NumCPU(), because the host is the honest authority on how much
     # work fits at once — but this limit lives in the endpoint, not here.
-    concurrency: 16
+    concurrency: 8
     timeout: 60s
 
   # Read path (retrieval-design.md §8). Only where the models live is a
@@ -77,8 +77,13 @@ infra:
 #
 # A workspace is described by two gitignored files, joined on id: one for what
 # it holds (collections, paths, bank details) and one for how to reach it
-# (database, bucket and NATS names plus credentials). Neither lives here —
-# this file stays committed and secret-free, matching the header above.
+# (credentials). Neither lives here — this file stays committed and
+# secret-free, matching the header above.
+#
+# Both paths below are resolved relative to THIS FILE, not to the working
+# directory of whatever ran the binary. That is what lets `--config <abs path>`
+# be enough on its own for an MCP client, which launches the server from a
+# directory of its own choosing. An absolute path here is left as written.
 # ============================================================================
 workspaces:
   # What each workspace holds: its collections and where they live on disk.

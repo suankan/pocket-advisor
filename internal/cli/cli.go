@@ -76,8 +76,11 @@ Modes (exactly one):
 
 Common:
   --workspace-id <id>       workspace from the registry (required by every mode)
-  --workspace-config <path> registry path (default: infra config's workspaces.config)
-  --config <path>           infrastructure config (default config.yaml)
+  --workspace-config <path> registry path override (default: infra config's
+                            workspaces.config, resolved relative to it)
+  --config <path>           infrastructure config (default config.yaml). Names
+                            the registry and credentials files, so an absolute
+                            path here is enough from any directory
 
 Query options:
   --top-k N                 maximum results (default 15)
@@ -109,7 +112,7 @@ func Parse(args []string) (*Options, error) {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 
 	fs.StringVar(&o.ConfigPath, "config", config.DefaultPath, "infrastructure config path")
-	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "", "workspace registry path (default: infra config's workspaces.config)")
+	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "", "workspace registry path override (default: infra config's workspaces.config, resolved relative to it)")
 	fs.StringVar(&o.WorkspaceID, "workspace-id", "", "workspace id within the registry")
 
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "upload, enqueue and process to completion")
@@ -213,6 +216,11 @@ func Run(o *Options) error {
 		// nothing for most modes. That is invisible when the process runs from
 		// the repository root and fatal when it does not — which is exactly
 		// how an MCP client launches it.
+		//
+		// The flag is an override now rather than a necessity: config.Load
+		// anchors both workspace paths to the directory of the config file that
+		// named them, so --config alone locates the registry and the
+		// credentials file from any working directory (deviation 26).
 		if o.WorkspaceConfig != "" {
 			cfg.WorkspacesConfigPath = o.WorkspaceConfig
 		} else {

@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -408,6 +409,25 @@ func applyFile(c *Config, path string) error {
 	setStr(&c.WorkspacesConfigPath, f.Workspaces.Config)
 	setStr(&c.WorkspacesValuesPath, f.Workspaces.Values)
 
+	// Both workspace paths are relative to the config file that declares them,
+	// never to the process's working directory. They point at files sitting
+	// beside config.yaml in the repository, so the directory it was read from is
+	// the only anchor that means anything.
+	//
+	// Resolving them against the cwd instead is invisible when the process runs
+	// from the repository root and fatal when it does not — which is exactly how
+	// an MCP client launches this binary. --workspace-config was added to work
+	// around that for the registry; the credentials file was split out later
+	// (deviation 18) and had no equivalent, so a client passing absolute paths
+	// for both flags still died on a relative workspaces.values.
+	//
+	// Applied to the defaults as well as to what the file set, because the
+	// defaults describe the same repository layout. A bare "config.yaml" gives a
+	// directory of ".", which leaves the paths exactly as they were.
+	dir := filepath.Dir(path)
+	c.WorkspacesConfigPath = resolveAgainst(dir, c.WorkspacesConfigPath)
+	c.WorkspacesValuesPath = resolveAgainst(dir, c.WorkspacesValuesPath)
+
 	setStr(&c.Embedding.Endpoint, in.Embedding.Endpoint)
 	setStr(&c.Embedding.Model, in.Embedding.Model)
 	if in.Embedding.Concurrency > 0 {
@@ -593,6 +613,16 @@ func setStr(dst *string, v string) {
 	if v != "" {
 		*dst = v
 	}
+}
+
+// resolveAgainst anchors a relative path to dir. An absolute path is already
+// unambiguous and is left exactly as given, which is what lets an operator
+// point at a registry outside the repository.
+func resolveAgainst(dir, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(dir, p)
 }
 
 func report(missing []string) error {

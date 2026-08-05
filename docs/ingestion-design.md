@@ -10,7 +10,10 @@
 
 **Status:** holistic design of record for the write path. Everything about
 ingestion — pipeline, storage, failure semantics, codebase layout,
-observability — lives in this file. Its peers are `docs/retrieval-design.md`,
+observability — lives in this file, with one exception: turning a PDF into
+text is `docs/pdf-to-text.md`, which outgrew a section here and now owns
+classification, extraction, layout, OCR and their history (§5.4). Its other
+peers are `docs/retrieval-design.md`,
 which owns every read-path concern (§7 here states the contract between
 them); `docs/workspace-isolation.md`, which owns how workspaces are
 kept apart across all three stores — the per-workspace database, bucket,
@@ -1007,51 +1010,24 @@ data lived only inside a text blob.
 
 **Renamed from `PdfExtractorWorker`,** and now consumes both `ingest.pdfs.raw` and `ingest.images.raw`.
 
-Image OCR is folded into this pool rather than given its own, because both paths execute the same CGo Tesseract engine against the same finite CPU budget. A separate image-OCR pool would compete with this one for the same cores with no coordination, and the host has one CPU count to divide, not a fourth CPU-heavy pool's worth to spare (§6.3). One pool, one bounded OCR semaphore.
+Image OCR is folded into this pool rather than given its own, because both paths execute the same Tesseract engine against the same finite CPU budget. A separate image-OCR pool would compete with this one for the same cores with no coordination, and the host has one CPU count to divide (§6.3). One pool, one bounded OCR semaphore.
 
-* **Role:** High-speed document inspection and dual-engine text extraction.
+* **Role:** document inspection and text extraction, digital and scanned.
 * **Key Operations:**
-* Runs a sub-2ms inspection pass on incoming PDFs (checking character densities and image bounding box dimensions).
-* Directs pure digital PDFs to the `PDFium` engine for low-latency text extraction.
-* Directs scanned or hybrid PDFs to an intermediate rasterizer, rendering high-DPI bitmaps page-by-page before passing them to the `Tesseract` OCR engine.
+* Classifies each PDF from character density, routing it to the text layer or to the rasteriser.
+* Recovers text a digital page shows but its text layer omits, and lays every page out from coordinates.
 * Runs standalone images through the viability gate, then the same OCR engine.
-* Manages C-heap memory lifecycles explicitly per request to prevent runtime memory growth.
+* Manages bitmap lifetimes explicitly per request to prevent runtime memory growth.
 
-#### Image viability gate
+> **PDF-to-text is documented separately: [`pdf-to-text.md`](pdf-to-text.md).**
+>
+> That covers classification, line reconstruction and orientation, subtract-and-merge
+> recovery, the layout renderer, vertical runs, OCR configuration and page
+> segmentation, deskew and reading axes, the image viability gate, the
+> rasterisation memory ceiling and semaphore sizing, verification, and the history
+> of what was wrong before. It is a subject of its own and outgrew this document.
 
-Email corpora are full of images that are not documents: tracking pixels, logos, signature graphics, social icons. Sending them all to OCR wastes the scarcest resource in the cluster and floods Tier 3 with noise chunks that degrade retrieval precision. An image is skipped, `SKIPPED` / `IMAGE_NOT_VIABLE`, when any holds:
-
-* either dimension < 200 px, or total area < 40 000 px²;
-* byte size < 8 KB;
-* OCR returns fewer than 20 alphanumeric characters (post-hoc — the result is recorded, not retried).
-
-A skipped image still exists in Tier 1 and Tier 2 with its lineage intact; it is simply not embedded.
-
-#### Rasterization memory ceiling
-
-"Zero local disk I/O" means page bitmaps live entirely in RAM, and they are the memory hot spot in the whole system: an A4 page at 300 DPI is ~2480×3508 px, ~35 MB uncompressed RGBA. There is no per-pod limit to bound this against any more — the process runs on the host (§6.1) — so unbounded page concurrency is bounded only by however much host RAM is free, which is exactly why §6.3's CPU semaphore, not a memory ceiling, is the real backstop.
-
-Pages are therefore rasterized **one at a time per document**, and each bitmap
-is explicitly freed before the next is rendered. Parallelism comes from other
-lanes working other documents, never from one document rendering ahead of
-itself.
-
-Rasterisation and OCR share **one process-wide semaphore sized at
-`runtime.NumCPU()`**, labelled so the split between them stays visible. One
-budget rather than two, because they burn the same cores: independent limits
-would oversubscribe the machine by their sum. This replaced two mechanisms
-that both made sense per-pod and stopped making sense in one process — a plain
-mutex around rasterisation, which bounded a single container to one render at
-a time and would have become one render for the whole pipeline, and an OCR
-limit of 2 chosen for a 1-core CPU limit.
-
-The PDFium instance pool is sized to the document lane count rather than to
-the render concurrency, because opening a document holds an instance for that
-document's whole lifetime, not just while a page is being drawn. A pool
-smaller than the lane count starves lanes on the instance timeout instead of
-queueing them briefly.
-
-OCR language flags are `eng+rus`, matching the corpus. A missing language does not error — it silently produces plausible-looking garbage, which is worse than a failure because it reaches the index.
+Deviations 29, 32 and 33 below are summaries; their detail lives there too.
 
 ### 5.5 Office Extractor Service (`OfficeExtractorWorker`)
 
@@ -1423,7 +1399,7 @@ pocket-advisor/                    # repo root — single Go module
 │   ├── engine/                   # pure logic, no transport
 │   │   ├── email/                # mime.go, compact.go, recursion guard
 │   │   ├── pdf/                  # pdfium.go — classify, extract, rasterize
-│   │   ├── ocr/                  # tesseract.go, viability.go — SHARED by pdf + image
+│   │   ├── ocr/                  # tesseract.go, disabled.go, viability.go — SHARED
 │   │   ├── office/               # OOXML, sheets, RTF (pure Go)
 │   │   └── embed/                # chunker.go                        (§2.4 order)
 │   │
@@ -1431,6 +1407,8 @@ pocket-advisor/                    # repo root — single Go module
 │   │   ├── runtime.go            # the worker pool: fetch, dispatch, ack/nak/DLQ
 │   │   ├── email_worker.go
 │   │   ├── document_worker.go    # both pdfs.raw and images.raw
+│   │   ├── layout.go             # page layout renderer         (pdf-to-text.md)
+│   │   ├── residue_mask.go       # mask the text layer, gate on ink
 │   │   ├── office_worker.go
 │   │   └── embed_worker.go
 │   │
@@ -1446,7 +1424,10 @@ pocket-advisor/                    # repo root — single Go module
 ├── logs/                         # one file per role, gitignored
 └── docs/
     ├── ingestion-design.md       # this file
-    └── retrieval-design.md
+    ├── pdf-to-text.md            # PDF → text: extraction, layout, OCR
+    ├── retrieval-design.md
+    ├── workspace-isolation.md
+    └── api-server-design.md
 ```
 
 `cmd/` holds one binary where it once held eight. The roles did not merge —
@@ -2341,7 +2322,8 @@ deliberate choice with a reason, not drift.
       chunk was nine tokens, four of them over 60 characters, the longest
       1,792. Only URLs over 120 characters are removed — short links are
       shared by people and can carry meaning. 213 chunks affected, all email.
-    * **The post-OCR viability gate now counts words, not characters.**
+    * **The post-OCR viability gate now counts words, not characters**
+      ([`pdf-to-text.md` §9](pdf-to-text.md)).
       `MinOCRChars = 20` was far too weak: OCR over a *photograph* — a
       kitchen, a bedroom, a building exterior — yields hundreds of tokens and
       zero words, and passed easily. It now requires 5 tokens of 4+ letters.
@@ -3202,55 +3184,17 @@ deliberate choice with a reason, not drift.
     inference collapse. Size against the *host*, not the node.
 
 29. **OCR ran at the wrong page segmentation mode for its entire existence
-    (2026-08-05).** Every scanned document in the corpus was extracted as
-    garbage, and the failure hid for months because it needs a page that mode 6
-    cannot cope with before it becomes visible.
+    (2026-08-05).** `SetPageSegMode` is silently discarded by gosseract —
+    `Init()` resets it — so Tesseract ran at its post-`Init` default of 6 with no
+    layout or orientation analysis, and every scanned document in the corpus was
+    extracted as garbage for months. The fix is to set `tessedit_pageseg_mode` as
+    a variable, at mode 1 for orientation detection.
 
-    A 208-page scanned contract produced 400,000 characters containing **zero**
-    occurrences of "vendor", "purchaser" or "COPYRIGHT" — in a land contract —
-    while the `tesseract` CLI read the identical bitmap perfectly. Rendering was
-    never the problem; our own bitmap OCR'd cleanly through the CLI.
+    **Everything OCR'd before this is wrong and needs re-ingesting.** That is the
+    real cost, and no amount of re-running fixes it without one.
 
-    **`SetPageSegMode` does not work.** It writes to the API immediately, but
-    `Client.Text()` then calls `Init()`, and `TessBaseAPI::Init` resets the mode
-    — so every value set that way is discarded and Tesseract runs at its
-    post-`Init` default of 6, a single uniform block, with no layout or
-    orientation analysis at all. Upstream, `otiai10/gosseract` issue 167.
-    Measured before it was found: all five page-seg modes returned byte-
-    identical output, and `PSM_OSD_ONLY` ran ordinary OCR instead of returning
-    an orientation report.
-
-    The fix is to set it as a *variable*, `tessedit_pageseg_mode`, because
-    gosseract deliberately applies variables after `Init` — there is even a
-    comment in its source saying `SetVariable` must be called after `Init`.
-    Nobody applied that reasoning to PSM.
-
-    **Mode 1, not the CLI's default of 3**, because only mode 1 runs orientation
-    detection. Measured across all four quarter-turns of the same page: mode 1
-    recovered every one, mode 3 only the two that happened to suit. That matters
-    because the pages in question carry no rotation metadata — `Page rot: 0` —
-    the scan was fed through the machine sideways and baked in that way, so
-    nothing but the pixels can reveal it.
-
-    **No detection code of our own.** An earlier attempt built exactly that:
-    four-way rotation with mean-confidence scoring to pick the best. It worked
-    (93.0 upright against 61.8 and 52.5) and was deleted, because Tesseract does
-    it better and per *block* rather than per page — a page with upright body
-    text and a sideways margin note yields both, 33 of 34 words recovered. Any
-    page-wide criterion of ours would have had to sacrifice one or the other.
-
-    A length heuristic would have chosen exactly wrong, which is worth
-    remembering: the garbage runs were consistently *longer* than the correct
-    ones, 3,075 characters against 2,423 on the same page.
-
-    **Verified end to end.** Re-ingesting that contract: latin 25% → **69%**,
-    cyrillic 14% → **2.35%**, and `vendor` 0 → 280, `purchaser` 0 → 269,
-    `COPYRIGHT` 0 → 23, `CAMERON PARK` 0 → 220. Grayscale conversion went in
-    alongside, halving the PNG the client decodes, which more than paid for
-    OSD's ~10%: the whole document went from ~21 minutes to **1m12s**.
-
-    **Everything OCR'd before this is wrong** and needs re-ingesting. That is
-    the real cost, and no amount of re-running fixes it without one.
+    Detail, measurements and the rejected alternatives:
+    [`pdf-to-text.md` §8.1](pdf-to-text.md).
 
 30. **Failure reasons became a closed vocabulary, and the catch-all stopped
     lying (2026-08-05).** `--redrive --reason X` is only worth building if one
@@ -3303,41 +3247,32 @@ deliberate choice with a reason, not drift.
     that already makes Postgres the first step.
 
 32. **Line breaks were assumed to travel rightwards, so upside-down text was
-    shredded (2026-08-05).** A PDF stores characters and positions, not lines,
-    so `writeStructuredChars` decides where a line ends by watching for a jump
-    backwards — and it took "backwards" to mean leftwards, unconditionally.
+    shredded (2026-08-05).** A PDF stores characters and positions, not lines, so
+    the extractor decides where a line ends by watching for a jump backwards —
+    and it took "backwards" to mean leftwards, unconditionally. Text turned 180°
+    advances leftwards, so every glyph looked like a break and runs were chopped
+    mid-word: every character preserved, every word destroyed. The direction is
+    now measured rather than assumed.
 
-    Upright text advances rightwards, so the rule was right by construction.
-    Text turned 90 or 270 degrees advances vertically and barely moves in x, so
-    the rule never fired and each run survived whole — correct, but by luck.
-    Text turned 180 degrees advances *leftwards*, so every glyph looked like a
-    backwards jump and the run was chopped mid-word: `INVERTEDMARKER` came out
-    as `INV` + `ER` + `TE` + `DM`. No character was lost and every word was,
-    which for a search index is the worse of the two — the text is present and
-    unfindable.
+    Verified by fingerprinting extraction across every PDF in the corpus, 224
+    files, before and after: zero changed.
 
-    The direction is now measured rather than assumed. A line starts with it
-    unknown and behaves exactly as before until the run has travelled 5 points
-    horizontally, which is above kerning jitter and far below a real line;
-    extent is then tracked along that direction and a break is a retreat from
-    it. Vertical runs never move far enough in x to commit, so they keep the
-    behaviour that already worked.
+    Detail: [`pdf-to-text.md` §4.1](pdf-to-text.md).
 
-    **The risk here was regressing the table tuning, not the fix itself.** The
-    30-point threshold was chosen against measurements from a real
-    bank-statement table — 4.8pt row-to-row gaps against 7.5pt of same-line
-    ascender jitter, which is why no vertical threshold works — and those are
-    the documents where exact figures matter most. So the change was verified
-    by fingerprinting the extraction of **every PDF in the corpus, 224 files,
-    before and after: zero changed**. The new behaviour reaches only the case
-    that was broken.
+33. **A dense text layer is neither complete nor in reading order, so pages are
+    now laid out from coordinates (2026-08-05).** Two assumptions were buried in
+    "has text, therefore extract it". A page can carry a full text layer and
+    still show words it does not contain — measured across 968 digital-classified
+    PDFs, 581 were hiding something, 36 of them whole pages. And content-stream
+    order is the order the file draws, not the order the page reads.
 
-    Guarded by `TestExtractTextKeepsWordsWholeAtEveryOrientation` over a
-    hand-written 828-byte fixture carrying one marker per quarter turn. It
-    asserts whole markers rather than character counts, because the failure
-    mode preserves every character and destroys every word.
+    Every page is therefore rendered, its text layer masked out, the residue
+    OCR'd, and the whole page laid out from coordinates in the manner of
+    `pdftotext -layout`. Scanned pages go through the same renderer. Output is
+    roughly 2–2.5× the characters, nearly all padding, which lands on embedding
+    tokens and chunk boundaries.
 
-    Interleaving was expected to be the fragile case and is not: orientations
-    mixed inside a single text object reconstruct correctly, measured. pdfium
-    returns characters in content-stream order and does no reading-order
-    detection of its own, which is why this reconstruction exists at all.
+    This is the largest change to extraction the project has made, and it took
+    several wrong turns that passed every automated check. Detail, the failed
+    attempts, and what the checks cannot see:
+    [`pdf-to-text.md`](pdf-to-text.md).

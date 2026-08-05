@@ -3170,6 +3170,37 @@ deliberate choice with a reason, not drift.
     that it stops when the handler returns, that `stop` is idempotent, and that
     the interval leaves several ticks of margin inside `AckWait`.
 
+28. **RustFS and Postgres were sized for a corpus a third the size of the real
+    one (2026-08-05).** A 1,891-file / 1.5GB ingest OOMKilled the object store
+    **13 times** — `lastState.terminated.reason: OOMKilled`, exit 137 — against
+    a 768Mi limit. Each kill took its in-flight uploads with it (31 failed) and
+    dead-lettered documents whose Tier 1 reads died mid-extraction. Postgres was
+    killed once on the same run, exit 137 after its own probes timed out.
+
+    The limits dated from a measured corpus of 559Mi. The corpus roughly
+    tripled; the limits never moved.
+
+    **CPU mattered as much as memory, for a reason that is not obvious.** The
+    RustFS operator sets `timeoutSeconds: 1` on both its liveness and readiness
+    probes, and `tenant.spec` exposes no field to soften them — checked, not
+    assumed. A server starved at half a core queues, a queued `/health` takes
+    over a second, three in a row kill the container. So headroom is the only
+    available defence against probe-induced restarts; the probe cannot be tuned.
+
+    RustFS went to 2 CPU / 2Gi and Postgres to 2 CPU / 1536Mi, with requests at
+    500m/512Mi on both. Limits are ceilings and requests are what the scheduler
+    commits, so the node sits at 99% memory in *limits* against 28% in requests
+    — deliberate, and safe only because one workspace ingests at a time. Two
+    concurrent ingests on this node would contend and the kernel would start
+    killing things.
+
+    **A caution this cost us.** The first sizing was chosen against the node's
+    ~8Gi allocatable without checking that the host underneath is a 16GB
+    machine also running the embedding model. Cluster limits are not free
+    memory; on a single-machine deployment they compete with the model server
+    for the same unified memory, and that competition is what makes MLX
+    inference collapse. Size against the *host*, not the node.
+
 30. **Failure reasons became a closed vocabulary, and the catch-all stopped
     lying (2026-08-05).** `--redrive --reason X` is only worth building if one
     problem class has exactly one code. It did not.

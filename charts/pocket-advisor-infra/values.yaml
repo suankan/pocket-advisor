@@ -76,9 +76,24 @@ rustfs:
     # ~60x headroom: the matter is active, and re-ingestion writes new
     # extracted/ objects without reclaiming old ones (§6.4).
     size: 50Gi
+  # Sized from a real ingest, not from guessing. At 768Mi/500m the server was
+  # OOMKilled 13 times during a 1,891-file / 1.5GB run — exit 137, taking its
+  # in-flight uploads with it (31 failed) and dead-lettering 49 documents whose
+  # Tier 1 reads died mid-extraction.
+  #
+  # CPU matters as much as memory here, for a reason that is not obvious: the
+  # RustFS operator sets its own liveness and readiness probes with
+  # timeoutSeconds: 1, and tenant.spec exposes no field to soften them. A
+  # server starved at half a core queues, a queued /health takes over a second,
+  # three in a row kill the container — so the only defence against
+  # probe-induced restarts is enough CPU that it never gets slow.
+  #
+  # Limits are ceilings, not reservations. Requests are what the scheduler
+  # commits, and they stay modest because N workspaces sit on one node while
+  # only one of them ingests at a time.
   resources:
-    requests: {cpu: "200m", memory: "256Mi"}
-    limits:   {cpu: "500m", memory: "768Mi"}
+    requests: {cpu: "500m", memory: "512Mi"}
+    limits:   {cpu: "2000m", memory: "2Gi"}
 
 # ============================================================================
 # Pipeline Bus: NATS JetStream
@@ -143,10 +158,18 @@ postgres:
     # index, and max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
     size: 20Gi
 
-  # Per cluster, so this multiplies by the number of workspaces.
+  # Per cluster, so this multiplies by the number of workspaces — hence modest
+  # requests and generous limits, since only one workspace ingests at a time.
+  #
+  # Raised after the same ingest that OOMKilled RustFS: this container was
+  # killed too, exit 137 after its own liveness and readiness probes started
+  # timing out. Postgres is on the write path for every chunk and every
+  # embedding — 2,468 embeddings in that run, against a pool configured for 50
+  # connections — so a single core is what made the probes slow enough to
+  # matter, the same failure shape as RustFS.
   resources:
-    requests: {cpu: "200m", memory: "384Mi"}
-    limits:   {cpu: "1000m", memory: "1Gi"}
+    requests: {cpu: "500m", memory: "512Mi"}
+    limits:   {cpu: "2000m", memory: "1536Mi"}
 
 # ============================================================================
 # Workspaces

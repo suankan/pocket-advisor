@@ -27,3 +27,17 @@ func (e *Engine) Close() error { return nil }
 func (e *Engine) Image(context.Context, image.Image) (string, error) { return "", ErrUnavailable }
 
 func (e *Engine) Bytes(context.Context, []byte) (string, error) { return "", ErrUnavailable }
+
+// Word mirrors the linked build's type so callers compile either way.
+type Word struct {
+	Text       string
+	Box        image.Rectangle
+	Confidence float64
+	Line       image.Rectangle
+}
+
+const MinWordConfidence = 80.0
+
+func (e *Engine) ImageWords(context.Context, image.Image, float64) ([]Word, error) {
+	return nil, ErrUnavailable
+}

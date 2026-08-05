@@ -71,6 +71,19 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 
 	if class.Digital {
 		telemetry.PDFClassification.WithLabelValues("digital").Inc()
+		// A text layer being dense does not make it complete, and the order it
+		// extracts in is the order the file draws, not the order the page
+		// reads. Lay the page out from coordinates instead, taking the text
+		// layer and whatever OCR finds in the gaps it leaves (deviation 33).
+		laid, err := w.layoutDocument(ctx, doc)
+		if err != nil && !errors.Is(err, ocr.ErrUnavailable) {
+			// Never fatal: the text layer is still the document, and losing a
+			// whole letter because its logo would not OCR is the wrong trade.
+			w.Log.Warn("layout failed, keeping text layer",
+				"doc_id", meta.DocId, "error", err)
+		} else if strings.TrimSpace(laid) != "" {
+			text = laid
+		}
 	} else {
 		telemetry.PDFClassification.WithLabelValues("scanned").Inc()
 		ocrText, err := w.ocrPages(ctx, doc, meta.DocId)
@@ -153,12 +166,23 @@ func (w *DocumentWorker) ocrPages(ctx context.Context, doc *pdf.Document, docID 
 		}
 
 		wg.Add(1)
-		go func(page int, img *image.RGBA, cleanup, release func()) {
+		go func(page, dpi int, img *image.RGBA, cleanup, release func()) {
 			defer wg.Done()
 			defer release()
 			defer cleanup()
 
-			text, err := w.OCR.Image(ctx, img)
+			// Words, so a scan is laid out from its own geometry exactly as a
+			// digital page is. A scanned statement has the same columns as a
+			// born-digital one and loses them the same way if the geometry is
+			// thrown away — and a licence or a form is nothing but layout.
+			//
+			// Safe on a scan only because each word carries the line Tesseract
+			// assigned it, which is deskewed. Grouping rows by each word's own
+			// baseline instead produced output 89% whitespace on a 208-page
+			// scan, with adjacent lines interleaved.
+			// Every word, whatever its confidence: a scan has no text layer
+			// beside it, so an uncertain reading is the only reading there is.
+			words, err := w.OCR.ImageWords(ctx, img, 0)
 			if err != nil {
 				if errors.Is(err, ocr.ErrUnavailable) {
 					mu.Lock()
@@ -169,8 +193,8 @@ func (w *DocumentWorker) ocrPages(ctx context.Context, doc *pdf.Document, docID 
 				w.Log.Warn("page ocr failed", "doc_id", docID, "page", page, "error", err)
 				return
 			}
-			texts[page] = strings.TrimSpace(text)
-		}(i, img, cleanup, release)
+			texts[page] = layoutPage(imageCells(words, img.Bounds().Dy(), dpi))
+		}(i, dpi, img, cleanup, release)
 	}
 
 	wg.Wait()

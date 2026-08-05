@@ -31,7 +31,7 @@ func TestWriteStructuredCharsMergedTableRow(t *testing.T) {
 	}
 
 	var b strings.Builder
-	wrote := writeStructuredChars(&b, chars)
+	_, _, wrote := writeStructuredChars(&b, chars)
 
 	if !wrote {
 		t.Fatal("expected writeStructuredChars to report it wrote content")
@@ -100,7 +100,7 @@ func TestWriteStructuredCharsSkipsBlankOnlyInput(t *testing.T) {
 	}
 
 	var b strings.Builder
-	wrote := writeStructuredChars(&b, chars)
+	_, _, wrote := writeStructuredChars(&b, chars)
 
 	if wrote {
 		t.Error("expected writeStructuredChars to report nothing meaningful was written for blank-only input")
@@ -109,7 +109,7 @@ func TestWriteStructuredCharsSkipsBlankOnlyInput(t *testing.T) {
 
 func TestWriteStructuredCharsEmptyInput(t *testing.T) {
 	var b strings.Builder
-	if writeStructuredChars(&b, nil) {
+	if _, _, wrote := writeStructuredChars(&b, nil); wrote {
 		t.Error("expected writeStructuredChars to report nothing written for empty input")
 	}
 	if b.String() != "" {

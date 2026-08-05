@@ -207,18 +207,70 @@ func (d *Document) PageCount() int { return d.page }
 func (d *Document) ExtractText() (string, error) {
 	var b strings.Builder
 	for i := 0; i < d.page; i++ {
-		res, err := d.inst.GetPageTextStructured(&requests.GetPageTextStructured{
-			Page: requests.Page{ByIndex: &requests.PageByIndex{Document: d.ref, Index: i}},
-			Mode: requests.GetPageTextStructuredModeChars,
-		})
-		if err != nil {
+		lines, err := d.PageLines(i)
+		if err != nil || len(lines) == 0 {
 			continue // one unreadable page must not lose the rest
 		}
-		if writeStructuredChars(&b, res.Chars) {
-			b.WriteString("\n\n")
+		for j, l := range lines {
+			if j > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(l.Text)
 		}
+		b.WriteString("\n\n")
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+// Line is one reconstructed line of a page's text layer, with the vertical
+// position it was drawn at. The position is what lets OCR of the same page be
+// merged back into reading order rather than appended in a heap.
+type Line struct {
+	Text string
+	// Top is in PDF points from the bottom of the page, so larger is higher —
+	// the convention pdfium reports character boxes in.
+	Top float64
+	// Left and Right are the line's horizontal extent in PDF points. Set on
+	// lines that came from somewhere with a known span; zero otherwise.
+	Left, Right float64
+	// Chars holds one box per rune of Text, so a caller can ask where along the
+	// line a given horizontal position falls. Empty when the line was built by
+	// something other than extraction.
+	Chars []CharBox
+}
+
+// PageLines reconstructs one page's text-layer lines, each with its position.
+//
+// The line breaking is writeStructuredChars', unchanged; this only keeps the
+// pieces separate instead of concatenating them, so a caller can interleave
+// something else by coordinate.
+func (d *Document) PageLines(index int) ([]Line, error) {
+	res, err := d.inst.GetPageTextStructured(&requests.GetPageTextStructured{
+		Page: requests.Page{ByIndex: &requests.PageByIndex{Document: d.ref, Index: index}},
+		Mode: requests.GetPageTextStructuredModeChars,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	tops, boxes, wrote := writeStructuredChars(&b, res.Chars)
+	if !wrote {
+		return nil, nil
+	}
+	parts := strings.Split(b.String(), "\n")
+	out := make([]Line, 0, len(parts))
+	for i, p := range parts {
+		top := 0.0
+		if i < len(tops) {
+			top = tops[i]
+		}
+		var chars []CharBox
+		if i < len(boxes) && len(boxes[i]) == len([]rune(p)) {
+			chars = boxes[i]
+		}
+		out = append(out, Line{Text: p, Top: top, Chars: chars})
+	}
+	return out, nil
 }
 
 // xBackJumpEpsilon is how far a character's left edge must fall behind the
@@ -258,9 +310,23 @@ const dirCommitPoints = 5.0
 // that direction and a break is a retreat from it. For upright text this is the
 // same arithmetic it always was; for vertical runs x never moves far enough to
 // commit, so they keep the behaviour that already worked.
-func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStructuredChar) bool {
+func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStructuredChar) ([]float64, [][]CharBox, bool) {
 	wrote := false
 	justBroke := true
+	// Top of the first character of each emitted line, in page order.
+	tops := []float64{}
+	pendingTop := true
+
+	// One box per rune written, grouped by emitted line, so a caller can find
+	// where along a line a given point falls. Kept parallel to what is written
+	// to b — including spaces — so rune indices into a line's text index this
+	// directly.
+	var perLine [][]CharBox
+	var cur []CharBox
+	endLine := func() {
+		perLine = append(perLine, cur)
+		cur = nil
+	}
 
 	// Extent reached along the line's direction of travel, and that direction:
 	// +1 rightwards, -1 leftwards, 0 while still unknown.
@@ -272,6 +338,7 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 		lineExtent = 0
 		lineDir = 0
 		justBroke = true
+		pendingTop = true
 	}
 
 	for _, c := range chars {
@@ -281,6 +348,7 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 		case "\n":
 			if !justBroke {
 				b.WriteString("\n")
+				endLine()
 				justBroke = true
 			}
 			newLine()
@@ -289,6 +357,10 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 
 		left, right := c.PointPosition.Left, c.PointPosition.Right
 
+		if pendingTop {
+			tops = append(tops, c.PointPosition.Top)
+			pendingTop = false
+		}
 		if justBroke {
 			lineStartLeft = left
 		} else if lineDir == 0 {
@@ -319,12 +391,18 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 
 		if !justBroke && trailing < lineExtent-xBackJumpEpsilon {
 			b.WriteString("\n")
+			endLine()
 			newLine()
 			lineStartLeft = left
 			dir, leading = 1, right
 		}
 
 		b.WriteString(c.Text)
+		box := CharBox{Left: left, Right: right,
+			Bottom: c.PointPosition.Bottom, Top: c.PointPosition.Top}
+		for range c.Text {
+			cur = append(cur, box)
+		}
 		if strings.TrimSpace(c.Text) != "" {
 			justBroke = false
 			wrote = true
@@ -333,7 +411,8 @@ func writeStructuredChars(b *strings.Builder, chars []*responses.GetPageTextStru
 			lineExtent = leading
 		}
 	}
-	return wrote
+	endLine()
+	return tops, perLine, wrote
 }
 
 // Classify decides digital vs scanned from character density.
@@ -447,3 +526,34 @@ func (e *Engine) NativeDPI(d *Document, index int) int {
 
 // InstanceTimeout bounds how long a worker waits for a pdfium instance.
 const InstanceTimeout = 30 * time.Second
+
+// CharBox is one character's rectangle in PDF points, origin bottom-left.
+type CharBox struct{ Left, Right, Bottom, Top float64 }
+
+// CharBoxes returns a rectangle per character of a page's text layer.
+//
+// These are the regions extraction already accounts for, and therefore the
+// regions OCR must not be shown: painting them out of a rendered page leaves
+// exactly the marks the text layer cannot explain — outlined glyphs, pasted
+// screenshots, scanned annexures — which is the whole basis of subtract and
+// merge (ingestion-design.md deviation 33).
+func (d *Document) CharBoxes(index int) ([]CharBox, error) {
+	res, err := d.inst.GetPageTextStructured(&requests.GetPageTextStructured{
+		Page: requests.Page{ByIndex: &requests.PageByIndex{Document: d.ref, Index: index}},
+		Mode: requests.GetPageTextStructuredModeChars,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CharBox, 0, len(res.Chars))
+	for _, c := range res.Chars {
+		if strings.TrimSpace(c.Text) == "" {
+			continue // a space covers no ink; masking it would erase a neighbour
+		}
+		out = append(out, CharBox{
+			Left: c.PointPosition.Left, Right: c.PointPosition.Right,
+			Bottom: c.PointPosition.Bottom, Top: c.PointPosition.Top,
+		})
+	}
+	return out, nil
+}

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"strings"
 	"sync"
 
 	"github.com/otiai10/gosseract/v2"
@@ -77,11 +78,11 @@ func (e *Engine) Close() error { return nil }
 // segmentation mode 1, which detects a page's rotation and corrects it before
 // recognising anything. Nothing here needs to know which way up a scan is.
 func (e *Engine) Image(ctx context.Context, img image.Image) (string, error) {
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, toGray(img)); err != nil {
-		return "", fmt.Errorf("encode page for ocr: %w", err)
+	data, err := encodeGray(img)
+	if err != nil {
+		return "", err
 	}
-	return e.Bytes(ctx, buf.Bytes())
+	return e.Bytes(ctx, data)
 }
 
 // toGray discards colour OCR never uses.
@@ -183,4 +184,113 @@ func splitLangs(s string) []string {
 		}
 	}
 	return out
+}
+
+// Word is one recognised word and where it sits in the image it came from.
+type Word struct {
+	Text       string
+	Box        image.Rectangle
+	Confidence float64
+	// Line is the box of the text line this word belongs to, as Tesseract
+	// grouped it. Zero when it could not be attributed to one.
+	//
+	// Worth carrying because Tesseract deskews the page before it decides what
+	// a line is. A caller laying words out by absolute position cannot do that,
+	// and on a scan even a fraction of a degree of rotation is enough for rows
+	// to assemble out of two different sentences.
+	Line image.Rectangle
+}
+
+// MinWordConfidence is the floor for keeping a word recovered from a page's
+// residue. It is the caller's to apply, because it suits residue and nothing
+// else: a page that is entirely OCR has no second source to fall back on, so
+// discarding its uncertain words discards the only reading of them there is. A
+// scanned licence photographed at an angle put "SYLVANIA" and half an address
+// below this bar.
+//
+// Residue is whatever survives masking the text layer, so it is a mixture of
+// genuinely missing prose and the decorative marks every letterhead carries —
+// logos, rules, signatures. Tesseract's own word confidence separates them
+// cleanly, and measured on real correspondence the two populations do not
+// overlap: real recovered words scored 89-97 (lowest were "client's" at 90.0
+// and punctuation-carrying "Bus"" at 89.0), while monogram fragments scored
+// 19-77 ("tm)" 19.0, "iN" 27.5, "S®" 39.9, "=~" 60.6, "6" 76.6).
+//
+// 80 sits in the empty gap between them. It is word confidence rather than
+// symbol confidence deliberately: Tesseract's word score folds in dictionary
+// and line-fit evidence, so it answers "is this a word" rather than "is that
+// shape an S" — and the junk we are rejecting is junk precisely because it is
+// not word-shaped. Individual fragments can score well as shapes.
+const MinWordConfidence = 80.0
+
+// ImageWords OCRs an image and returns the words worth believing.
+//
+// Filtered rather than raw because the caller merges these into indexed text:
+// an unfiltered residue puts "S® iN tm)" alongside real sentences, and the
+// whole point of subtracting first is to keep what is added trustworthy.
+func (e *Engine) ImageWords(ctx context.Context, img image.Image, minConfidence float64) ([]Word, error) {
+	data, err := encodeGray(img)
+	if err != nil {
+		return nil, err
+	}
+	release, err := e.cpu.Acquire(ctx, limits.LabelOCR)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	client := gosseract.NewClient()
+	defer client.Close()
+	if err := client.DisableOutput(); err != nil {
+		return nil, fmt.Errorf("silence tesseract diagnostics: %w", err)
+	}
+	if err := client.SetVariable("tessedit_pageseg_mode", "1"); err != nil {
+		return nil, fmt.Errorf("set page segmentation mode: %w", err)
+	}
+	if err := client.SetLanguage(splitLangs(e.lang)...); err != nil {
+		return nil, fmt.Errorf("set ocr language %q: %w", e.lang, err)
+	}
+	if err := client.SetImageFromBytes(data); err != nil {
+		return nil, fmt.Errorf("load image for ocr: %w", err)
+	}
+	boxes, err := client.GetBoundingBoxes(gosseract.RIL_WORD)
+	if err != nil {
+		return nil, fmt.Errorf("ocr words: %w", err)
+	}
+	// Tesseract's own idea of which words form a line, which is worth having
+	// because it deskews the page first. A caller laying words out by their
+	// absolute position cannot: a fraction of a degree of rotation is enough
+	// that a line's baseline at the left margin matches the next line's at the
+	// right, and rows then assemble from two different sentences.
+	lines, err := client.GetBoundingBoxes(gosseract.RIL_TEXTLINE)
+	if err != nil {
+		return nil, fmt.Errorf("ocr text lines: %w", err)
+	}
+
+	out := make([]Word, 0, len(boxes))
+	for _, b := range boxes {
+		if b.Confidence < minConfidence || strings.TrimSpace(b.Word) == "" {
+			continue
+		}
+		w := Word{Text: b.Word, Box: b.Box, Confidence: b.Confidence}
+		mid := image.Pt((b.Box.Min.X+b.Box.Max.X)/2, (b.Box.Min.Y+b.Box.Max.Y)/2)
+		for _, l := range lines {
+			if mid.In(l.Box) {
+				w.Line = l.Box
+				break
+			}
+		}
+		out = append(out, w)
+	}
+	return out, nil
+}
+
+// encodeGray is Image's encoding step, shared so both paths send the client the
+// same bytes.
+func encodeGray(img image.Image) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, toGray(img)); err != nil {
+		return nil, fmt.Errorf("encode page for ocr: %w", err)
+	}
+	return buf.Bytes(), nil
 }

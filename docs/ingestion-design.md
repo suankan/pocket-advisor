@@ -3201,6 +3201,57 @@ deliberate choice with a reason, not drift.
     for the same unified memory, and that competition is what makes MLX
     inference collapse. Size against the *host*, not the node.
 
+29. **OCR ran at the wrong page segmentation mode for its entire existence
+    (2026-08-05).** Every scanned document in the corpus was extracted as
+    garbage, and the failure hid for months because it needs a page that mode 6
+    cannot cope with before it becomes visible.
+
+    A 208-page scanned contract produced 400,000 characters containing **zero**
+    occurrences of "vendor", "purchaser" or "COPYRIGHT" — in a land contract —
+    while the `tesseract` CLI read the identical bitmap perfectly. Rendering was
+    never the problem; our own bitmap OCR'd cleanly through the CLI.
+
+    **`SetPageSegMode` does not work.** It writes to the API immediately, but
+    `Client.Text()` then calls `Init()`, and `TessBaseAPI::Init` resets the mode
+    — so every value set that way is discarded and Tesseract runs at its
+    post-`Init` default of 6, a single uniform block, with no layout or
+    orientation analysis at all. Upstream, `otiai10/gosseract` issue 167.
+    Measured before it was found: all five page-seg modes returned byte-
+    identical output, and `PSM_OSD_ONLY` ran ordinary OCR instead of returning
+    an orientation report.
+
+    The fix is to set it as a *variable*, `tessedit_pageseg_mode`, because
+    gosseract deliberately applies variables after `Init` — there is even a
+    comment in its source saying `SetVariable` must be called after `Init`.
+    Nobody applied that reasoning to PSM.
+
+    **Mode 1, not the CLI's default of 3**, because only mode 1 runs orientation
+    detection. Measured across all four quarter-turns of the same page: mode 1
+    recovered every one, mode 3 only the two that happened to suit. That matters
+    because the pages in question carry no rotation metadata — `Page rot: 0` —
+    the scan was fed through the machine sideways and baked in that way, so
+    nothing but the pixels can reveal it.
+
+    **No detection code of our own.** An earlier attempt built exactly that:
+    four-way rotation with mean-confidence scoring to pick the best. It worked
+    (93.0 upright against 61.8 and 52.5) and was deleted, because Tesseract does
+    it better and per *block* rather than per page — a page with upright body
+    text and a sideways margin note yields both, 33 of 34 words recovered. Any
+    page-wide criterion of ours would have had to sacrifice one or the other.
+
+    A length heuristic would have chosen exactly wrong, which is worth
+    remembering: the garbage runs were consistently *longer* than the correct
+    ones, 3,075 characters against 2,423 on the same page.
+
+    **Verified end to end.** Re-ingesting that contract: latin 25% → **69%**,
+    cyrillic 14% → **2.35%**, and `vendor` 0 → 280, `purchaser` 0 → 269,
+    `COPYRIGHT` 0 → 23, `CAMERON PARK` 0 → 220. Grayscale conversion went in
+    alongside, halving the PNG the client decodes, which more than paid for
+    OSD's ~10%: the whole document went from ~21 minutes to **1m12s**.
+
+    **Everything OCR'd before this is wrong** and needs re-ingesting. That is
+    the real cost, and no amount of re-running fixes it without one.
+
 30. **Failure reasons became a closed vocabulary, and the catch-all stopped
     lying (2026-08-05).** `--redrive --reason X` is only worth building if one
     problem class has exactly one code. It did not.

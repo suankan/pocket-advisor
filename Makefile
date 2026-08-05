@@ -100,6 +100,12 @@ deploy-infra:
 	@# regardless, so the retry succeeds. This is the price of one chart
 	@# instead of two; Helm cannot express "wait for a subchart to be ready"
 	@# mid-apply (ingestion-design.md deviation 24).
+	@#
+	@# The retry only works because every operator's CRDs are applied before
+	@# any of this, from the chart's own crds/. When CloudNativePG templated
+	@# its CRDs instead, a bare cluster failed to map our Cluster CRs and
+	@# installed nothing at all — no operator, so no amount of retrying could
+	@# recover (deviation 25).
 	helm upgrade --install $(RELEASE) $(CHART) --namespace $(NS) --create-namespace \
 	  -f $(WS_VALUES) || ( \
 	    echo "first apply failed; waiting for operator webhooks, then retrying" && \

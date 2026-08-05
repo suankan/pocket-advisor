@@ -2945,3 +2945,78 @@ deliberate choice with a reason, not drift.
     before calling a run finished, because finishing an email publishes
     attachment work that has not reached its queue yet (§2.6). On a run that
     ingests, the settle is noise; on a no-op it is nearly the whole runtime.
+
+25. **The one chart could not install itself on a virgin cluster, and
+    deviation 24's documented recovery could never have fixed it
+    (2026-08-05).** A full teardown — `make destroy-infra`, then
+    `make destroy-state` — followed by `make deploy-infra` failed with
+
+        no matches for kind "Cluster" in version "postgresql.cnpg.io/v1"
+        ensure CRDs are installed first
+
+    for all three workspaces, and identically on every retry.
+
+    **Helm validates the whole template manifest before applying any of it.**
+    CloudNativePG ships its CRDs as an ordinary template guarded by
+    `crds.create`, so `clusters.postgresql.cnpg.io` and our three `Cluster` CRs
+    were in one manifest. The CRs cannot be mapped, the manifest is rejected,
+    and *nothing* is installed — including the CRD that would have made the
+    next attempt work. The retry in `make deploy-infra` fails identically
+    forever; its `kubectl wait ... deploy --all` said `no matching resources
+    found`, which was the tell that zero objects had been created.
+
+    **nack and rustfs-operator were unaffected, and that asymmetry is the
+    proof.** Both ship their CRDs in `crds/`, which Helm applies *before* it
+    renders templates — so `tenants.rustfs.com` and the six
+    `jetstream.nats.io` CRDs were created by the failed attempts and outlived
+    them, while CNPG's never landed at all. Their creation timestamps matched
+    the failed runs, not the earlier working cluster.
+
+    **Why deviation 24 did not catch this.** Its "fresh cluster" still had
+    CNPG's CRDs, left behind by the two-chart era's separate operators release
+    — they carry `helm.sh/resource-policy: keep`, so an uninstall does not
+    remove them. The webhook race 24 documents is real but *later*: it is only
+    reachable once the CRDs already exist. 24's claim that "the operators come
+    up regardless, so a retry succeeds" holds for that case and not for a
+    genuinely bare cluster, where no operator is installed either.
+
+    **The fix is to make CloudNativePG behave like the other two.** Its CRDs
+    are vendored into `charts/pocket-advisor-infra/crds/cloudnative-pg.yaml`
+    (11 definitions, the `{{- if }}` guard stripped, since Helm does not
+    template `crds/`) and `cloudnative-pg.crds.create` is set to `false`.
+
+    No Makefile change was needed, which is the part worth knowing:
+    `helm upgrade --install` runs the *install* path when the release does not
+    exist, and that is exactly when Helm applies `crds/`. The first deploy on a
+    bare cluster therefore works in one pass. The webhook retry stays, because
+    that race is unchanged — and now it can actually succeed, since the first
+    pass installs the operators instead of failing before it applies anything.
+
+    **What it costs, and why the cost is not new.** Helm applies `crds/` only
+    on install, and only when the CRD is not already present — never on
+    upgrade. CNPG's definitions are therefore frozen at first install: a
+    subchart bump updates the operator but not the CRDs, silently. That was
+    already true of nack's and rustfs-operator's CRDs, neither of which offers
+    a values toggle at all, so this makes all three consistent rather than
+    adding a hazard to a clean system. Any operator bump now needs the CRDs
+    re-vendored and applied by hand — worth remembering for rustfs-operator in
+    particular, whose 0.0.5 reconcile bug (deviation 22) will eventually be
+    fixed in a release whose CRDs will not install themselves.
+
+    **Migrating an existing cluster is safe because of one annotation.** All 11
+    CNPG CRDs carry `helm.sh/resource-policy: keep`, so dropping them from the
+    template manifest does not delete them — which would otherwise have
+    cascaded to every workspace's `Cluster` and its volumes. Without that
+    annotation this change would need a very different migration.
+
+    **One upstream oddity found while confirming this.** rustfs-operator 0.0.5
+    ships `tenants.rustfs.com` twice, in `crds/tenant-crd.yaml` and
+    `crds/tenant.yaml`, byte-identical at 2,049 lines. Harmless while they
+    agree — Helm skips a CRD that is already present — but if a future release
+    updates one and not the other, whichever sorts first wins, silently.
+
+    **Verified** on the cluster this was found on: operators installed first,
+    all 11 CNPG CRDs present, then a full `make deploy-infra` bringing up three
+    workspaces — Tenants Ready, Clusters running, nine Streams Created. The
+    chart now renders zero CustomResourceDefinitions into its template manifest
+    and 20 with `--include-crds` (11 CNPG, 6 nack, 3 rustfs).

@@ -136,6 +136,12 @@ bucket publishes where.
 > `no endpoints available for service cnpg-webhook-service`: CloudNativePG's
 > admission webhook is not serving yet when the first `Cluster` is applied.
 > `make deploy-infra` waits and retries automatically.
+>
+> The operators' CRDs are applied before any of that, from the chart's `crds/`
+> directory, so a bare cluster bootstraps in one command. Note Helm applies
+> `crds/` only on install: **bumping an operator does not update its CRDs.**
+> Re-vendor and `kubectl apply` them as part of any version bump
+> (`ingestion-design.md` deviation 25).
 
 Infrastructure endpoints live under `infra:` in
 [`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,

@@ -363,10 +363,17 @@ and the safeguard is that it is deliberate.
 chart gets for free.** Operators reconcile; they do not run in sequence. A
 `Stream` whose account is not yet loaded simply retries until it is, so
 partial state resolves itself rather than needing the rollback path §6 of
-1.1.0 specified. One consequence worth knowing: on a *fresh* cluster the first
-`helm upgrade` fails once, because CloudNativePG's admission webhook is not
-serving yet when the first `Cluster` is applied. `make deploy-infra` waits and
-retries automatically (`ingestion-design.md` deviation 24).
+1.1.0 specified.
+
+Two consequences worth knowing, both about the very first deploy on a bare
+cluster. Every operator's CRDs are applied from the chart's own `crds/`
+directory, before Helm renders anything — including CloudNativePG's, which are
+vendored there precisely because that operator templates its own, and a
+templated CRD cannot be applied in the same pass as the `Cluster` CRs that
+need it (`ingestion-design.md` deviation 25). After that, the first
+`helm upgrade` still fails once, because CNPG's admission webhook is not yet
+serving when the first `Cluster` is applied; `make deploy-infra` waits and
+retries automatically (deviation 24).
 
 ---
 

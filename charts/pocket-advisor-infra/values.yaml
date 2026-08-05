@@ -190,6 +190,13 @@ workspace:
 # Each can be disabled where a cluster already runs one — CloudNativePG in
 # particular is commonly installed cluster-wide for other workloads, and a
 # second copy would leave two controllers reconciling the same CRDs.
+#
+# All three now get their CRDs the same way: from a crds/ directory Helm
+# applies before it renders anything. nack and rustfs-operator ship theirs that
+# way and offer no alternative; CloudNativePG templates its own, which is what
+# made a virgin cluster unbootstrappable, so ours are vendored into
+# crds/cloudnative-pg.yaml instead — see the header of that file, and
+# ingestion-design.md deviation 25.
 # ============================================================================
 cloudnative-pg:
   enabled: true
@@ -198,6 +205,14 @@ cloudnative-pg:
   # merely installs, and a second release would produce a second differently
   # prefixed copy of the same controller.
   fullnameOverride: cloudnative-pg
+  crds:
+    # We ship them, from crds/cloudnative-pg.yaml. Leaving this true would put
+    # the CRD and the Cluster CRs that need it in one manifest, which Helm
+    # validates as a whole before applying any of it — the failure this fixed.
+    # Turning it back on is safe only if the vendored copy is removed at the
+    # same time; two sources for one CRD means whichever Helm reaches first
+    # wins, silently.
+    create: false
 
 nack:
   enabled: true

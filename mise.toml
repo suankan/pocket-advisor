@@ -12,4 +12,10 @@ CGO_ENABLED = "1"
 # one level too deep (at .../include/leptonica) for that form to resolve.
 # gosseract supplies -ltesseract/-lleptonica itself; only the paths are ours.
 CGO_CXXFLAGS = "-I/opt/homebrew/include"
+# The same root for C, not just C++: internal/engine/ocr includes that header
+# directly to call Leptonica's setMsgSeverity, which is the only way to stop it
+# writing to stderr and shredding the live dashboard (ingestion-design.md
+# deviation 27). gosseract's own bridge is C++, which is why only CXXFLAGS was
+# needed until then.
+CGO_CFLAGS = "-I/opt/homebrew/include"
 CGO_LDFLAGS = "-L/opt/homebrew/lib"

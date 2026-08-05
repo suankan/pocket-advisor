@@ -44,9 +44,21 @@ const (
 
 	// MaxDeliver bounds redelivery; the third attempt routes to the DLQ.
 	MaxDeliver = 3
-	// AckWait must exceed the slowest legitimate unit of work. OCR of a large
-	// scanned PDF routinely exceeds a 30s default, and a too-short window
-	// redelivers slow work as if it had failed.
+	// AckWait is how long the broker waits before concluding a worker died.
+	//
+	// It no longer has to cover the slowest document as well. It used to, and
+	// could not: a 208-page scanned PDF needs ~15 minutes of OCR, so a 5-minute
+	// window redelivered it mid-flight and MaxDeliver eventually dead-lettered a
+	// document nothing was wrong with. Runtime.heartbeat now calls InProgress
+	// while a handler runs, which holds the deadline open for exactly as long as
+	// real work is happening.
+	//
+	// So this is sized for crash detection alone. It was briefly 10 minutes,
+	// as margin in case the heartbeat missed a tick — but that margin was
+	// really covering a heartbeat that gave up permanently on its first failed
+	// InProgress. Fixing the heartbeat to keep trying removed the reason, and
+	// the shorter window is the better one: it halves how long a genuinely dead
+	// worker's message sits before someone else can have it.
 	AckWait = 5 * time.Minute
 )
 

@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -264,7 +265,7 @@ func (m *fakeMsg) Ack() error                       { m.c.acked.Add(1); return n
 func (m *fakeMsg) DoubleAck(context.Context) error  { m.c.acked.Add(1); return nil }
 func (m *fakeMsg) Nak() error                       { m.c.naked.Add(1); return nil }
 func (m *fakeMsg) NakWithDelay(time.Duration) error { m.c.naked.Add(1); return nil }
-func (m *fakeMsg) InProgress() error                { return nil }
+func (m *fakeMsg) InProgress() error                { m.c.inProgress.Add(1); return nil }
 func (m *fakeMsg) Term() error                      { m.c.termed.Add(1); return nil }
 func (m *fakeMsg) TermWithReason(string) error      { m.c.termed.Add(1); return nil }
 
@@ -276,11 +277,12 @@ func (b *fakeBatch) Error() error                   { return nil }
 // fakeConsumer serves a bounded supply of messages, then empty batches — the
 // shape a real pull consumer presents once its queue drains.
 type fakeConsumer struct {
-	remaining atomic.Int64
-	acked     atomic.Int64
-	naked     atomic.Int64
-	termed    atomic.Int64
-	onFetch   func(batch int)
+	remaining  atomic.Int64
+	acked      atomic.Int64
+	naked      atomic.Int64
+	termed     atomic.Int64
+	inProgress atomic.Int64
+	onFetch    func(batch int)
 }
 
 func newFakeConsumer(n int) *fakeConsumer {
@@ -330,4 +332,89 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// The heartbeat is what separates "this worker is slow" from "this worker is
+// dead". Before it existed, a 208-page scanned PDF — ~15 minutes of OCR — was
+// redelivered mid-flight and eventually dead-lettered as a terminal failure,
+// with nothing wrong with the document.
+
+func TestHeartbeatExtendsUntilStopped(t *testing.T) {
+	c := newFakeConsumer(0)
+	r := &Runtime{Name: "test", Log: quietLogger()}
+
+	stop := r.heartbeatEvery(&fakeMsg{c: c}, time.Millisecond)
+
+	// Wait for several ticks rather than sleeping a fixed span, so a slow
+	// machine makes the test slower rather than flaky.
+	deadline := time.Now().Add(2 * time.Second)
+	for c.inProgress.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := c.inProgress.Load(); got < 3 {
+		t.Fatalf("InProgress called %d times, want the deadline extended repeatedly", got)
+	}
+
+	stop()
+	settled := c.inProgress.Load()
+	time.Sleep(20 * time.Millisecond)
+	if got := c.inProgress.Load(); got != settled {
+		t.Errorf("InProgress called %d more times after stop; a finished handler must release the message", got-settled)
+	}
+}
+
+func TestHeartbeatStopIsIdempotent(t *testing.T) {
+	// handle() calls stop on a path that may also be reached by a panicking
+	// handler's recovery, and closing a closed channel panics.
+	c := newFakeConsumer(0)
+	r := &Runtime{Name: "test", Log: quietLogger()}
+	stop := r.heartbeatEvery(&fakeMsg{c: c}, time.Hour)
+	stop()
+	stop()
+}
+
+func TestHeartbeatIntervalLeavesMarginInsideAckWait(t *testing.T) {
+	got := heartbeatInterval()
+	if got <= 0 || got >= bus.AckWait {
+		t.Fatalf("interval %v must be positive and inside AckWait %v", got, bus.AckWait)
+	}
+	// Several ticks per window, so one scheduled late under load is survivable.
+	if min := bus.AckWait / 3; got > min {
+		t.Errorf("interval %v leaves too little margin in a %v window (want <= %v)", got, bus.AckWait, min)
+	}
+}
+
+// A failed InProgress must not disable the heartbeat. It is a network call, and
+// one blip on a document that needs twenty minutes would silently restore the
+// redelivery cascade the heartbeat exists to prevent.
+func TestHeartbeatKeepsGoingAfterAFailedExtension(t *testing.T) {
+	m := &flakyMsg{failUntil: 3}
+	r := &Runtime{Name: "test", Log: quietLogger()}
+	stop := r.heartbeatEvery(m, time.Millisecond)
+	defer stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for m.succeeded.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := m.succeeded.Load(); got < 2 {
+		t.Fatalf("after %d failures the heartbeat stopped; %d later attempts succeeded, want it to keep trying",
+			m.failUntil, got)
+	}
+}
+
+// flakyMsg fails the first failUntil calls to InProgress, then succeeds.
+type flakyMsg struct {
+	fakeMsg
+	failUntil int64
+	attempts  atomic.Int64
+	succeeded atomic.Int64
+}
+
+func (m *flakyMsg) InProgress() error {
+	if m.attempts.Add(1) <= m.failUntil {
+		return errors.New("connection lost")
+	}
+	m.succeeded.Add(1)
+	return nil
 }

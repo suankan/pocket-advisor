@@ -1776,6 +1776,33 @@ to `docs/retrieval-design.md`.
 6. **No log rotation.** Role logs append across runs and are never trimmed.
    Fine at the current corpus size; revisit before it stops being.
 
+7. **Reconciliation only sees `PENDING`, so failed and stalled documents are
+   unreachable.** `discovery/service.go` re-publishes a known document only
+   when its status is still `PENDING`; anything at `FAILED` or `PROCESSING` is
+   counted as a duplicate and skipped by every mode, forever. Recovery today
+   is `--forget <sha256>` per document followed by a re-ingest — and for an
+   email attachment, forgetting the *parent*, since nothing else re-creates a
+   child. This has now been hit twice: 49 documents dead-lettered by a RustFS
+   OOM (deviation 28), and one stuck at `PROCESSING` by the ack-window
+   bug (deviation 27).
+
+   The fix belongs in Postgres rather than the DLQ: a `FAILED` row whose Tier 1
+   object exists and whose chunks do not *is* the difference that "ingestion is
+   reconciliation" already promises to close, whereas the DLQ is a copy of a
+   command that can be regenerated from the row. Widening the predicate is a
+   small change; what makes it a decision rather than a task is that a
+   genuinely broken document would then re-fail on every run, burning three
+   delivery attempts each time and turning the DLQ count into permanent noise.
+   That argues for `--reconcile` rather than `--ingest-all`, and for recording
+   attempts so "failed twice the same way" is visible.
+
+   It also wants a distinction the reason codes cannot currently make. The 44
+   PDFs lost to the OOM and a genuinely corrupt file both recorded
+   `EXTRACTION_FAILED`; only the first kind is worth retrying. Classifying a
+   Tier 1 read error as transient and a parse error after the bytes arrived as
+   terminal would make automatic retry safe *and* make the dashboard's `dlq`
+   column mean something.
+
 ---
 
 ## 12. Implementation Deviations
@@ -3064,6 +3091,84 @@ deliberate choice with a reason, not drift.
     resolved. Unit tests cover the anchor, the defaults, an absolute path left
     alone, the environment override, a missing config file, and that `.` is a
     no-op.
+
+27. **Slow work was being punished for being slow, and the punishment made it
+    slower (2026-08-05).** One document held a PDF worker for an entire
+    13-minute run without ever logging a line, while Tesseract flooded the
+    terminal and destroyed the dashboard. Three separate defects, found
+    together.
+
+    **The document.** `Contract for land exchanged.pdf` — 6.6MB, **208 pages,
+    zero fonts, 208 `/CCITTFaxDecode` image XObjects at 2340×1654**. A pure
+    bilevel fax-grade scan with no text layer, so every page needs OCR. It is
+    an email attachment rather than a file on disk, which is why it only
+    appeared once its parent was re-extracted. At the ~4.5s/page this corpus
+    measures (8 pages in 43s, 15 pages in 33s, from the extractor log), 208
+    pages is **~15 minutes of OCR inside a single message**.
+
+    **`AckWait` was 5 minutes, and nothing extended it.** The constant's own
+    comment said it "must exceed the slowest legitimate unit of work" — the
+    intent was right and the value could not satisfy it, because no single
+    number can: `AckWait` was silently answering two different questions at
+    once, *how long before we conclude a worker died* and *how long may the
+    largest document in the corpus take*. What followed was deterministic. At
+    5 minutes the broker redelivered while the first attempt was still
+    running, so a second worker started the same 208 pages from scratch, then
+    a third — each slower than the last, because they compete for the same
+    cores — until `MaxDeliver` routed a document with nothing wrong with it to
+    the DLQ as a *terminal* failure. A positive feedback loop into guaranteed
+    failure, and almost certainly several of the 9 pdf dead-letters in the
+    preceding full run.
+
+    `Runtime.heartbeat` now calls `InProgress` every 30s (`AckWait/4`, capped)
+    for as long as a handler is running, started and stopped around `invoke` in
+    `handle` — so it covers every worker, not just OCR, and the runtime that
+    already owns Ack/Nak/Term owns this too. `AckWait` went to 10 minutes and
+    means only crash detection now; the margin over what that needs is for the
+    heartbeat itself, which is a goroutine on a host that also runs the
+    embedding endpoint and can be scheduled late under load. Raising `AckWait`
+    *instead* of heartbeating was considered and rejected: it would have made
+    recovery from a genuinely dead worker proportionally slower while still
+    being a guess about the largest document.
+
+    **Two C libraries were writing to fd 2, and silencing one did nothing for
+    the other.** Thousands of lines bypassed the Go logger and interleaved with
+    the live display until it was unreadable. They are per-line notes about
+    degenerate regions — typically the vertical rules and signature lines of a
+    scanned contract on a 1-bit image — and the page still OCRs regardless.
+
+    The first fix set Tesseract's `debug_file` via `client.DisableOutput()`,
+    which was verified live and removed exactly half the output: `Image too
+    small to scale!!`, `Line cannot be recognized!!`, `Bad pix from ImageData!`
+    and `Scaling pix ... made null pix!!` all stopped. What kept coming was
+    `Error in pixScaleAreaMap: pixd too small`, `Error in pixClone: pixs not
+    defined`, `Error in pixCreateHeader: width must be > 0`.
+
+    Those are **Leptonica**, not Tesseract. Two libraries, two independent
+    error paths: Tesseract routes through `tprintf()` and honours `debug_file`,
+    while Leptonica's `L_ERROR` writes straight to stderr and has never heard
+    of it. Only `setMsgSeverity` reaches those, so `NewEngine` now calls it
+    once per process behind a `sync.Once`. It must be `L_SEVERITY_NONE`: the
+    noise is emitted *at error severity*, so no milder threshold keeps genuine
+    errors while dropping it — to Leptonica they are the same thing. Nothing is
+    lost, because Go learns about failures from gosseract's return values and
+    never from this stream.
+
+    That call is the first C (rather than C++) include in the codebase, so
+    `mise.toml` gained `CGO_CFLAGS` alongside the `CGO_CXXFLAGS` gosseract's
+    own C++ bridge needed.
+
+    Redirecting fd 2 process-wide was rejected throughout — it would take the
+    Go logger's own output with it, and ten OCR lanes would race over it.
+
+    **A document stuck in `PROCESSING` is invisible to every mode**, the same
+    blind spot `FAILED` has: `discovery/service.go` re-publishes only
+    `PENDING`, so neither `--ingest-all` nor `--reconcile` will retry it. That
+    is unfixed and belongs with the reconciliation change in open decision 7.
+
+    **Verified:** three unit tests pin the heartbeat — that it keeps extending,
+    that it stops when the handler returns, that `stop` is idempotent, and that
+    the interval leaves several ticks of margin inside `AckWait`.
 
 30. **Failure reasons became a closed vocabulary, and the catch-all stopped
     lying (2026-08-05).** `--redrive --reason X` is only worth building if one

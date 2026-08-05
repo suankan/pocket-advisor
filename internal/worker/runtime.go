@@ -183,6 +183,72 @@ func (r *Runtime) fetchLoop(
 	}
 }
 
+// heartbeat keeps extending a message's ack deadline until stop is called.
+//
+// AckWait answers one question — how long before the broker concludes a worker
+// died and gives the message to someone else. Without a heartbeat it silently
+// answers a second one as well: how long the largest legitimate unit of work in
+// the corpus may take. Those are different numbers, and tuning one to satisfy
+// the other makes both wrong.
+//
+// The failure it prevents is not hypothetical. A 208-page scanned PDF (no text
+// layer, CCITTFax bilevel pages) takes ~15 minutes to OCR at the ~4.5s/page
+// this corpus measures. Against a 5-minute AckWait the broker redelivered it
+// while the first attempt was still running, so a second worker began the same
+// 208 pages from scratch, then a third — each slower than the last, because
+// they compete for the same cores — until MaxDeliver routed a perfectly good
+// document to the DLQ as a "terminal" failure. Slow work was being punished for
+// being slow, and the punishment made it slower.
+//
+// InProgress resets the timer, so a handler that is still running keeps its
+// message. A handler that is stuck holds it forever, which is the same
+// exposure a long AckWait has and the reason this is a heartbeat rather than a
+// larger constant: when the process dies, the heartbeats stop with it and
+// redelivery happens on schedule.
+func (r *Runtime) heartbeat(msg jetstream.Msg) (stop func()) {
+	return r.heartbeatEvery(msg, heartbeatInterval())
+}
+
+// heartbeatInterval sits comfortably inside the ack window, so a tick scheduled
+// late under load still lands before the deadline. The traffic is negligible —
+// one control message per interval per in-flight message — so the cap is about
+// keeping the margin generous on any future AckWait rather than saving anything.
+func heartbeatInterval() time.Duration {
+	if d := bus.AckWait / 4; d < 30*time.Second {
+		return d
+	}
+	return 30 * time.Second
+}
+
+func (r *Runtime) heartbeatEvery(msg jetstream.Msg, interval time.Duration) (stop func()) {
+	done := make(chan struct{})
+
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				// Keep trying after a failure rather than returning. InProgress
+				// is a network call, and one blip must not silently disable the
+				// heartbeat for the rest of a document that needs twenty
+				// minutes — that would quietly reinstate the redelivery cascade
+				// this exists to prevent, at the worst possible moment. The
+				// next tick costs one control message.
+				if err := msg.InProgress(); err != nil {
+					r.Log.Debug("ack deadline extension failed, will retry",
+						"worker_type", r.Name, "error", err)
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
 // invoke calls the handler with a panic guard.
 //
 // One process now hosts every role. A panic that used to kill a single pod and
@@ -203,8 +269,13 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		defer r.Stats.LaneFinished()
 	}
 
+	// Hold the ack deadline open for as long as the handler is genuinely
+	// working. Without this, slow-but-healthy work is indistinguishable from a
+	// dead worker (see heartbeat).
+	stopHeartbeat := r.heartbeat(msg)
 	start := time.Now()
 	err := r.invoke(ctx, msg, h)
+	stopHeartbeat()
 	telemetry.IngestionDuration.WithLabelValues(r.Name, r.Subject).Observe(time.Since(start).Seconds())
 
 	switch {

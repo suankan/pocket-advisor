@@ -5,17 +5,42 @@
 // (ingestion-design.md §8.3).
 package ocr
 
+/*
+#include <leptonica/allheaders.h>
+*/
+import "C"
+
 import (
 	"bytes"
 	"context"
 	"fmt"
 	"image"
 	"image/png"
+	"sync"
 
 	"github.com/otiai10/gosseract/v2"
 
 	"github.com/suankan/pocket-advisor/internal/limits"
 )
+
+// silenceLeptonica stops the *other* C library from writing to fd 2.
+//
+// Tesseract and Leptonica are two libraries with two independent error paths,
+// and quietening one does nothing for the other. Tesseract routes through
+// tprintf() and honours the debug_file variable Bytes sets per client, which
+// covers "Image too small to scale!!", "Line cannot be recognized!!" and "Bad
+// pix from ImageData!". Leptonica does not: L_ERROR writes straight to stderr,
+// which is where "Error in pixScaleAreaMap: pixd too small" and its dozen
+// companions come from. Only setMsgSeverity reaches those.
+//
+// L_SEVERITY_NONE rather than something milder because the noise *is* at error
+// severity — there is no threshold that keeps genuine errors and drops these,
+// since to Leptonica they are the same thing. Nothing is lost: Go learns about
+// failures from gosseract's return values, never from this stream, and a page
+// that provokes these messages still OCRs.
+//
+// Process-global, so once is enough however many engines or clients exist.
+var silenceLeptonica sync.Once
 
 // Available reports whether this build has a real OCR engine linked.
 const Available = true
@@ -33,6 +58,8 @@ type Engine struct {
 }
 
 func NewEngine(cpu *limits.CPU, lang string) *Engine {
+	silenceLeptonica.Do(func() { C.setMsgSeverity(C.L_SEVERITY_NONE) })
+
 	if lang == "" {
 		// A missing language does not error — it silently produces
 		// plausible-looking garbage, which is worse than a failure because it

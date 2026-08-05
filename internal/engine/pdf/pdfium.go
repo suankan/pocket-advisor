@@ -12,12 +12,14 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	"github.com/klippa-app/go-pdfium"
+	"github.com/klippa-app/go-pdfium/enums"
 	"github.com/klippa-app/go-pdfium/references"
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/responses"
@@ -40,6 +42,22 @@ type Engine struct {
 	// collapsed every replica's rasterisation into one global lane.
 	cpu *limits.CPU
 
+	// slots bounds how many rendered bitmaps are alive at once, across the whole
+	// process, and it is the reason pages can be OCR'd concurrently at all.
+	//
+	// The old discipline was "render one page, OCR it, release it, then render
+	// the next" — which bounded live bitmaps to one per lane, but pinned a
+	// 208-page scan to a single core for a quarter of an hour while nine other
+	// lanes sat idle. Making that concurrent needs the bound stated explicitly
+	// rather than emerging from the loop shape, or ten lanes each fanning out
+	// would multiply the memory hot spot by their product.
+	//
+	// Sized to the CPU bound, so the ceiling is exactly what it was before:
+	// as many live bitmaps as there are lanes that could each have held one.
+	// What changes is who may use them — one document can now take them all
+	// when nothing else is competing.
+	slots chan struct{}
+
 	// The pool is created lazily; see NewEngine.
 	once         sync.Once
 	initErr      error
@@ -61,7 +79,31 @@ func NewEngine(maxInstances int, cpu *limits.CPU) (*Engine, error) {
 	if maxInstances < 1 {
 		maxInstances = 1
 	}
-	return &Engine{maxInstances: maxInstances, cpu: cpu}, nil
+	size := 1
+	if cpu != nil {
+		size = cpu.Size()
+	}
+	return &Engine{
+		maxInstances: maxInstances,
+		cpu:          cpu,
+		slots:        make(chan struct{}, size),
+	}, nil
+}
+
+// PageSlot reserves the right to hold one rendered bitmap. The caller renders,
+// OCRs, and releases — releasing only once the bitmap is finished with, since
+// the reservation is what bounds memory rather than what bounds CPU.
+//
+// Safe to call more than once on the returned release, so callers can defer it
+// unconditionally alongside the render cleanup.
+func (e *Engine) PageSlot(ctx context.Context) (func(), error) {
+	select {
+	case e.slots <- struct{}{}:
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-e.slots }) }, nil
 }
 
 // ensure builds the instance pool once, whichever lane gets there first.
@@ -277,6 +319,62 @@ func (e *Engine) RenderPage(ctx context.Context, d *Document, index, dpi int) (*
 		cleanup = func() {}
 	}
 	return res.Result.Image, cleanup, nil
+}
+
+// NativeDPI reports the resolution the scanner actually captured a page at, or
+// 0 when the page carries no image to ask.
+//
+// Rendering a scan above its own resolution cannot recover detail that was
+// never captured; it only multiplies pixels. The corpus's 208-page contract is
+// 200 DPI throughout, and rendering it at 300 measured 1.66x the cost of
+// rendering it at 200 for output of the same length — 2,435 characters against
+// 2,422 on the same page.
+//
+// pdfium reports *effective* DPI: the image's pixel width against the size it
+// is drawn at on the page, so a scan placed at half scale reports double its
+// stored resolution, which is the number that matters here. Taking the maximum
+// across a page's images is deliberate — a page with a small logo beside a
+// full-page scan must be rendered for the scan.
+//
+// Errors are not failures. Every one of these calls is an optimisation input,
+// so anything unexpected returns 0 and lets the caller fall back to its own
+// ceiling rather than failing a document over a metadata query.
+func (e *Engine) NativeDPI(d *Document, index int) int {
+	if err := e.ensure(); err != nil {
+		return 0
+	}
+	page := requests.Page{ByIndex: &requests.PageByIndex{Document: d.ref, Index: index}}
+
+	count, err := d.inst.FPDFPage_CountObjects(&requests.FPDFPage_CountObjects{Page: page})
+	if err != nil {
+		return 0
+	}
+
+	best := 0.0
+	for i := 0; i < count.Count; i++ {
+		obj, err := d.inst.FPDFPage_GetObject(&requests.FPDFPage_GetObject{Page: page, Index: i})
+		if err != nil {
+			continue
+		}
+		typ, err := d.inst.FPDFPageObj_GetType(&requests.FPDFPageObj_GetType{PageObject: obj.PageObject})
+		if err != nil || typ.Type != enums.FPDF_PAGEOBJ_IMAGE {
+			continue
+		}
+		meta, err := d.inst.FPDFImageObj_GetImageMetadata(&requests.FPDFImageObj_GetImageMetadata{
+			ImageObject: obj.PageObject,
+			Page:        page,
+		})
+		if err != nil {
+			continue
+		}
+		// The smaller axis, so a page is never rendered below the resolution of
+		// either dimension of its own scan.
+		dpi := math.Min(float64(meta.ImageMetadata.HorizontalDPI), float64(meta.ImageMetadata.VerticalDPI))
+		if dpi > best {
+			best = dpi
+		}
+	}
+	return int(best)
 }
 
 // InstanceTimeout bounds how long a worker waits for a pdfium instance.

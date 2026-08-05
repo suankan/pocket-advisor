@@ -3283,3 +3283,21 @@ deliberate choice with a reason, not drift.
     are already recorded and already discriminate better than the reason did.
     And no transient/terminal property is attached yet; that is what would make
     automated redrive safe, and it belongs with open decision 7.
+
+31. **`--delete-data` purges the queues (2026-08-05).** A wipe emptied Postgres
+    and the bucket and left the streams full, so every surviving command named
+    an object and a row that no longer existed — a clean wipe followed by a
+    burst of fresh dead letters about a corpus that was already gone. The DLQ
+    kept its own history through it, 132 entries describing documents nobody
+    had any more, which is worse than useless to anything reading it to decide
+    what needs attention.
+
+    All three streams go: `INGESTION`, `INGESTION_DLQ` and `RUSTFS_EVENTS`.
+    Wider than the DLQ alone deliberately — purging only the DLQ would have
+    refilled it from the work still queued.
+
+    Ordered last, after both stores, because queues are the only tier that can
+    be rebuilt by re-running the thing that filled them. `--delete-data` now
+    also requires NATS, so an unreachable broker refuses the operation up front
+    rather than leaving purged stores beside populated queues — the same posture
+    that already makes Postgres the first step.

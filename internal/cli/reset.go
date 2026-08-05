@@ -21,7 +21,10 @@ import (
 func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
-	a, err := app.New(ctx, cfg, logs, app.Needs{Uploader: true, Postgres: true}, o.WorkspaceID)
+	// NATS as well as the two stores: a wipe now empties the queues too, and
+	// requiring the connection up front means an unreachable broker refuses the
+	// whole operation rather than leaving purged stores behind populated ones.
+	a, err := app.New(ctx, cfg, logs, app.Needs{Uploader: true, Postgres: true, NATS: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -34,7 +37,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return err
 	}
 
-	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Logger(telemetry.RoleUploader))
+	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, a.Logger(telemetry.RoleUploader))
 
 	if o.Forget != "" {
 		sha := strings.ToLower(o.Forget)
@@ -64,6 +67,8 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 			"  - %s\n"+
 			"  - deletes every object in this workspace's bucket\n"+
 			"  - deletes every documents row and every chunk for the workspace\n"+
+			"  - purges its queues, the dead letter queue included: every message\n"+
+			"    names an object and a row that will no longer exist\n"+
 			"This cannot be undone. Tier 1 is the source of truth; re-ingesting\n"+
 			"requires the original files still being on disk.",
 		ws.ID, len(ws.Collections), counts)) {

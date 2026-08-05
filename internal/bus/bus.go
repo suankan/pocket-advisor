@@ -5,7 +5,9 @@ package bus
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -100,6 +102,44 @@ func Connect(ctx context.Context, url, natsUser, natsPassword string) (*Bus, err
 func (b *Bus) Close() { b.nc.Close() }
 
 func (b *Bus) JS() jetstream.JetStream { return b.js }
+
+// PurgeQueues empties this workspace's streams.
+//
+// Queues are the one tier that is purely derived: a command names a Tier 1
+// object and a document row, and once both are gone the command describes work
+// that cannot be done. Left behind after a wipe they are worse than useless —
+// every one of them fails on a missing object and manufactures a fresh dead
+// letter about a document nobody has any more.
+//
+// The DLQ goes too, and that is the point of purging at all rather than letting
+// maxAge expire it: its 132 entries after one wipe describe a corpus that no
+// longer exists, so anything reading it to decide what needs attention is
+// reading history as if it were a work list.
+//
+// Non-fatal by design. Every stream is attempted even if an earlier one fails,
+// and the errors are returned together, because a stale queue is untidy while a
+// half-purged one is no worse than the state this started from.
+func (b *Bus) PurgeQueues(ctx context.Context) error {
+	var failed []string
+	for _, name := range []string{StreamName, StreamDLQ, StreamRustFSEvents} {
+		s, err := b.js.Stream(ctx, name)
+		if err != nil {
+			// A stream that does not exist is already as empty as it can be.
+			if errors.Is(err, jetstream.ErrStreamNotFound) {
+				continue
+			}
+			failed = append(failed, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		if err := s.Purge(ctx); err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("purge queues: %s", strings.Join(failed, "; "))
+	}
+	return nil
+}
 
 // EnsureStreams provisions the work queue and the DLQ. Idempotent, so every
 // binary can call it at startup.

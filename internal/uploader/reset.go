@@ -13,13 +13,21 @@ import (
 // Resetter performs the destructive operations. It holds both stores because
 // neither half is valid alone.
 type Resetter struct {
-	vault *rustfs.Vault
-	docs  *postgres.DocumentRepo
-	log   *slog.Logger
+	vault  *rustfs.Vault
+	docs   *postgres.DocumentRepo
+	queues QueuePurger
+	log    *slog.Logger
 }
 
-func NewResetter(v *rustfs.Vault, docs *postgres.DocumentRepo, log *slog.Logger) *Resetter {
-	return &Resetter{vault: v, docs: docs, log: log}
+// QueuePurger is the half of the bus a wipe needs. An interface for the same
+// reason DeadLetterer is one: the destructive paths stay testable without a
+// broker, and *bus.Bus is the only production implementation.
+type QueuePurger interface {
+	PurgeQueues(ctx context.Context) error
+}
+
+func NewResetter(v *rustfs.Vault, docs *postgres.DocumentRepo, queues QueuePurger, log *slog.Logger) *Resetter {
+	return &Resetter{vault: v, docs: docs, queues: queues, log: log}
 }
 
 // Wipe purges a workspace from Tier 1 and cascades into Tier 2.
@@ -52,6 +60,19 @@ func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 			"(re-run --wipe to converge): %w", err)
 	}
 	r.log.Info("tier 1 purged", "workspace_id", workspaceID)
+
+	// Last, and deliberately after both stores: a command still in flight names
+	// an object and a row that no longer exist, so leaving the queues populated
+	// would turn a clean wipe into a burst of fresh dead letters about a corpus
+	// that is already gone. Ordered last because queues are the only tier that
+	// can be rebuilt by re-running the thing that filled them.
+	if r.queues != nil {
+		if err := r.queues.PurgeQueues(ctx); err != nil {
+			return fmt.Errorf("both tiers cleared, but purging queues failed "+
+				"(re-run --delete-data to converge): %w", err)
+		}
+		r.log.Info("queues purged", "workspace_id", workspaceID)
+	}
 	return nil
 }
 

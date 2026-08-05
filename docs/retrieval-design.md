@@ -947,6 +947,14 @@ packets, and writes the cited answer itself. Nothing in this repository
 performs generation, so `docs/generation-design.md` is not needed — the
 boundary *is* the design.
 
+**One tool per workspace, named from the registry** (`internal/mcp`):
+`search_<workspace_id>`, with the workspace's own description. A single
+generic tool would leave the agent choosing a corpus from a parameter, and two
+servers advertising the same name would leave it disambiguating on description
+alone. Picking the wrong corpus is not a soft failure here — it answers a
+financial question from legal correspondence, and cites confidently either
+way.
+
 **`infra.llm` is for query preparation only and must never be used for answer
 generation.** It is already wired up, fast and local, which makes it exactly
 what someone would reach for; this is written down to stop that. The split is
@@ -1266,7 +1274,7 @@ re-litigated from scratch.
 | **Query rewriting / expansion** | **Deferred**, with two constraints fixed now. Expansion must stay in English — translating into Russian is prohibited regardless of technique (§3.2). And rewriting must not be used to fix the lexical leg: decomposition already produces keyword-style output *sometimes*, which revives it by accident, and building on an accident that varies per question is worse than the deterministic fix in §3.3. |
 | **Query decomposition** | **Adopted** (§3.6). Deferred in 2.0.0 pending "a real query pattern"; a measured total loss of one topic in a two-topic question is that pattern. |
 | **Router / adaptive pattern** | **Rejected for now.** Skipping retrieval for greetings assumes a chat surface that does not exist; there is no interactive front end, and the cost saved is one 23 ms embedding call. |
-| **Agentic / iterative retrieval** | **Rejected for now.** Higher latency and LLM cost for a read path that is not yet built once. Reconsider only after the linear pipeline is measured and found wanting. |
+| **Agentic / iterative retrieval** | **Rejected for now.** Higher latency and LLM cost, on a read path whose single-pass form was still unbuilt when this was decided. Reconsider only after the linear pipeline is measured and found wanting. |
 | **Parent–child / auto-merging** | **Partly adopted, differently.** The guideline's small-chunks-for-precision, large-context-for-generation idea is served by §5.2's lineage expansion, which uses real document structure — thread, parent, attachments — rather than an artificial chunk hierarchy. |
 | **Prompt compression** | **Rejected.** Directly contradicts principle 2 and `ingestion-design.md` §4.3: compression happens once, at the answer stage, by a model that can see the question. |
 

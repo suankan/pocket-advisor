@@ -94,8 +94,8 @@ deliberately differs from this design).
 * **Tier 1 (RustFS) is now the sole source of truth.** User filesystems are a
   staging feed, never read by the system (pillar 2, §5.1).
 * **New `Corpus Uploader`** (§5.1) — CLI/Job that moves a folder into
-  `raw/`, skipping content already present, with `--wipe` and `--forget`
-  resets that cascade into PostgreSQL.
+  `raw/`, skipping content already present, with `--delete-data` and
+  `--forget` resets that cascade into PostgreSQL.
 * **Discovery no longer walks a filesystem** (§5.2) — it consumes RustFS bucket
   notifications, with a bucket scan as an exact reconciliation. No corpus
   volume mount anywhere in the cluster.
@@ -849,14 +849,14 @@ Isolation is preserved rather than traded away: RustFS authenticates to NATS
 workspace's own account and nowhere else. The only administrative act is
 installing the target, which is provisioning's job.
 
-**The target is installed by `--create-workspace`, not by the chart.** The
-chart declares the environment variables unconditionally and sources their
-values from an *optional* Secret that provisioning owns. A fresh install has
-no Secret, so the variables are unset and notification is simply off; the
-first `--create-workspace` writes it and restarts RustFS. Two properties fall
-out of that arrangement: `helm upgrade` cannot revert the target, because the
-chart never contained its values; and there is no `enabled` flag, because
-"configured" and "enabled" are the same fact.
+**The target is installed by provisioning, not by the chart.** The Tenant CRD
+declares buckets, users and policies but has no field for which bucket
+publishes to which target, so the rule stays an S3 API call —
+`provision.ensureBucketNotification`, one of the only two things provisioning
+still does (§6.2). It runs as the workspace's own RustFS identity, which its
+Tenant policy already grants, and it is idempotent, which is why
+`--ingest-all` and `--listen` simply call it on every run rather than
+requiring a separate step.
 
 **Runtime reconfiguration was tried and rejected — it crashes RustFS.**
 `madmin-go`'s `SetConfigKV` would have avoided the restart entirely, and the
@@ -870,22 +870,22 @@ version; it is the obviously better mechanism and it does not work.
 So installing a target restarts RustFS. That is the pattern deliberately
 removed from NATS provisioning the same day (deviation 10), and the
 distinction matters: a NATS restart drops every JetStream client mid-flight,
-whereas RustFS is restarted by `--create-workspace` before any upload begins,
-with nothing connected to lose. The restart is skipped entirely when the
-target already names the requested workspace, so repeated runs pay nothing.
+whereas RustFS is restarted before any upload begins, with nothing connected
+to lose. The restart is skipped entirely when the target already names the
+requested workspace, so repeated runs pay nothing.
 
 **One workspace at a time is now an explicit constraint, not a latent race.**
-Two concurrent `--create-workspace` runs for different workspaces would fight
-over a single target; the second would win and the first workspace's events
-would stop. Nothing enforces this, and nothing needs to for a single-operator
+Two concurrent runs for different workspaces would fight over a single
+target; the second would win and the first workspace's events would stop. Nothing enforces this, and nothing needs to for a single-operator
 tool — but it is a real limit and belongs written down rather than discovered.
 
-**How to run it.** `--create-workspace --workspace-id <id>` provisions all
-three stores and the notify target, and is the only mode that uses shared root
-credentials. Everything afterwards — `--ingest-all`, `--scan`, `--query`,
-`--mcp` — connects with that workspace's own credentials and no others.
-`--ingest-all` therefore starts processing the moment the first object lands,
-rather than waiting for the upload to finish and a scan to run.
+**How to run it.** There is no provisioning mode to run. `--ingest-all` and
+`--listen` call `provision.EnsureWorkspace` themselves, which applies the
+schema and installs the notify target, both as the workspace's own
+credentials. The stores themselves are the chart's (deviation 24), so nothing
+here uses shared root credentials at all. `--ingest-all` starts processing the
+moment the first object lands, rather than waiting for the upload to finish
+and a scan to run.
 
 `--listen` still exists for the case where objects arrive from something other
 than our uploader, and the scan remains the reconciliation authority for
@@ -1194,7 +1194,7 @@ alongside `CGO_ENABLED=1` and the Homebrew include and library paths Tesseract
 needs, so a working toolchain is checked into the repo rather than described
 in a README.
 
-**`charts/pocket-advisor`** deploys RustFS, PostgreSQL+pgvector and
+**`charts/pocket-advisor-infra`** deploys RustFS, PostgreSQL+pgvector and
 NATS, and nothing else. It builds no images. One setup task accompanies every
 install and upgrade:
 
@@ -1203,18 +1203,19 @@ bucket and two scoped identities that per-workspace isolation had already made
 redundant; it was deleted along with them. The chart now renders only the three
 stores, their Services, the NATS config and one Secret.
 
-Schema bootstrap is no longer a Helm hook. It is the last step of
-`--create-workspace`, which probes the embedding endpoint and applies the DDL
-with the resolved dimension (§4.4). Making it a hook was a way to guarantee it
+Schema bootstrap is no longer a Helm hook. It is a step of
+`provision.EnsureWorkspace`, which probes the embedding endpoint and applies
+the DDL with the resolved dimension (§4.4) as the workspace's own Postgres
+role. Making it a hook was a way to guarantee it
 ran before the workers did; with the workers on the host, the binary re-probes
 at startup and refuses to run against a mismatched index, so the ordering
 enforces itself.
 
 It was briefly its own CLI mode, `--bootstrap-schema`. That was removed: it
 repeated provisioning's schema step without calling it, and everything it
-covered is covered by `--create-workspace` re-applying the DDL on every run
-and by `VerifyDimension` failing at the start of `--ingest-all` and
-`--listen` (deviation 16).
+covered is covered by the DDL being re-applied on every run and by
+`VerifyDimension` failing at the start of `--ingest-all` and `--listen`
+(deviation 16).
 
 The two RustFS identities remain the enforcement point for the write-authority
 split, and matter *more* now rather than less. `pa-uploader` holds `s3:*` on
@@ -1417,10 +1418,15 @@ pocket-advisor/                    # repo root — single Go module
 │   │   └── postgres/             # Tier 2 rows, Tier 3 chunks, schema
 │   │
 │   ├── client/embedding/         # external REST client + circuit breaker (§4.4)
+│   ├── retrieval/                # read path        (retrieval-design.md §7)
+│   ├── mcp/                      # MCP server over retrieval
+│   ├── provision/                # schema + notify rule; all the chart cannot
+│   ├── workspace/                # workspace registry + config resolution
+│   ├── trace/                    # traceparent propagation            (§9.1)
 │   ├── telemetry/                # metrics, per-role log files, live stats
 │   └── bus/                      # JetStream streams, consumers, DLQ  (§2.5)
 │
-├── charts/pocket-advisor/  # RustFS + PostgreSQL + NATS only
+├── charts/pocket-advisor-infra/  # RustFS + PostgreSQL + NATS only
 ├── logs/                         # one file per role, gitignored
 └── docs/
     ├── ingestion-design.md       # this file
@@ -1580,6 +1586,14 @@ embedding), so trace context propagation is mandatory, not optional.
 
 JSON, one file per role under `logs/<role>.log` rather than stdout/stderr —
 the terminal belongs to the live dashboard while a run is in flight (§9.5).
+
+**The read path is the exception:** `--mcp` and `--query` log to stderr
+instead. A client launches the MCP server from a working directory it may not
+be able to write to, and creating a relative `logs/` there fails outright —
+which is how the first Claude Desktop attempt died, before the handshake and
+with the reason visible only in the client's own log. Neither mode runs the
+dashboard, so stderr is free.
+
 `worker_type` is on every line (`internal/telemetry`); `trace_id`, `doc_id`,
 `workspace_id`, and `parent_doc_id` (on children) are attached at the call
 sites that have them, not enforced by the logger itself. There is no
@@ -1652,15 +1666,16 @@ escapes written to a file are unreadable.
   └── make build: produces bin/pocket-advisor (mise-pinned Go + CGo)
 
 [ Phase 2: Workspace ]
-  └── ./bin/pocket-advisor --create-workspace --workspace-id <id>
-        Postgres database + role, RustFS bucket + identity, NATS account +
-        user + JetStream streams, then the DDL — it probes the embedding
-        endpoint, resolves (model_id, N) (§4.4) and interpolates N — the
-        schema step is here, not a Helm hook and not its own mode (§6.2).
-        Finally points RustFS's notify target at this workspace (§5.2).
-        The only phase using shared root credentials; everything after it
-        connects as the workspace. Required — the chart cannot do any of it,
-        since all four resources are named after a workspace it never sees.
+  └── no command. The stores are CRDs the chart renders from
+        workspaces/workspace-config.yaml, so Phase 1 already created the
+        Postgres database and role, the RustFS bucket and identity, and the
+        NATS account, user and streams (deviations 20, 22, 24).
+        The two things a manifest cannot express are done on demand by
+        provision.EnsureWorkspace, which every run calls: the DDL, whose
+        halfvec(N) needs N probed from an embedding endpoint only the
+        operator's machine can reach (§4.4), and the bucket notification
+        rule, which the Tenant CRD has no field for (§5.2). Both idempotent,
+        both as the workspace's own credentials.
 
 [ Phase 3: Corpus Load ]
   └── ./bin/pocket-advisor --ingest-all --workspace-id <id>

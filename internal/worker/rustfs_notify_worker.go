@@ -83,7 +83,7 @@ func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) erro
 	var event bucketNotification
 	if err := json.Unmarshal(msg.Data(), &event); err != nil {
 		telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
-		return Fatal("MALFORMED_NOTIFY_EVENT", err)
+		return Fatal(domain.ReasonMalformedNotify, err)
 	}
 
 	if len(event.Records) == 0 {
@@ -100,7 +100,7 @@ func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) erro
 		key, err := url.QueryUnescape(event.key(i))
 		if err != nil {
 			telemetry.DiscoveryFiles.WithLabelValues("notify", "malformed").Inc()
-			return Fatal("MALFORMED_NOTIFY_EVENT", err)
+			return Fatal(domain.ReasonMalformedNotify, err)
 		}
 		if _, err := domain.ParseRawObjectKey(key); err != nil {
 			// extracted/ children arrive here too if the bucket rule wasn't

@@ -25,19 +25,55 @@ const (
 	StatusFailed Status = "FAILED"
 )
 
+// FailureReason is why a document was skipped or failed. It is recorded in
+// metadata_headers and travels to the DLQ as X-Failure-Reason, so it is the
+// only handle anything has on *what class of problem* a message represents.
+//
+// A named type rather than a bare string because that handle has to be
+// trustworthy. Roughly half these codes used to be typed inline at their call
+// sites, which meant a typo compiled cleanly and quietly created a class of one
+// that no filter would ever match again. Declaring them here makes the set
+// enumerable and the compiler the thing that enforces it.
+type FailureReason string
+
 // Reason codes recorded in metadata_headers alongside SKIPPED / FAILED.
 const (
-	ReasonUnsupportedFormat = "UNSUPPORTED_FORMAT"
-	ReasonRecursionLimit    = "RECURSION_LIMIT"
-	ReasonImageNotViable    = "IMAGE_NOT_VIABLE"
-	ReasonExtractionFailed  = "EXTRACTION_FAILED"
-	ReasonEmptyExtraction   = "EMPTY_EXTRACTION"
+	ReasonUnsupportedFormat FailureReason = "UNSUPPORTED_FORMAT"
+	ReasonRecursionLimit    FailureReason = "RECURSION_LIMIT"
+	ReasonImageNotViable    FailureReason = "IMAGE_NOT_VIABLE"
+	ReasonExtractionFailed  FailureReason = "EXTRACTION_FAILED"
+	ReasonEmptyExtraction   FailureReason = "EMPTY_EXTRACTION"
 	// ReasonUnknownEncoding marks a body whose charset could not be
 	// determined with confidence — not declared, or declared but
 	// unrecognized. Never guessed; routed for manual review instead
 	// (ingestion-design.md's DLQ philosophy: a wrong guess would be silent
 	// content corruption, not a loud, actionable failure).
-	ReasonUnknownEncoding = "UNKNOWN_ENCODING"
+	ReasonUnknownEncoding FailureReason = "UNKNOWN_ENCODING"
+
+	// Codes that used to be string literals at their call sites.
+	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"
+	ReasonMalformedCommand    FailureReason = "MALFORMED_COMMAND"
+	ReasonMalformedNotify     FailureReason = "MALFORMED_NOTIFY_EVENT"
+	ReasonBadObjectURI        FailureReason = "BAD_OBJECT_URI"
+	ReasonOCRUnavailable      FailureReason = "OCR_UNAVAILABLE"
+	ReasonOCRFailed           FailureReason = "OCR_FAILED"
+	ReasonPDFOpenFailed       FailureReason = "PDF_OPEN_FAILED"
+	ReasonEmailParseFailed    FailureReason = "EMAIL_PARSE_FAILED"
+	ReasonHandlerPanic        FailureReason = "HANDLER_PANIC"
+
+	// ReasonUnclassified is what an error that nobody classified becomes.
+	//
+	// That used to be ReasonExtractionFailed, which made it a lie: the code
+	// meant both "extraction genuinely failed" and "no one said". The two are
+	// not interchangeable, and conflating them actively misinforms — 44
+	// documents lost to a RustFS out-of-memory kill are recorded as extraction
+	// failures, when Tier 1 reads were the thing that broke. Nothing about the
+	// text was ever the problem.
+	//
+	// Kept deliberately unhelpful, because a rising count here is a list of
+	// failure paths still needing a name, and a helpful-looking label would
+	// hide exactly that.
+	ReasonUnclassified FailureReason = "UNCLASSIFIED"
 )
 
 // Document is a Tier 2 row: one node in the lineage graph.

@@ -114,7 +114,7 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 		// A format we knowingly do not support is a recorded outcome, not a
 		// DLQ event. It is never retried (§2.5).
 		telemetry.DiscoveryFiles.WithLabelValues(mode, "unsupported").Inc()
-		telemetry.Skipped.WithLabelValues(domain.ReasonUnsupportedFormat).Inc()
+		telemetry.Skipped.WithLabelValues(string(domain.ReasonUnsupportedFormat)).Inc()
 		s.Log.Info("unsupported format",
 			"doc_id", docID, "mime", route.MimeType, "filename", prov.SourceFilename)
 		return s.Docs.UpdateStatus(ctx, docID, domain.StatusSkipped, domain.ReasonUnsupportedFormat)

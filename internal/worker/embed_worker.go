@@ -28,11 +28,11 @@ type EmbedWorker struct {
 func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	var cmd ingestionv1.EmbedTextCommand
 	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
-		return Fatal("MALFORMED_COMMAND", err)
+		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
+		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
 	// The command carries a reference, not the text (§4.1).

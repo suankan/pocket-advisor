@@ -31,16 +31,16 @@ type OfficeWorker struct {
 func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	var cmd ingestionv1.ProcessOfficeCommand
 	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
-		return Fatal("MALFORMED_COMMAND", err)
+		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
+		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
 	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
 	if err != nil {
-		return Fatal("BAD_OBJECT_URI", err)
+		return Fatal(domain.ReasonBadObjectURI, err)
 	}
 	data, _, err := w.Vault.Get(ctx, key)
 	if err != nil {

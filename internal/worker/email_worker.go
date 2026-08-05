@@ -30,11 +30,11 @@ type EmailWorker struct {
 func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	var cmd ingestionv1.ProcessEmailCommand
 	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
-		return Fatal("MALFORMED_COMMAND", err)
+		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal("MISSING_TRACE_CONTEXT",
+		return Fatal(domain.ReasonMissingTraceContext,
 			fmt.Errorf("command carries no traceparent"))
 	}
 
@@ -44,7 +44,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
 	if err != nil {
-		return Fatal("BAD_OBJECT_URI", err)
+		return Fatal(domain.ReasonBadObjectURI, err)
 	}
 	data, _, err := w.Vault.Get(ctx, key)
 	if err != nil {
@@ -68,7 +68,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 			if errors.Is(perr, email.ErrUnknownCharset) {
 				return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, perr))
 			}
-			return WithDoc(meta.DocId, Fatal("EMAIL_PARSE_FAILED", perr))
+			return WithDoc(meta.DocId, Fatal(domain.ReasonEmailParseFailed, perr))
 		}
 		children = parsed.Children
 		threadID = resolveThread(parsed)

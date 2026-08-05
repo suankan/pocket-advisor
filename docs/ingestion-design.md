@@ -3064,3 +3064,35 @@ deliberate choice with a reason, not drift.
     resolved. Unit tests cover the anchor, the defaults, an absolute path left
     alone, the environment override, a missing config file, and that `.` is a
     no-op.
+
+30. **Failure reasons became a closed vocabulary, and the catch-all stopped
+    lying (2026-08-05).** `--redrive --reason X` is only worth building if one
+    problem class has exactly one code. It did not.
+
+    Fifteen codes existed: six declared in `domain`, **nine typed as string
+    literals across 23 call sites**. And `reasonOf` returned
+    `ReasonExtractionFailed` for any unclassified error, so that one code meant
+    both "extraction genuinely failed" and "nobody said". The live DLQ showed
+    what that costs: **125 of 132 entries were `EXTRACTION_FAILED`**, including
+    79 from `embed-indexer` and 11 from `discovery` — workers that do not
+    extract anything. Four unrelated problem classes wearing one label.
+
+    All fifteen are now `domain.FailureReason` constants, every call site
+    migrated, and unclassified errors surface as `UNCLASSIFIED` so a rising
+    count there is a list of failure paths still needing a name.
+
+    **The named type does not enforce this, and that was a wrong assumption
+    worth recording.** Go's untyped string constants are assignable to any named
+    string type, so `Fatal("OCR_FALIED", err)` still compiles — verified by
+    planting one. Enforcement is `TestFailureReasonsAreNeverStringLiterals`,
+    which parses every non-test file under `internal/`, finds `Fatal`/`Decline`
+    calls and fails on any SCREAMING_SNAKE_CASE literal argument. Checked both
+    ways: it names the file and line of a planted violation, and passes once
+    removed.
+
+    Two things are deliberately *not* here. Call-site origins were considered
+    and rejected as an alternative vocabulary — `file:line` is not stable across
+    the very edits a fix makes, and `X-Failure-Worker` plus `X-Original-Subject`
+    are already recorded and already discriminate better than the reason did.
+    And no transient/terminal property is attached yet; that is what would make
+    automated redrive safe, and it belongs with open decision 7.

@@ -42,11 +42,11 @@ type DocumentWorker struct {
 func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error {
 	var cmd ingestionv1.ProcessPdfCommand
 	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
-		return Fatal("MALFORMED_COMMAND", err)
+		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
+		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
 	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
@@ -57,7 +57,7 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 
 	doc, err := w.PDF.Open(ctx, data)
 	if err != nil {
-		return WithDoc(meta.DocId, Fatal("PDF_OPEN_FAILED", err))
+		return WithDoc(meta.DocId, Fatal(domain.ReasonPDFOpenFailed, err))
 	}
 	defer doc.Close()
 
@@ -74,9 +74,9 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 		ocrText, err := w.ocrPages(ctx, doc, meta.DocId)
 		if err != nil {
 			if errors.Is(err, ocr.ErrUnavailable) {
-				return Decline(meta.DocId, "OCR_UNAVAILABLE")
+				return Decline(meta.DocId, domain.ReasonOCRUnavailable)
 			}
-			return WithDoc(meta.DocId, Fatal("OCR_FAILED", err))
+			return WithDoc(meta.DocId, Fatal(domain.ReasonOCRFailed, err))
 		}
 		// Keep whichever is richer: a hybrid PDF sometimes has a usable
 		// partial text layer that OCR of a low-quality scan cannot beat.
@@ -131,11 +131,11 @@ func (w *DocumentWorker) ocrPages(ctx context.Context, doc *pdf.Document, docID 
 func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) error {
 	var cmd ingestionv1.ProcessImageCommand
 	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
-		return Fatal("MALFORMED_COMMAND", err)
+		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal("MISSING_TRACE_CONTEXT", fmt.Errorf("command carries no traceparent"))
+		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
 	// Dimensions were recorded at discovery, so the gate can reject without a
@@ -145,7 +145,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 		return Decline(meta.DocId, domain.ReasonImageNotViable)
 	}
 	if !ocr.Available {
-		return Decline(meta.DocId, "OCR_UNAVAILABLE")
+		return Decline(meta.DocId, domain.ReasonOCRUnavailable)
 	}
 
 	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
@@ -157,9 +157,9 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 	text, err := w.OCR.Bytes(ctx, data)
 	if err != nil {
 		if errors.Is(err, ocr.ErrUnavailable) {
-			return Decline(meta.DocId, "OCR_UNAVAILABLE")
+			return Decline(meta.DocId, domain.ReasonOCRUnavailable)
 		}
-		return WithDoc(meta.DocId, Fatal("OCR_FAILED", err))
+		return WithDoc(meta.DocId, Fatal(domain.ReasonOCRFailed, err))
 	}
 
 	// Post-hoc half of the viability gate: an image that OCRs to almost
@@ -174,7 +174,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 func (w *DocumentWorker) fetch(ctx context.Context, uri, docID string) ([]byte, error) {
 	key, err := w.Vault.KeyFromURI(uri)
 	if err != nil {
-		return nil, Fatal("BAD_OBJECT_URI", err)
+		return nil, Fatal(domain.ReasonBadObjectURI, err)
 	}
 	data, _, err := w.Vault.Get(ctx, key)
 	if err != nil {

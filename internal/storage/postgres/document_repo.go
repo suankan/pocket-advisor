@@ -64,14 +64,14 @@ func (r *DocumentRepo) Status(ctx context.Context, docID string) (domain.Status,
 
 // UpdateStatus moves a document to a terminal or intermediate state. reason is
 // recorded in metadata_headers so SKIPPED and FAILED rows stay auditable.
-func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.Status, reason string) error {
+func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.Status, reason domain.FailureReason) error {
 	_, err := r.db.Pool.Exec(ctx, `
         UPDATE documents
         SET processing_status = $2::processing_status,
             metadata_headers  = CASE WHEN $3 = '' THEN metadata_headers
                                      ELSE metadata_headers || jsonb_build_object('reason', $3) END,
             updated_at        = now()
-        WHERE doc_id = $1`, docID, string(s), reason)
+        WHERE doc_id = $1`, docID, string(s), string(reason))
 	if err != nil {
 		return fmt.Errorf("update status %s: %w", docID, err)
 	}

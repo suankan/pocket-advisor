@@ -24,26 +24,30 @@ import (
 // Terminal marks an error as not worth retrying: the work is broken in a way
 // a redelivery cannot fix, so it goes straight to the DLQ.
 type Terminal struct {
-	Reason string
+	Reason domain.FailureReason
 	Err    error
 }
 
-func (t *Terminal) Error() string { return t.Reason + ": " + t.Err.Error() }
+func (t *Terminal) Error() string { return string(t.Reason) + ": " + t.Err.Error() }
 func (t *Terminal) Unwrap() error { return t.Err }
 
-func Fatal(reason string, err error) error { return &Terminal{Reason: reason, Err: err} }
+func Fatal(reason domain.FailureReason, err error) error {
+	return &Terminal{Reason: reason, Err: err}
+}
 
 // Declined marks work the system knowingly does not support. It is NOT a
 // failure: the document is recorded SKIPPED and the message is acked. Mixing
 // "we can't parse this" with "this broke" makes the DLQ unactionable (§2.5).
 type Declined struct {
-	Reason string
+	Reason domain.FailureReason
 	DocID  string
 }
 
-func (d *Declined) Error() string { return "declined: " + d.Reason }
+func (d *Declined) Error() string { return "declined: " + string(d.Reason) }
 
-func Decline(docID, reason string) error { return &Declined{Reason: reason, DocID: docID} }
+func Decline(docID string, reason domain.FailureReason) error {
+	return &Declined{Reason: reason, DocID: docID}
+}
 
 // Handler processes one message. Returning nil acks it.
 type Handler func(ctx context.Context, msg jetstream.Msg) error
@@ -187,7 +191,7 @@ func (r *Runtime) fetchLoop(
 func (r *Runtime) invoke(ctx context.Context, msg jetstream.Msg, h Handler) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			err = Fatal("HANDLER_PANIC", fmt.Errorf("%v\n%s", p, debug.Stack()))
+			err = Fatal(domain.ReasonHandlerPanic, fmt.Errorf("%v\n%s", p, debug.Stack()))
 		}
 	}()
 	return h(ctx, msg)
@@ -214,7 +218,7 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		var d *Declined
 		errors.As(err, &d)
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
-		telemetry.Skipped.WithLabelValues(d.Reason).Inc()
+		telemetry.Skipped.WithLabelValues(string(d.Reason)).Inc()
 		r.stat((*telemetry.Queue).Skipped)
 		if d.DocID != "" && r.Docs != nil {
 			if uerr := r.Docs.UpdateStatus(ctx, d.DocID, domain.StatusSkipped, d.Reason); uerr != nil {
@@ -238,12 +242,12 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		// MaxDeliveries advisory, which is a backstop for crashed workers that
 		// never reach their own error path (§2.5).
 		reason := reasonOf(err)
-		if derr := r.Bus.ToDLQ(ctx, r.Subject, r.Name, reason,
+		if derr := r.Bus.ToDLQ(ctx, r.Subject, r.Name, string(reason),
 			msg.Headers().Get(bus.HdrTraceparent), deliveries, msg.Data()); derr != nil {
 			r.Log.Error("dlq publish failed", "error", derr)
 		}
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "dlq").Inc()
-		telemetry.DLQ.WithLabelValues(r.Name, reason).Inc()
+		telemetry.DLQ.WithLabelValues(r.Name, string(reason)).Inc()
 		r.stat((*telemetry.Queue).DeadLettered)
 
 		if id := docIDOf(err); id != "" && r.Docs != nil {
@@ -279,12 +283,16 @@ func isTerminal(err error) bool {
 	return errors.As(err, &t)
 }
 
-func reasonOf(err error) string {
+func reasonOf(err error) domain.FailureReason {
 	var t *Terminal
 	if errors.As(err, &t) {
 		return t.Reason
 	}
-	return domain.ReasonExtractionFailed
+	// Deliberately not ReasonExtractionFailed. Defaulting to a real class made
+	// every unclassified error indistinguishable from a genuine extraction
+	// failure, which is how a RustFS outage came to be recorded as 44 broken
+	// documents. UNCLASSIFIED says the true thing: nobody named this path yet.
+	return domain.ReasonUnclassified
 }
 
 // docIDErr lets a handler attach the document a failure belongs to, so the

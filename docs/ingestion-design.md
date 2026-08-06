@@ -16,9 +16,11 @@ classification, extraction, layout, OCR and their history (§5.4). Its other
 peers are `docs/retrieval-design.md`,
 which owns every read-path concern (§7 here states the contract between
 them); `docs/workspace-isolation.md`, which owns how workspaces are
-kept apart across all three stores — the per-workspace database, bucket,
-and NATS account this file's uploader/discovery/worker code will need to
-address once that design is implemented; and `docs/api-server-design.md`,
+kept apart across all three stores — a per-workspace bucket and NATS
+account, and, since deviation 34, a per-workspace database and role on one
+shared Postgres cluster rather than a cluster of its own — that this file's
+uploader/discovery/worker code addresses via `internal/config.Config`; and
+`docs/api-server-design.md`,
 which owns the longer-term direction of exposing this pipeline's
 operations (and workspace lifecycle) behind an API Server rather than
 only a CLI — forward-looking, not yet begun.
@@ -3291,3 +3293,84 @@ deliberate choice with a reason, not drift.
     several wrong turns that passed every automated check. Detail, the failed
     attempts, and what the checks cannot see:
     [`pdf-to-text.md`](pdf-to-text.md).
+
+34. **Postgres moved back to one shared cluster, and a default Postgres leaves
+    open had to be closed by hand (2026-08-06).** Deviation 20 gave each
+    workspace its own `Cluster` — its own process, volume, and failure
+    domain — specifically to make isolation physical rather than logical.
+    Reverted: one shared `Cluster` again, with every workspace's database
+    (`<id>`) and role (`<id>_user`) declared as `Database`/`DatabaseRole` CRDs
+    on top of it (`charts/pocket-advisor-infra/templates/
+    postgres-workspaces.yaml`), CNPG 1.30 features that did not exist when
+    deviation 20 was written — the operator's own CRD set predates them, and
+    the alternative at the time was reintroducing the in-database role
+    provisioning deviation 20 explicitly deleted.
+
+    **What moved.** `internal/config.Postgres.HostTemplate`, a `%s`-per-workspace
+    format string, became a plain `Host` constant — the shared cluster has one
+    address, `postgres-rw.pocket-advisor.svc.cluster.local`, the same shape as
+    `NATS.URL`. `Workspace.DBName`/`DBUser` went from the shared constants
+    `workspace`/`app_user` to `<id>`/`<id>_user` — the inverse of deviation
+    20's own change, and for the same reason in reverse: one cluster, so
+    workspaces need names that actually differ. `Database`/`DatabaseRole`
+    reference their `Cluster` by name only — no namespace field, which in
+    Kubernetes always means "the same namespace as this object" — so both, and
+    each workspace's credentials `Secret`, moved from the workspace's own
+    namespace into the shared release namespace. RustFS and NATS keep the
+    per-workspace-namespace isolation `workspace-isolation.md` §2.2 and §2.3
+    describe; Postgres no longer does (§2.1 there has the full account).
+
+    **What a shared instance reopens, verified directly rather than assumed.**
+    Postgres grants `CONNECT` to `PUBLIC` on every newly created database.
+    Under one cluster per workspace this was moot — there was no server for
+    another workspace's role to reach. Tested against a throwaway two-database
+    cluster: a second workspace's role could connect to the first's database
+    and list its tables with `\dt`, though not read their contents —
+    object-level grants (ownership, no `GRANT` to anyone else) still held.
+    Also tested: a database's own owner can `REVOKE CONNECT ... FROM PUBLIC`
+    on it without being superuser, and doing so actually refuses a different
+    role's connection afterward, not merely its reads. That REVOKE is now the
+    first statement `internal/storage/postgres` `schemaSQL` runs, inside a `DO`
+    block using `format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC',
+    current_database())` so it needs no database name passed in — and doubled
+    to `%%I` in the Go source, since `schemaSQL` is itself a `fmt.Sprintf`
+    format string for the vector dimension and a single `%I` is a Go verb, not
+    Postgres's placeholder. `go vet` catches the unescaped form; unescaped, it
+    would have silently mangled the REVOKE at runtime rather than merely
+    failed to vet clean.
+
+    **What extensions needed, moved with the database.** `CREATE EXTENSION`
+    is scoped to one database, and each workspace needs `vector` and
+    `pg_textsearch` (deviation 33's BM25 unification, `retrieval-design.md`
+    §3.3) independently of every other workspace's. Deviation 20's
+    `postInitApplicationSQL` ran once, against whichever database the
+    `Cluster` bootstrapped — fine when that was the one real database, wrong
+    once it is an inert placeholder nothing connects to. Extensions are
+    declared on each workspace's own `Database` CRD instead
+    (`spec.extensions`), reconciled by the operator with the privilege the
+    workspace's own role never has, the same superuser-at-the-boundary
+    pattern deviation 20 established, just relocated.
+
+    **What a removed workspace now leaves behind.** Deleting a workspace's
+    entry and redeploying still removes its namespace, taking its RustFS and
+    NATS state with it — unchanged. Its `Database`/`DatabaseRole` objects are
+    pruned too, chart-rendered like everything else, but their reclaim
+    policies are `retain`, not `delete`: the shared cluster has no
+    per-workspace volume for a namespace deletion to take the data with, so an
+    explicit reclaim-on-delete would mean one workspace's chart edit could
+    destroy Postgres data with no confirmation step at all. The database and
+    role survive, orphaned, until removed by hand
+    (`workspace-isolation.md` §10 item 5) — accepted because no workspace has
+    actually been removed from a live cluster yet, not because scoped cleanup
+    is hard to build.
+
+    Verified so far: the chart renders correctly against multiple workspaces
+    (`helm template`, inspected object by object — one `Cluster`, correctly
+    namespaced `Database`/`DatabaseRole` per workspace); and, against a real
+    `pg_textsearch`-enabled Postgres in a throwaway container, the full
+    `ApplySchema` DDL — REVOKE included — runs clean as a non-superuser
+    database-owner role, and a different role's connection is refused
+    afterward. **Not yet verified: an actual `make deploy-infra` against the
+    live cluster** — the CRDs' behaviour once the operator itself reconciles
+    them, rather than a container standing in for what it will eventually do,
+    is the one thing this deviation records as assumed rather than measured.

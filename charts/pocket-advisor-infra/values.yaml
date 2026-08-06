@@ -125,9 +125,10 @@ nats:
 # Tier 2 & 3: PostgreSQL + pgvector
 # ============================================================================
 postgres:
-  # Managed by the CloudNativePG operator, one Cluster per workspace. The
-  # operator installs with this chart as a dependency — see the Operators
-  # section at the bottom.
+  # Managed by the CloudNativePG operator, one Cluster shared by every
+  # workspace — reverted from one Cluster per workspace
+  # (ingestion-design.md deviation 34). The operator installs with this
+  # chart as a dependency — see the Operators section at the bottom.
   #
   # CNPG's own Postgres 18 build with pg_textsearch layered on
   # (docker-images/postgres/Dockerfile) — pgvector ships with the base image
@@ -139,38 +140,43 @@ postgres:
   # format changes, and the operator will not rewrite it in place.
   image: pocket-advisor-postgres:18-pg_textsearch-v1.3.1
 
-  # One instance per cluster. See the comment in templates/postgres.yaml.
   instances: 1
   port: 5432
 
-  # The owner of every workspace database. One name across all of them, because
-  # each workspace has its own cluster now — there is nothing to separate
-  # *within* one, so per-workspace roles bought nothing. Passwords still
-  # differ, one per workspace, from workspaces/pocket-advisor-infra.yaml.
-  appUser: app_user
-  # No credentials block here either: CloudNativePG creates each cluster and
-  # its owner, so there is no administrative connection to hold. Each
-  # workspace's own password lives under `workspaces:` in the values file.
+  # The Cluster's own Kubernetes object name — templates/postgres.yaml — not a
+  # Postgres identifier. Every workspace's database and role live inside it,
+  # declared in templates/postgres-workspaces.yaml.
+  clusterName: postgres
 
-  # The database inside every cluster. One name everywhere, because the cluster
-  # is already per-workspace — see templates/postgres.yaml.
+  # CNPG requires a database and owner at cluster creation; nothing in this
+  # application ever connects to either. Its password lives under
+  # postgres.credentials.bootstrapPassword, alongside the RustFS root
+  # credentials below — same reasoning: generated once, required, never a
+  # published default.
+  bootstrapUser: bootstrap
+  credentials:
+    bootstrapPassword: ""
 
   storage:
-    # Per workspace, not shared. Steady state for the measured corpus is
-    # ~250Mi; the headroom is for transient operations rather than growth — a
-    # re-embed holds two embed_model namespaces at once, REINDEX needs ~2x the
-    # index, and max_wal_size defaults to 1Gi regardless of corpus size (§6.4).
+    # Shared across every workspace now, not one volume each. Steady state
+    # for the measured corpus is ~250Mi per workspace; the headroom is for
+    # transient operations rather than growth — a re-embed holds two
+    # embed_model namespaces at once, REINDEX needs ~2x the index, and
+    # max_wal_size defaults to 1Gi regardless of corpus size (§6.4) — plus
+    # now that cost is paid once per cluster rather than once per workspace.
     size: 20Gi
 
-  # Per cluster, so this multiplies by the number of workspaces — hence modest
-  # requests and generous limits, since only one workspace ingests at a time.
+  # One allocation for the whole cluster now, not one per workspace — hence
+  # generous limits relative to the request, since only one workspace
+  # ingests at a time but every workspace's writes land on this one process.
   #
-  # Raised after the same ingest that OOMKilled RustFS: this container was
-  # killed too, exit 137 after its own liveness and readiness probes started
-  # timing out. Postgres is on the write path for every chunk and every
-  # embedding — 2,468 embeddings in that run, against a pool configured for 50
-  # connections — so a single core is what made the probes slow enough to
-  # matter, the same failure shape as RustFS.
+  # Values carried over from the per-workspace figure, raised after an ingest
+  # that OOMKilled RustFS: this container was killed too, exit 137 after its
+  # own liveness and readiness probes started timing out. Postgres is on the
+  # write path for every chunk and every embedding — 2,468 embeddings in that
+  # run, against a pool configured for 50 connections — so a single core is
+  # what made the probes slow enough to matter, the same failure shape as
+  # RustFS. Unswept for the shared-instance shape specifically.
   resources:
     requests: {cpu: "500m", memory: "512Mi"}
     limits:   {cpu: "2000m", memory: "1536Mi"}
@@ -186,8 +192,11 @@ postgres:
 # to a published default.
 #
 # One release renders every workspace: a namespace each, holding that
-# workspace's Postgres Cluster, RustFS Tenant and three JetStream Streams,
-# plus its account block in the shared NATS config (deviation 24).
+# workspace's RustFS Tenant and three JetStream Streams, plus its account
+# block in the shared NATS config (deviation 24). Its Postgres database and
+# role are not in that namespace — deviation 34 put every workspace's
+# Postgres objects in the shared release namespace instead, alongside the one
+# Cluster they all live inside (templates/postgres-workspaces.yaml).
 #
 # Entries carry credentials and nothing else:
 #
@@ -198,16 +207,17 @@ postgres:
 #       nats:      {credentials: {password: ...}}
 #
 # `id` is the namespace, and it is the NATS account and user name — accounts
-# share one server, so the id is the only thing keeping them apart. Everything
-# else is the constant below.
+# share one server, so the id is the only thing keeping them apart. It is
+# also the Postgres database name and, as `<id>_user`, the role name. RustFS's
+# bucket and identity are the one exception — see the constant below.
 # ============================================================================
 workspaces: []
 
-# The bucket, the Postgres database and the RustFS identity, in every
-# workspace. One value, because they are deliberately identical: each lives
-# alone in a namespace named after its workspace, so a workspace-derived name
-# would repeat, in three places, what the address already says. Note the NATS
-# account is *not* this — see above.
+# The bucket and the RustFS identity, in every workspace. One value, because
+# they are deliberately identical: each lives alone in a namespace named
+# after its workspace, so a workspace-derived name would repeat, in two
+# places, what the address already says. Postgres and NATS are not this —
+# see above.
 workspace:
   name: workspace
 

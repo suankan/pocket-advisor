@@ -1,0 +1,87 @@
+{{/*
+Every workspace's own logical database and role, inside the one shared
+Cluster from postgres.yaml.
+
+Both CRDs reference their Cluster by name only — no namespace field, which in
+Kubernetes always means "the same namespace as this object" — so these live
+in the shared release namespace alongside the Cluster, not in the workspace's
+own namespace the way its RustFS Tenant and NATS account do
+(workspace-isolation.md §2.1).
+
+Object names are prefixed with the workspace id because, unlike before, these
+now share one namespace: `postgres-app` was unique enough when it lived alone
+in a workspace's own namespace, and is not any more.
+
+Extensions live on the Database, not on the Cluster's bootstrap: each
+workspace's database needs pgvector and pg_textsearch independently of every
+other workspace's, and CREATE EXTENSION is always scoped to one database —
+folding it into the Cluster's own postInitApplicationSQL would only reach the
+inert bootstrap database nothing else uses.
+*/}}
+{{- range $.Values.workspaces }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: {{ .id }}-postgres-app
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" (printf "Postgres credentials for workspace %s" .id)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+# basic-auth is the shape DatabaseRole.spec.passwordSecret expects; it reads
+# username and password from these exact keys.
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ printf "%s_user" .id | quote }}
+  password: {{ required (printf "workspaces[%s].postgres.credentials.password is required" .id) .postgres.credentials.password | quote }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: {{ .id }}-postgres-role
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" (printf "Postgres role owning workspace %s's database" .id)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  cluster:
+    name: {{ $.Values.postgres.clusterName }}
+  name: {{ printf "%s_user" .id | quote }}
+  login: true
+  passwordSecret:
+    name: {{ .id }}-postgres-app
+  # retain, not delete: dropping a workspace from the values file and
+  # upgrading should not silently take its data with it the way removing its
+  # namespace does for RustFS and NATS. Postgres data here is deleted
+  # explicitly, the same way `make destroy-state` already requires elsewhere.
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: {{ .id }}-postgres-db
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" (printf "Postgres database for workspace %s" .id)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  cluster:
+    name: {{ $.Values.postgres.clusterName }}
+  name: {{ .id | quote }}
+  owner: {{ printf "%s_user" .id | quote }}
+  extensions:
+    - name: vector
+      ensure: present
+    - name: pg_textsearch
+      ensure: present
+  databaseReclaimPolicy: retain
+{{- end }}

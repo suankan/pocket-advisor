@@ -23,14 +23,15 @@ infra:
     url: nats://nats.pocket-advisor.svc.cluster.local:4222
 
   postgres:
-    # There is no admin connection. CloudNativePG gives each workspace its own
-    # cluster, so nothing creates a database or a role — the chart declares a
-    # Cluster CRD per workspace and the operator reconciles it.
+    # There is no admin connection. One shared CloudNativePG cluster now
+    # (deviation 34) — the chart declares it plus a Database/DatabaseRole CRD
+    # per workspace, and the operator reconciles all three.
     #
-    # A workspace's address is this template plus its id: the operator exposes
-    # each cluster's primary as <cluster>-rw, and the chart names the cluster
-    # <release>-<workspace-id>.
-    host_template: postgres-rw.%s.svc.cluster.local
+    # Not templated by workspace, unlike rustfs.endpoint above: there is only
+    # one cluster, in the release namespace, so its address is as constant as
+    # nats.url's. A workspace's own database and role names carry the id
+    # instead (<id>, <id>_user).
+    host: postgres-rw.pocket-advisor.svc.cluster.local
     port: 5432
     # `require`, not `verify-full`: CNPG issues its own internal CA, so
     # verifying the chain would mean shipping that CA to the host for no gain

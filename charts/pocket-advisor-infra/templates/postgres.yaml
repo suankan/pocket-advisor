@@ -1,39 +1,31 @@
 {{/*
-One CloudNativePG Cluster per workspace, plus the Secret holding that
-workspace's application password.
+One CloudNativePG Cluster, shared by every workspace — reverted from one
+cluster per workspace (ingestion-design.md deviation 34). Each workspace gets
+its own logical database and role inside this cluster instead, declared in
+postgres-workspaces.yaml.
 
-A cluster each, not one shared server with a database each. Physical isolation
-was already the rule for RustFS buckets and NATS accounts
-(workspace-isolation.md §2); Postgres was the outlier, sharing a server and
-separating workspaces by database and role. Now a workspace's Postgres is its
-own process, its own volume, and its own failure domain, and the operator owns
-the lifecycle rather than provisioning code.
+`Database` and `DatabaseRole` reference their `Cluster` by name only — no
+namespace field, so per Kubernetes convention that means "same namespace as
+the object doing the referencing." That is why this Cluster, and every
+workspace's Database/DatabaseRole/credentials Secret, live in the shared
+release namespace rather than each workspace's own namespace: RustFS and NATS
+keep their per-workspace-namespace isolation (workspace-isolation.md §2.2,
+§2.3); Postgres no longer does.
 
-That removes the whole in-database role model. Every cluster uses the same
-owner — the value of postgres.appUser — differing only by password, because
-there is nothing to separate *within* a cluster any more. CREATE ROLE, GRANT,
-ALTER SCHEMA OWNER and the superuser admin connection they needed all went
-with it (ingestion-design.md deviation 20).
-
-postInitApplicationSQL, not postInitSQL: the latter runs against the `postgres`
-database, so pgvector would be installed where nothing uses it and the
-halfvec(N) DDL would fail on a type the application database has never heard
-of. Verified against the CRD schema, which says so explicitly.
-
-The schema itself is still applied from the host, by --ingest-all and --listen
-on every run: the vector dimension is resolved by probing the embedding
-endpoint on localhost, which nothing inside the cluster can reach.
+The bootstrap database below is a CNPG requirement, not a real one: initdb
+needs *some* database and owner at cluster creation. Nothing in this
+application ever connects to it — every real database is a Database CRD,
+created after the cluster already exists, and gets its own extensions
+declared there rather than here.
 */}}
-{{- range $.Values.workspaces }}
----
 apiVersion: v1
 kind: Secret
 metadata:
-  namespace: {{ .id }}
-  name: postgres-app
+  namespace: {{ $.Values.global.namespace }}
+  name: postgres-bootstrap
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Application credentials for this workspace's Postgres cluster") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Bootstrap credentials CNPG requires at cluster creation; unused by the application") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
@@ -41,65 +33,48 @@ metadata:
 # username and password from these exact keys.
 type: kubernetes.io/basic-auth
 stringData:
-  username: {{ $.Values.postgres.appUser | quote }}
-  password: {{ required (printf "workspaces[%s].postgres.credentials.password is required" .id) .postgres.credentials.password | quote }}
+  username: {{ $.Values.postgres.bootstrapUser | quote }}
+  password: {{ required "postgres.credentials.bootstrapPassword is required" $.Values.postgres.credentials.bootstrapPassword | quote }}
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  namespace: {{ .id }}
-  name: postgres
+  namespace: {{ $.Values.global.namespace }}
+  name: {{ $.Values.postgres.clusterName }}
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Postgres cluster backing this workspace") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Shared Postgres cluster; every workspace's database and role live inside it") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
 spec:
-  # One. This is a single-node local cluster, so replicas would contend for the
-  # same disk and the same page cache while buying no availability — and there
-  # are as many clusters as workspaces.
+  # One. This is a single-node local cluster, so replicas would contend for
+  # the same disk and the same page cache while buying no availability.
   instances: {{ $.Values.postgres.instances }}
   imageName: {{ $.Values.postgres.image }}
 
   # pg_textsearch must be preloaded, not just CREATE EXTENSION'd — it installs
   # hooks the server only picks up at start. The operator writes this into
   # postgresql.conf before the first start, so it's already in effect by the
-  # time postInitApplicationSQL below runs CREATE EXTENSION on a fresh
-  # cluster; only a change to an *existing* cluster would need the restart
-  # this GUC normally requires.
+  # time any workspace's Database CRD runs CREATE EXTENSION.
   postgresql:
     shared_preload_libraries:
       - pg_textsearch
 
   bootstrap:
     initdb:
-      # One name for every workspace. The database name carries no information
-      # now that each workspace has its own cluster — the cluster name already
-      # says whose it is — so naming it after the workspace would only be a
-      # second place to keep in step.
-      #
       # Not `postgres`: that database already exists, owned by the superuser,
       # and the operator will not reassign it. Measured rather than assumed —
       # a cluster bootstrapped with database: postgres comes up healthy and
       # then refuses the first CREATE TABLE with "permission denied for schema
-      # public", because app_user owns nothing in it.
-      database: {{ $.Values.workspace.name | quote }}
-      owner: {{ $.Values.postgres.appUser | quote }}
+      # public", because the bootstrap owner owns nothing in it.
+      database: {{ $.Values.postgres.bootstrapUser | quote }}
+      owner: {{ $.Values.postgres.bootstrapUser | quote }}
       secret:
-        name: postgres-app
-      postInitApplicationSQL:
-        # Superuser-only, and the reason this cannot be folded into the DDL the
-        # host applies as the application user.
-        - CREATE EXTENSION IF NOT EXISTS vector;
-        # pg_textsearch also needs shared_preload_libraries — set above, not
-        # here, since that GUC is cluster-level and this runs once per
-        # database.
-        - CREATE EXTENSION IF NOT EXISTS pg_textsearch;
+        name: postgres-bootstrap
 
   storage:
     size: {{ $.Values.postgres.storage.size }}
 
   resources:
     {{- toYaml $.Values.postgres.resources | nindent 4 }}
-{{- end }}

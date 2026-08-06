@@ -14,6 +14,25 @@ import (
 const schemaSQL = `
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- Postgres grants CONNECT to PUBLIC on every new database by default —
+-- verified directly: with this un-run, a second workspace's role could
+-- connect to this one's database and list its tables (though not read them;
+-- object-level grants still held). One shared cluster (deviation 34) makes
+-- that reachable in a way one cluster per workspace never was, since there
+-- was no server to connect to in the first place. The database owner can
+-- revoke its own database's PUBLIC connect without being superuser — also
+-- verified directly — so this runs here, in the same DDL the workspace's own
+-- role already applies, rather than needing a separate administrative step.
+--
+-- The identifier-quoting placeholder below is doubled up: schemaSQL is
+-- itself a fmt.Sprintf format string (for the vector dimension below), so a
+-- single instance would be a Go verb, not Postgres's format() placeholder —
+-- go vet catches the unescaped form as an unknown verb, and left unescaped it
+-- would have mangled the REVOKE at runtime, not just failed to vet clean.
+DO $$ BEGIN
+    EXECUTE format('REVOKE CONNECT ON DATABASE %%I FROM PUBLIC', current_database());
+END $$;
+
 DO $$ BEGIN
     CREATE TYPE processing_status AS ENUM
         ('PENDING','PROCESSING','COMPLETED','SKIPPED','FAILED');

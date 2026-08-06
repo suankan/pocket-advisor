@@ -87,6 +87,7 @@ lint: fmt vet
 	@helm template $(RELEASE) $(CHART) \
 	  --set rustfs.credentials.rootUser=lint \
 	  --set rustfs.credentials.rootPassword=lint \
+	  --set postgres.credentials.bootstrapPassword=lint \
 	  --set workspaces[0].id=lintws \
 	  --set workspaces[0].rustfs.credentials.secretKey=lint \
 	  --set workspaces[0].nats.credentials.password=lint \

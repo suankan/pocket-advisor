@@ -57,9 +57,13 @@ of them:
   dropped 2026-08-01 (`ingestion-design.md` deviation 9). Identity comes
   from which bucket a `Vault` is connected to, never from a key.
 
-What this document adds is **physical, credential-level separation** on top
-of that: a workspace's data is unreachable from another workspace's
-credentials by construction, not by discipline.
+What this document adds is **credential-level separation, physical where the
+store allows it**, on top of that: a workspace's data is unreachable from
+another workspace's credentials by construction, not by discipline. RustFS
+and NATS get the physical form — a separate server, or a separate account
+with its own subject space. Postgres does not any more (§2.1, deviation 34):
+one shared cluster, isolation enforced by role grants a workspace's own
+schema-apply DDL sets automatically, not by there being no server to reach.
 
 ---
 
@@ -71,44 +75,66 @@ inside:
 
 | Store | Resource | Kind | Name | Where |
 | --- | --- | --- | --- | --- |
-| PostgreSQL | server | `Cluster` (postgresql.cnpg.io/v1) | `postgres` | ns `<workspace_id>` |
-| PostgreSQL | database / owner | — | `workspace` / `app_user` | inside that cluster |
+| PostgreSQL | server | `Cluster` (postgresql.cnpg.io/v1) | `postgres` | shared release ns |
+| PostgreSQL | database / owner | `Database` / `DatabaseRole` | `<workspace_id>` / `<workspace_id>_user` | inside that cluster |
 | RustFS | server | `Tenant` (rustfs.com/v1alpha1) | `rustfs` | ns `<workspace_id>` |
 | RustFS | bucket / identity | — | `workspace` / `workspace` | inside that tenant |
 | NATS | account + user | config block | `<workspace_id>` | shared server |
 | NATS | streams | `Stream` (jetstream.nats.io/v1beta2) × 3 | `INGESTION`, `INGESTION_DLQ`, `RUSTFS_EVENTS` | ns `<workspace_id>` |
 
-**Most of these names are constants, and that is the point.** The bucket, the
-database and the Postgres owner are the same string in every workspace,
-because the namespace already says whose they are — a workspace-derived name
-would repeat, in three places, information the address already carries. The
-NATS account is the exception: accounts share one server, so the id is the
-only thing keeping them apart (§2.3).
+**The bucket and RustFS identity are constants, and that is the point** — the
+same string in every workspace, because the namespace already says whose
+they are; a workspace-derived name would repeat, in two places, information
+the address already carries. Postgres and NATS are keyed by id instead, and
+for the same reason in both cases: both are shared, so id is what actually
+distinguishes one workspace's database, role, account and user from
+another's (§2.1, §2.3).
 
 The 1.x model — one shared Postgres server with a database and role per
-workspace, one shared RustFS with a bucket and identity per workspace — is
-gone. It was logical isolation dressed as physical: a bug or a privilege
-mistake inside the shared server could cross the boundary. Now there is no
-shared server to cross.
+workspace — was logical isolation dressed as physical: a bug or a privilege
+mistake inside the shared server could cross the boundary. Moving to one
+`Cluster` per workspace removed that risk entirely for a period, by removing
+the shared server. **Postgres has since moved back** (§2.1, `ingestion-design.md`
+deviation 34): the isolation this table now describes for Postgres is
+exactly the credential-level, role-and-grant kind 1.x had — with one
+correction 1.x lacked, a `PUBLIC`-connect revoke that closes the specific gap
+a shared instance reopens (§2.1). RustFS never had this problem to begin
+with; its per-workspace `Tenant` is untouched by any of this.
 
 ### 2.1 PostgreSQL
 
-One `Cluster` per workspace: its own process, its own volume, its own failure
-domain. The operator exposes each cluster's primary as a Service named
-`<cluster>-rw`, so a workspace's address is
-`postgres-rw.<workspace_id>.svc.cluster.local:5432` —
-`infra.postgres.host_template` plus an id is the whole thing.
+**One shared `Cluster`, not one per workspace** — reverted back
+(`ingestion-design.md` deviation 34) after a period where each workspace had
+its own process, its own volume, and its own failure domain. Every
+workspace's database and role now live inside one instance, declared as
+`Database` and `DatabaseRole` CRDs (`charts/pocket-advisor-infra/templates/
+postgres-workspaces.yaml`): database `<workspace_id>`, role `<workspace_id>_user`,
+owned by that role. The operator exposes the shared cluster's primary as
+`postgres-rw.pocket-advisor.svc.cluster.local:5432` — `infra.postgres.host`,
+untemplated, the same shape as `infra.nats.url`.
 
-Every cluster uses the same owner (`app_user`) and the same database
-(`workspace`), differing only by password. There is nothing to separate
-*within* a cluster, so the in-database role model that 1.x needed —
-`CREATE ROLE`, `GRANT`, `ALTER SCHEMA public OWNER`, and the superuser
-connection all three required — was deleted rather than carried forward
-(`ingestion-design.md` deviation 20).
+**These two CRDs live in the shared release namespace, not the workspace's
+own.** They reference their `Cluster` by name only — no namespace field —
+which in Kubernetes always means "the same namespace as this object." RustFS
+and NATS keep the per-workspace-namespace isolation §2.2 and §2.3 describe;
+Postgres's Kubernetes-level blast radius no longer matches theirs.
 
-Isolation is Postgres's own access-control model, one level up from where 1.x
-applied it: a role with no credentials for another workspace's *server*
-cannot reach it, regardless of what any query does.
+**Isolation moved from "which server can this role reach" to Postgres's own
+role-and-grant model, and that model has a default that had to be closed by
+hand.** A role with no credentials for another workspace's cluster used to be
+unable to reach it at all — there was no server to connect to. On a shared
+instance, every role can reach every database unless told otherwise: Postgres
+grants `CONNECT` to `PUBLIC` on every newly created database by default.
+Verified directly, before the fix: a second workspace's role could connect to
+a database it had no business touching and list its tables with `\dt`,
+though not read their contents — object-level grants (`OWNER`, no `GRANT`
+to anyone else) still held. The fix is one statement,
+`REVOKE CONNECT ON DATABASE ... FROM PUBLIC`, run as part of the same DDL a
+workspace's own role already applies to its own database
+(`internal/storage/postgres/schema.go`) — also verified directly: a database
+owner can revoke its own database's `PUBLIC` connect without being
+superuser, and it actually blocks a different role's connection afterward,
+not merely its ability to read.
 
 This supersedes query-level scoping rather than complementing it. The fusion
 query in `retrieval-design.md` §3.3 does not filter on `workspace_id` at all:
@@ -118,7 +144,8 @@ than reveal that it should not be there. The read path instead asserts once at
 startup that the connected database holds exactly one `workspace_id` and that
 it is the expected one, and refuses to serve otherwise
 (`retrieval-design.md` §3.4). What a request selects is a connection pool, not
-a filter.
+a filter. That assertion is unchanged by any of the above — it was never
+about which server a role could reach.
 
 `sslmode=require`, not `verify-full`: CNPG issues its own internal CA, so
 verifying the chain would mean distributing that CA to the host binary for no
@@ -202,10 +229,12 @@ infra:
     url: nats://nats.pocket-advisor.svc.cluster.local:4222
 
   postgres:
-    # Also a template. There is no admin DSN: CloudNativePG gives each
-    # workspace its own cluster, so nothing creates a database or a role and
-    # there is no maintenance connection to hold.
-    host_template: postgres-rw.%s.svc.cluster.local
+    # Not a template, unlike rustfs.endpoint above: one shared cluster now
+    # (deviation 34), in the release namespace, so its address is as constant
+    # as nats.url's. There is no admin DSN either way: the chart declares
+    # every workspace's database and role as CRDs, so nothing this binary
+    # does creates one.
+    host: postgres-rw.pocket-advisor.svc.cluster.local
     port: 5432
     sslmode: require
 
@@ -350,14 +379,24 @@ and `infra.kubernetes.*` are all gone.
 3. `make deploy-infra`.
 
 One release manages every workspace. The chart renders that workspace's
-namespace, its `Cluster`, its `Tenant`, its three `Stream`s, and its account
-block in the shared NATS config, and `make deploy-infra` waits for each to
-report Ready.
+namespace, its `Tenant`, its three `Stream`s, and its account block in the
+shared NATS config — plus, in the *shared* release namespace rather than its
+own, its `Database` and `DatabaseRole` on the one Postgres `Cluster`
+(deviation 34, §2.1). `make deploy-infra` waits for each to report Ready.
 
-**Removing one is the same operation in reverse:** delete its entry and
-re-deploy. Helm removes the namespace, which takes its volumes with it. There
-is no confirmation prompt on this path and no `--yes` — it is a chart edit,
-and the safeguard is that it is deliberate.
+**Removing one is the same operation in reverse, with one asymmetry Postgres
+introduces.** Delete its entry and re-deploy. Helm removes the namespace,
+which takes its RustFS and NATS volumes with it, same as before. Its
+`Database`/`DatabaseRole` objects are pruned too — they are chart-rendered
+like everything else — but `databaseReclaimPolicy`/`databaseRoleReclaimPolicy`
+are deliberately `retain`, not `delete`: dropping a workspace should not
+silently take its Postgres data with it the way removing a namespace does for
+the other two stores, since the shared cluster has no per-workspace volume to
+delete *from*. The database and role survive, orphaned, until removed by
+hand — there is no `make destroy-state`-equivalent scoped to one workspace
+yet (§10). There is no confirmation prompt on the chart-edit path and no
+`--yes` either way — it is deliberate, and the Postgres asymmetry above is the
+one place "deliberate" now means "leaves data behind," not "removes it."
 
 **Ordering, which 1.x's `--create-workspace` had to enforce in code and the
 chart gets for free.** Operators reconcile; they do not run in sequence. A
@@ -500,6 +539,14 @@ vault and was refused on all 79 objects it tried to touch
    `make deploy-infra` annotates every tenant to force the reconcile the
    operator should retry itself. Remove the workaround once it does
    (`ingestion-design.md` deviation 22).
+5. **No scoped Postgres cleanup for one removed workspace.** §6 records the
+   asymmetry deviation 34 introduced: removing a workspace's entry deletes its
+   `Database`/`DatabaseRole` Kubernetes objects, but their reclaim policy is
+   `retain`, so the underlying Postgres database and role survive, orphaned,
+   in the shared cluster. `make destroy-state` wipes every workspace's data at
+   once; nothing today targets one. Not built because the case has not come
+   up yet — a workspace has not actually been removed from a live cluster —
+   not because it is hard.
 
 ---
 
@@ -537,19 +584,27 @@ constrain the chart:
 1. **`CREATE EXTENSION` needs superuser, and pgvector is not "trusted."** The
    first run failed with `permission denied to create extension "vector"`,
    because the DDL was running as the workspace's own deliberately
-   unprivileged role. **Still load-bearing:** it is why the `Cluster` CRD
-   carries `postInitApplicationSQL: CREATE EXTENSION IF NOT EXISTS vector` —
-   the operator runs it as superuser at bootstrap, before the application role
-   ever connects. `postInitApplicationSQL`, not `postInitSQL`: the latter runs
-   against the `postgres` database, where nothing would use it.
+   unprivileged role. **The fact is still load-bearing; the mechanism has
+   moved twice.** At the time this was found, the fix was
+   `postInitApplicationSQL: CREATE EXTENSION IF NOT EXISTS vector` on a
+   per-workspace `Cluster`, run as superuser at bootstrap before the
+   application role ever connected. Deviation 34 moved it again: one shared
+   `Cluster` now, so each workspace's extensions are declared on its own
+   `Database` CRD (`spec.extensions`) instead — the operator still applies
+   them with the privilege the workspace's own role never has, just scoped
+   per database rather than run once at cluster bootstrap.
 2. **PostgreSQL 15+ does not grant `CREATE` on `public` to new roles.**
    `GRANT ALL PRIVILEGES ON DATABASE` does not touch schema-level privileges,
    and a fresh database's `public` schema is owned by the bootstrap superuser.
-   1.x worked around it with `ALTER SCHEMA public OWNER TO <id>`. **Now
-   structural:** CNPG's `bootstrap.initdb` creates the database *owned by*
-   `app_user`, so there is nothing to reassign. The related trap — a cluster
-   bootstrapped with `database: postgres` comes up healthy and then refuses
-   the first `CREATE TABLE` — is why the database is named `workspace`.
+   1.x worked around it with `ALTER SCHEMA public OWNER TO <id>`. **Structural
+   ownership survived deviation 34's reversal, through a different CRD:**
+   `bootstrap.initdb` on the shared `Cluster` now only creates an inert
+   placeholder database nothing connects to; each workspace's real database
+   is a `Database` CRD with `owner: <id>_user` set directly, so there is
+   still nothing to reassign, just declared in a different place. The related
+   trap — a cluster bootstrapped with `database: postgres` comes up healthy
+   and then refuses the first `CREATE TABLE` — is why neither the placeholder
+   nor any workspace database is ever named `postgres`.
 3. **NATS's `/accountz` field is `accounts`, not `account_list`.** An
    unverified guess in the account-polling code, wrong, and found only
    because the account had in fact loaded correctly. The polling itself is

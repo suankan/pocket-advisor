@@ -36,11 +36,11 @@ const (
 	// namespaces, so there is a single shared server with an account per
 	// workspace (deviation 23).
 	defaultNATSURL = "nats://nats.pocket-advisor.svc.cluster.local:4222"
-	// Each workspace has its own CloudNativePG cluster, and the operator
-	// exposes its primary as a Service named <cluster>-rw. The chart names the
-	// cluster <release>-<workspace-id>, so this template plus a workspace id
-	// is the whole address.
-	defaultPostgresHostTemplate = "postgres-rw.%s.svc.cluster.local"
+	// Not templated by workspace, unlike RustFS: one shared CloudNativePG
+	// cluster now (ingestion-design.md deviation 34), in the release
+	// namespace alongside NATS, so its address is exactly as constant as
+	// defaultNATSURL's.
+	defaultPostgresHost = "postgres-rw.pocket-advisor.svc.cluster.local"
 	// The embedding endpoint is a plain localhost address now: the process that
 	// calls it runs on the machine that serves it, so the host.docker.internal
 	// indirection the in-cluster workers needed is gone.
@@ -52,15 +52,11 @@ const (
 	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
 	defaultWorkspacesValuesPath = "workspaces/pocket-advisor-infra.yaml"
 
-	// Match charts/pocket-advisor-infra/values.yaml's postgres.appUser and
-	// appDatabase: the owner and database CloudNativePG creates in every
-	// workspace cluster. Both are the same everywhere — the cluster is already
-	// per-workspace, so neither name carries information.
-	defaultPostgresAppUser = "app_user"
-
-	// Match charts/pocket-advisor-infra/values.yaml's workspace.name: the bucket, the
-	// NATS account and the Postgres database are all called this, in every
-	// namespace. The namespace already says whose they are.
+	// Match charts/pocket-advisor-infra/values.yaml's workspace.name: the
+	// bucket and the RustFS identity are called this, in every namespace. The
+	// namespace already says whose they are. The Postgres database and role
+	// are not this any more — deviation 34 made them `<id>` and `<id>_user`,
+	// since one shared cluster needs names that actually differ.
 	defaultWorkspaceResourceName = "workspace"
 
 	// DefaultPath is where Load looks unless told otherwise.
@@ -98,16 +94,18 @@ type RustFS struct {
 }
 
 type Postgres struct {
-	// There is no admin DSN. CloudNativePG gives each workspace its own
-	// cluster, so nothing creates a database or a role and there is no
-	// maintenance connection to hold (deviation 20). Every connection is a
-	// workspace's own, built by WorkspacePostgresDSN.
+	// There is no admin DSN. Every workspace's database and role are
+	// declared by the chart (Database/DatabaseRole CRDs, deviation 34), so
+	// nothing this binary does creates one, and there is no maintenance
+	// connection to hold. Every connection is a workspace's own, built by
+	// WorkspacePostgresDSN.
 
-	// HostTemplate resolves a workspace id to its cluster's primary Service.
-	// CNPG names that <cluster>-rw, and the chart names the cluster
-	// <release>-<workspace-id>.
-	HostTemplate string
-	Port         int
+	// Host is the one shared cluster's primary Service — CNPG names that
+	// <cluster>-rw. Not templated by workspace: unlike the one-cluster-per-
+	// workspace shape this replaced, there is only one address, in the
+	// release namespace, the same as defaultNATSURL's.
+	Host string
+	Port int
 	// SSLMode is `require` rather than `verify-full`: CNPG issues its own
 	// internal CA, so verifying the chain would mean distributing that CA to
 	// the host binary for no gain on a local cluster. `require` still
@@ -242,10 +240,10 @@ type file struct {
 			URL string `yaml:"url"`
 		} `yaml:"nats"`
 		Postgres struct {
-			HostTemplate string `yaml:"host_template"`
-			Port         int    `yaml:"port"`
-			SSLMode      string `yaml:"sslmode"`
-			MaxConns     int32  `yaml:"max_conns"`
+			Host     string `yaml:"host"`
+			Port     int    `yaml:"port"`
+			SSLMode  string `yaml:"sslmode"`
+			MaxConns int32  `yaml:"max_conns"`
 		} `yaml:"postgres"`
 		Embedding struct {
 			Endpoint    string `yaml:"endpoint"`
@@ -333,10 +331,10 @@ func defaults() *Config {
 			UseSSL:   false,
 		},
 		Postgres: Postgres{
-			HostTemplate: defaultPostgresHostTemplate,
-			Port:         5432,
-			SSLMode:      "require",
-			MaxConns:     50,
+			Host:     defaultPostgresHost,
+			Port:     5432,
+			SSLMode:  "require",
+			MaxConns: 50,
 		},
 		NATS:                 NATS{URL: defaultNATSURL},
 		WorkspacesConfigPath: defaultWorkspacesConfigPath,
@@ -395,7 +393,7 @@ func applyFile(c *Config, path string) error {
 
 	setStr(&c.NATS.URL, in.NATS.URL)
 
-	setStr(&c.Postgres.HostTemplate, in.Postgres.HostTemplate)
+	setStr(&c.Postgres.Host, in.Postgres.Host)
 	setStr(&c.Postgres.SSLMode, in.Postgres.SSLMode)
 	if in.Postgres.Port != 0 {
 		c.Postgres.Port = in.Postgres.Port
@@ -479,7 +477,7 @@ func applyEnv(c *Config) {
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
 
-	c.Postgres.HostTemplate = env("POSTGRES_HOST_TEMPLATE", c.Postgres.HostTemplate)
+	c.Postgres.Host = env("POSTGRES_HOST", c.Postgres.Host)
 	c.Postgres.MaxConns = int32(envInt("POSTGRES_MAX_CONNS", int(c.Postgres.MaxConns)))
 
 	c.WorkspacesConfigPath = env("WORKSPACES_CONFIG", c.WorkspacesConfigPath)
@@ -559,9 +557,11 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 		}
 	}
 
-	// The namespace is the workspace id, and every address is the same service
-	// name inside it. Nothing here is looked up by name in a shared namespace
-	// any more, which is why the resource names are all one constant.
+	// The namespace is the workspace id, and RustFS's address is the same
+	// service name inside it — which is why its resource names are one
+	// constant (defaultWorkspaceResourceName). Postgres and NATS are keyed by
+	// id instead: both are shared now, so id is what actually distinguishes
+	// one workspace's database, role, account and user from another's.
 	return Workspace{
 		ID:         id,
 		Namespace:  id,
@@ -572,24 +572,26 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 		RustFSAccessKey: defaultWorkspaceResourceName,
 		RustFSSecretKey: entry.RustFS.Credentials.SecretKey,
 
-		NATSURL: c.NATS.URL,
-		// Keyed by workspace id, unlike the bucket and database: those are
-		// alone in a namespace, while accounts share one server.
+		NATSURL:      c.NATS.URL,
 		NATSAccount:  id,
 		NATSUser:     id,
 		NATSPassword: entry.NATS.Credentials.Password,
 
-		PostgresHost: fmt.Sprintf(c.Postgres.HostTemplate, id),
-		DBName:       defaultWorkspaceResourceName,
-		DBUser:       defaultPostgresAppUser,
+		// One shared cluster (deviation 34): the host is constant, and the
+		// database and role names are what the chart's Database/DatabaseRole
+		// CRDs actually created — templates/postgres-workspaces.yaml.
+		PostgresHost: c.Postgres.Host,
+		DBName:       id,
+		DBUser:       id + "_user",
 		DBPassword:   entry.Postgres.Credentials.Password,
 	}, nil
 }
 
 // WorkspacePostgresDSN builds the connection string a workspace's own role
-// uses, from its cluster's primary Service and its own database, owner and
-// password (workspace-isolation.md §2.1, §3). It is the only Postgres
-// connection string in this project: there is no administrative one.
+// uses, from the shared cluster's primary Service and its own database,
+// owner and password (workspace-isolation.md §2.1, §3). It is the only
+// Postgres connection string in this project: there is no administrative
+// one.
 func (c *Config) WorkspacePostgresDSN(id string) (string, error) {
 	w, err := c.Workspace(id)
 	if err != nil {

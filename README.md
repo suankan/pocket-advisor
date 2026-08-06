@@ -146,10 +146,12 @@ bucket publishes where.
 Infrastructure endpoints live under `infra:` in
 [`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,
 so you only edit it to point somewhere else. Environment variables override
-the file (`RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, `POSTGRES_HOST_TEMPLATE`,
-…). There is no Postgres admin connection to configure: CloudNativePG gives
-each workspace its own cluster, so nothing creates a database or a role, and
-`host_template` plus a workspace id is the whole address.
+the file (`RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, `POSTGRES_HOST`,
+…). There is no Postgres admin connection to configure: one shared
+CloudNativePG cluster now, with the chart declaring a database and role per
+workspace on top of it, so nothing this binary does creates one — `host` is a
+plain, untemplated address, the database and role names carry the workspace
+id instead (`<id>`, `<id>_user`).
 
 ### Add your first workspace
 

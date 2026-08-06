@@ -1,10 +1,20 @@
 # pocket-advisor runs on the host, against the three stores in the local
-# cluster. There are no container images to build any more.
+# cluster. The one container image the chart still needs is Postgres itself,
+# built with pg_textsearch layered on (docker-images/postgres) — everything
+# else is stock.
 
 BIN     := bin/pocket-advisor
 PKG     := ./cmd/pocket-advisor
 RELEASE := pocket-advisor
 CHART   := charts/pocket-advisor-infra
+
+# pg_textsearch ships no image of its own, only tagged source
+# (docker-images/postgres/Dockerfile). linux/arm64 explicitly rather than
+# left to the host default: this cluster is OrbStack, which is arm64-only,
+# and OrbStack's Kubernetes shares the host Docker daemon's image store
+# directly — a locally built image needs no registry or push to be visible
+# to the cluster, only a matching architecture.
+POSTGRES_IMAGE := pocket-advisor-postgres:18-pg_textsearch-v1.3.1
 
 # The private per-workspace override: names and credentials for each
 # workspace's database, bucket and NATS account. Gitignored, and the same file
@@ -38,8 +48,8 @@ GO    := mise exec -- go
 GOFMT := mise exec -- gofmt
 endif
 
-.PHONY: all build test race vet fmt lint deploy-infra destroy-infra \
-        destroy-state clean
+.PHONY: all build test race vet fmt lint docker-build-postgres deploy-infra \
+        destroy-infra destroy-state clean
 
 # No target takes a workspace. One release renders every workspace from
 # WS_VALUES, so adding or removing one is an edit to that file followed by
@@ -88,9 +98,17 @@ lint: fmt vet
 	  || (echo "FAIL: rendered workspace is incomplete"; exit 1)
 
 
+# Built fresh on every deploy rather than cached and rebuilt by hand: the
+# Dockerfile pins pg_textsearch's version, so a stale local image can only
+# mean stock ghcr.io/cloudnative-pg/postgresql was pulled since, not that the
+# extension changed underneath anyone.
+docker-build-postgres:
+	docker build --platform linux/arm64 \
+	  -t $(POSTGRES_IMAGE) docker-images/postgres
+
 # The chart carries RustFS, NATS, and one CloudNativePG Cluster per workspace.
 # Nothing in it runs pipeline code.
-deploy-infra:
+deploy-infra: docker-build-postgres
 	@test -f $(WS_VALUES) || (echo "missing $(WS_VALUES)"; exit 1)
 	@# Two attempts, and the first is expected to fail on a fresh cluster.
 	@# CloudNativePG installs a mutating webhook, and applying a Cluster

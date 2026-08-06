@@ -195,6 +195,19 @@ destroy-state:
 	@for ns in $(NS) $$(kubectl get ns -l app.kubernetes.io/part-of=rag-ingestion-engine -o name 2>/dev/null | cut -d/ -f2); do \
 	  kubectl delete pvc --all --namespace $$ns --ignore-not-found; \
 	done
+	@# Workspace namespaces are chart-rendered (templates/namespaces.yaml) and
+	@# went into Terminating the moment destroy-infra ran, held there by
+	@# finalizers on what they still contained — the CNPG Cluster, these same
+	@# PVCs — until the deletes above clear them. Waiting here, rather than
+	@# leaving it to the caller, is what makes deploy-infra safe to run
+	@# immediately afterward: without this, a namespace still finishing
+	@# termination fails Secret/Cluster creation with "being terminated", and
+	@# "run deploy-infra again" only works by luck of how fast that particular
+	@# run's finalizers happened to clear.
+	@for ns in $$(kubectl get ns -l app.kubernetes.io/part-of=rag-ingestion-engine -o name 2>/dev/null | cut -d/ -f2); do \
+	  echo "waiting for namespace $$ns to finish terminating..."; \
+	  kubectl wait --for=delete namespace/$$ns --timeout=5m || true; \
+	done
 
 clean:
 	rm -rf bin

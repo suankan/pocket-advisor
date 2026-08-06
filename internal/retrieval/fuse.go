@@ -22,9 +22,8 @@ type candidate struct {
 
 // fusionSQL runs both legs and fuses them in one round trip.
 //
-// $1 query vector, $2 embed_model, $3 vec_candidates, $4 lexical tsquery
-// (already built — see buildTSQuery), $5 fts_candidates, $6 rrf_k,
-// $7 rerank_candidates.
+// $1 query vector, $2 embed_model, $3 vec_candidates, $4 the sub-query's own
+// text (raw — see below), $5 fts_candidates, $6 rrf_k, $7 rerank_candidates.
 //
 // Three things are load-bearing. FULL OUTER JOIN, because a chunk found by
 // only one leg is exactly what RRF exists to handle. 1/(k+rank) rather than
@@ -32,6 +31,19 @@ type candidate struct {
 // filters embed_model too, without which a re-embed backfill surfaces the same
 // text twice under two namespaces as two chunk_ids RRF cannot recognise as
 // duplicates (§3.3).
+//
+// The lexical leg scores with pg_textsearch's BM25 rather than ts_rank_cd —
+// real IDF, term-frequency saturation and document-length normalisation,
+// where ts_rank_cd had none of the three and needed a hand-rolled
+// document-frequency ceiling standing in for the IDF it lacked. to_bm25query
+// does its own tokenisation against the index's own text_config, so the raw
+// sub-query text is passed straight through: no lexeme extraction, no
+// disjunction-building, no separate round trip (§3.3).
+//
+// <@> returns a *negated* score — Postgres index scans only support ascending
+// order, per pg_textsearch's own docs — so ORDER BY is ASC here, the opposite
+// of ts_rank_cd's DESC. Getting this backwards silently inverts relevance
+// rather than erroring.
 //
 // No workspace_id predicate: each workspace is its own database, so it would
 // match every row. Scope is asserted once at startup instead, where it can
@@ -47,10 +59,12 @@ WITH dense AS (
 ),
 lexical AS (
     SELECT c.chunk_id,
-           ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC) AS rank
+           ROW_NUMBER() OVER (
+               ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
+           ) AS rank
     FROM document_chunks c
-    WHERE $4 <> '' AND c.embed_model = $2 AND c.fulltext_search @@ $4::tsquery
-    ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC
+    WHERE $4 <> '' AND c.embed_model = $2
+    ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
     LIMIT $5
 ),
 fused AS (
@@ -69,63 +83,11 @@ JOIN documents d USING (doc_id)
 ORDER BY f.rrf DESC
 LIMIT $7`
 
-// tsquerySQL builds the lexical query from the question's own lexemes.
-//
-// websearch_to_tsquery is deliberately not used. It ANDs every term, and the
-// 'simple' configuration — mandatory for a bilingual corpus — strips no
-// stopwords, so a real question becomes a conjunction including its own
-// grammar and matches nothing. Measured: every natural-language question
-// returned zero (§3.3).
-//
-// Terms are disjoined, not conjoined. AND survives two terms and dies at
-// three, because chunks are atomic ~2000-character passages and three specific
-// words rarely co-occur in one. Better keywords do not rescue it — that was
-// tested directly.
-//
-// High-frequency lexemes are dropped. Plain OR floods: 280 of 348 chunks
-// matched and the top results ranked on "the" density. The ceiling measures
-// "would this term flood the results" rather than approximating a stopword
-// list, which makes it language-blind — it drops `the` at 58% of chunks while
-// no Russian term crosses it, because a term too rare to flood needs no
-// filtering.
-//
-// Injection safety comes free: to_tsvector reduces input to lexemes before any
-// operator can be interpreted, and quote_literal handles embedded quotes.
-//
-// The ::float8 casts on the ceiling are load-bearing, not decoration. Written
-// as count(*) * $2, Postgres infers $2 as bigint — it prefers the bigint
-// multiply against count(*) — so a 0.5 ceiling arrives as 0, GREATEST clamps
-// it to 1, and only lexemes appearing in no chunk at all survive. That yields
-// a plausible-looking non-empty tsquery matching nothing, killing the lexical
-// leg silently. It did exactly that until caught by acceptance criterion 14.
-const tsquerySQL = `
-WITH lex AS (
-  SELECT lexeme,
-         (SELECT count(*) FROM document_chunks c
-          WHERE c.fulltext_search @@ (quote_literal(lexeme))::tsquery) AS df
-  FROM unnest(to_tsvector('simple', $1))
-)
-SELECT COALESCE(string_agg(quote_literal(lexeme), ' | '), '')
-FROM lex
-WHERE df::float8 < GREATEST((SELECT count(*) FROM document_chunks)::float8 * $2::float8, 1)`
-
-// buildTSQuery returns the disjunctive tsquery for a sub-query, or "" when the
-// input yields no usable lexemes — a stopword-only or punctuation-only
-// question. Empty is reported rather than left to look like a lexical miss.
-func (s *Service) buildTSQuery(ctx context.Context, q string) (string, error) {
-	var tq string
-	err := s.DB.Pool.QueryRow(ctx, tsquerySQL, q, s.cfg.LexicalDFCeiling).Scan(&tq)
-	if err != nil {
-		return "", fmt.Errorf("build tsquery: %w", err)
-	}
-	return tq, nil
-}
-
 // fuse runs one sub-query's two legs and returns its fused candidates.
-func (s *Service) fuse(ctx context.Context, vec []float32, tsquery string, subIdx int) ([]candidate, error) {
+func (s *Service) fuse(ctx context.Context, vec []float32, query string, subIdx int) ([]candidate, error) {
 	rows, err := s.DB.Pool.Query(ctx, fusionSQL,
 		formatVector(vec), s.Embedder.Model(),
-		s.cfg.VecCandidates, tsquery, s.cfg.FTSCandidates,
+		s.cfg.VecCandidates, query, s.cfg.FTSCandidates,
 		s.cfg.RRFK, s.cfg.RerankCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("fusion query: %w", err)

@@ -157,14 +157,13 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("embed sub-query %d: %w", i+1, err)
 		}
-		tsq, err := sub.buildTSQuery(ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		if tsq == "" {
+		// BM25 tokenises the raw text itself (fuse.go), so there is no
+		// separate query-construction step left to fail — only the
+		// degenerate case of nothing to tokenise at all.
+		if strings.TrimSpace(q) == "" {
 			warn.add(WarnLexicalQueryEmpty)
 		}
-		cands, err := sub.fuse(ctx, vecs[0], tsq, i)
+		cands, err := sub.fuse(ctx, vecs[0], q, i)
 		if err != nil {
 			return nil, err
 		}

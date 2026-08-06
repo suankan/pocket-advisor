@@ -194,7 +194,6 @@ type Query struct {
 	MinRelevanceScore    float64
 	MaxPerThread         int
 	AnswerContextChars   int
-	LexicalDFCeiling     float64
 	DecomposeEnabled     bool
 	MaxSubQueries        int
 	PoolFloorDenseOnly   int
@@ -360,7 +359,6 @@ func defaults() *Config {
 			MinRelevanceScore:    0.0,
 			MaxPerThread:         3,
 			AnswerContextChars:   120000,
-			LexicalDFCeiling:     0.5,
 			DecomposeEnabled:     true,
 			MaxSubQueries:        4,
 			PoolFloorDenseOnly:   6,

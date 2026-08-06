@@ -79,22 +79,53 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     -- a retrieval-time lookup through doc_id (§5.6).
     chunk_text        TEXT    NOT NULL,
     embed_model       VARCHAR NOT NULL,
-    embedding         halfvec(%[1]d),
-    -- 'simple', not 'english': the corpus is bilingual and Postgres cannot
-    -- select a stemmer per row (§4.2). Indexes the chunk's own text only —
-    -- folding a shared subject line in here would make every chunk of a thread
-    -- match on it, which is the same cross-contamination in the lexical leg
-    -- that atomic embedding avoids in the dense one.
-    fulltext_search   TSVECTOR GENERATED ALWAYS AS
-                          (to_tsvector('simple', chunk_text)) STORED
+    embedding         halfvec(%[1]d)
 );
 
 CREATE INDEX IF NOT EXISTS chunks_doc_idx       ON document_chunks(doc_id);
 CREATE INDEX IF NOT EXISTS chunks_workspace_idx ON document_chunks(workspace_id, embed_model);
-CREATE INDEX IF NOT EXISTS chunks_fts_idx       ON document_chunks USING GIN (fulltext_search);
 CREATE INDEX IF NOT EXISTS chunks_hnsw_idx      ON document_chunks
     USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
 `
+
+// searchIndexName is the lexical leg's BM25 index. Named, not anonymous,
+// because to_bm25query's two-argument form (BuildSearchIndex, fuse.go) must
+// name the index it scores against.
+const searchIndexName = "chunks_bm25_idx"
+
+// BuildSearchIndex creates the lexical leg's BM25 index.
+//
+// Deliberately not part of schemaSQL. pg_textsearch's own guidance is to
+// load data before indexing it — its write path is not yet optimised for
+// sustained concurrent inserts, and this application's ingestion is exactly
+// that: one row per chunk, streamed continuously by a NATS worker, not a
+// single bulk load. Callers build this once, after every write for a run has
+// landed (retrieval-design.md §3.3).
+//
+// 'simple', not 'english': the corpus is bilingual and Postgres cannot select
+// a stemmer per row (§4.2). Indexes the chunk's own text only — folding a
+// shared subject line in here would make every chunk of a thread match on
+// it, the same cross-contamination atomic embedding avoids in the dense leg.
+func (d *DB) BuildSearchIndex(ctx context.Context) error {
+	_, err := d.Pool.Exec(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS %s ON document_chunks
+		 USING bm25 (chunk_text) WITH (text_config='simple')`, searchIndexName))
+	if err != nil {
+		return fmt.Errorf("build search index: %w", err)
+	}
+	return nil
+}
+
+// DropSearchIndex removes the BM25 index before a bulk ingest run begins, so
+// pg_textsearch never has to maintain it incrementally against a stream of
+// individual inserts — see BuildSearchIndex.
+func (d *DB) DropSearchIndex(ctx context.Context) error {
+	_, err := d.Pool.Exec(ctx, fmt.Sprintf(`DROP INDEX IF EXISTS %s`, searchIndexName))
+	if err != nil {
+		return fmt.Errorf("drop search index: %w", err)
+	}
+	return nil
+}
 
 // SchemaMetadata records what the index was actually built for.
 type SchemaMetadata struct {

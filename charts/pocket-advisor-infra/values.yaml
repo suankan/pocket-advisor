@@ -129,11 +129,15 @@ postgres:
   # operator installs with this chart as a dependency — see the Operators
   # section at the bottom.
   #
-  # The image is CNPG's own Postgres 18 build, which already carries pgvector —
-  # so there is no separate pgvector image to keep in step with the server
-  # version. A major-version bump still means new volumes: the on-disk format
-  # changes, and the operator will not rewrite it in place.
-  image: ghcr.io/cloudnative-pg/postgresql:18-standard-trixie
+  # CNPG's own Postgres 18 build with pg_textsearch layered on
+  # (docker-images/postgres/Dockerfile) — pgvector ships with the base image
+  # already, so pg_textsearch is the only extension this chart has to build
+  # itself. `make deploy-infra` builds this image first (docker-build-postgres
+  # in the Makefile); it never leaves the local Docker daemon, since
+  # OrbStack's Kubernetes shares that daemon's image store directly. A major
+  # Postgres version bump still means new volumes either way: the on-disk
+  # format changes, and the operator will not rewrite it in place.
+  image: pocket-advisor-postgres:18-pg_textsearch-v1.3.1
 
   # One instance per cluster. See the comment in templates/postgres.yaml.
   instances: 1

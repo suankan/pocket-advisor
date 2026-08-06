@@ -105,6 +105,25 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		"model", cfg.Embedding.Model, "dimension", info.Dimension,
 		"sessions", embedder.Concurrency(), "probe_ms", probeTook.Milliseconds())
 
+	// The BM25 lexical index is dropped before a full ingest run's writes
+	// begin and rebuilt once after they all land (below, after WaitDrained) —
+	// pg_textsearch's own guidance is to load data before indexing it, and
+	// this run is about to stream chunk inserts continuously rather than in
+	// one bulk load. --scan/--reconcile add only a handful of documents to an
+	// already-indexed, already-queried workspace, so they leave the index in
+	// place rather than paying for a full rebuild each time.
+	//
+	// Not fatal: an index that fails to drop degrades write throughput during
+	// this run, it does not lose or corrupt anything, and aborting the whole
+	// ingest over it would be a worse trade (§7 silent-degradation principle
+	// aside — this is reported, just not fatal).
+	if o.IngestAll {
+		if err := a.DB.DropSearchIndex(ctx); err != nil {
+			a.Log.Warn("search index drop failed; writes may be slower than usual this run",
+				"error", err)
+		}
+	}
+
 	stats := telemetry.NewStats()
 
 	pipe, err := pipeline.New(ctx, a, stats, embedder,
@@ -157,6 +176,16 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 
 	fmt.Print(view.Summary())
 	fmt.Printf("logs      %s\n", logs.Dir())
+
+	// Built on ctx, not workCtx: whatever landed before an interrupt is still
+	// real committed data and deserves to be searchable, even if the run that
+	// wrote it was cut short.
+	if o.IngestAll {
+		if err := a.DB.BuildSearchIndex(ctx); err != nil {
+			a.Log.Warn("search index build failed; lexical search will underperform until the next full ingest",
+				"error", err)
+		}
+	}
 
 	if feedErr != nil {
 		return feedErr

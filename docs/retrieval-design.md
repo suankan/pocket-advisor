@@ -1,11 +1,30 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.6.0`
+**Version:** `2.7.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
-**Target Runtime:** Go over PostgreSQL + pgvector, HTTP to local model endpoints
+**Target Runtime:** Go over PostgreSQL + pgvector + pg_textsearch, HTTP to
+local model endpoints
+
+**Changes in 2.7.0:** the lexical leg is real BM25 (`pg_textsearch`), not
+`ts_rank_cd` scoring a hand-built disjunctive `tsquery`. `ts_rank_cd` has no
+IDF, no term-frequency saturation, and no document-length normalisation, which
+is exactly why §3.3's `lexical_df_ceiling` existed — a document-frequency cutoff
+standing in for the IDF the ranking function itself lacked. BM25 has real IDF,
+so the caller no longer builds a query at all: `to_bm25query` tokenises the
+raw sub-query text against the index's own `text_config`, in the same round
+trip as fusion. `lexical_df_ceiling` is removed along with the code path it
+configured. §3.3 is rewritten; the retired construction's measured history
+stays, compressed, because the facts it established (why `websearch_to_tsquery`
+is unusable, why chunk atomicity makes AND unsatisfiable) remain true
+regardless of which ranking function scores the OR. Schema change: the
+`fulltext_search` generated column and its GIN index are dropped — nothing
+reads them once BM25 owns the lexical leg — replaced by a `bm25` index built
+and dropped around each ingest run rather than maintained live, since
+`pg_textsearch`'s write path is not yet tuned for continuous per-row inserts
+(`ingestion-design.md`, `docker-images/postgres/Dockerfile`).
 
 **Changes in 2.6.0:** adds a relevance floor to selection (§5.1). `top_k`
 previously returned fifteen results whether or not fifteen were relevant,
@@ -122,7 +141,7 @@ question
    │   query embedding (~23 ms)                  │
    │      ├─────────────┬──────────────┐         │
    │    dense leg   lexical leg                  │
-   │    HNSW cosine  GIN tsvector                │
+   │    HNSW cosine  BM25 (pg_textsearch)        │
    │      └──────► RRF fusion (~5 ms)            │
    └──────────────────────────────────────────── ┘
                  │
@@ -186,7 +205,7 @@ thirds.
 | Leg | Index | Candidates | Finds what the other misses |
 | --- | --- | --- | --- |
 | Dense | HNSW cosine on `halfvec` | 50 | paraphrase, cross-lingual matches, conceptual similarity |
-| Lexical | GIN on `tsvector` (`simple`) | 50 | exact identifiers, account numbers, names, rare terms |
+| Lexical | `bm25` (`pg_textsearch`, `simple`) | 50 | exact identifiers, account numbers, names, rare terms |
 
 Both are filtered to the active `embed_model` namespace — and **only** to it;
 see §3.4 for why the workspace filter is gone.
@@ -248,8 +267,10 @@ Postgres can fuse, so fusion is one round trip rather than transferring two
 candidate sets to the client:
 
 ```sql
--- $4 is a prepared tsquery, built by the caller (see below) — not raw text
--- handed to websearch_to_tsquery.
+-- $4 is the sub-query's own raw text — to_bm25query tokenises it inline,
+-- against the bm25 index's own text_config. No separate query-construction
+-- round trip, and no dynamic SQL to build: it is a parameterised argument
+-- like the dense leg's query vector, not a string assembled by the caller.
 WITH dense AS (
     SELECT chunk_id,
            ROW_NUMBER() OVER (ORDER BY embedding <=> $1::halfvec) AS rank
@@ -260,10 +281,12 @@ WITH dense AS (
 ),
 lexical AS (
     SELECT c.chunk_id,
-           ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC) AS rank
+           ROW_NUMBER() OVER (
+               ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
+           ) AS rank
     FROM document_chunks c
-    WHERE c.embed_model = $2 AND c.fulltext_search @@ $4::tsquery
-    ORDER BY ts_rank_cd(c.fulltext_search, $4::tsquery) DESC
+    WHERE $4 <> '' AND c.embed_model = $2
+    ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
     LIMIT $5                                    -- fts_candidates (50)
 ),
 fused AS (
@@ -281,7 +304,7 @@ ORDER BY f.rrf_score DESC
 LIMIT $7;                                       -- rerank_candidates (24)
 ```
 
-Three things are load-bearing:
+Four things are load-bearing:
 
 * **`FULL OUTER JOIN`, not inner.** A chunk found by only one leg is exactly
   the case RRF exists to handle; an inner join would discard it.
@@ -293,151 +316,107 @@ Three things are load-bearing:
   backfill (`ingestion-design.md` §4.4) surfaces the same text twice under
   two namespaces, as two different `chunk_id`s that RRF cannot recognise as
   duplicates.
+* **`<@>` returns a *negated* BM25 score, so the lexical `ORDER BY` is `ASC`**
+  — the opposite of `ts_rank_cd`'s `DESC`. `pg_textsearch` negates it because
+  Postgres index scans only support ascending order; getting this backwards
+  silently inverts relevance rather than raising an error.
 
-#### Building the lexical query
+#### The lexical leg is `pg_textsearch`, not a hand-built query
 
-**Do not use `websearch_to_tsquery`.** Version 1.0.0 specified it and it is
-the obvious choice, which is why this says otherwise explicitly.
+Version 2.3.0–2.6.0 scored the lexical leg with `ts_rank_cd` over a
+disjunctive `tsquery` this codebase built by hand, term by term, because
+`ts_rank_cd` has no inverse document frequency, no term-frequency saturation,
+and no document-length normalisation — the three things an actual BM25 formula
+provides natively. `pg_textsearch` (v1.3.1) adds a real `bm25` index type and
+scores with the standard Okapi BM25 formula, so none of that hand-rolling is
+needed any more:
 
-It ANDs every term of the input, and `simple` — mandatory for a bilingual
-corpus, §3.2 — strips no stopwords. So a real question becomes a conjunction
-including its own grammar:
+* **No tsquery construction.** `to_bm25query(text, index_name)` tokenises the
+  raw sub-query directly against the index's `text_config`. There is no
+  lexeme-extraction step, no frequency-based term dropping, and nothing built
+  as a SQL string — the whole `tsquerySQL` round trip this document used to
+  describe here is gone.
+* **`text_config = 'simple'`**, same choice as before and for the same reason
+  — the corpus is bilingual (§3.2) and Postgres cannot select a stemmer per
+  row.
+* **The index is not part of `schemaSQL`.** `pg_textsearch`'s own guidance is
+  to load data before indexing it — its write path is not yet tuned for
+  continuous per-row inserts, which is exactly this application's ingestion
+  pattern (a NATS worker streaming one chunk at a time, not a bulk load).
+  `DropSearchIndex` runs before a full `--ingest-all` run's writes begin;
+  `BuildSearchIndex` runs once, after `pipe.WaitDrained` confirms every write
+  has landed (`internal/cli/ingest.go`). `--scan`/`--reconcile` leave the
+  index in place, since they add a handful of documents to an
+  already-queried workspace rather than streaming a whole corpus.
+* **Cost is unmeasured against the live corpus** — there is exactly one query
+  now instead of a fusion query plus a separate tsquery-building query, so it
+  is strictly less work than before, but no figure is recorded here until it
+  is actually timed against real data.
 
-```
-'What was the closing balance?'  →  'what' & 'was' & 'the' & 'closing' & 'balance'
-```
+#### Why a hand-rolled query existed at all (history)
 
-All five must co-occur inside one ~2000-character chunk. Measured against the
-live corpus, **that returns zero**, and so does every natural-language
-question tried. The lexical leg is not merely weak under this construction,
-it is inert — every fusion query run during this design was dense-only, which
-makes principle 3 false in practice rather than in principle.
+The measurements below motivated the `tsquerySQL` construction 2.7.0 retires.
+They are kept because the facts remain true regardless of which ranking
+function scores the result — BM25 does not change what a `tsquery` operator
+does, only what replaces it.
 
-Nor is this fixable by choosing a different builder: `plainto_tsquery` and
-`phraseto_tsquery` also hard-code AND, and Postgres ships no "match any term"
-constructor. Any correct behaviour here requires building the tsquery
-directly.
+**`websearch_to_tsquery` is unusable.** It ANDs every term, and `simple` —
+mandatory for a bilingual corpus — strips no stopwords, so a real question
+becomes a conjunction including its own grammar: `'What was the closing
+balance?'` → `'what' & 'was' & 'the' & 'closing' & 'balance'`, and all five
+must co-occur inside one ~2000-character chunk. Measured against the live
+corpus, that returns **zero** for every natural-language question tried — the
+lexical leg was not weak, it was inert. `plainto_tsquery` and
+`phraseto_tsquery` hard-code AND too; there is no Postgres-native "match any
+term" tsquery constructor.
 
-**Construction.** Derive lexemes with `to_tsvector`, drop the ones that would
-flood, and join what remains:
+**Conjunction dies at three terms, structurally.** `AND` with two terms
+(`closing & balance`) returned 55 candidates, precise and correct. Three terms
+(`agreed & children & school`) returned zero, and so did every four-term set
+tried. The cause is chunk atomicity, not query quality: `chunk_text` is an
+atomic ~2000-character passage (`ingestion-design.md` deviation 13), and
+requiring three specific words to co-occur inside one is an unlikely event
+independent of which words they are. **The more atomic the chunk, the less
+satisfiable any conjunction becomes.** This is also why AND is structurally
+unable to serve a multi-topic question: no chunk contains keywords from two
+topics that live in different documents.
 
-```sql
-WITH lex AS (
-  SELECT lexeme,
-         (SELECT count(*) FROM document_chunks c
-          WHERE c.fulltext_search @@ (quote_literal(lexeme))::tsquery) df
-  FROM unnest(to_tsvector('simple', $1))
-)
-SELECT string_agg(quote_literal(lexeme), ' | ')::tsquery
-FROM lex WHERE df < (SELECT count(*) * 0.5 FROM document_chunks);
-```
+**Better keywords did not rescue AND**, tested directly rather than assumed.
+An LLM keyword extraction for a real question produced five clean, well-chosen
+terms; ANDed, it still returned zero — one term didn't match due to a
+stemming mismatch (`holiday` vs `holidays`), and removing it left three
+present-in-corpus terms that still didn't co-occur. The same five terms
+disjoined returned 91 candidates, ranked sensibly — which is what disjunction
+plus a real ranking function was always going to give, keyword quality being
+equal.
 
-**Drop by document frequency, not by a stopword list.** The threshold is not
-approximating "stopword" — it directly measures *would this term flood the
-result set*, which is the actual concern, and it is therefore language-blind.
-That matters here because a stopword list would need an English one, a
-Russian one, and maintenance forever, and would still miss corpus-specific
-noise like a case reference appearing in every solicitor email.
+**Frequency identifies noise; it cannot select signal.** In a domain corpus,
+content words can be *more common* than stopwords — `balance` appeared in
+38.5% of chunks against `what` at 8.6%, for the question `What was the closing
+balance?`. This is why `tsquerySQL`'s document-frequency ceiling could only
+ever be a drop filter, never a keyword selector, and why it was language-blind
+by construction rather than an approximated stopword list: `the` crossed the
+threshold at 58% of chunks while no Russian term ever did, because Russian was
+the minority language and its function words were globally rare there. BM25's
+own IDF term generalises this correctly — continuous weighting by rarity,
+not a binary cutoff — which is the concrete thing 2.7.0 gains over the ceiling
+it replaces.
 
-Measured on the live corpus, `the` occupies 58% of chunks and is dropped;
-no Russian term crosses the threshold at all, because Russian is the minority
-language and its function words are globally rare. That looks like
-under-filtering and is not: a term too rare to flood needs no filtering. The
-threshold self-corrects with corpus composition.
+**What `websearch_to_tsquery` gave up, and BM25 does not restore.** User-typed
+search syntax — `"quoted phrases"`, `OR`, `-exclusion` — was never available
+under lexeme construction and still isn't: `pg_textsearch` v1.3.1 stores term
+frequencies, not positions, so it cannot evaluate phrase queries either
+(v1.3.1 known limitation). That cost nothing before and costs nothing now —
+there is no search box, no API, no UI, and queries are natural-language
+questions, not typed syntax.
 
-**Do not use frequency to *select* keywords.** The inverse operation fails,
-and the failure is counter-intuitive enough to be worth recording. Frequencies
-for `What was the closing balance?`:
-
-| term | % of chunks | |
-| --- | --- | --- |
-| `the` | 58.0% | stopword |
-| **`balance`** | **38.5%** | **content** |
-| **`closing`** | **16.1%** | **content** |
-| `what` | 8.6% | stopword |
-| `was` | 8.3% | stopword |
-
-The content words are *more common* than the stopwords, because in a domain
-corpus every bank statement says "balance" and almost nothing says "what".
-Any threshold aggressive enough to remove `what` would remove `balance` and
-`closing` first. Frequency identifies noise at the extreme top; it cannot
-separate signal from grammar in general.
-
-**Disjunction, always.** The terms are joined with `|`, never `&`. This was
-not the first answer — an AND-then-OR fallback was specified and removed once
-measured — and the reasoning matters, because conjunction is the intuitive
-choice and looks strictly more precise.
-
-| form | behaviour |
-| --- | --- |
-| AND, 2 terms (`closing & balance`) | 55 candidates — precise and correct |
-| AND, 3 terms (`agreed & children & school`) | **0** |
-| AND, 4 terms | **0** — every four-term set tried |
-| OR, unfiltered | 280 of 348 candidates, top-ranked by `the` density — **confidently wrong** |
-| **OR, frequency-filtered** | 179 candidates, bank statements ranked top — correct |
-
-AND survives two terms and dies at three. The cause is the chunking decision,
-not the query: `chunk_text` is an atomic passage of ~2000 characters
-(`ingestion-design.md` deviation 13), and requiring three specific words to
-co-occur inside one such passage is simply an unlikely event. **The more
-atomic the chunk, the less satisfiable any conjunction becomes** — the two
-decisions are in direct tension, and chunk atomicity wins because it is load
-bearing for the dense leg.
-
-It is also *structurally* incapable of serving a multi-topic question: no
-chunk contains keywords from two topics that live in different documents.
-
-**Better keywords do not rescue it**, and this was tested directly rather
-than assumed. Asking `Qwen3.5-4B-MLX-4bit` for five FTS keywords from *"What
-did we agree about the children's school holidays in July during our last
-email exchange?"* produced, in 0.94 s and with no preamble,
-`agreed, children, school, holidays, July` — a good extraction. Through
-`websearch_to_tsquery` with AND it returned **zero**. Two independent causes:
-
-* `holidays` matches no chunk; the corpus says `holiday`, and `simple` does
-  not stem. One zero-matching term zeroes the conjunction. The same failure
-  appears in Russian more severely — the model lemmatises `Россию` to
-  `Россия`, which matches nothing at all, while the surface form matches five
-  chunks.
-* Removing that term changes nothing. `agreed & children & school`, three
-  terms present in 17, 66 and 15 chunks, still returns zero.
-
-The same five keywords under OR returned 91 candidates, ranked sensibly. So
-an LLM keyword-extraction stage is viable and fast, but it earns nothing: for
-OR its output is what the question's own lexemes already give, minus a
-network call, minus the lemmatisation hazard, and minus a non-deterministic
-dependency in a path that should be reproducible. It is recorded here as
-tested and rejected specifically so that "the keywords weren't good enough"
-is not offered as an explanation later — they were.
-
-OR always yields a ranked list, which is what RRF actually consumes. The
-leg's job is to contribute an ordered 50, not to be a filter; the reranker
-already exists to discard the tail.
-
-**Injection safety comes free.** `to_tsvector` reduces input to lexemes
-before any operator can be interpreted, and `quote_literal` handles embedded
-quotes. Verified against adversarial input: `balance & !parenting` yields
-`'balance' | 'parenting'`, `foo' | 'bar` yields `'bar' | 'foo'`, and
-`;drop table documents;--` yields three inert lexemes.
-
-**What this gives up.** `websearch_to_tsquery` supports user-typed search
-syntax — `"quoted phrases"`, `OR`, `-exclusion`. Lexeme construction discards
-all of it: `closing <-> balance` becomes a plain disjunction. That costs
-nothing today because nothing can type a quote — there is no search box, no
-API, no UI, and queries are natural-language questions. If a UI appears and
-phrase search is wanted, route queries containing explicit syntax through
-`websearch_to_tsquery` and keep lexeme construction for plain questions.
-Not before.
-
-**Empty query guard.** A stopword-only or punctuation-only input yields an
-empty tsquery matching nothing — `!!! ???` and `''` both produce one. The
-caller checks before executing and reports `lexical_query_empty` in
-`warnings` (§7.1) rather than letting it look like a lexical miss.
-
-**Cost.** 2.9 ms including the per-term frequency counts, at 348 chunks.
-Those counts are GIN lookups and stay cheap, but they are per query term and
-per query; at substantially larger corpora, precompute a term-frequency table
-refreshed after ingest rather than counting inline.
+**Empty query guard.** A blank sub-query — decomposition producing an empty
+line, not a real degenerate case for user input — reports `lexical_query_empty`
+in `warnings` (§7.1) before the fusion query runs, rather than letting it look
+like a lexical miss. This is now a plain string check rather than a detection
+based on tokenisation output: BM25 has no "empty tsquery" failure mode the
+way `to_tsvector` did, since it doesn't build an intermediate query object a
+caller can inspect for emptiness.
 
 ### 3.4 The post-filter recall trap — now about `embed_model`
 
@@ -502,8 +481,8 @@ DDL changes for another reason.
 ### 3.5 What a chunk is, and where context comes from
 
 Chunks are **atomic**. `chunk_text` is exactly
-`normalized_text[start:end]`, that string alone is what was embedded, and
-`fulltext_search` indexes the same string and no more. Nothing about the
+`normalized_text[start:end]`, that string alone is what was embedded, and the
+`bm25` index (§3.3) indexes the same string and no more. Nothing about the
 document or thread a chunk belongs to is encoded into it
 (`ingestion-design.md` deviation 13).
 
@@ -1069,7 +1048,7 @@ mechanism that can quietly reduce quality reports itself:
 | warning | raised when | §ref |
 | --- | --- | --- |
 | `dense_leg_underfill` | dense leg returned materially fewer rows than requested | §3.4 |
-| `lexical_query_empty` | the query produced an empty tsquery | §3.3 |
+| `lexical_query_empty` | the sub-query was blank before it ever reached BM25 | §3.3 |
 | `decomposition_unavailable` | decomposer failed; served on the original question | §3.6 |
 | `pool_floor_applied` | a reserved floor displaced a higher-scoring candidate | §4.1 |
 | `reranker_unavailable` | served on RRF order after a reranker failure | §4 |
@@ -1142,9 +1121,6 @@ query:
   max_per_thread: 3                # §5.1
   answer_context_chars: 120000     # per ANSWER, shared across packets (§5.3)
 
-  # Lexical query construction (§3.3)
-  lexical_df_ceiling: 0.5          # drop lexemes present in >50% of chunks
-
   # Query decomposition (§3.6)
   decompose_enabled: true
   max_sub_queries: 4
@@ -1155,10 +1131,15 @@ query:
 ```
 
 `min_relevance_score` is the exception to what follows: it is calibrated
-against the model rather than chosen (§5.1). `lexical_df_ceiling` and the two
-pool floors are the least-grounded numbers here. They work on 348 chunks against the queries in this document; none has
-been swept. Each has an acceptance criterion (§10) rather than a claim to
-being tuned.
+against the model rather than chosen (§5.1). The two pool floors are the
+least-grounded numbers here. They work on 348 chunks against the queries in
+this document; neither has been swept. Each has an acceptance criterion (§10)
+rather than a claim to being tuned.
+
+`k1` (1.2) and `b` (0.75) are `pg_textsearch`'s own BM25 defaults, set on the
+index (`WITH (text_config='simple')`, §3.3), not this table — they are
+index-invalidating in the same way chunk size and embedding model are, so
+they belong to ingestion's schema, not to per-query tuning.
 
 `rerank_text_chars` is deliberately absent — see §4.
 
@@ -1228,17 +1209,23 @@ is ~99% of query latency by design, so it is the first thing to regress.
     and report `reranker_unavailable`.
 12. Chronological neighbours are labelled distinctly from reply-lineage
     relationships.
-13. A stopword-only query reports `lexical_query_empty` rather than silently
-    returning dense-only results.
+13. A blank sub-query reports `lexical_query_empty` rather than silently
+    returning dense-only results. A stopword-only or punctuation-only
+    *natural-language* input is no longer this case — BM25 has no "empty
+    tsquery" failure mode, it just scores such a query weakly — so this now
+    exercises the one real degenerate input, an empty string, rather than the
+    tsquery-construction edge cases §3.3 used to document.
 14. **A natural-language question produces a non-empty lexical leg.** This is
-    the criterion whose absence let §3.3's original construction ship an
-    inert leg while the design claimed hybrid retrieval. It must be exercised
-    with a full question — "What was the closing balance?" — not a keyword
-    phrase, and in both languages.
-15. A three-or-more-term question still yields lexical candidates. This is
-    the criterion that would have caught the conjunction failure: good
-    keywords ANDed together returned zero while the same terms disjoined
-    returned 91 (§3.3).
+    the criterion whose absence let §3.3's pre-2.7.0 construction ship an
+    inert leg while the design claimed hybrid retrieval. Kept as a standing
+    regression guard, not just history: it must be exercised with a full
+    question — "What was the closing balance?" — not a keyword phrase, and in
+    both languages.
+15. A three-or-more-term question still yields lexical candidates. Under the
+    retired `tsquery` construction this was the criterion that would have
+    caught AND's conjunction failure (§3.3 history); BM25 has no AND/OR choice
+    to fail, but the criterion is kept as a general regression guard for the
+    lexical leg on longer questions.
 16. A multi-topic question retrieves both topics. Concretely: a question
     combining a bank-statement topic and a correspondence topic returns at
     least one document of each, which the undecomposed form does not (§3.6).
@@ -1309,19 +1296,22 @@ re-litigated from scratch.
    overwhelmingly genuine topical clustering: those 23 messages really are
    about the same subject. The cap is load-bearing on its own merits.
 
-5. **Threshold values in §8 are unswept.** `lexical_df_ceiling` (0.5),
-   `pool_floor_dense_only` (6) and `pool_floor_per_sub_query` (4) were each
-   chosen to satisfy a measured case, not by sweeping. They are cheap to change and index-invariant, and
-   each has an acceptance criterion; tune once there is a query log rather
-   than a handful of examples.
+5. **Threshold values in §8 are unswept.** `pool_floor_dense_only` (6) and
+   `pool_floor_per_sub_query` (4) were each chosen to satisfy a measured case,
+   not by sweeping. They are cheap to change and index-invariant, and each has
+   an acceptance criterion; tune once there is a query log rather than a
+   handful of examples. `lexical_df_ceiling`, formerly listed here, is gone
+   along with the code path it configured (§3.3, 2.7.0); `pg_textsearch`'s
+   `k1`/`b` are index-level and left at the extension's own defaults,
+   unswept for the same reason as everything else in this list.
 
-6. **Whether chunk size and the lexical leg should be tuned together.**
-   §3.3 found conjunction unusable because three terms rarely co-occur inside
-   one ~2000-character chunk. That is a property of the chunk size, not of the
-   query: larger chunks would make AND viable and blunt the dense leg, smaller
-   ones sharpen the dense leg and push the lexical leg further toward pure
-   disjunction. The two have been tuned independently so far, and the
-   interaction is unmeasured.
+6. **Resolved by 2.7.0: whether chunk size and the lexical leg should be tuned
+   together.** This asked whether larger chunks would make `AND` viable and
+   blunt the dense leg, since §3.3 found conjunction unusable at three terms
+   inside a ~2000-character chunk. The question dissolved rather than being
+   answered: BM25 has no `AND`/`OR` choice to be sensitive to chunk size in
+   the first place, so this tension no longer exists for the lexical leg to
+   be tuned against.
 
 7. **Multi-turn sessions are entirely out of scope, deliberately.** `Request`
    carries a question, not a conversation, and there is no chat surface, API

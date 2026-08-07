@@ -42,6 +42,8 @@ Each case supports:
 
 Commit a small synthetic corpus and evaluation set under test fixtures. Store real evaluation cases and generated reports only under a gitignored path inside `workspaces/`. Never commit real questions, source hashes, titles, paths, snippets, reports, or workspace identifiers.
 
+Include a broad multi-document discussion case with several participants, topics, and time periods. Measure relevant-source, topic-group, participant, and conversation coverage under the default `top_k` and aggregate evidence budget, together with warning frequency and evidence omitted by that budget. This case evaluates retrieval coverage only; it does not grade an agent's prose or treat semantic top-k as proof of exhaustive discussion coverage.
+
 ### Supported evaluation command
 
 Add a supported host command that runs evaluation for one fixed workspace, emits a human summary by default, and can emit machine-readable JSON. Keep the evaluator in a transport-independent package; the CLI is an adapter.
@@ -65,11 +67,13 @@ Report at least:
 - reciprocal rank of the first acceptable source;
 - nDCG when relevance grades are present;
 - multi-topic coverage;
+- broad-discussion source, topic, participant, and conversation coverage;
 - forbidden-source and unexpected-result counts;
 - expected-empty pass rate;
 - candidate yield by dense and lexical leg;
 - warning frequency;
-- context-budget truncation frequency; and
+- context-budget truncation frequency;
+- evidence bytes and sources omitted by the aggregate budget; and
 - per-stage and end-to-end latency distributions.
 
 ### Exact-search and HNSW comparison
@@ -108,7 +112,7 @@ Record enough configuration in a report to reproduce a comparison: commit id, ca
 
 ## Acceptance criteria
 
-- A committed synthetic corpus exercises exact identifiers, paraphrases, bilingual search, multi-topic decomposition, thread context, attachments, and off-domain empty results.
+- A committed synthetic corpus exercises exact identifiers, paraphrases, bilingual search, multi-topic decomposition, a broad multi-document discussion, thread context, attachments, and off-domain empty results.
 - One supported command runs the synthetic suite and a private suite through the normal retrieval configuration.
 - CI runs the synthetic suite without network access to private services or access to `workspaces/`.
 - Reports distinguish every retrieval stage and include the required ranking, coverage, warning, budget, and latency measures.

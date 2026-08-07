@@ -46,8 +46,8 @@ type Related struct {
 // Match locates a packet's hit inside its document.
 type Match struct {
 	ChunkID   string  `json:"chunk_id"`
-	StartChar int     `json:"start_char"`
-	EndChar   int     `json:"end_char"`
+	StartByte int     `json:"start_byte"`
+	EndByte   int     `json:"end_byte"`
 	Score     float64 `json:"score"`
 	Legs      string  `json:"legs"` // dense | lexical | both
 	SubQuery  string  `json:"sub_query,omitempty"`
@@ -167,7 +167,7 @@ func (s *Service) loadNeighbours(ctx context.Context, matched []string) ([]neigh
 	return out, rows.Err()
 }
 
-// budgeter allocates the single per-answer character allowance.
+// budgeter allocates the single per-answer UTF-8 byte allowance.
 //
 // The allowance is shared across all packets, not per packet, which would let
 // a 15-packet answer blow any context window. Matched documents draw it down

@@ -12,8 +12,8 @@ type candidate struct {
 	DocID     string
 	ThreadID  string
 	Text      string
-	StartChar int
-	EndChar   int
+	StartByte int
+	EndByte   int
 	DenseRank int // 0 when the dense leg did not return it
 	LexRank   int // 0 when the lexical leg did not return it
 	RRF       float64
@@ -98,7 +98,7 @@ func (s *Service) fuse(ctx context.Context, vec []float32, query string, subIdx 
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.ChunkID, &c.DocID, &c.ThreadID, &c.Text,
-			&c.StartChar, &c.EndChar, &c.DenseRank, &c.LexRank, &c.RRF); err != nil {
+			&c.StartByte, &c.EndByte, &c.DenseRank, &c.LexRank, &c.RRF); err != nil {
 			return nil, err
 		}
 		c.SubQuery = subIdx

@@ -77,7 +77,7 @@ The compiled defaults are 15 returned matches, a reranker relevance floor of `0.
 
 An empty `thread_id` denotes a standalone document and is not capped as a shared conversation. A below-floor candidate is never restored merely to fill the requested count.
 
-Each returned packet contains the matched document's metadata and source text, the chunk ID and byte range, its reranker score, the search leg or legs that found it, a snippet, source hash, and Tier 1 URI. The JSON fields retain the current `start_char` and `end_char` names even though Go string slicing makes their values UTF-8 byte offsets. Related documents are labeled using stored facts:
+Each returned packet contains the matched document's metadata and source text, the chunk ID and UTF-8 byte range, its reranker score, the search leg or legs that found it, a snippet, source hash, and Tier 1 URI. The transport-independent result and CLI JSON use `start_byte` and `end_byte`; MCP additionally carries `offset_unit: utf8_bytes`. Related documents are labeled using stored facts:
 
 - `parent` for the matched document's recorded parent;
 - `attachment` for a recorded child document; and
@@ -85,11 +85,11 @@ Each returned packet contains the matched document's metadata and source text, t
 
 Chronological adjacency is never represented as a reply edge.
 
-All packets share a default context budget configured as 120,000 `answer_context_chars`. The current budgeter charges `len(text)`, so the enforced unit is UTF-8 bytes despite the configuration and result field names. It first offers each packet its matched document, then related documents, so a large conversation cannot consume the allowance before other primary matches are considered. Text that does not fit is omitted and produces `budget_truncated`; the document metadata and relationship remain available.
+All packets share a default 120,000 UTF-8 byte context budget. The budgeter charges `len(text)`, exposes `bytes_used` and `bytes_allowed` in the transport-independent result, and labels the unit explicitly in MCP. It first offers each packet its matched document, then related documents, so a large conversation cannot consume the allowance before other primary matches are considered. Text that does not fit is omitted and produces `budget_truncated`; the document metadata and relationship remain available.
 
 ## Results and degradation signals
 
-`retrieval.Result` contains the original question, effective sub-queries, evidence packets, warnings, and used and allowed character counts. Empty packet and warning collections are serialized as empty arrays.
+`retrieval.Result` contains the original question, effective sub-queries, evidence packets, warnings, and used and allowed UTF-8 byte counts. Empty packet and warning collections are serialized as empty arrays.
 
 Current warnings are:
 
@@ -102,7 +102,7 @@ Current warnings are:
 | `reranker_unavailable` | Reranking failed and fused order was returned. |
 | `relevance_floor_applied` | Below-floor candidates caused fewer than the requested results to be selected. |
 | `thread_capped` | A conversation produced more selected documents than the per-thread limit. |
-| `budget_truncated` | Some document text did not fit the shared character allowance. |
+| `budget_truncated` | Some document text did not fit the shared UTF-8 byte allowance. |
 
 Embedding, SQL, lineage-loading, and packet-building errors fail the query. Decomposition and reranking failures have defined fallbacks because the system can still produce a useful, explicitly degraded result.
 
@@ -116,9 +116,21 @@ The current process emits structured logs and includes warning codes in CLI and 
 
 ### stdio MCP
 
-`./bin/pocket-advisor --mcp --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes one generated query tool. It supports MCP initialization, tool listing, tool calls, and ping; it does not open a network listener.
+`./bin/pocket-advisor --mcp --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes generated search and evidence-reading tools. It implements the final MCP revisions from 2024-11-05 through 2025-11-25, negotiates only those revisions, enforces initialize/initialized lifecycle order, supports ping and cancellation, and does not open a network listener. The direct protocol implementation remains smaller than introducing an SDK for this bounded method set; every advertised revision and method is covered by protocol tests.
 
-The MCP server renders evidence packets as source-oriented text for an external agent. Answer generation therefore occurs in that client, outside this repository, in the current system.
+`tools/list` advertises closed, bounded input schemas and one shared JSON Schema 2020-12 evidence-page output schema. Both tools have display titles and read-only, non-destructive, idempotent, closed-world annotations. Workspace scope is absent from their inputs. The search tool accepts a bounded question and optional result count. The evidence reader accepts only an opaque continuation cursor; clients cannot select a result, document, byte range, storage location, or workspace.
+
+A search creates an immutable session-local snapshot of the typed retrieval result and returns a compact ranked index. Packets have collision-free result-scoped references such as `R0123456789ab:E1`; document and chunk identifiers; source hash and Tier 1 URI; match snippet, score, search legs, explicit UTF-8 byte offsets; text availability and omission state; and related-document counts. Dates and absent identifiers are nullable and collections are never null. Subsequent evidence pages use the same references and deliver primary and related admitted text in server-selected UTF-8-safe ranges, preferring paragraph boundaries when they fit.
+
+Every page is returned both as typed `structuredContent` and as readable `TextContent` generated from the same value. It reports `complete`, nullable `next_cursor` and `continuation_tool`, current response budget, aggregate evidence budget, retrieval warnings, and an explicit delivery warning while more evidence remains. The aggregate retrieval allowance defaults to 120,000 UTF-8 bytes across the result; it is not reset per page. An agent may stop when it has enough cited support, but it cannot claim complete admitted-evidence coverage until a page reports `complete: true`.
+
+The server targets at most 48 KiB for the encoded `CallToolResult` and 1,800 readable lines so the complete JSON-RPC response remains below an absolute 50 KiB and 2,000-readable-line client boundary. Both structured and readable representations count toward the result target. The server never depends on client spill files or tool-output truncation recovery.
+
+Continuation cursors are random, opaque, bound to the current stdio session and fixed workspace, and idempotent on retry. They reference the immutable snapshot rather than rerunning retrieval. Access extends a ten-minute expiry; the session retains at most eight snapshots and 2 MiB of encoded snapshot data, evicts the least recently used snapshot when necessary, and releases all state at shutdown. Expired, evicted, malformed, wrong-session, and wrong-workspace cursors return the same bounded correctable tool error.
+
+Invalid tool arguments return a correctable tool error. An unknown tool is a protocol error. Retrieval and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded page is rejected with an instruction to narrow and rerun the question. Valid request frames are limited to 8 MiB, request identifiers to 256 encoded bytes, questions to 8,192 Unicode characters before whitespace trimming, cursors to 256 bytes, and `top_k` to 50.
+
+The external MCP agent uses complete result-scoped packet references for citations and performs answer generation. It must preserve warning, relation, and incomplete-delivery semantics; it says that the corpus supplied no evidence when a completed search has no packets rather than answering from general knowledge.
 
 ## Target service boundary
 
@@ -130,7 +142,7 @@ Target observability should expose per-stage latency, candidate yields by leg, w
 
 ## Verification
 
-Use the repository commands in [README §9](../README.md#9-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, and the manual query and MCP smoke tests in the handbook.
+Use the repository commands in [README §9](../README.md#9-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, MCP lifecycle and cancellation fixtures, JSON Schema validation, and the manual query and supported-client smoke checks in the handbook.
 
 ## Open decisions
 

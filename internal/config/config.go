@@ -209,7 +209,7 @@ type Query struct {
 	RerankCandidates     int
 	MinRelevanceScore    float64
 	MaxPerThread         int
-	AnswerContextChars   int
+	AnswerContextBytes   int
 	DecomposeEnabled     bool
 	MaxSubQueries        int
 	PoolFloorDenseOnly   int
@@ -413,7 +413,7 @@ func defaults() *Config {
 			RerankCandidates:     24,
 			MinRelevanceScore:    0.0,
 			MaxPerThread:         3,
-			AnswerContextChars:   120000,
+			AnswerContextBytes:   120000,
 			DecomposeEnabled:     true,
 			MaxSubQueries:        4,
 			PoolFloorDenseOnly:   6,

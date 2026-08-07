@@ -10,6 +10,7 @@ require (
 	github.com/nats-io/nats.go v1.37.0
 	github.com/otiai10/gosseract/v2 v2.4.1
 	github.com/prometheus/client_golang v1.24.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0

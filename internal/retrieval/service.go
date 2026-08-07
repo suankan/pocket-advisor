@@ -115,8 +115,8 @@ type Result struct {
 }
 
 type Budget struct {
-	CharsUsed    int `json:"chars_used"`
-	CharsAllowed int `json:"chars_allowed"`
+	BytesUsed    int `json:"bytes_used"`
+	BytesAllowed int `json:"bytes_allowed"`
 }
 
 // Query runs the read path end to end.
@@ -140,7 +140,7 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 	sub := *s
 	sub.cfg = cfg
 
-	res := &Result{Question: question, Budget: Budget{CharsAllowed: cfg.AnswerContextChars}}
+	res := &Result{Question: question, Budget: Budget{BytesAllowed: cfg.AnswerContextBytes}}
 	warn := newWarnSet()
 
 	// 1. Prepare: split a multi-topic question so one vector does not land
@@ -205,7 +205,7 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 	// correct outcome — an off-domain question should return nothing — and a
 	// consumer should not have to distinguish "no results" from "field absent".
 	res.Packets = nonNilPackets(packets)
-	res.Budget.CharsUsed = budget.used
+	res.Budget.BytesUsed = budget.used
 	res.Warnings = nonNilStrings(warn.list())
 	res.SubQueries = nonNilStrings(res.SubQueries)
 	return res, nil

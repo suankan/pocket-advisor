@@ -3,9 +3,10 @@ package retrieval
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
 )
 
-const snippetChars = 240
+const snippetBytes = 240
 
 // buildPackets turns selected matches into the deliverable: each matched
 // document with its provenance, its text, and what it is part of.
@@ -15,7 +16,7 @@ const snippetChars = 240
 // single long thread cannot consume the allowance and leave other matched
 // documents with nothing (§5.3).
 func (s *Service) buildPackets(ctx context.Context, picked []scored, subQueries []string) ([]Packet, *budgeter, error) {
-	budget := newBudgeter(s.cfg.AnswerContextChars)
+	budget := newBudgeter(s.cfg.AnswerContextBytes)
 	if len(picked) == 0 {
 		return nil, budget, nil
 	}
@@ -49,7 +50,7 @@ func (s *Service) buildPackets(ctx context.Context, picked []scored, subQueries 
 		packets = append(packets, Packet{
 			Document: doc,
 			Match: Match{
-				ChunkID: p.ChunkID, StartChar: p.StartChar, EndChar: p.EndChar,
+				ChunkID: p.ChunkID, StartByte: p.StartByte, EndByte: p.EndByte,
 				Score: p.Score, Legs: legs, SubQuery: sq,
 				Snippet: snippet(p.Text),
 			},
@@ -132,11 +133,15 @@ func ownerOf(packets []Packet, n neighbour) int {
 
 func snippet(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= snippetChars {
+	if len(s) <= snippetBytes {
 		return s
 	}
-	cut := s[:snippetChars]
-	if i := strings.LastIndex(cut, " "); i > snippetChars/2 {
+	end := snippetBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	cut := s[:end]
+	if i := strings.LastIndex(cut, " "); i > snippetBytes/2 {
 		cut = cut[:i]
 	}
 	return cut + "…"

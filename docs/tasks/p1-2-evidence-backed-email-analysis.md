@@ -63,7 +63,8 @@ Return a typed dossier containing:
 - each participant’s most recent supported statement on the topic;
 - earlier conflicting or materially different statements;
 - coverage, omission, retrieval, and relationship warnings;
-- the context budget and explicit budget unit; and
+- the context budget and explicit budget unit;
+- collision-free evidence references that remain resolvable across every research pass and page; and
 - a stable continuation cursor when more admissible evidence remains.
 
 “Current position” means the most recent position supported by in-scope evidence, with its date and citation. It is not a claim about a person’s private belief or present-day view. When recency, authorship, topic relevance, or participant identity is ambiguous, represent that ambiguity instead of resolving it through model confidence alone.
@@ -82,9 +83,9 @@ Every classification must cite the evidence that supports it and briefly state t
 
 ### Budgeting and continuation
 
-Replace the assumption that one oversized tool response is a complete analysis. Enforce bounded work, result, and evidence budgets. Return deterministic continuation cursors that preserve the fixed request scope and cannot be altered to access another workspace.
+Replace the assumption that one oversized tool response is a complete analysis. Reuse the P0-1 result namespace, immutable snapshot, and opaque cursor primitive rather than introduce an analysis-specific continuation system. Enforce bounded work, result, and aggregate evidence budgets while keeping every encoded result below the 48 KiB target and 51,200-byte absolute response ceiling. Return deterministic continuation cursors that preserve the authorized caller, MCP session, fixed workspace, research plan, and request scope and cannot be altered to select a result, pass, source, or byte range.
 
-The external agent can request subsequent dossier pages until the server reports completion or the user-selected effort limit is reached. Report partial coverage clearly. Cancellation, expiry, invalid cursors, corpus changes between pages, and repeated pages have deterministic behavior.
+The external agent can request subsequent dossier pages until the server reports completion or the user-selected effort limit is reached. Continuation is emitted before any intended-client or model truncation and never depends on a local spill file. Report partial coverage clearly and distinguish “no support found after completed scope” from “not observed in partial results.” Cancellation, expiry, eviction, invalid or cross-scope cursors, corpus changes between pages, and repeated or concurrent pages have deterministic behavior.
 
 ### Quality evaluation
 
@@ -99,6 +100,8 @@ Extend the privacy-safe retrieval evaluation workflow with synthetic analysis ca
 - awaiting-reply candidate precision and recall separately from agent action classification;
 - unsupported-claim and unsupported-participant rates in an intended-client smoke test; and
 - dossier completion, continuation, warning, and budget behavior.
+
+Include a synthetic multi-pass intended-client case where the same local rank occurs in several passes, results exceed one page, duplicate sources recur, and warnings are present. The final answer must resolve every collision-free citation to the dossier without reading client-local files, and it must not turn incomplete delivery into a negative finding.
 
 Evaluate retrieval coverage independently from final prose quality so a fluent answer cannot hide missing evidence.
 
@@ -119,7 +122,8 @@ Evaluate retrieval coverage independently from final prose quality so a fluent a
 - Research dossiers disclose their queries, filters, coverage limits, warnings, budgets, and continuation state.
 - Participant, date, thread, and topic diversity prevents one prolific sender or conversation from consuming the entire evidence budget without an explicit warning.
 - A missing or ambiguous current position is reported as unsupported or uncertain rather than inferred from silence.
-- Continuation is stable, bounded, cancellation-aware, workspace-scoped, and tested across corpus changes and expired cursors.
+- Continuation reuses the P0-1 primitive, is stable, bounded, cancellation-aware, caller-, session-, and workspace-scoped, and is tested across corpus changes, retries, concurrency, expiry, and eviction.
+- Dossier references remain collision-free when several research passes each contain the same local rank, and completed versus partial no-support findings are distinct.
 - Evaluation reports distinguish evidence coverage from final-agent citation and unsupported-claim behavior.
 - The intended HTTP MCP client completes both analysis workflows using only synthetic content and produces citations that resolve to returned evidence.
 - No private questions, identities, evidence, analysis output, or workspace details enter committed fixtures, logs, metrics, or reports.

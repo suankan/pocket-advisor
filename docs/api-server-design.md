@@ -13,7 +13,7 @@ Pocket Advisor currently runs as a host CLI process. `internal/cli` parses comma
 - a direct query command; and
 - a workspace-bound stdio MCP server over newline-delimited JSON-RPC.
 
-The current MCP server is an adapter over `internal/retrieval`. It is fixed to one workspace when launched and does not provide an HTTP or network MCP endpoint. Answer generation is performed by the MCP client or another external consumer of evidence packets.
+The current MCP server is an adapter over `internal/retrieval`. It is fixed to one workspace when launched and does not provide an HTTP or network MCP endpoint. It negotiates the supported final MCP revisions through 2025-11-25 and exposes typed JSON Schema 2020-12 compact-search and cursor-based evidence-page results with a text compatibility representation. Answer generation is performed by the MCP client or another external consumer of evidence packets.
 
 ## Target architecture
 
@@ -53,7 +53,7 @@ Local corpus paths and the current model endpoints exist on the host, so the fir
 
 ### User API
 
-The user surface exposes retrieval and, when implemented, optional cited generation. Retrieval's Go package remains transport-independent; HTTP and network MCP handlers translate their requests to `retrieval.Request` and preserve `retrieval.Result` semantics. Generation is a separate consumer of retrieval packets and never queries storage directly.
+The user surface exposes retrieval and, when implemented, optional cited generation. Retrieval's Go package remains transport-independent; HTTP handlers translate their requests to `retrieval.Request`, while MCP transports reuse the current tool definition, typed evidence adapter, safe error contract, and text fallback. Generation is a separate consumer of retrieval packets and never queries storage directly.
 
 The Web UI is a client of these APIs. It must not introduce a parallel backend or implement its own workspace authorization rules.
 
@@ -95,6 +95,10 @@ Operation records must not contain credentials, corpus paths, source content, qu
 Idempotency keys are required for create, dispatch, and destructive requests where client retries could duplicate work. Cancellation must distinguish stopping active processing from rolling back completed external changes; no operation should claim rollback unless its implementation provides it.
 
 ## Protocol behavior
+
+The current stdio MCP adapter directly implements the small supported method set rather than depending on an SDK. It strictly validates JSON-RPC request identity and lifecycle, advertises only the tools capability, serializes concurrent responses, and processes cancellation while retrieval is in flight. Tool discovery publishes closed search and cursor-only evidence-reader inputs, a shared evidence-page output schema, and behavior annotations. Search creates an immutable session-local snapshot with collision-free result-scoped citations; opaque cursors deliver server-selected UTF-8-safe pages without rerunning retrieval or accepting workspace, result, document, or range selectors. Cursors are idempotent, expire, are memory-bounded, and are released on shutdown. Typed evidence validates its provenance, omission, budget, and continuation invariants before return, and contract tests validate it against the published schema. Invalid arguments are correctable tool errors, unknown tools are protocol errors, and internal retrieval details are never returned to the client.
+
+Each encoded tool result, including structured and readable forms, targets 48 KiB and 1,800 readable lines. The complete JSON-RPC response has an absolute 50 KiB limit and readable content an absolute 2,000-line limit. These delivery limits are independent of retrieval's aggregate evidence budget, which can span several continuation calls. Future HTTP MCP adapters must reuse the same page, result namespace, snapshot, cursor, and safe-error contract rather than introduce a transport-specific result format.
 
 Before third-party clients depend on the API, define:
 

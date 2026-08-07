@@ -93,8 +93,8 @@ func renderResult(res *retrieval.Result, elapsed time.Duration) {
 	} else {
 		fmt.Printf("warnings:     none\n")
 	}
-	fmt.Printf("budget:       %d / %d chars · %.1fs\n\n",
-		res.Budget.CharsUsed, res.Budget.CharsAllowed, elapsed.Seconds())
+	fmt.Printf("budget:       %d / %d UTF-8 bytes · %.1fs\n\n",
+		res.Budget.BytesUsed, res.Budget.BytesAllowed, elapsed.Seconds())
 
 	if len(res.Packets) == 0 {
 		fmt.Println("No sources in this workspace answer that question.")
@@ -111,8 +111,8 @@ func renderResult(res *retrieval.Result, elapsed time.Duration) {
 			meta += " · " + p.From
 		}
 		fmt.Printf("   %s\n", meta)
-		fmt.Printf("   score %+.3f · %s · chars %d-%d\n",
-			p.Match.Score, p.Match.Legs, p.Match.StartChar, p.Match.EndChar)
+		fmt.Printf("   score %+.3f · %s · UTF-8 bytes %d-%d\n",
+			p.Match.Score, p.Match.Legs, p.Match.StartByte, p.Match.EndByte)
 		if p.Match.SubQuery != "" {
 			fmt.Printf("   via: %s\n", p.Match.SubQuery)
 		}

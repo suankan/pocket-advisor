@@ -29,7 +29,7 @@ Do not begin by exposing an unauthenticated prototype and planning to add securi
 
 ### Transport adapter
 
-Implement the final MCP Streamable HTTP transport supported by the intended clients. Reuse the same typed MCP method handling, tool definition, retrieval service, structured result, error contract, and fixed workspace as stdio.
+Implement the final MCP Streamable HTTP transport supported by the intended clients. Reuse the same typed MCP method handling, compact search and cursor-only evidence-reader definitions, result namespace, immutable snapshot, structured page, readable fallback, safe error contract, and fixed workspace as stdio. Do not introduce a second cursor format or transport-specific evidence result.
 
 The adapter must implement:
 
@@ -38,7 +38,7 @@ The adapter must implement:
 - session negotiation and secure session identifiers when sessions are used;
 - JSON responses and server-sent event behavior required by supported clients;
 - cancellation, disconnect, timeout, and clean shutdown behavior;
-- request and response size limits;
+- the stdio contract's 48 KiB encoded-result target, 51,200-byte complete-response ceiling, 1,800-readable-line target, and 2,000-readable-line ceiling without reducing the aggregate evidence budget;
 - bounded concurrent requests and backpressure; and
 - liveness and dependency-aware readiness that do not expose corpus state.
 
@@ -72,7 +72,7 @@ If the selected client cannot implement the required authorization flow, stop an
 
 ### Workspace routing
 
-Deploy or launch one HTTP MCP service for one fixed workspace. The authenticated route selects that service; request paths, bodies, headers, tool names, and session state cannot change its workspace.
+Deploy or launch one HTTP MCP service for one fixed workspace. The authenticated route selects that service; request paths, bodies, headers, tool names, and session state cannot change its workspace. Bind every evidence snapshot and cursor to the authorized caller or secure MCP session as well as that fixed service. Cross-caller, cross-session, and cross-workspace cursor use returns the same bounded correctable error without revealing which boundary rejected it.
 
 The service receives only the selected workspace’s retrieval credentials. It receives no shared PostgreSQL, RustFS, NATS, provisioning, or Kubernetes administrative credential. Direct service access must be blocked by network policy or host binding when a gateway is authoritative.
 
@@ -92,13 +92,14 @@ Configure:
 
 ### Compatibility and security testing
 
-Test the exact intended client through the real gateway and authorization flow. Add automated tests for protocol behavior and a repeatable security suite covering:
+Test the exact intended client through the real gateway and authorization flow. The client must receive a result larger than one page entirely through MCP continuation, without desktop-local spill files or increasing its configured tool-output limit. Add automated tests for protocol behavior and a repeatable security suite covering:
 
 - unauthenticated, expired, wrong-audience, wrong-resource, and insufficient-scope tokens;
 - invalid Origin, Host, forwarded headers, redirect URIs, and session identifiers;
 - DNS rebinding attempts;
 - request smuggling and oversized JSON or SSE traffic;
 - session fixation and cross-session message use;
+- cross-caller, cross-session, and cross-workspace continuation cursor use, expiry, eviction, and idempotent retry;
 - disconnect and cancellation resource cleanup;
 - direct backend access around the gateway; and
 - attempts to select another workspace by every transport field.
@@ -116,15 +117,16 @@ Test the exact intended client through the real gateway and authorization flow. 
 ## Acceptance criteria
 
 - Stdio and HTTP adapters expose the same tool schema, structured result, warnings, citations, and error semantics.
+- Stdio and HTTP adapters expose the same result-scoped references, aggregate-versus-page budgets, response bounds, immutable snapshot, and opaque continuation behavior.
 - HTTP conforms to the selected final MCP transport and authorization revisions used by the intended client.
 - Loopback is the default and non-loopback startup fails without the approved authenticated mode.
 - Invalid origins are rejected before tool execution.
 - Remote requests require valid OAuth authorization over TLS with correct resource and scope.
 - No request-controlled value can change workspace scope.
 - Direct backend access is unavailable outside its approved trust boundary.
-- Rate, concurrency, size, timeout, cancellation, and shutdown limits are tested.
+- Rate, concurrency, size, timeout, cursor expiry and eviction, retry, disconnect, cancellation, and shutdown limits are tested without mixing result namespaces or pages.
 - Logs and metrics contain no tokens, questions, evidence, source identifiers, private paths, or workspace names.
-- The intended client completes initialization, tool discovery, retrieval, cancellation, and token renewal through the deployed boundary.
+- The intended client completes initialization, tool discovery, multi-page retrieval without spill-file recovery, cancellation, and token renewal through the deployed boundary.
 - Security tests cover origin, redirect, token, proxy, session, size, and cross-workspace attacks.
 
 ## Verification

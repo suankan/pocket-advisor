@@ -23,6 +23,7 @@ import (
 type Client struct {
 	endpoint string
 	apiKey   string
+	model    string
 	http     *http.Client
 }
 
@@ -34,11 +35,12 @@ func New(cfg config.LLM) *Client {
 	return &Client{
 		endpoint: cfg.Endpoint,
 		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
 		http:     &http.Client{Timeout: timeout},
 	}
 }
 
-func (c *Client) Model() string { return config.LLMModel }
+func (c *Client) Model() string { return c.model }
 
 type chatRequest struct {
 	Model       string        `json:"model"`
@@ -77,7 +79,7 @@ func (c *Client) Complete(ctx context.Context, prompt string, maxTokens int) (st
 		maxTokens = 256
 	}
 	body, err := json.Marshal(chatRequest{
-		Model:       config.LLMModel,
+		Model:       c.model,
 		Messages:    []chatMessage{{Role: "user", Content: prompt}},
 		Temperature: 0,
 		MaxTokens:   maxTokens,

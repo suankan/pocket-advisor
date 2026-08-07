@@ -100,8 +100,8 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		if err != nil {
 			return nil, err
 		}
-		// The bucket is declared by the workspace's Tenant CRD; this is a
-		// harmless, idempotent safety net, not the primary creation path.
+		// deploy-workspace creates the bucket; this is a harmless, idempotent
+		// safety net, not the primary creation path.
 		if err := u.EnsureBucket(ctx); err != nil {
 			return nil, err
 		}
@@ -128,14 +128,11 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		if err != nil {
 			return nil, err
 		}
-		// Deliberately does not create streams. They are Stream CRDs now,
-		// reconciled by NACK from charts/pocket-advisor-infra (deviation 22),
-		// and creating them here too would make Go a second writer of
-		// something an operator owns — the same conflict that broke every
-		// `helm upgrade` when provisioning patched the NATS ConfigMap
-		// (deviation 18). A missing stream now means the chart has not been
-		// deployed for this workspace, which the pipeline reports when it
-		// tries to attach a consumer.
+		// Deliberately does not create streams. deploy-workspace owns that
+		// lifecycle through natscli, and creating them here too would make Go
+		// a second writer. A missing stream means that command has not run for
+		// this workspace, which the pipeline reports when it attaches a
+		// consumer.
 		a.Bus = b
 		a.stopFns = append(a.stopFns, b.Close)
 	}

@@ -2,7 +2,8 @@
 // fused candidate window (retrieval-design.md §4).
 //
 // Like the embedding client it loads no model: it holds a URL and an HTTP
-// client. Unlike it, the model is not configurable — see config.RerankModel.
+// client. Unlike it, the model is not meant to be changed casually — see
+// the comment on config.yaml's infra.reranking.model.
 package reranking
 
 import (
@@ -20,6 +21,7 @@ import (
 type Client struct {
 	endpoint string
 	apiKey   string
+	model    string
 	http     *http.Client
 }
 
@@ -31,11 +33,12 @@ func New(cfg config.Reranking) *Client {
 	return &Client{
 		endpoint: cfg.Endpoint,
 		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
 		http:     &http.Client{Timeout: timeout},
 	}
 }
 
-func (c *Client) Model() string { return config.RerankModel }
+func (c *Client) Model() string { return c.model }
 
 // Result is one scored candidate, carrying the caller's original index so the
 // caller never has to match on text.
@@ -72,7 +75,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []string, t
 	}
 
 	body, err := json.Marshal(rerankRequest{
-		Model: config.RerankModel, Query: query, Documents: documents, TopN: topN,
+		Model: c.model, Query: query, Documents: documents, TopN: topN,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rerank request: %w", err)

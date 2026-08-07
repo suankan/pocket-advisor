@@ -1,5 +1,14 @@
 # ============================================================================
 # Global & Environment Settings
+#
+# resourcePolicy: no `resources:` block on any workload in this namespace —
+# not just no limits, no requests either. The OrbStack VM itself is capped at
+# 4GB/4CPU, a boundary this chart cannot see and does not try to replicate
+# piecemeal; every pod inside it competes freely for whatever that ceiling
+# actually leaves available, rather than each holding its own reservation
+# carved out of it. A single-tenant local cluster has nothing to protect one
+# pod's share from another's — there is one operator, and it is the person
+# reading this file.
 # ============================================================================
 global:
   namespace: pocket-advisor
@@ -50,20 +59,26 @@ rustfs:
   # enforced by Vault.role in application code (workspace-isolation.md §9).
   # Neither key was referenced by any Go code; they and the setup Job that
   # created them were deleted (ingestion-design.md deviation 19).
-  credentials:
-    rootUser: ""
-    rootPassword: ""
+  adminRustFSUser: rustfsadmin
+  adminRustFSPassword: adminrustfspassword
 
-  # Bucket notifications. There is no enable flag: the target's identity is
-  # rendered into a Secret by templates/rustfs.yaml, which already holds every
-  # workspace's NATS password, so "configured" and "enabled" are the same fact
-  # (§5.2). Only the shape lives here. Which bucket publishes to that target is
-  # the one piece the CRD cannot express, so --ingest-all sets it (deviation 24).
+  # Bucket notifications. There is no enable flag: every workspace's target
+  # identity is rendered into its own Secret by templates/rustfs.yaml, which
+  # already holds every workspace's NATS password, so "configured" and
+  # "enabled" are the same fact (§5.2). Only the shape lives here — subject
+  # and stream name are safe to share across every workspace's target block
+  # despite being the same literal string, because NATS accounts make that
+  # string a different subject space per workspace (workspace-isolation.md
+  # §2.3). Which bucket publishes to which target is still the one piece the
+  # CRD cannot express — `./pocket-advisor.sh deploy-workspace` sets it now
+  # via aws-cli, not --ingest-all (deviation 35).
   notify:
     subject: rustfs.events.raw
     jetstreamStreamName: RUSTFS_EVENTS
     # Default (/opt/rustfs/events) is unwritable by RustFS's non-root user —
     # identical bug class already fixed for the webhook target (§12 bug 1).
+    # Each workspace's target gets its own subdirectory under this now, not
+    # this exact path — see templates/rustfs.yaml.
     queueDir: /data/.rustfs-events-notify
 
   persistence:
@@ -72,28 +87,25 @@ rustfs:
     # volumeClaimTemplates is immutable, so `helm upgrade` fails with
     # "updates to statefulset spec ... are forbidden". See the chart README.
     #
-    # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children.
-    # ~60x headroom: the matter is active, and re-ingestion writes new
-    # extracted/ objects without reclaiming old ones (§6.4).
+    # Shared across every workspace now, not one volume each (deviation 35).
+    # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children, for
+    # one workspace. ~60x headroom: the matter is active, re-ingestion writes
+    # new extracted/ objects without reclaiming old ones (§6.4), and that cost
+    # is now paid once per cluster rather than once per workspace.
     size: 50Gi
-  # Sized from a real ingest, not from guessing. At 768Mi/500m the server was
-  # OOMKilled 13 times during a 1,891-file / 1.5GB run — exit 137, taking its
-  # in-flight uploads with it (31 failed) and dead-lettering 49 documents whose
-  # Tier 1 reads died mid-extraction.
-  #
-  # CPU matters as much as memory here, for a reason that is not obvious: the
-  # RustFS operator sets its own liveness and readiness probes with
-  # timeoutSeconds: 1, and tenant.spec exposes no field to soften them. A
-  # server starved at half a core queues, a queued /health takes over a second,
-  # three in a row kill the container — so the only defence against
-  # probe-induced restarts is enough CPU that it never gets slow.
-  #
-  # Limits are ceilings, not reservations. Requests are what the scheduler
-  # commits, and they stay modest because N workspaces sit on one node while
-  # only one of them ingests at a time.
-  resources:
-    requests: {cpu: "500m", memory: "512Mi"}
-    limits:   {cpu: "2000m", memory: "2Gi"}
+  # No requests, no limits (see global.resourcePolicy below). The history
+  # that used to justify this component's own figures, kept because the
+  # symptom it describes can still recur without a per-container ceiling to
+  # blame: at 768Mi/500m the server was OOMKilled 13 times during a
+  # 1,891-file / 1.5GB run — exit 137, taking its in-flight uploads with it
+  # (31 failed) and dead-lettering 49 documents whose Tier 1 reads died
+  # mid-extraction. Separately, the RustFS operator sets its own liveness and
+  # readiness probes with timeoutSeconds: 1, and tenant.spec exposes no field
+  # to soften them — a server starved of CPU queues, a queued /health takes
+  # over a second, three in a row kill the container. Neither failure mode
+  # needed a K8s-level limit to happen; it needed the process to be slow.
+  # Removing the limit removes the artificial ceiling; it does not remove the
+  # VM's real one (global.resourcePolicy).
 
 # ============================================================================
 # Pipeline Bus: NATS JetStream
@@ -117,45 +129,39 @@ nats:
     # Commands carry object references and doc_ids (~1Ki each), never document
     # text (§4.1). Sized for backlog depth, not document volume.
     size: 5Gi
-  resources:
-    requests: {cpu: "150m", memory: "128Mi"}
-    limits:   {cpu: "300m", memory: "384Mi"}
+  # No requests, no limits — see global.resourcePolicy.
 
 # ============================================================================
 # Tier 2 & 3: PostgreSQL + pgvector
 # ============================================================================
 postgres:
-  # Managed by the CloudNativePG operator, one Cluster shared by every
-  # workspace — reverted from one Cluster per workspace
-  # (ingestion-design.md deviation 34). The operator installs with this
-  # chart as a dependency — see the Operators section at the bottom.
+  # A plain StatefulSet now, not a CloudNativePG Cluster (deviation 39) — one
+  # shared instance either way (deviation 34). templates/postgres.yaml's own
+  # header has the full account of what running this image standalone
+  # actually needed.
   #
   # CNPG's own Postgres 18 build with pg_textsearch layered on
   # (docker-images/postgres/Dockerfile) — pgvector ships with the base image
   # already, so pg_textsearch is the only extension this chart has to build
-  # itself. `make deploy-infra` builds this image first (docker-build-postgres
-  # in the Makefile); it never leaves the local Docker daemon, since
-  # OrbStack's Kubernetes shares that daemon's image store directly. A major
-  # Postgres version bump still means new volumes either way: the on-disk
-  # format changes, and the operator will not rewrite it in place.
+  # itself. `./pocket-advisor.sh deploy-infra` builds this image first (its
+  # own docker-build-postgres command); it never leaves the local Docker
+  # daemon, since OrbStack's Kubernetes shares that daemon's image store
+  # directly. A major
+  # Postgres version bump still means a new volume either way: the on-disk
+  # format changes, and nothing here rewrites it in place.
   image: pocket-advisor-postgres:18-pg_textsearch-v1.3.1
 
-  instances: 1
   port: 5432
 
-  # The Cluster's own Kubernetes object name — templates/postgres.yaml — not a
-  # Postgres identifier. Every workspace's database and role live inside it,
-  # declared in templates/postgres-workspaces.yaml.
-  clusterName: postgres
-
-  # CNPG requires a database and owner at cluster creation; nothing in this
-  # application ever connects to either. Its password lives under
-  # postgres.credentials.bootstrapPassword, alongside the RustFS root
-  # credentials below — same reasoning: generated once, required, never a
-  # published default.
-  bootstrapUser: bootstrap
-  credentials:
-    bootstrapPassword: ""
+  # The admin/superuser this StatefulSet creates on first boot. Real and
+  # ongoing now, unlike the CNPG-era bootstrap placeholder nothing ever
+  # connected to: removing CloudNativePG means nothing reconciles a
+  # Database/DatabaseRole any more, so ./pocket-advisor.sh deploy-workspace
+  # uses this credential directly — psql, CREATE DATABASE/CREATE ROLE/GRANT —
+  # the same operation an operator would have made, run once by a human
+  # instead of continuously by a controller (deviation 39).
+  adminPostgresUser: postgres
+  adminPostgresPassword: postgrespassword
 
   storage:
     # Shared across every workspace now, not one volume each. Steady state
@@ -166,20 +172,16 @@ postgres:
     # now that cost is paid once per cluster rather than once per workspace.
     size: 20Gi
 
-  # One allocation for the whole cluster now, not one per workspace — hence
-  # generous limits relative to the request, since only one workspace
-  # ingests at a time but every workspace's writes land on this one process.
-  #
-  # Values carried over from the per-workspace figure, raised after an ingest
-  # that OOMKilled RustFS: this container was killed too, exit 137 after its
+  # No requests, no limits (see global.resourcePolicy). The history that
+  # used to justify this component's own figures: this container was
+  # OOMKilled too, in the same run that OOMKilled RustFS, exit 137 after its
   # own liveness and readiness probes started timing out. Postgres is on the
   # write path for every chunk and every embedding — 2,468 embeddings in that
-  # run, against a pool configured for 50 connections — so a single core is
+  # run, against a pool configured for 50 connections — so a single core was
   # what made the probes slow enough to matter, the same failure shape as
-  # RustFS. Unswept for the shared-instance shape specifically.
-  resources:
-    requests: {cpu: "500m", memory: "512Mi"}
-    limits:   {cpu: "2000m", memory: "1536Mi"}
+  # RustFS. That failure mode needed the process to be slow, not a K8s-level
+  # limit; removing the limit removes the artificial ceiling, not the VM's
+  # real one.
 
 # ============================================================================
 # Workspaces
@@ -187,85 +189,30 @@ postgres:
 # The one list this chart is driven by, and the only place anything private
 # belongs. Empty here on purpose: this file is committed, and the real list
 # lives in the gitignored workspaces/pocket-advisor-infra.yaml that
-# `make deploy-infra` passes with -f. Every secret in it is `required` in the
-# templates, so a deploy that forgets -f fails loudly rather than falling back
-# to a published default.
+# `./pocket-advisor.sh deploy-infra` passes with -f. Every secret in it is
+# `required` in the templates, so a deploy that forgets -f fails loudly
+# rather than falling back to a published default.
 #
-# One release renders every workspace: a namespace each, holding that
-# workspace's RustFS Tenant and three JetStream Streams, plus its account
-# block in the shared NATS config (deviation 24). Its Postgres database and
-# role are not in that namespace — deviation 34 put every workspace's
-# Postgres objects in the shared release namespace instead, alongside the one
-# Cluster they all live inside (templates/postgres-workspaces.yaml).
-#
-# Entries carry credentials and nothing else:
+# This chart itself renders nothing per workspace — deviation 39 removed the
+# last thing that was (each workspace's namespace and three Stream CRDs).
+# What is left here is credentials only, read by
+# `./pocket-advisor.sh deploy-workspace`/`destroy-workspace` (not by any
+# template), to create or drop that workspace's slice of the three shared
+# StatefulSets over psql/rc/aws-cli/natscli:
 #
 #   workspaces:
 #     - id: test
-#       rustfs:    {credentials: {secretKey: ...}}
-#       postgres:  {credentials: {password: ...}}
-#       nats:      {credentials: {password: ...}}
+#       rustfs:
+#         password: <generate>
+#       nats:
+#         password: <generate>
+#       postgres:
+#         password: <generate>
 #
-# `id` is the namespace, and it is the NATS account and user name — accounts
-# share one server, so the id is the only thing keeping them apart. It is
-# also the Postgres database name and, as `<id>_user`, the role name. RustFS's
-# bucket and identity are the one exception — see the constant below.
+# `id` names everything now — there is no longer a constant resource name
+# left to fall back on, because nothing is alone in its own namespace any
+# more. It is the NATS account and user name, the Postgres database name
+# and, as `<id>_user`, the role name, and the RustFS bucket, policy and
+# identity name alike.
 # ============================================================================
 workspaces: []
-
-# The bucket and the RustFS identity, in every workspace. One value, because
-# they are deliberately identical: each lives alone in a namespace named
-# after its workspace, so a workspace-derived name would repeat, in two
-# places, what the address already says. Postgres and NATS are not this —
-# see above.
-workspace:
-  name: workspace
-
-# ============================================================================
-# Operators
-#
-# Each can be disabled where a cluster already runs one — CloudNativePG in
-# particular is commonly installed cluster-wide for other workloads, and a
-# second copy would leave two controllers reconciling the same CRDs.
-#
-# All three now get their CRDs the same way: from a crds/ directory Helm
-# applies before it renders anything. nack and rustfs-operator ship theirs that
-# way and offer no alternative; CloudNativePG templates its own, which is what
-# made a virgin cluster unbootstrappable, so ours are vendored into
-# crds/cloudnative-pg.yaml instead — see the header of that file, and
-# ingestion-design.md deviation 25.
-# ============================================================================
-cloudnative-pg:
-  enabled: true
-  # Named for the chart, not the release. These are shared operators, not part
-  # of pocket-advisor: prefixing them implies this release owns something it
-  # merely installs, and a second release would produce a second differently
-  # prefixed copy of the same controller.
-  fullnameOverride: cloudnative-pg
-  crds:
-    # We ship them, from crds/cloudnative-pg.yaml. Leaving this true would put
-    # the CRD and the Cluster CRs that need it in one manifest, which Helm
-    # validates as a whole before applying any of it — the failure this fixed.
-    # Turning it back on is safe only if the vendored copy is removed at the
-    # same time; two sources for one CRD means whichever Helm reaches first
-    # wins, silently.
-    create: false
-
-nack:
-  enabled: true
-  # NACK defaults useLegacyNames: true, which names its Deployment after the
-  # *release* alone — so it appeared as a bare "pocket-advisor", indistinguishable
-  # from anything of ours. false switches it to the chart name.
-  useLegacyNames: false
-  nameOverride: nack
-  jetstream:
-    enabled: true
-    # No default server URL: every Stream names its own, because each
-    # authenticates as its own workspace's NATS account.
-
-rustfs-operator:
-  enabled: true
-  fullnameOverride: rustfs-operator
-  # A web UI we never open; the operator itself is what reconciles Tenants.
-  console:
-    enabled: false

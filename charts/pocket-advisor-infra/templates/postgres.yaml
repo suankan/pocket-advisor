@@ -1,80 +1,148 @@
 {{/*
-One CloudNativePG Cluster, shared by every workspace — reverted from one
-cluster per workspace (ingestion-design.md deviation 34). Each workspace gets
-its own logical database and role inside this cluster instead, declared in
-postgres-workspaces.yaml.
+Postgres as a plain StatefulSet — no CloudNativePG, no Cluster CRD
+(deviation 39). One shared instance, same as the Cluster it replaces
+(deviation 34); what changed is who drives it.
 
-`Database` and `DatabaseRole` reference their `Cluster` by name only — no
-namespace field, so per Kubernetes convention that means "same namespace as
-the object doing the referencing." That is why this Cluster, and every
-workspace's Database/DatabaseRole/credentials Secret, live in the shared
-release namespace rather than each workspace's own namespace: RustFS and NATS
-keep their per-workspace-namespace isolation (workspace-isolation.md §2.2,
-§2.3); Postgres no longer does.
+The image is built from CloudNativePG's own base
+(docker-images/postgres/Dockerfile), for pg_textsearch — but that base has
+no docker-entrypoint.sh and no auto-init the way the official postgres image
+does: it was built for CNPG's instance-manager to drive, not to run
+standalone. Checked directly: `Entrypoint: null`, `Cmd: ["bash"]`, nothing
+else. The ConfigMap below is a from-scratch replacement, tested end to end
+against the real image before being trusted here — two things it would have
+been easy to get wrong and ship anyway:
 
-The bootstrap database below is a CNPG requirement, not a real one: initdb
-needs *some* database and owner at cluster creation. Nothing in this
-application ever connects to it — every real database is a Database CRD,
-created after the cluster already exists, and gets its own extensions
-declared there rather than here.
+  * UTF8/C.utf8 explicitly. initdb's own default, unset, is SQL_ASCII/"C" —
+    silently wrong for the bilingual English/Russian corpus, and not the
+    kind of wrong anything would fail loudly on.
+  * pg_hba.conf given an explicit host-network entry. initdb's own generated
+    one only ever covers loopback, so a pod connecting from anywhere else on
+    the cluster network — which is every real connection this server will
+    ever receive — would be refused with no pg_hba entry to match at all,
+    not a permission error pointing at the cause.
 */}}
+---
 apiVersion: v1
 kind: Secret
 metadata:
   namespace: {{ $.Values.global.namespace }}
-  name: postgres-bootstrap
+  name: postgres-admin
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Bootstrap credentials CNPG requires at cluster creation; unused by the application") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Postgres admin credentials — ./pocket-advisor.sh deploy-workspace uses these to provision each workspace") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
-# basic-auth is the shape CNPG's bootstrap.initdb.secret expects; it reads
-# username and password from these exact keys.
-type: kubernetes.io/basic-auth
+type: Opaque
 stringData:
-  username: {{ $.Values.postgres.bootstrapUser | quote }}
-  password: {{ required "postgres.credentials.bootstrapPassword is required" $.Values.postgres.credentials.bootstrapPassword | quote }}
+  username: {{ required "postgres.adminPostgresUser is required" $.Values.postgres.adminPostgresUser | quote }}
+  password: {{ required "postgres.adminPostgresPassword is required" $.Values.postgres.adminPostgresPassword | quote }}
 ---
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
+apiVersion: v1
+kind: ConfigMap
 metadata:
   namespace: {{ $.Values.global.namespace }}
-  name: {{ $.Values.postgres.clusterName }}
+  name: postgres-entrypoint
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Shared Postgres cluster; every workspace's database and role live inside it") }}
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    export PGDATA=/var/lib/postgresql/data/pgdata
+    if [ ! -s "$PGDATA/PG_VERSION" ]; then
+      echo "initializing database at $PGDATA"
+      mkdir -p "$PGDATA"
+      echo -n "$POSTGRES_PASSWORD" > /tmp/pwfile
+      initdb -D "$PGDATA" -U "$POSTGRES_USER" --pwfile=/tmp/pwfile \
+        --encoding=UTF8 --locale=C.utf8 \
+        --auth-host=scram-sha-256 --auth-local=trust
+      rm -f /tmp/pwfile
+      echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
+      echo "shared_preload_libraries = 'pg_textsearch'" >> "$PGDATA/postgresql.conf"
+      echo "host all all 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+      echo "host all all ::/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    else
+      echo "database already initialized, skipping initdb"
+    fi
+    exec postgres -D "$PGDATA"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: postgres
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Shared Postgres — Tier 2/3, every workspace's database and role live inside it") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
 spec:
-  # One. This is a single-node local cluster, so replicas would contend for
-  # the same disk and the same page cache while buying no availability.
-  instances: {{ $.Values.postgres.instances }}
-  imageName: {{ $.Values.postgres.image }}
-
-  # pg_textsearch must be preloaded, not just CREATE EXTENSION'd — it installs
-  # hooks the server only picks up at start. The operator writes this into
-  # postgresql.conf before the first start, so it's already in effect by the
-  # time any workspace's Database CRD runs CREATE EXTENSION.
-  postgresql:
-    shared_preload_libraries:
-      - pg_textsearch
-
-  bootstrap:
-    initdb:
-      # Not `postgres`: that database already exists, owned by the superuser,
-      # and the operator will not reassign it. Measured rather than assumed —
-      # a cluster bootstrapped with database: postgres comes up healthy and
-      # then refuses the first CREATE TABLE with "permission denied for schema
-      # public", because the bootstrap owner owns nothing in it.
-      database: {{ $.Values.postgres.bootstrapUser | quote }}
-      owner: {{ $.Values.postgres.bootstrapUser | quote }}
-      secret:
-        name: postgres-bootstrap
-
-  storage:
-    size: {{ $.Values.postgres.storage.size }}
-
-  resources:
-    {{- toYaml $.Values.postgres.resources | nindent 4 }}
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ $.Values.postgres.image }}
+          command: ["bash", "/scripts/entrypoint.sh"]
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: password
+          ports:
+            - containerPort: {{ $.Values.postgres.port }}
+          # No resources block, deliberately — see global.resourcePolicy.
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-entrypoint
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: postgres-entrypoint
+          configMap:
+            name: postgres-entrypoint
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $.Values.postgres.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: postgres
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Cluster-internal endpoint for Postgres") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $.Values.postgres.port }}
+      targetPort: {{ $.Values.postgres.port }}
+      name: postgres
+  selector:
+    app: postgres

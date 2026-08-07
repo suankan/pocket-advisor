@@ -41,18 +41,21 @@ kubectl config use-context pocket-advisor   # switch into it
 
 ## Concepts you need before running anything
 
-- **Every workspace is physically isolated**, not just logically separated.
-  `--workspace-id <id>` doesn't just filter what a command touches — each
-  workspace gets a namespace of its own containing its own Postgres *server*
-  and its own RustFS *server*, not a database and a bucket inside shared ones.
-  NATS is the single exception: one server for the cluster, with an account
-  per workspace, because accounts are its own tenancy boundary. Every mode
+- **Every workspace is logically isolated inside shared stores**, not
+  physically separated. `--workspace-id <id>` doesn't just filter what a
+  command touches — one shared Postgres StatefulSet holds a database and role
+  per workspace, one shared RustFS StatefulSet holds a bucket and identity per
+  workspace, and one shared NATS server holds an account per workspace,
+  because accounts are its own tenancy boundary regardless. Every mode
   requires `--workspace-id`.
-  A workspace's infrastructure is *declared*, not provisioned: the chart
-  renders a `Cluster`, a `Tenant` and three `Stream` custom resources, and
-  operators reconcile them. The binary creates none of it and holds no
-  administrative credentials — it connects with one workspace's own and
-  nothing more. See [§2](#2-install).
+  A workspace's infrastructure is *provisioned*, not declared:
+  `./pocket-advisor.sh deploy-infra` brings up the three shared stores
+  themselves, empty, and `./pocket-advisor.sh deploy-workspace <id>` then
+  creates that workspace's database/role, bucket/identity/policy and streams
+  directly — over psql/rc/aws-cli/natscli, no CRD, no operator reconciling
+  drift (deviation 39). The binary itself still creates none of it and holds
+  no administrative credentials at query/ingest time — it connects with one
+  workspace's own and nothing more. See [§2](#2-install).
 - **RustFS (Tier 1) is the sole source of truth.** Your filesystem is never
   read directly by the system — it's a staging feed you push into RustFS. Once
   uploaded, a document's origin folder can move or vanish; the bucket is
@@ -61,19 +64,20 @@ kubectl config use-context pocket-advisor   # switch into it
   `workspaces/workspace-config.yaml` says what it *holds* — named
   *collections*, each a path on disk, plus bank-account details for financial
   ones. `workspaces/pocket-advisor-infra.yaml` says how to *reach* it, and
-  carries credentials and nothing else: every resource name inside a
-  workspace's namespace is a constant. Both are gitignored, and the second
-  doubles as the Helm values override `make deploy-infra` passes with `-f`, so
-  the chart and the CLI read the same credentials from one place.
+  carries credentials and nothing else: every resource name for a workspace
+  is its own id. Both are gitignored, and the second
+  doubles as the Helm values override `./pocket-advisor.sh deploy-infra`
+  passes with `-f`, so the chart and the CLI read the same credentials from
+  one place.
 - **Ingestion is reconciliation, not events.** Every run compares the bucket
   against Postgres and processes the difference. That makes re-running free
   and interrupting safe.
 - **Everything destructive prompts unless `--yes`.** `--delete-data` and
   `--forget` both hit Postgres first, so a failure to reach it leaves the
   bucket untouched rather than dangling a citation. Removing a workspace
-  altogether is a chart operation, not a CLI one: drop it from
-  `workspaces/pocket-advisor-infra.yaml` and re-deploy, which takes its
-  namespace and therefore its volumes with it.
+  altogether is `./pocket-advisor.sh destroy-workspace <id>`, which drops its
+  database, bucket and streams, followed by removing its entry from
+  `workspaces/pocket-advisor-infra.yaml`.
 - **Retrieval returns sources, not answers.** `--query` gives you the
   passages that match, each traceable to a Tier 1 object and a character
   range. Turning those into prose is generation, and it deliberately happens
@@ -104,54 +108,91 @@ kubectl config use-context pocket-advisor   # switch into it
   `SKIPPED` rather than indexed.
 - **An embedding REST endpoint on localhost**, serving the model named in
   `config.yaml` (default `jina-embeddings-v5-text-small-mlx` on `:8000`).
-- Nothing else. The three operators that reconcile a workspace's stores —
-  CloudNativePG, NACK and the RustFS operator — are dependencies of the chart
-  and install with it.
+- **`aws-cli`, RustFS's `rc`, `natscli`, `psql` and `yq`** —
+  `./pocket-advisor.sh deploy-workspace`/`destroy-workspace` call all five
+  directly to provision or tear down one workspace's slice of the shared
+  stores; nothing renders this as a CRD any more (deviation 39):
+  ```bash
+  brew install awscli natscli libpq yq
+  # rc: https://rustfs.com/docs/cli-reference (single static binary, no formula)
+  ```
+  `aws-cli` talks to RustFS's S3-compatible API directly (`--endpoint-url`,
+  arbitrary access keys — the standard way to point it at anything that
+  isn't real AWS) for bucket creation and the notification binding; `rc` is
+  RustFS's own admin CLI, used for identity and IAM-policy creation, which
+  `aws-cli`'s surface cannot reach on RustFS or on real AWS either;
+  `natscli` creates each workspace's three JetStream streams; `psql` creates
+  its database and role; `yq` reads each workspace's id and credentials out
+  of `workspaces/pocket-advisor-infra.yaml` from `pocket-advisor.sh`. None
+  of them ever touches real AWS.
+- **`metrics-server`** is optional and lifecycle-independent of everything
+  above — its own Helm release, `./pocket-advisor.sh deploy-metrics-server` /
+  `./pocket-advisor.sh destroy-metrics-server` (§1.1).
+
+### 1.1 Optional: cluster resource metrics
+
+`kubectl top` and the Metrics API need `metrics-server`, which is not
+bundled with a bare cluster and is not part of `pocket-advisor-infra` —
+its lifecycle is independent, its own upstream chart installed as its own
+release:
+
+```bash
+./pocket-advisor.sh deploy-metrics-server    # helm install from the upstream chart
+./pocket-advisor.sh destroy-metrics-server   # helm uninstall
+```
+
+`--kubelet-insecure-tls` is passed automatically — local clusters' kubelets
+serve certificates it doesn't trust by default, and without the flag it
+fails silently: pod healthy, APIService registered, every scrape rejected,
+`kubectl top` returns nothing.
 
 ## 2. Install
 
 ```bash
-make deploy-infra    # helm install, then waits for every store to be ready
-make build           # produces bin/pocket-advisor
+./pocket-advisor.sh deploy-infra    # helm install/upgrade, then waits for the three StatefulSets to roll out
+./pocket-advisor.sh build           # produces bin/pocket-advisor
 ```
 
-One release installs everything: the three operators as chart dependencies,
-and, for **every workspace listed in `workspaces/pocket-advisor-infra.yaml`**,
-a namespace of its own containing a Postgres `Cluster`, a RustFS `Tenant` and
-three JetStream `Stream` resources. NATS itself is shared — one server in the
-release namespace with an account per workspace — because NACK reconciles
-JetStream objects against a server rather than deploying one.
+One release installs the three shared stores themselves — a Postgres
+StatefulSet, a RustFS StatefulSet, a NATS StatefulSet — empty. No operator,
+no CRD: `deploy-infra` just waits on `kubectl rollout status` for each
+(deviation 39). Nothing workspace-specific exists yet.
 
-The chart's own `workspaces:` list is empty; that private file is the override
-supplying it. Adding or removing a workspace means editing it and re-running
-`make deploy-infra`.
+For **every workspace listed in `workspaces/pocket-advisor-infra.yaml`**,
+provision its slice of those shared stores separately:
 
-There is no provisioning command. `--ingest-all` applies the Tier 2/3 schema
-and the bucket notification rule itself — the only two things a manifest
-cannot express, since the schema's vector width comes from probing your
-embedding endpoint on localhost, and the Tenant CRD has no field for which
-bucket publishes where.
+```bash
+./pocket-advisor.sh deploy-workspace <id>
+```
 
-> On a **fresh** cluster the first `helm upgrade` fails once, on
-> `no endpoints available for service cnpg-webhook-service`: CloudNativePG's
-> admission webhook is not serving yet when the first `Cluster` is applied.
-> `make deploy-infra` waits and retries automatically.
->
-> The operators' CRDs are applied before any of that, from the chart's `crds/`
-> directory, so a bare cluster bootstraps in one command. Note Helm applies
-> `crds/` only on install: **bumping an operator does not update its CRDs.**
-> Re-vendor and `kubectl apply` them as part of any version bump
-> (`ingestion-design.md` deviation 25).
+That creates the workspace's Postgres database and role, its RustFS bucket,
+identity and policy, its bucket-notification binding, and its three
+JetStream streams — over psql/rc/aws-cli/natscli, directly, idempotently.
+Run it once per workspace after `deploy-infra`, and again any time an entry
+is added to `workspaces/pocket-advisor-infra.yaml`.
+
+The chart's own `workspaces:` list in `values.yaml` is empty and unused —
+credentials for `deploy-workspace` come from `workspaces/
+pocket-advisor-infra.yaml` alone now, not from anything rendered.
+
+There is no separate schema-provisioning command. `--ingest-all` applies the
+Tier 2/3 schema itself, the one thing `deploy-workspace` cannot do, since its
+vector width comes from probing your embedding endpoint on localhost —
+nothing running in the cluster, or any infra tooling running elsewhere, can
+reach it (§4.4).
 
 Infrastructure endpoints live under `infra:` in
-[`config.yaml`](config.yaml). The defaults match a stock `make deploy-infra`,
-so you only edit it to point somewhere else. Environment variables override
+[`config.yaml`](config.yaml). The defaults match a stock
+`./pocket-advisor.sh deploy-infra`, so you only edit it to point somewhere
+else. Environment variables override
 the file (`RUSTFS_ENDPOINT`, `EMBEDDING_ENDPOINT`, `POSTGRES_HOST`,
-…). There is no Postgres admin connection to configure: one shared
-CloudNativePG cluster now, with the chart declaring a database and role per
-workspace on top of it, so nothing this binary does creates one — `host` is a
-plain, untemplated address, the database and role names carry the workspace
-id instead (`<id>`, `<id>_user`).
+…). There is no Postgres admin connection to configure for the binary
+itself: `host` is a plain, untemplated address to the one shared StatefulSet,
+and the database/role names carry the workspace id instead (`<id>`,
+`<id>_user`) — the admin credential that creates them lives only in
+`workspaces/pocket-advisor-infra.yaml`, read by
+`./pocket-advisor.sh deploy-workspace`/`destroy-workspace`, never by the
+binary.
 
 ### Add your first workspace
 
@@ -180,50 +221,57 @@ id instead (`<id>`, `<id>_user`).
 2. Describe how to **reach** it, in `workspaces/pocket-advisor-infra.yaml`.
    Generate each secret yourself (e.g. `openssl rand -base64 24`):
    ```yaml
-   # Administrative RustFS credentials, shared by every tenant. The operator
-   # creates each workspace's bucket and identity with them; nothing reads or
-   # writes documents as this identity.
+   # Administrative credentials, shared by every workspace.
+   # ./pocket-advisor.sh deploy-workspace/destroy-workspace use these to
+   # create or drop each workspace's own bucket/identity/policy and
+   # database/role; nothing reads or writes documents, or connects to
+   # query/ingest, as either identity.
    rustfs:
-     credentials:
-       rootUser: <generate>
-       rootPassword: <generate>
+     adminRustFSUser: <generate>
+     adminRustFSPassword: <generate>
+   postgres:
+     adminPostgresUser: postgres
+     adminPostgresPassword: <generate>
 
    workspaces:
      - id: test
        rustfs:
-         credentials:
-           secretKey: <generate>
+         password: <generate>
        postgres:
-         credentials:
-           password: <generate>
+         password: <generate>
        nats:
-         credentials:
-           password: <generate>
+         password: <generate>
    ```
    The section names mirror the chart's own `rustfs:` / `postgres:` / `nats:`
    blocks, one scope down. The shape is documented in
    [`charts/pocket-advisor-infra/values.yaml`](charts/pocket-advisor-infra/values.yaml),
    which is its source of truth — there is no example file to drift from it.
 
-   Credentials are all this file carries. Every resource name inside a
-   workspace's namespace is the constant `workspace` — bucket, database and,
-   for the shared NATS server, the account is the workspace id — because the
-   namespace already says whose they are.
+   Credentials are all this file carries. Every resource name for a workspace
+   is its own id — bucket, database and role, NATS account — because nothing
+   is alone in its own namespace any more to fall back on for a name
+   (deviation 39).
 
-   It is a Helm values override *and* app config: `make deploy-infra` passes it
-   with `-f`, and `config.yaml`'s `workspaces.values` points the binary at the
-   same file, so Helm and the CLI cannot disagree about a password. It is
-   joined to `workspace-config.yaml` on `id`.
+   It is a Helm values override *and* app config *and* what
+   `./pocket-advisor.sh deploy-workspace` reads: `deploy-infra` passes it to
+   Helm with `-f`, `config.yaml`'s `workspaces.values` points the binary at
+   it, and `pocket-advisor.sh` reads workspace credentials out of it via
+   `yq` — so Helm, the CLI and the script cannot disagree about a password.
+   It is joined to `workspace-config.yaml` on `id`.
 
    Full field reference: [`docs/workspace-isolation.md`](docs/workspace-isolation.md), §3 "Credentials & Config Shape".
 
-3. Apply it:
+3. Bring up the shared stores, if this is the first workspace on this
+   cluster, then provision this one:
    ```bash
-   make deploy-infra
+   ./pocket-advisor.sh deploy-infra
+   ./pocket-advisor.sh deploy-workspace test
    ```
-   This creates the workspace's namespace and everything in it. Verify before
-   loading a corpus — a workspace that reconciled cleanly has three JetStream
-   streams in its own NATS account:
+   `deploy-workspace` creates the database, bucket, identity, policy,
+   notification binding and three JetStream streams directly — idempotent,
+   so re-running it after editing `workspaces/pocket-advisor-infra.yaml` only
+   creates what's missing. Verify before loading a corpus — a workspace that
+   provisioned cleanly has three JetStream streams in its own NATS account:
    ```bash
    kubectl exec nats-0 -n pocket-advisor -- \
      wget -qO- 'http://localhost:8222/jsz?accounts=true&streams=true' \
@@ -237,39 +285,39 @@ id instead (`<id>`, `<id>_user`).
    ```
    `$G` is NATS' built-in global account and is always empty. An account
    showing `[]` will accept uploads and process none of them; re-run
-   `make deploy-infra`.
+   `./pocket-advisor.sh deploy-workspace test`.
 
-That is the whole setup. There is no provisioning command to run afterwards —
-go straight to [§3](#3-load-a-corpus).
+That is the whole setup — go straight to [§3](#3-load-a-corpus).
 
-Repeat steps 1 and 2 per workspace, then `make deploy-infra` once. Removing a
-workspace is the same operation in reverse: delete its entry and re-deploy,
-which takes its namespace and its volumes with it.
+Repeat steps 1 and 2 per workspace, then `./pocket-advisor.sh
+deploy-workspace <id>` for each new one; `deploy-infra` itself only needs
+re-running when the shared stores' own config changes. Removing a workspace
+is the same operation in reverse: `./pocket-advisor.sh destroy-workspace
+<id>`, then delete its entry from both files.
 
 ### Who creates what
 
 | | Creates | Needs |
 |---|---|---|
-| `make deploy-infra` | operators, and per workspace: namespace, Postgres `Cluster`, RustFS `Tenant`, three `Stream`s, the shared NATS account | cluster admin |
-| `--ingest-all` | the Tier 2/3 schema, the bucket notification rule, then documents | that workspace's own credentials |
+| `./pocket-advisor.sh deploy-infra` | the three shared StatefulSets themselves, empty | cluster admin |
+| `./pocket-advisor.sh deploy-workspace <id>` | that workspace's database/role, bucket/identity/policy, notification binding, three JetStream streams | the admin credentials in `workspaces/pocket-advisor-infra.yaml` |
+| `--ingest-all` | the Tier 2/3 schema, then documents | that workspace's own credentials |
 
-The binary holds no administrative credentials at all. The schema is applied as
-the workspace's own Postgres role, and the notification rule as its own RustFS
-identity, which the Tenant's policy already grants.
+The binary itself holds no administrative credentials at all — only
+`./pocket-advisor.sh deploy-workspace`/`destroy-workspace` do, read from
+`workspaces/pocket-advisor-infra.yaml`. The schema is applied as the
+workspace's own Postgres role; ingest, query and mcp all connect as that
+workspace's own RustFS identity and Postgres role, nothing more.
 
 OrbStack resolves cluster Service DNS from macOS, so no port-forward is needed
 and the defaults address the cluster directly:
 
 ```
-# RustFS and Postgres are per workspace, in the workspace's own namespace.
-# The RustFS operator exposes each tenant's S3 API as <tenant>-io, and
-# CloudNativePG exposes each cluster's primary as <cluster>-rw. Both are named
-# plainly, because the namespace already says whose they are:
-rustfs-io.<workspace-id>.svc.cluster.local:9000
-postgres-rw.<workspace-id>.svc.cluster.local:5432
-
-# NATS is shared — one server in the release namespace, an account per
-# workspace — so this address is not templated:
+# All three stores are one shared StatefulSet each, in the pocket-advisor
+# namespace — nothing is per-workspace at the network level, only inside
+# the store (a database, a bucket, a NATS account named after the workspace):
+rustfs.pocket-advisor.svc.cluster.local:9000
+postgres.pocket-advisor.svc.cluster.local:5432
 nats.pocket-advisor.svc.cluster.local:4222
 ```
 
@@ -280,7 +328,7 @@ resolver and will report NXDOMAIN even when everything is fine; use `nc -vz`
 or `ping` instead:
 
 ```bash
-nc -vz postgres-rw.test.svc.cluster.local 5432
+nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 ```
 
 ## 3. Load a corpus
@@ -329,21 +377,23 @@ ls logs/     # uploader, discovery, email-processor, document-extractor,
 curl -s localhost:9090/metrics | grep rag_
 
 # Pipeline backlog
-kubectl exec pocket-advisor-nats-0 -- \
+kubectl exec nats-0 -n pocket-advisor -- \
   sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"'
 
-# What actually landed. Each workspace is its own cluster, so the pod is
-# pocket-advisor-<workspace-id>-1 and the database is always `workspace`.
-kubectl exec pocket-advisor-test-1 -c postgres -- psql -U postgres -d workspace -c \
+# What actually landed. One shared Postgres StatefulSet now, named `postgres`
+# in the pocket-advisor namespace — a plain StatefulSet's pods are 0-indexed,
+# so it's always postgres-0 regardless of workspace, and the database name is
+# the workspace id instead.
+kubectl exec postgres-0 -n pocket-advisor -- psql -U pa_admin -d test -c \
   "select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;"
 
 # The resolved vector dimension — worth checking after any embedding model
 # change, since the column can't be reshaped without a full re-embed
-kubectl exec pocket-advisor-test-1 -c postgres -- psql -U postgres -d workspace -c \
+kubectl exec postgres-0 -n pocket-advisor -- psql -U pa_admin -d test -c \
   "select * from schema_metadata;"
 
 # Anything that failed for real (as opposed to being skipped)
-kubectl exec pocket-advisor-nats-0 -- \
+kubectl exec nats-0 -n pocket-advisor -- \
   sh -c 'wget -qO- "http://localhost:8222/jsz?streams=true"' | grep -A5 INGESTION_DLQ
 ```
 
@@ -500,18 +550,18 @@ upload run never implies deletion — removal is always explicit.
 
 `--delete-data` empties a workspace but leaves it standing — its Postgres
 database, RustFS bucket and NATS account all still exist, just empty, ready
-for the next `--ingest-all`. Retiring a workspace entirely is a chart
-operation, not a CLI one: remove its entry from
-`workspaces/pocket-advisor-infra.yaml` and re-run `make deploy-infra`, which
-deletes its namespace and every volume in it.
+for the next `--ingest-all`. Retiring a workspace entirely is
+`./pocket-advisor.sh destroy-workspace <id>` (§2 "Who creates what"), then
+removing its entry from `workspaces/pocket-advisor-infra.yaml` and
+`workspace-config.yaml`.
 
 ## 7. After code changes
 
 ```bash
-make build          # rebuild the binary — no images, no rollout
-make test           # go test with the ocr tag
-make race           # the worker pool under -race
-make lint           # gofmt, go vet, helm lint
+./pocket-advisor.sh build          # rebuild the binary — no images, no rollout
+./pocket-advisor.sh test           # go test with the ocr tag
+./pocket-advisor.sh race           # the worker pool under -race
+./pocket-advisor.sh lint           # gofmt, go vet, helm lint
 ```
 
 Nothing in the cluster runs pipeline code, so a code change never needs a
@@ -542,19 +592,18 @@ Set it in `config.yaml` under `infra.embedding.concurrency` to make it stick.
 ## 9. Upgrading the chart
 
 ```bash
-make deploy-infra    # upgrade --install, then waits for every store to be ready
+./pocket-advisor.sh deploy-infra    # upgrade --install, then waits for the three StatefulSets to roll out
 ```
 
-Prefer that over a bare `helm upgrade`. It retries past the CNPG webhook race
-on a fresh cluster, waits on each workspace's `Tenant` and `Cluster` rather
-than just on the release, and applies the RustFS operator's reconcile
-workaround. If you run Helm directly, wait yourself:
+Prefer that over a bare `helm upgrade` — it does the `kubectl rollout status`
+wait for you. If you run Helm directly:
 
 ```bash
 helm upgrade pocket-advisor ./charts/pocket-advisor-infra \
   --namespace pocket-advisor -f workspaces/pocket-advisor-infra.yaml
-kubectl wait --for=condition=Ready tenant.rustfs.com --all --all-namespaces --timeout=5m
-kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io --all --all-namespaces --timeout=10m
+kubectl rollout status statefulset/postgres -n pocket-advisor --timeout=5m
+kubectl rollout status statefulset/rustfs -n pocket-advisor --timeout=5m
+kubectl rollout status statefulset/nats -n pocket-advisor --timeout=5m
 ```
 
 Do not omit `-f workspaces/pocket-advisor-infra.yaml`. The chart's own
@@ -562,60 +611,69 @@ Do not omit `-f workspaces/pocket-advisor-infra.yaml`. The chart's own
 `nats-server.conf` with no accounts at all and every workspace loses its NATS
 identity.
 
-**Adding or changing a workspace needs a `helm upgrade`.** Everything a
-workspace has is rendered from `workspaces/pocket-advisor-infra.yaml`, so an
-entry added there exists only after `make deploy-infra` runs again.
+**Adding a workspace needs both a `helm upgrade` and a `deploy-workspace`.**
+Its NATS account is rendered from `workspaces/pocket-advisor-infra.yaml` by
+this chart, so it only exists after `./pocket-advisor.sh deploy-infra` runs
+again; its database, bucket and streams are not rendered by anything and
+only exist after `./pocket-advisor.sh deploy-workspace <id>` runs on top of
+that.
 
-**Why `make deploy-infra` can take a while.** The operators reconcile in the
-background, so the command waits for them:
-
-| What changed | Time |
-|---|---|
-| Nothing | a few seconds |
-| A new workspace | ~1-2 min for its Cluster and Tenant to come up |
-| First install on a fresh cluster | +1 retry past the CNPG webhook race |
+**Why `./pocket-advisor.sh deploy-infra` is usually fast now.** No operator
+reconciles anything in the background any more (deviation 39) — the command
+waits on the three StatefulSets' own rollout, typically a few seconds once
+images are already pulled, and only as long as a fresh Postgres/RustFS/NATS
+container takes to pass its own readiness probe on a cold start.
 
 Two immutability traps:
 
-- **`persistence.size` can't be changed on a live release.**
-  `volumeClaimTemplates` is immutable, so `helm upgrade` fails with "updates to
-  statefulset spec … are forbidden". That applies to the shared NATS, the only
-  StatefulSet this chart renders directly; the Postgres and RustFS volumes
-  belong to their operators.
-- **A PostgreSQL major-version bump changes the on-disk format.** CloudNativePG
-  will not rewrite it in place, so the workspace needs a fresh volume and a
-  re-ingest. Per workspace rather than cluster-wide — each has its own
-  `Cluster`.
+- **`persistence.size` can't be changed on a live release, for any of the
+  three.** `volumeClaimTemplates` is immutable, so `helm upgrade` fails with
+  "updates to statefulset spec … are forbidden" — Postgres, RustFS and NATS
+  are all plain StatefulSets this chart renders directly now (deviation 39),
+  so all three hit this the same way.
+- **A PostgreSQL major-version bump changes the on-disk format.** The image
+  itself will not rewrite it in place, so the shared StatefulSet needs a
+  fresh volume and every workspace needs a re-ingest — cluster-wide now, not
+  per workspace, since there is one Postgres server for all of them.
 
 ## 10. Uninstall
 
-To retire one workspace without touching any other, remove its entry from
-`workspaces/pocket-advisor-infra.yaml` and re-run `make deploy-infra` (§6).
-Everything below is cluster-wide.
+**Removing one workspace** is scoped and complete — unlike the operator era,
+there is nothing left over to clean up by hand:
 
 ```bash
-make destroy-infra    # helm uninstall; PVCs deliberately retained
+./pocket-advisor.sh destroy-workspace <id>   # drops its database/role, bucket/identity/policy, streams
+```
+
+Then remove its entry from `workspaces/pocket-advisor-infra.yaml` and
+`workspace-config.yaml` (§2 "Who creates what" covers exactly what this
+undoes). Everything below is cluster-wide.
+
+```bash
+./pocket-advisor.sh destroy-infra    # helm uninstall; PVCs deliberately retained
 ```
 
 PVCs survive on purpose: Tier 1 is the corpus source of truth, and the NATS
-volume is what makes an interrupted ingest resumable. To discard everything —
-every workspace, not just one:
+volume is what makes an interrupted ingest resumable. This is now a plain
+Kubernetes guarantee rather than something pocket-advisor.sh has to
+engineer — `helm uninstall` doesn't touch a StatefulSet's PVCs by Kubernetes' own
+ordinary default, the same as it always did for NATS. (An earlier revision
+patched the underlying `PersistentVolume` to `Retain` before uninstalling,
+to work around CloudNativePG's operator actively deleting Postgres's PVC on
+`Cluster` deletion regardless of StorageClass policy — deviation 38. Removing
+the operator (deviation 39) removed the problem, not just the workaround for
+it, so that patching step is gone.) To discard everything:
 
 ```bash
-make destroy-state    # kubectl delete pvc --all
+./pocket-advisor.sh destroy-state    # kubectl delete pvc --all --namespace pocket-advisor
 ```
 
-Nothing needs deleting by hand. Every object is chart-rendered, so
-`helm uninstall` removes it — including the per-workspace namespaces, which
-the chart creates rather than `--create-namespace`.
-
-Two things do survive, both deliberately:
-
-- **PVCs**, until `destroy-state`. Tier 1 is the corpus source of truth and the
-  JetStream volume is what makes an interrupted ingest resumable.
-- **CRDs**. Helm never deletes CRDs installed from a subchart's `crds/`
-  directory. Harmless, and what lets a re-install skip straight to applying
-  custom resources.
+Nothing needs deleting by hand beyond that. Every object
+`./pocket-advisor.sh deploy-infra` creates is chart-rendered in one
+namespace, so `helm uninstall` removes all
+of it in one step — there are no more per-workspace namespaces to enumerate,
+and no CRDs to leave behind either, since none are installed any more
+(deviation 39).
 
 Worth being clear about why the recommended labels do not make Helm delete more
 than it does: `helm uninstall` does not search the cluster by label. It reads
@@ -624,7 +682,7 @@ exactly the objects that manifest names. The `app.kubernetes.io/*` labels and
 `meta.helm.sh/release-*` annotations matter at *install* time, where they stop
 one release adopting another's resources — they are not a delete-time index.
 
-To confirm a teardown is actually complete:To confirm a teardown is actually complete:
+To confirm a teardown is actually complete:
 
 ```bash
 kubectl get all,secrets,configmaps,pvc -n pocket-advisor

@@ -1,15 +1,20 @@
 // Package config resolves service configuration.
 //
-// Three layers, each overriding the one before: built-in defaults, the `infra`
-// section of config.yaml, then the environment. Flags override all of it at the
-// call site. Defaults alone are enough to run against a stock local cluster, so
-// config.yaml exists to describe a different one rather than to repeat this one.
+// config.yaml is the only source of truth for infrastructure — there is no
+// Go-side fallback for a store address, an endpoint, or a fixed model name
+// any more. This package layers only the `infra` section of config.yaml,
+// then the environment, over nothing: an address this package used to
+// default to a stock local cluster now has to come from the file or the
+// environment, or Load reports it missing rather than silently guessing.
+// Flags override all of it at the call site. The one path that IS hardcoded
+// is DefaultPath itself — Load has to know where to look before it can read
+// anything that would tell it otherwise.
 //
 // The app runs on the host while its stores stay in the local OrbStack
-// cluster, so the defaults are the cluster's own Service DNS names. OrbStack
-// routes *.svc.cluster.local from macOS, but only through the system resolver
-// — which Go consults only when cgo is enabled. mise.toml pins CGO_ENABLED=1
-// for that as much as for Tesseract.
+// cluster, so config.yaml's own committed values are the cluster's Service
+// DNS names. OrbStack routes *.svc.cluster.local from macOS, but only
+// through the system resolver — which Go consults only when cgo is enabled.
+// mise.toml pins CGO_ENABLED=1 for that as much as for Tesseract.
 package config
 
 import (
@@ -18,64 +23,72 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Cluster Service DNS defaults, matching a `pocket-advisor` release in the
-// `pocket-advisor` namespace.
-const (
-	// One namespace per workspace, and the namespace *is* the workspace id.
-	// Every address below is therefore the same service name in a different
-	// namespace — hence one %s each, filled with the id.
-	defaultRustFSEndpoint = "rustfs-io.%s.svc.cluster.local:9000"
-	// Not templated by workspace, unlike RustFS and Postgres: NACK does not
-	// deploy NATS, and its model is one server serving Stream CRDs across many
-	// namespaces, so there is a single shared server with an account per
-	// workspace (deviation 23).
-	defaultNATSURL = "nats://nats.pocket-advisor.svc.cluster.local:4222"
-	// Not templated by workspace, unlike RustFS: one shared CloudNativePG
-	// cluster now (ingestion-design.md deviation 34), in the release
-	// namespace alongside NATS, so its address is exactly as constant as
-	// defaultNATSURL's.
-	defaultPostgresHost = "postgres-rw.pocket-advisor.svc.cluster.local"
-	// The embedding endpoint is a plain localhost address now: the process that
-	// calls it runs on the machine that serves it, so the host.docker.internal
-	// indirection the in-cluster workers needed is gone.
-	defaultEmbeddingEndpoint = "http://localhost:8000/v1/embeddings"
-	defaultRerankEndpoint    = "http://localhost:8000/v1/rerank"
-	defaultLLMEndpoint       = "http://localhost:8000/v1/chat/completions"
+// DefaultPath is where Load looks unless told otherwise. The only
+// infrastructure value left hardcoded in Go — Load has to know where
+// config.yaml is before it can read the rest from it.
+const DefaultPath = "config.yaml"
 
-	// Matches the CLI's own --workspace-config default (internal/cli).
-	defaultWorkspacesConfigPath = "workspaces/workspace-config.yaml"
-	defaultWorkspacesValuesPath = "workspaces/pocket-advisor-infra.yaml"
+var environmentPlaceholder = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-	// Match charts/pocket-advisor-infra/values.yaml's workspace.name: the
-	// bucket and the RustFS identity are called this, in every namespace. The
-	// namespace already says whose they are. The Postgres database and role
-	// are not this any more — deviation 34 made them `<id>` and `<id>_user`,
-	// since one shared cluster needs names that actually differ.
-	defaultWorkspaceResourceName = "workspace"
+// expandEnvironmentPlaceholders resolves the ${NAME} placeholders permitted
+// in the committed config template and the gitignored workspace values file.
+// os.ExpandEnv would silently turn an unset secret into an empty string;
+// reporting it here keeps a malformed direnv setup from becoming a confusing
+// authentication failure against one of the stores.
+func expandEnvironmentPlaceholders(value, field string) (string, error) {
+	var missing []string
+	expanded := environmentPlaceholder.ReplaceAllStringFunc(value, func(match string) string {
+		name := match[2 : len(match)-1]
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+			return match
+		}
+		return value
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("expand %s: unset environment variable(s): %s", field, strings.Join(missing, ", "))
+	}
+	return expanded, nil
+}
 
-	// DefaultPath is where Load looks unless told otherwise.
-	DefaultPath = "config.yaml"
-)
-
-// The read path's models are fixed rather than configured
-// (retrieval-design.md §8). Every latency and quality figure in that design
-// was measured against these two, so a swap silently invalidates the numbers
-// it rests on — and both slots fail quietly rather than loudly when filled
-// wrongly: a non-cross-encoder in the rerank slot reorders badly without
-// erroring, and a reasoning model in the LLM slot returns chain-of-thought
-// where queries were expected. The embedding model stays configurable by
-// contrast because it has a real forcing case: schema_metadata records it and
-// the vector dimension must match (ingestion-design.md §4.4).
-const (
-	RerankModel = "jina-reranker-v3-mlx"
-	LLMModel    = "Qwen3.5-4B-MLX-4bit"
-)
+func expandFilePlaceholders(f *file) error {
+	fields := map[string]*string{
+		"infra.rustfs.endpoint":         &f.Infra.RustFS.Endpoint,
+		"infra.nats.url":                &f.Infra.NATS.URL,
+		"infra.postgres.host":           &f.Infra.Postgres.Host,
+		"infra.postgres.sslmode":        &f.Infra.Postgres.SSLMode,
+		"infra.embedding.endpoint":      &f.Infra.Embedding.Endpoint,
+		"infra.embedding.model":         &f.Infra.Embedding.Model,
+		"infra.embedding.timeout":       &f.Infra.Embedding.Timeout,
+		"infra.reranking.endpoint":      &f.Infra.Reranking.Endpoint,
+		"infra.reranking.model":         &f.Infra.Reranking.Model,
+		"infra.reranking.timeout":       &f.Infra.Reranking.Timeout,
+		"infra.llm.endpoint":            &f.Infra.LLM.Endpoint,
+		"infra.llm.model":               &f.Infra.LLM.Model,
+		"infra.llm.timeout":             &f.Infra.LLM.Timeout,
+		"infra.observability.log_dir":   &f.Infra.Observability.LogDir,
+		"infra.observability.log_level": &f.Infra.Observability.LogLevel,
+		"workspaces.config":             &f.Workspaces.Config,
+		"workspaces.values":             &f.Workspaces.Values,
+	}
+	for field, value := range fields {
+		expanded, err := expandEnvironmentPlaceholders(*value, field)
+		if err != nil {
+			return err
+		}
+		*value = expanded
+	}
+	return nil
+}
 
 // RustFS holds the connection and credential settings for Tier 1. There is no
 // bucket here: every bucket is a workspace's own (workspace-isolation.md
@@ -86,11 +99,13 @@ type RustFS struct {
 	UseSSL   bool
 
 	// No administrative credentials. Everything this binary does with RustFS
-	// it does as a workspace's own identity: the bucket, that identity and its
-	// policy are declared by the Tenant CRD, and even the bucket notification
-	// rule is within the policy the Tenant grants (deviation 24). The root
-	// credentials still exist — the operator needs them — but only the chart
-	// ever sees them.
+	// it does as a workspace's own identity: the bucket, that identity, its
+	// policy and its notification binding are all created once by
+	// `./pocket-advisor.sh deploy-workspace`, over rc/aws-cli, not by
+	// anything this binary runs (deviation 39). The root credentials still
+	// exist — deploy-workspace/destroy-workspace need them — but only
+	// workspaces/pocket-advisor-infra.yaml and pocket-advisor.sh ever see
+	// them.
 }
 
 type Postgres struct {
@@ -100,16 +115,21 @@ type Postgres struct {
 	// connection to hold. Every connection is a workspace's own, built by
 	// WorkspacePostgresDSN.
 
-	// Host is the one shared cluster's primary Service — CNPG names that
-	// <cluster>-rw. Not templated by workspace: unlike the one-cluster-per-
-	// workspace shape this replaced, there is only one address, in the
-	// release namespace, the same as defaultNATSURL's.
+	// Host is the shared Postgres StatefulSet's Service. Not templated by
+	// workspace: there is one address, in the release namespace, the same as
+	// NATS.URL's.
 	Host string
 	Port int
-	// SSLMode is `require` rather than `verify-full`: CNPG issues its own
-	// internal CA, so verifying the chain would mean distributing that CA to
-	// the host binary for no gain on a local cluster. `require` still
-	// encrypts.
+	// SSLMode is `disable`, not `require`. CloudNativePG issued its own
+	// internal CA and terminated TLS for free; the plain StatefulSet that
+	// replaced it (deviation 39) does none of that — no cert, no key, no
+	// `ssl = on` in postgresql.conf — so `require` would refuse every
+	// connection outright rather than degrade to unencrypted, which is a
+	// worse failure than the one it would have been guarding against on a
+	// single-machine local cluster with no network segment to eavesdrop on.
+	// Encrypting this would mean provisioning and rotating a cert by hand,
+	// the kind of machinery deviation 39 removed operators specifically to
+	// avoid — revisit only if this cluster stops being local and single-user.
 	SSLMode string
 	// MaxConns must cover every lane that can hold a connection at once. The
 	// pgxpool default is max(4, NumCPU), far below the lane count once all
@@ -128,12 +148,7 @@ type NATS struct {
 // callers use these fields rather than passing the id around and assuming the
 // three systems agree with it.
 type Workspace struct {
-	ID string
-	// Namespace is the workspace id: one release for the whole cluster, but a
-	// namespace per workspace. Every address below is the same service name
-	// inside it, which is why the names are constants — the namespace already
-	// says whose they are (deviations 21, 24).
-	Namespace  string
+	ID         string
 	ValuesPath string
 
 	RustFSEndpoint  string
@@ -160,24 +175,27 @@ type Embedding struct {
 	Concurrency int
 }
 
-// Reranking and LLM carry only where the model lives. Which model is not
-// configurable — see RerankModel / LLMModel and retrieval-design.md §8: every
-// latency and quality figure in that design was measured against those two
-// specifically, and both slots degrade silently rather than erroring when
-// filled wrongly.
+// Reranking's Model is config.yaml's infra.reranking.model, not a Go
+// constant — see the comment on that key for why changing it is a measured
+// decision, not a free knob, even though nothing in code enforces that any
+// more (retrieval-design.md §8).
 type Reranking struct {
 	Endpoint string
 	APIKey   string
+	Model    string
 	Timeout  time.Duration
 }
 
 // LLM is for query preparation only — decomposition (retrieval-design.md
 // §3.6). It is never used for answer generation, which happens outside this
 // codebase entirely (§6.1). It is local, fast and already wired up, which is
-// exactly what makes that worth stating.
+// exactly what makes that worth stating. Model is config.yaml's
+// infra.llm.model, the same non-obvious-but-not-enforced contract as
+// Reranking.Model above.
 type LLM struct {
 	Endpoint string
 	APIKey   string
+	Model    string
 	Timeout  time.Duration
 }
 
@@ -208,16 +226,16 @@ type Config struct {
 	Query     Query
 
 	// WorkspacesConfigPath points at the workspace registry
-	// (workspaces/workspace-config.yaml by default) — the same file
-	// internal/workspace reads for collections and paths. It describes what a
-	// workspace *holds*; credentials moved out of it entirely and now live in
-	// WorkspacesValuesPath below (deviation 18).
+	// (config.yaml's workspaces.config — required, no fallback) — the same
+	// file internal/workspace reads for collections and paths. It describes
+	// what a workspace *holds*; credentials moved out of it entirely and now
+	// live in WorkspacesValuesPath below (deviation 18).
 	WorkspacesConfigPath string
 
 	// WorkspacesValuesPath points at the private Helm values override that
 	// carries each workspace's infrastructure names and credentials. The same
-	// file `make deploy-infra` passes to helm with -f, so the chart and this
-	// binary cannot disagree about a password.
+	// file `./pocket-advisor.sh deploy-infra` passes to helm with -f, so the
+	// chart and this binary cannot disagree about a password.
 	WorkspacesValuesPath string
 
 	MetricsPort int
@@ -253,10 +271,12 @@ type file struct {
 		} `yaml:"embedding"`
 		Reranking struct {
 			Endpoint string `yaml:"endpoint"`
+			Model    string `yaml:"model"`
 			Timeout  string `yaml:"timeout"`
 		} `yaml:"reranking"`
 		LLM struct {
 			Endpoint string `yaml:"endpoint"`
+			Model    string `yaml:"model"`
 			Timeout  string `yaml:"timeout"`
 		} `yaml:"llm"`
 		Observability struct {
@@ -276,8 +296,11 @@ type file struct {
 
 // Load resolves configuration from defaults, then path, then the environment.
 //
-// A missing file is not an error — the defaults describe a stock local cluster.
-// A malformed one is, because silently ingesting into the wrong store is worse
+// A missing file is now an error, not a fallback to a stock local cluster:
+// there is no Go-side default left for any of the fields requireInfra
+// checks, so a missing config.yaml leaves them all empty rather than filled
+// in from somewhere else. A malformed file is an error for the same
+// long-standing reason — silently ingesting into the wrong store is worse
 // than refusing to start.
 func Load(path string) (*Config, error) {
 	c := defaults()
@@ -285,16 +308,58 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	applyEnv(c)
+	if err := requireInfra(c); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// requireInfra reports every field that used to have a Go-side default and
+// no longer does — config.yaml (or the environment) is the only place left
+// that can supply them, so one left empty after applyFile and applyEnv is a
+// configuration error, not a silent gap. Embedding.Endpoint is deliberately
+// not here: RequireEmbedding already covers it, called only by the modes
+// that actually need it, and duplicating that check here would just be two
+// sources of truth for the same field.
+func requireInfra(c *Config) error {
+	var missing []string
+	if c.RustFS.Endpoint == "" {
+		missing = append(missing, "infra.rustfs.endpoint")
+	}
+	if c.NATS.URL == "" {
+		missing = append(missing, "infra.nats.url")
+	}
+	if c.Postgres.Host == "" {
+		missing = append(missing, "infra.postgres.host")
+	}
+	if c.Reranking.Endpoint == "" {
+		missing = append(missing, "infra.reranking.endpoint")
+	}
+	if c.Reranking.Model == "" {
+		missing = append(missing, "infra.reranking.model")
+	}
+	if c.LLM.Endpoint == "" {
+		missing = append(missing, "infra.llm.endpoint")
+	}
+	if c.LLM.Model == "" {
+		missing = append(missing, "infra.llm.model")
+	}
+	if c.WorkspacesConfigPath == "" {
+		missing = append(missing, "workspaces.config")
+	}
+	if c.WorkspacesValuesPath == "" {
+		missing = append(missing, "workspaces.values")
+	}
+	return report(missing)
 }
 
 // valuesFile mirrors workspaces/pocket-advisor-infra.yaml — the private
 // override Helm is given with -f, so one file configures both the chart and
 // this binary and the two cannot disagree about a password.
 //
-// Credentials only. Every resource name is a constant now: one release per
-// namespace means the namespace identifies the workspace, so a name derived
-// from the id would only repeat it (deviation 21).
+// Credentials only. Every resource name derives from the workspace id now:
+// there is one shared namespace and one shared process per store, so the id
+// is what distinguishes a workspace's database, bucket and NATS account.
 //
 // Read per call rather than at Load: there is no longer one values file to
 // resolve at startup, and a mode that never touches a workspace should not
@@ -307,46 +372,38 @@ type valuesFile struct {
 	Workspaces []struct {
 		ID     string `yaml:"id"`
 		RustFS struct {
-			Credentials struct {
-				SecretKey string `yaml:"secretKey"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"rustfs"`
 		NATS struct {
-			Credentials struct {
-				Password string `yaml:"password"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"nats"`
 		Postgres struct {
-			Credentials struct {
-				Password string `yaml:"password"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"postgres"`
 	} `yaml:"workspaces"`
 }
 
+// defaults covers only the fields that still have one — every field
+// requireInfra checks starts at its zero value here on purpose, since
+// config.yaml (or the environment) is now the only place any of them can
+// come from.
 func defaults() *Config {
 	return &Config{
 		RustFS: RustFS{
-			Endpoint: defaultRustFSEndpoint,
-			UseSSL:   false,
+			UseSSL: false,
 		},
 		Postgres: Postgres{
-			Host:     defaultPostgresHost,
 			Port:     5432,
-			SSLMode:  "require",
+			SSLMode:  "disable",
 			MaxConns: 50,
 		},
-		NATS:                 NATS{URL: defaultNATSURL},
-		WorkspacesConfigPath: defaultWorkspacesConfigPath,
-		WorkspacesValuesPath: defaultWorkspacesValuesPath,
 		Embedding: Embedding{
-			Endpoint:    defaultEmbeddingEndpoint,
 			Model:       "jina-embeddings-v5-text-small-mlx",
 			Timeout:     60 * time.Second,
 			Concurrency: 8,
 		},
-		Reranking: Reranking{Endpoint: defaultRerankEndpoint, Timeout: 60 * time.Second},
-		LLM:       LLM{Endpoint: defaultLLMEndpoint, Timeout: 30 * time.Second},
+		Reranking: Reranking{Timeout: 60 * time.Second},
+		LLM:       LLM{Timeout: 30 * time.Second},
 		Query: Query{
 			VecCandidates:        50,
 			FTSCandidates:        50,
@@ -379,10 +436,12 @@ func applyFile(c *Config, path string) error {
 		}
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-
 	var f file
 	if err := yaml.Unmarshal(raw, &f); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := expandFilePlaceholders(&f); err != nil {
+		return fmt.Errorf("expand %s: %w", path, err)
 	}
 	in := f.Infra
 
@@ -417,9 +476,11 @@ func applyFile(c *Config, path string) error {
 	// (deviation 18) and had no equivalent, so a client passing absolute paths
 	// for both flags still died on a relative workspaces.values.
 	//
-	// Applied to the defaults as well as to what the file set, because the
-	// defaults describe the same repository layout. A bare "config.yaml" gives a
-	// directory of ".", which leaves the paths exactly as they were.
+	// Applied unconditionally, even when the file set neither path (they
+	// stay "" and requireInfra reports them missing below) — resolveAgainst
+	// itself is a no-op on an empty string, so there is nothing to guard
+	// here. A bare "config.yaml" gives a directory of ".", which leaves a
+	// path the file did set exactly as written.
 	dir := filepath.Dir(path)
 	c.WorkspacesConfigPath = resolveAgainst(dir, c.WorkspacesConfigPath)
 	c.WorkspacesValuesPath = resolveAgainst(dir, c.WorkspacesValuesPath)
@@ -438,6 +499,7 @@ func applyFile(c *Config, path string) error {
 	}
 
 	setStr(&c.Reranking.Endpoint, in.Reranking.Endpoint)
+	setStr(&c.Reranking.Model, in.Reranking.Model)
 	if in.Reranking.Timeout != "" {
 		d, err := time.ParseDuration(in.Reranking.Timeout)
 		if err != nil {
@@ -447,6 +509,7 @@ func applyFile(c *Config, path string) error {
 	}
 
 	setStr(&c.LLM.Endpoint, in.LLM.Endpoint)
+	setStr(&c.LLM.Model, in.LLM.Model)
 	if in.LLM.Timeout != "" {
 		d, err := time.ParseDuration(in.LLM.Timeout)
 		if err != nil {
@@ -472,8 +535,10 @@ func applyEnv(c *Config) {
 
 	c.Reranking.Endpoint = env("RERANK_ENDPOINT", c.Reranking.Endpoint)
 	c.Reranking.APIKey = env("RERANK_API_KEY", c.Reranking.APIKey)
+	c.Reranking.Model = env("RERANK_MODEL", c.Reranking.Model)
 	c.LLM.Endpoint = env("LLM_ENDPOINT", c.LLM.Endpoint)
 	c.LLM.APIKey = env("LLM_API_KEY", c.LLM.APIKey)
+	c.LLM.Model = env("LLM_MODEL", c.LLM.Model)
 
 	c.NATS.URL = env("NATS_URL", c.NATS.URL)
 
@@ -503,9 +568,9 @@ func (c *Config) RequireEmbedding() error {
 }
 
 // Workspace resolves a workspace's secrets by id, and returns every address
-// and name already resolved so callers never derive one themselves. Only the
-// NATS account is named after the id; the bucket, database and owner are
-// constants, because a namespace holds one of each (workspace-isolation.md §2).
+// and name already resolved so callers never derive one themselves. The
+// bucket, database, owner and NATS account are all named after the id because
+// the stores are shared (workspace-isolation.md §2).
 func (c *Config) Workspace(id string) (Workspace, error) {
 	if id == "" {
 		return Workspace{}, fmt.Errorf("workspace id is required")
@@ -523,19 +588,13 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 	var entry *struct {
 		ID     string `yaml:"id"`
 		RustFS struct {
-			Credentials struct {
-				SecretKey string `yaml:"secretKey"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"rustfs"`
 		NATS struct {
-			Credentials struct {
-				Password string `yaml:"password"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"nats"`
 		Postgres struct {
-			Credentials struct {
-				Password string `yaml:"password"`
-			} `yaml:"credentials"`
+			Password string `yaml:"password"`
 		} `yaml:"postgres"`
 	}
 	for i := range vf.Workspaces {
@@ -547,43 +606,59 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 	if entry == nil {
 		return Workspace{}, fmt.Errorf("workspace %q has no entry under workspaces: in %s", id, path)
 	}
+	for field, value := range map[string]*string{
+		"rustfs.password":   &entry.RustFS.Password,
+		"nats.password":     &entry.NATS.Password,
+		"postgres.password": &entry.Postgres.Password,
+	} {
+		expanded, err := expandEnvironmentPlaceholders(*value, field)
+		if err != nil {
+			return Workspace{}, fmt.Errorf("workspace %q: %w", id, err)
+		}
+		*value = expanded
+	}
 	for field, v := range map[string]string{
-		"rustfs.credentials.secretKey":  entry.RustFS.Credentials.SecretKey,
-		"nats.credentials.password":     entry.NATS.Credentials.Password,
-		"postgres.credentials.password": entry.Postgres.Credentials.Password,
+		"rustfs.password":   entry.RustFS.Password,
+		"nats.password":     entry.NATS.Password,
+		"postgres.password": entry.Postgres.Password,
 	} {
 		if v == "" {
 			return Workspace{}, fmt.Errorf("workspace %q: %s is empty in %s", id, field, path)
 		}
 	}
 
-	// The namespace is the workspace id, and RustFS's address is the same
-	// service name inside it — which is why its resource names are one
-	// constant (defaultWorkspaceResourceName). Postgres and NATS are keyed by
-	// id instead: both are shared now, so id is what actually distinguishes
-	// one workspace's database, role, account and user from another's.
+	// No namespace field any more: nothing is Kubernetes-namespace-scoped
+	// per workspace since deviation 39 removed the operators, not even the
+	// JetStream streams deviation 35 still had a namespace for. Every store
+	// is one shared process now, so id is what actually distinguishes one
+	// workspace's database, role, bucket, account and user from another's —
+	// there is no namespace boundary left to lean on instead.
 	return Workspace{
 		ID:         id,
-		Namespace:  id,
 		ValuesPath: path,
 
-		RustFSEndpoint:  fmt.Sprintf(c.RustFS.Endpoint, id),
-		BucketName:      defaultWorkspaceResourceName,
-		RustFSAccessKey: defaultWorkspaceResourceName,
-		RustFSSecretKey: entry.RustFS.Credentials.SecretKey,
+		// One shared RustFS StatefulSet (deviation 39, replacing deviation
+		// 35's Tenant CRD): the endpoint is constant, and the bucket/identity
+		// names are what `./pocket-advisor.sh deploy-workspace` actually
+		// created via rc/aws-cli, not a CRD.
+		RustFSEndpoint:  c.RustFS.Endpoint,
+		BucketName:      id,
+		RustFSAccessKey: id,
+		RustFSSecretKey: entry.RustFS.Password,
 
 		NATSURL:      c.NATS.URL,
 		NATSAccount:  id,
 		NATSUser:     id,
-		NATSPassword: entry.NATS.Credentials.Password,
+		NATSPassword: entry.NATS.Password,
 
-		// One shared cluster (deviation 34): the host is constant, and the
-		// database and role names are what the chart's Database/DatabaseRole
-		// CRDs actually created — templates/postgres-workspaces.yaml.
+		// One shared Postgres StatefulSet (deviation 39, replacing deviation
+		// 34's Cluster CRD): the host is constant, and the database/role
+		// names are what `./pocket-advisor.sh deploy-workspace` actually
+		// created via psql, not a Database/DatabaseRole CRD.
 		PostgresHost: c.Postgres.Host,
 		DBName:       id,
 		DBUser:       id + "_user",
-		DBPassword:   entry.Postgres.Credentials.Password,
+		DBPassword:   entry.Postgres.Password,
 	}, nil
 }
 
@@ -598,7 +673,7 @@ func (c *Config) WorkspacePostgresDSN(id string) (string, error) {
 		return "", err
 	}
 	if w.DBPassword == "" {
-		return "", fmt.Errorf("workspace %q has no postgres.credentials.password in %s", id, c.WorkspacesValuesPath)
+		return "", fmt.Errorf("workspace %q has no postgres.password in %s", id, c.WorkspacesValuesPath)
 	}
 	return (&url.URL{
 		Scheme:   "postgres",

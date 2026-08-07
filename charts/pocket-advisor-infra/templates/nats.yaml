@@ -1,17 +1,12 @@
 {{/*
 One NATS server for the whole cluster, with an account per workspace.
 
-Unlike Postgres and RustFS — where each workspace gets its own process, because
-CloudNativePG and the RustFS operator each deploy one — NATS is shared. NACK
-does not deploy NATS at all: it reconciles JetStream resources against a server
-that already exists, and its documented model is one controller and one server
-serving Stream CRDs across many namespaces. Accounts are NATS's own tenancy
-boundary, so a workspace still gets an isolated JetStream store and a user that
-can see nothing else (deviation 23).
+Like Postgres and RustFS, NATS is one shared process. Accounts are NATS's own
+tenancy boundary, so a workspace still gets an isolated JetStream store and a
+user that can see nothing else (workspace-isolation.md §2.3).
 
-Rendered once, into the release namespace, rather than once per workspace. The
-Streams that authenticate against it live in the workspace namespaces and reach
-it by FQDN.
+Rendered once, into the release namespace, rather than once per workspace.
+Streams are data inside the account, created by deploy-workspace over natscli.
 
 Named plainly `nats`, without the release prefix. It is the only NATS in the
 cluster and its namespace holds nothing else of its kind, so the prefix added
@@ -44,18 +39,15 @@ data:
 
     # This workspace's account, with its own JetStream store and its own user
     # (workspace-isolation.md §2.3, §8).
-    # One account per workspace, each named for its workspace — unlike the
-    # bucket and database, which are both the constant `workspace`. Those live
-    # in a namespace of their own, so the namespace disambiguates them;
-    # accounts share one server, so the id is the only thing keeping them
-    # apart. The account IS the isolation boundary here: its own JetStream
-    # store, its own user, no visibility into any other (deviation 23).
+    # One account per workspace, each named for its workspace. The account IS
+    # the isolation boundary here: its own JetStream store, its own user, no
+    # visibility into any other.
     accounts {
     {{- range $.Values.workspaces }}
       {{ .id | quote }}: {
         jetstream: enabled
         users: [
-          { user: {{ .id | quote }}, password: {{ required (printf "workspaces[%s].nats.credentials.password is required" .id) .nats.credentials.password | quote }} }
+          { user: {{ .id | quote }}, password: {{ required (printf "workspaces[%s].nats.password is required" .id) .nats.password | quote }} }
         ]
       }
     {{- end }}
@@ -81,6 +73,12 @@ spec:
     metadata:
       labels:
         app: nats
+      annotations:
+        # ConfigMap volumes update on disk, but nats-server does not reload
+        # its account definitions just because the file changed. Rolling the
+        # pod when the workspace list changes makes deploy-infra sufficient
+        # when an operator adds or removes an account.
+        checksum/nats-accounts: {{ toYaml $.Values.workspaces | sha256sum }}
     spec:
       containers:
         - name: nats
@@ -92,8 +90,10 @@ spec:
           ports:
             - containerPort: {{ $.Values.nats.clientPort }}
             - containerPort: {{ $.Values.nats.monitorPort }}
-          resources:
-            {{- toYaml $.Values.nats.resources | nindent 12 }}
+          # No resources block, deliberately: everything in this namespace
+          # competes freely over the OrbStack VM's fixed 4GB/4CPU ceiling
+          # rather than each holding its own reservation inside it
+          # (values.yaml has the full account).
           volumeMounts:
             - name: nats-data
               mountPath: /data

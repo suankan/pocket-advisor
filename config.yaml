@@ -1,6 +1,13 @@
 # Platform-layer configuration — no user/workspace/case content. Committed
-# with the repo. `internal/config` loads only the `infra:` section below;
-# every key in it is optional and falls back to a built-in default.
+# with the repo. `internal/config` loads only the `infra:` section below.
+#
+# This file is the only source of truth for the values marked REQUIRED
+# below — there is no Go-side default for any of them any more (deviation
+# 41 removed the last ones: they used to silently fall back to this exact
+# file's own committed values, which meant a real config.yaml was never
+# actually necessary and a typo here could go unnoticed if it happened to
+# match the Go default anyway). Everything else keeps a built-in default
+# and stays genuinely optional.
 #
 # Precedence: built-in defaults < this file < environment variables < flags.
 # Put secrets in the environment rather than here; the file is committed.
@@ -9,39 +16,57 @@
 # Infrastructure endpoints
 #
 # pocket-advisor runs on the host; its three stores stay in the local OrbStack
-# cluster. These defaults match a `pocket-advisor` Helm release in the
-# a namespace per workspace, so a stock local cluster needs no edits here —
-# this section exists to point at a different one.
+# cluster. These values match a `pocket-advisor` Helm release in the
+# pocket-advisor namespace, so a stock local cluster needs no edits here —
+# this section exists to point at a different one. `./pocket-advisor.sh`
+# reads rustfs/nats/postgres below too (deploy-workspace/destroy-workspace),
+# so this file is the one place either has to agree on a host or a port.
 # ============================================================================
 infra:
   rustfs:
-    # OrbStack routes *.svc.cluster.local from macOS via the system resolver.
-    endpoint: rustfs-io.%s.svc.cluster.local:9000
+    # REQUIRED. OrbStack routes *.svc.cluster.local from macOS via the
+    # system resolver. Not templated by workspace: one shared RustFS
+    # StatefulSet (deviation 39), so its address is as constant as
+    # nats.url's below.
+    endpoint: rustfs.pocket-advisor.svc.cluster.local:9000
     use_ssl: false
+    # No admin credential here, deliberately — see postgres.host's comment
+    # below for the same reasoning. RustFS's root user/password live only
+    # in workspaces/pocket-advisor-infra.yaml, read only by
+    # ./pocket-advisor.sh deploy-workspace/destroy-workspace; internal/config
+    # has no field for them and never will (deviation 39).
 
   nats:
+    # REQUIRED.
     url: nats://nats.pocket-advisor.svc.cluster.local:4222
 
   postgres:
-    # There is no admin connection. One shared CloudNativePG cluster now
-    # (deviation 34) — the chart declares it plus a Database/DatabaseRole CRD
-    # per workspace, and the operator reconciles all three.
+    # host is REQUIRED. There is no admin connection this binary holds —
+    # ./pocket-advisor.sh deploy-workspace holds the one that exists, and
+    # only at the shell, never in this file or in Go (deviation 39: no
+    # CloudNativePG, no Database/DatabaseRole CRD, a plain StatefulSet and
+    # psql instead).
     #
     # Not templated by workspace, unlike rustfs.endpoint above: there is only
-    # one cluster, in the release namespace, so its address is as constant as
-    # nats.url's. A workspace's own database and role names carry the id
+    # one Postgres, in the release namespace, so its address is as constant
+    # as nats.url's. A workspace's own database and role names carry the id
     # instead (<id>, <id>_user).
-    host: postgres-rw.pocket-advisor.svc.cluster.local
+    host: postgres.pocket-advisor.svc.cluster.local
     port: 5432
-    # `require`, not `verify-full`: CNPG issues its own internal CA, so
-    # verifying the chain would mean shipping that CA to the host for no gain
-    # on a local cluster. Connections are still encrypted.
-    sslmode: require
+    # `disable`, not `require`. CloudNativePG issued its own internal CA for
+    # free; the plain StatefulSet that replaced it (deviation 39) offers no
+    # TLS at all — no cert, no key — so `require` would refuse every
+    # connection outright. Revisit only if this stops being a local,
+    # single-user cluster.
+    sslmode: disable
     max_conns: 50
 
   embedding:
-    # Plain localhost: the process calling this now runs on the machine serving
-    # it, so the host.docker.internal hop the in-cluster workers needed is gone.
+    # endpoint is effectively REQUIRED — RequireEmbedding checks it lazily,
+    # only for the modes that actually need it (ingest, listen), rather than
+    # unconditionally here. Plain localhost: the process calling this now
+    # runs on the machine serving it, so the host.docker.internal hop the
+    # in-cluster workers needed is gone.
     endpoint: http://localhost:8000/v1/embeddings
     model: jina-embeddings-v5-text-small-mlx
     # The one concurrency knob in the system. Every other pool is sized from
@@ -50,20 +75,29 @@ infra:
     concurrency: 8
     timeout: 60s
 
-  # Read path (retrieval-design.md §8). Only where the models live is a
-  # setting — which model is fixed in code, because every latency and quality
-  # figure in that design was measured against a specific pair, and both slots
-  # degrade silently rather than erroring when filled wrongly.
+  # Read path (retrieval-design.md §8). endpoint and model are both
+  # REQUIRED — unlike embedding.model above, changing this one is not a
+  # casual choice: every latency and quality figure in that design was
+  # measured against this specific model, and this slot degrades silently
+  # (reorders badly) rather than erroring when filled with the wrong one.
+  # Fixed by convention now, not by the type system — deviation 41 moved it
+  # here from a Go constant nothing could override; nothing stops it being
+  # edited, only this comment argues against doing so lightly.
   reranking:
     endpoint: http://localhost:8000/v1/rerank
+    model: jina-reranker-v3-mlx
     timeout: 60s
 
   # Query preparation only — decomposition. Never answer generation, which
-  # happens outside this codebase over MCP (§6.1). Thinking must be disabled
-  # on this model server-side: with it on, the call takes 5x as long and
-  # returns chain-of-thought instead of queries.
+  # happens outside this codebase over MCP (§6.1). endpoint and model are
+  # both REQUIRED, for the same reason as reranking.model above: this
+  # design's numbers were measured against this one model, and a reasoning
+  # model in this slot returns chain-of-thought where queries were expected
+  # rather than erroring. Thinking must be disabled on this model
+  # server-side regardless: with it on, the call takes 5x as long.
   llm:
     endpoint: http://localhost:8000/v1/chat/completions
+    model: Qwen3.5-4B-MLX-4bit
     timeout: 30s
 
   observability:
@@ -87,11 +121,13 @@ infra:
 # directory of its own choosing. An absolute path here is left as written.
 # ============================================================================
 workspaces:
-  # What each workspace holds: its collections and where they live on disk.
+  # REQUIRED. What each workspace holds: its collections and where they live
+  # on disk.
   config: workspaces/workspace-config.yaml
-  # Its infrastructure credentials — and only credentials; every resource name
-  # inside a workspace's namespace is a constant. One file for every workspace,
-  # the same one `make deploy-infra` passes to helm with -f, so the chart and
-  # this binary cannot disagree about a password. Gitignored; the shape is
-  # documented in charts/pocket-advisor-infra/values.yaml.
+  # REQUIRED. Its infrastructure credentials — and only credentials; every
+  # resource name for a workspace is its own id, or derived from it. One
+  # file for every workspace, the same one `./pocket-advisor.sh deploy-infra`
+  # passes to helm with -f, so the chart and this binary cannot disagree
+  # about a password. Gitignored; the shape is documented in
+  # charts/pocket-advisor-infra/values.yaml.
   values: workspaces/pocket-advisor-infra.yaml

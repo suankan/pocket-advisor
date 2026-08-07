@@ -1,6 +1,65 @@
 # Workspace Isolation
 
-**Version:** `2.0.0`
+**Version:** `2.3.1`
+
+**Changes in 2.3.1:** The Makefile is gone (`ingestion-design.md` deviation
+40) — `./pocket-advisor.sh`, plain POSIX `sh`, replaces it outright, one
+follow-on decision from 2.3.0 rather than a separate one: once workspace
+provisioning was already a fixed shell sequence, not a Helm/CRD concern,
+the thing running it stopped needing to be Make. `deploy-workspace WORKSPACE_ID=<id>` /
+`destroy-workspace WORKSPACE_ID=<id>` throughout this document become
+`./pocket-advisor.sh deploy-workspace <id>` / `destroy-workspace <id>` — a
+plain positional argument, not a Make variable override, because this
+repository has a real workspace named `test`, the same name as the
+Makefile's own `test` target, and Make's own trick for positional-looking
+arguments (`$(MAKECMDGOALS)` plus a catch-all rule) would have silently run
+both. Every section below reflects the new command name and syntax; §§2, 3,
+5, 6, 7, 8, 9 all had at least one reference to fix. The changelog entries
+below this one are left as written — each records what was true in the
+version it shipped with, not what is true now.
+
+**Changes in 2.3.0:** CloudNativePG, the RustFS operator and NACK are gone —
+every operator and CRD this document has described since 2.0.0, removed in
+one pass (`ingestion-design.md` deviation 39). A political decision: for a
+single-tenant local cluster, continuous reconciliation against many clusters,
+unattended, is machinery this deployment has no use for. The three shared
+stores are plain `StatefulSet`s now; everything workspace-specific — a
+Postgres database and role, a RustFS bucket/identity/policy, three JetStream
+streams — is `make deploy-workspace WORKSPACE_ID=<id>` / `destroy-workspace`,
+calling psql, `rc`, `aws-cli` and `natscli` directly, run once by a human
+instead of continuously by a controller. This is not a partial reversal the
+way 2.1.0 and 2.2.0 were — there is no CRD left anywhere in this project, and
+no per-workspace Kubernetes namespace either, since the JetStream streams
+were the last thing still namespace-scoped. §§2, 5, 6, 7 are rewritten
+throughout; §3's example config and credential shape change (a real,
+ongoing Postgres admin credential now exists, where CloudNativePG-era
+`bootstrapPassword` never connected to anything); §9's open item about
+scoped Postgres cleanup is resolved, not just tracked — `destroy-workspace`
+is that command.
+
+**Changes in 2.2.0:** RustFS moved back to one shared `Tenant`
+(`ingestion-design.md` deviation 35), reverting the specific claim 2.1.0 made
+below it — a workspace no longer has its own RustFS server, only its own
+bucket, policy and identity, declared as array entries on the shared
+`Tenant`. The one genuinely new problem this raised, and 2.1.0's Postgres
+reversal did not have an equivalent of: notification-publishing identity
+does not consolidate for free, because RustFS's own NATS credentials used to
+just be "the server's," and now the one shared server needs a full
+credential set per workspace to keep publishing under the right NATS
+account. §2.2, §1's principle statement, §2's resource table, and §5–§7 are
+rewritten; `internal/provision/notify.go` is deleted — the bucket
+notification rule moved to a Makefile target using `aws-cli`, since unlike
+schema application it never actually needed to run from the binary.
+
+**Changes in 2.1.0:** Postgres moved back to one shared `Cluster`
+(`ingestion-design.md` deviation 34), reverting the specific claim 2.0.0 made
+below — a workspace no longer has its own Postgres process, only its own
+database and role, declared as `Database`/`DatabaseRole` CRDs on the shared
+instance. RustFS and NATS are unaffected: §2.2 and §2.3 are exactly as
+2.0.0 left them. §2.1, §1's principle statement, §2's resource table, and
+§6's workspace-removal lifecycle are rewritten; §10 gains a new open
+item — no scoped Postgres cleanup exists yet for one removed workspace,
+since the shared cluster's reclaim policy is `retain`, not `delete`.
 
 **Changes in 2.0.0:** the provisioning model this document described is gone.
 Every store a workspace needs is now a custom resource reconciled by an
@@ -57,78 +116,90 @@ of them:
   dropped 2026-08-01 (`ingestion-design.md` deviation 9). Identity comes
   from which bucket a `Vault` is connected to, never from a key.
 
-What this document adds is **credential-level separation, physical where the
-store allows it**, on top of that: a workspace's data is unreachable from
-another workspace's credentials by construction, not by discipline. RustFS
-and NATS get the physical form — a separate server, or a separate account
-with its own subject space. Postgres does not any more (§2.1, deviation 34):
-one shared cluster, isolation enforced by role grants a workspace's own
-schema-apply DDL sets automatically, not by there being no server to reach.
+What this document adds is **credential-level separation** on top of that: a
+workspace's data is unreachable from another workspace's credentials by
+construction, not by discipline. None of the three stores get physical
+separation any more. RustFS moved back to one shared instance (§2.2,
+deviation 35) the same way Postgres did (§2.1, deviation 34); NATS was never
+physically separated to begin with — NACK has no per-workspace-server model,
+so it was always one server with per-workspace accounts (§2.3). All three are
+the same shape now: one shared process, isolation enforced by credentials and
+grants a workspace's own provisioning sets automatically, not by there being
+no server to reach. As of deviation 39, nothing reconciles those grants
+continuously either — no operator, no CRD, anywhere in this project. A
+workspace's grants are set once, by `./pocket-advisor.sh deploy-workspace`, and stay set
+until something explicitly changes them; isolation is enforced by what
+Postgres/RustFS/NATS themselves refuse, not by a controller correcting drift.
 
 ---
 
 ## 2. Per-Store Design
 
-Two workspaces share nothing but a Kubernetes cluster and a NATS server. Each
-gets a namespace named after its `workspace_id`, and everything it owns lives
-inside:
+No operator, no CRD, anywhere — deviation 39 removed CloudNativePG, the
+RustFS operator and NACK together. Two workspaces now share everything but
+their own credentials and grants:
 
-| Store | Resource | Kind | Name | Where |
-| --- | --- | --- | --- | --- |
-| PostgreSQL | server | `Cluster` (postgresql.cnpg.io/v1) | `postgres` | shared release ns |
-| PostgreSQL | database / owner | `Database` / `DatabaseRole` | `<workspace_id>` / `<workspace_id>_user` | inside that cluster |
-| RustFS | server | `Tenant` (rustfs.com/v1alpha1) | `rustfs` | ns `<workspace_id>` |
-| RustFS | bucket / identity | — | `workspace` / `workspace` | inside that tenant |
-| NATS | account + user | config block | `<workspace_id>` | shared server |
-| NATS | streams | `Stream` (jetstream.nats.io/v1beta2) × 3 | `INGESTION`, `INGESTION_DLQ`, `RUSTFS_EVENTS` | ns `<workspace_id>` |
+| Store | Resource | Kind | Where |
+| --- | --- | --- | --- |
+| PostgreSQL | server | `StatefulSet` | shared release ns |
+| PostgreSQL | database / role | `<workspace_id>` / `<workspace_id>_user` | inside that server, made by `./pocket-advisor.sh deploy-workspace` over psql |
+| RustFS | server | `StatefulSet` | shared release ns |
+| RustFS | bucket / identity | `<workspace_id>` / `<workspace_id>` | inside that server, made by `./pocket-advisor.sh deploy-workspace` over `rc`/`aws-cli` |
+| NATS | server | `StatefulSet` | shared release ns |
+| NATS | account + user | `<workspace_id>` | config block, rendered by the chart |
+| NATS | streams | `INGESTION`, `INGESTION_DLQ`, `RUSTFS_EVENTS` | inside that account, made by `./pocket-advisor.sh deploy-workspace` over `natscli` |
 
-**The bucket and RustFS identity are constants, and that is the point** — the
-same string in every workspace, because the namespace already says whose
-they are; a workspace-derived name would repeat, in two places, information
-the address already carries. Postgres and NATS are keyed by id instead, and
-for the same reason in both cases: both are shared, so id is what actually
-distinguishes one workspace's database, role, account and user from
-another's (§2.1, §2.3).
+**Nothing in this table is Kubernetes-namespace-scoped per workspace any
+more.** The JetStream streams were the last thing that was, back when NACK
+reconciled them as `Stream` CRDs (deviation 35's table still shows this); now
+they are just data inside the one shared NATS server, addressed by account
+and subject, not by a namespace. Every workspace's presence in the cluster is
+now purely a matter of *credentials existing*, not *objects existing* — there
+is no Kubernetes object anywhere that is "workspace X's," only rows and
+buckets and streams inside three shared processes that workspace X's own
+password can reach and no other workspace's can.
 
-The 1.x model — one shared Postgres server with a database and role per
-workspace — was logical isolation dressed as physical: a bug or a privilege
-mistake inside the shared server could cross the boundary. Moving to one
-`Cluster` per workspace removed that risk entirely for a period, by removing
-the shared server. **Postgres has since moved back** (§2.1, `ingestion-design.md`
-deviation 34): the isolation this table now describes for Postgres is
-exactly the credential-level, role-and-grant kind 1.x had — with one
-correction 1.x lacked, a `PUBLIC`-connect revoke that closes the specific gap
-a shared instance reopens (§2.1). RustFS never had this problem to begin
-with; its per-workspace `Tenant` is untouched by any of this.
+The 1.x model — one shared server per store, isolated by role/bucket-policy/
+account — was logical isolation dressed as physical: a bug or a privilege
+mistake inside the shared server could cross the boundary. 2.0.0 moved each
+store to its own dedicated server per workspace, removing that risk
+entirely, for a period. **All three have since moved back** (deviations 34,
+35, 39): the isolation this table describes is exactly the credential-level
+kind 1.x had, with two corrections 1.x lacked, both closing gaps a shared
+instance reopens that a dedicated server made moot — Postgres's
+`PUBLIC`-connect default (§2.1) and RustFS's per-workspace notify identity
+(§2.2). What is different from every earlier version of this document is
+that nothing reconciles any of it continuously any more: a workspace's
+grants are set once, by a human running `./pocket-advisor.sh
+deploy-workspace`, and nothing runs afterward correcting drift against them.
 
 ### 2.1 PostgreSQL
 
-**One shared `Cluster`, not one per workspace** — reverted back
-(`ingestion-design.md` deviation 34) after a period where each workspace had
-its own process, its own volume, and its own failure domain. Every
-workspace's database and role now live inside one instance, declared as
-`Database` and `DatabaseRole` CRDs (`charts/pocket-advisor-infra/templates/
-postgres-workspaces.yaml`): database `<workspace_id>`, role `<workspace_id>_user`,
-owned by that role. The operator exposes the shared cluster's primary as
-`postgres-rw.pocket-advisor.svc.cluster.local:5432` — `infra.postgres.host`,
-untemplated, the same shape as `infra.nats.url`.
+One `StatefulSet` (`charts/pocket-advisor-infra/templates/postgres.yaml`),
+built from CloudNativePG's own base image for `pg_textsearch` but running
+standalone now — no CNPG, no `Cluster` CRD. Its Service address is constant,
+`postgres.pocket-advisor.svc.cluster.local:5432` (`infra.postgres.host`,
+the same shape as `infra.nats.url`). `./pocket-advisor.sh deploy-workspace` creates each
+workspace's database (`<workspace_id>`) and role (`<workspace_id>_user`)
+over `psql`, authenticating as a real, ongoing Postgres admin credential
+this StatefulSet creates on first boot.
 
-**These two CRDs live in the shared release namespace, not the workspace's
-own.** They reference their `Cluster` by name only — no namespace field —
-which in Kubernetes always means "the same namespace as this object." RustFS
-and NATS keep the per-workspace-namespace isolation §2.2 and §2.3 describe;
-Postgres's Kubernetes-level blast radius no longer matches theirs.
+**That admin credential is a real reintroduction, not an oversight.**
+Deviation 20 spent real effort eliminating a shared administrative Postgres
+connection from this project. Removing CloudNativePG brings it back: nothing
+else creates a database or a role any more, so something has to hold the
+credential that can. Worth stating plainly rather than letting it be
+discovered later — this is the direct, accepted cost of "no operator holds
+it for you."
 
-**Isolation moved from "which server can this role reach" to Postgres's own
-role-and-grant model, and that model has a default that had to be closed by
-hand.** A role with no credentials for another workspace's cluster used to be
-unable to reach it at all — there was no server to connect to. On a shared
-instance, every role can reach every database unless told otherwise: Postgres
-grants `CONNECT` to `PUBLIC` on every newly created database by default.
-Verified directly, before the fix: a second workspace's role could connect to
-a database it had no business touching and list its tables with `\dt`,
-though not read their contents — object-level grants (`OWNER`, no `GRANT`
-to anyone else) still held. The fix is one statement,
+**Isolation is Postgres's own role-and-grant model, and that model has a
+default that has to be closed by hand.** A role with no credentials for
+another workspace's database still reaches the same server — there is only
+one — and Postgres grants `CONNECT` to `PUBLIC` on every newly created
+database by default. Verified directly: a second workspace's role could
+connect to a database it had no business touching and list its tables with
+`\dt`, though not read their contents — object-level grants (`OWNER`, no
+`GRANT` to anyone else) still held. The fix is one statement,
 `REVOKE CONNECT ON DATABASE ... FROM PUBLIC`, run as part of the same DDL a
 workspace's own role already applies to its own database
 (`internal/storage/postgres/schema.go`) — also verified directly: a database
@@ -144,30 +215,61 @@ than reveal that it should not be there. The read path instead asserts once at
 startup that the connected database holds exactly one `workspace_id` and that
 it is the expected one, and refuses to serve otherwise
 (`retrieval-design.md` §3.4). What a request selects is a connection pool, not
-a filter. That assertion is unchanged by any of the above — it was never
-about which server a role could reach.
+a filter.
 
-`sslmode=require`, not `verify-full`: CNPG issues its own internal CA, so
-verifying the chain would mean distributing that CA to the host binary for no
-gain on a local cluster. Connections are still encrypted.
+**There is no TLS.** CloudNativePG issued its own internal CA and encrypted
+every connection for free; the plain `StatefulSet` that replaced it does
+none of that — no cert, no key. `sslmode` is `disable`, not `require`:
+`require` would refuse every connection outright rather than degrade to
+unencrypted, which is a worse failure than the one it would guard against on
+a single-machine local cluster with no network segment to eavesdrop on.
+Revisit only if this stops being local and single-user.
 
 ### 2.2 RustFS
 
-One `Tenant` per workspace — its own RustFS server — declaring one bucket
-(`workspace`), one identity (`workspace`), and that identity's IAM policy,
-granting `s3:*` on its own bucket and nothing else. The policy document comes
-from a ConfigMap; the Tenant references it by name.
+One `StatefulSet` (`charts/pocket-advisor-infra/templates/rustfs.yaml`), root
+credentials via `RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY` env vars — verified
+directly against this exact image (beta.12) rather than trusted from docs, a
+known upstream issue reports them not taking effect in some deployment
+modes. Its S3 endpoint is constant, `rustfs.pocket-advisor.svc.cluster.local:
+9000` (`infra.rustfs.endpoint`).
 
-The S3 endpoint is the operator's Service, `<tenant>-io`, so a workspace's
-address is `rustfs-io.<workspace_id>.svc.cluster.local:9000`.
+`./pocket-advisor.sh deploy-workspace` creates each workspace's bucket and notification
+binding over `aws-cli` (`aws s3api create-bucket`,
+`put-bucket-notification-configuration` — S3 data-plane operations, unchanged
+in mechanism since deviation 35) and its identity and policy over `rc admin`
+instead — checked directly, not assumed: `aws s3api put-bucket-policy`
+rejects the exact policy document `rc admin policy create` accepts, because
+bucket resource policies and IAM canned policies are different mechanisms
+with different required shapes, and only the canned-policy kind is what
+per-workspace scoped access has ever actually been in this project.
+`aws-cli`'s S3-only surface cannot reach RustFS's own MinIO-shaped admin API
+at all — not a maturity gap, a scope gap, true against real AWS too.
+
+**Notification identity needs one full credential set per workspace, not
+one for the whole server.** Before any operator existed, "the server's one
+NATS identity" and "the workspace's identity" were never the same thing to
+begin with once the server became shared (deviation 35) — one shared RustFS
+process needs a full `RUSTFS_NOTIFY_NATS_*` environment block *per
+workspace*, each authenticating as that workspace's own NATS user, or every
+workspace's events would have to publish through one identity reaching
+across the account boundary §2.3 exists to keep separate. Verified directly:
+RustFS (and MinIO, whose wire protocol it implements) supports multiple
+simultaneously-configured targets of the same type, distinguished by an
+arbitrary trailing identifier. The suffix cannot be the workspace id
+verbatim — environment variable names cannot contain hyphens, workspace ids
+can — so it is uppercased with hyphens replaced by underscores, and because
+RustFS lowercases whatever suffix it finds when registering the target, the
+ARN a binding call must use is the *lowercased* transform of that
+(`arn:rustfs:sqs::family_law_matters:nats`), not the id verbatim either.
 
 **One identity per workspace, not two.** Today's uploader/worker split
 (`ingestion-design.md` §5.1) once had two RustFS identities with different
 policies enforcing the `raw/`-vs-`extracted/` write boundary on a single
-shared bucket. Per-workspace tenants replaced that, and the split is rebuilt
-as an application-level guard instead — see §9. Both global identities were
-found to be referenced by no Go code at all and deleted with the setup Job
-that created them (deviation 19).
+shared bucket. Per-workspace identities replaced that, and the split is
+rebuilt as an application-level guard instead — see §9. Both global
+identities were found to be referenced by no Go code at all and deleted with
+the setup Job that created them (deviation 19).
 
 ### 2.3 NATS
 
@@ -175,11 +277,14 @@ that created them (deviation 19).
 whole cluster, in the release namespace, with an **Account** and a **User**
 per workspace, both named `<workspace_id>`.
 
-The reason is NACK, the operator that reconciles JetStream `Stream` resources:
-it does not deploy NATS at all. Its model is one controller and one server
-serving Stream CRDs across many namespaces, so unlike CloudNativePG and the
-RustFS operator there is nothing to give each workspace a server of its own
-(`ingestion-design.md` deviation 23).
+The original reason was NACK, the operator that used to reconcile JetStream
+`Stream` resources: it never deployed NATS at all, and its model was one
+controller and one server serving Stream CRDs across many namespaces, so
+unlike CloudNativePG and the RustFS operator there was never anything to
+give each workspace a server of its own (`ingestion-design.md` deviation
+23). NACK itself is gone now (deviation 39), but the shape it left behind —
+one shared server, isolated by account — is exactly what deviation 39 moved
+Postgres and RustFS *to*, not away from; NATS was already there.
 
 That costs nothing, because accounts are NATS's own tenancy boundary. An
 account is a fully separate subject space — nothing in one is visible to
@@ -190,10 +295,13 @@ Stream and subject names (`INGESTION`, `INGESTION_DLQ`, `ingest.emails.raw`,
 …) therefore need no per-workspace renaming: the account boundary isolates
 them, not the name.
 
-Each workspace's three streams are `Stream` CRDs in its own namespace, each
-naming its own server URL and authenticating as its own account — NACK has no
-default server URL configured, precisely so no stream can be created in the
-wrong account by omission.
+Each workspace's three streams are created by `./pocket-advisor.sh deploy-workspace`, over
+`natscli` (`nats stream add`), authenticating as that workspace's own
+account — never a shared or default identity, so a stream cannot land in the
+wrong account by a missing flag going unnoticed. They are not Kubernetes
+objects of any kind any more: no `Stream` CRD, no namespace, just data
+inside the one shared NATS server's JetStream store, addressed by account
+and subject.
 
 **This is authentication, not an upgrade of it.** Before the chart rendered a
 config file, NATS ran on bare CLI flags (`-js -m <port> -sd /data`) with no
@@ -210,7 +318,7 @@ deferred by oversight. Expect this to need real secret management later; that
 is a known, accepted gap.
 
 **They live in `workspaces/pocket-advisor-infra.yaml`**, gitignored, and that
-file is simultaneously the Helm values override `make deploy-infra` passes
+file is simultaneously the Helm values override `./pocket-advisor.sh deploy-infra` passes
 with `-f` and the file the binary reads. Helm and the CLI therefore cannot
 disagree about a password. `config.yaml` stays committed and carries not one
 credential:
@@ -219,24 +327,26 @@ credential:
 # config.yaml — committed, and genuinely secret-free.
 infra:
   rustfs:
-    # A template, not an address: %s is the workspace id, and each workspace
-    # has its own tenant in its own namespace. No root credentials — the
-    # binary never authenticates as an administrator (§5).
-    endpoint: rustfs-io.%s.svc.cluster.local:9000
+    # One shared StatefulSet (deviation 39), so its address is as constant
+    # as nats.url's below. No root credentials here either way — the binary
+    # never authenticates as an administrator; ./pocket-advisor.sh deploy-workspace does,
+    # from workspaces/pocket-advisor-infra.yaml directly (§5).
+    endpoint: rustfs.pocket-advisor.svc.cluster.local:9000
 
   nats:
     # Not templated: one server for the cluster, an account per workspace.
     url: nats://nats.pocket-advisor.svc.cluster.local:4222
 
   postgres:
-    # Not a template, unlike rustfs.endpoint above: one shared cluster now
-    # (deviation 34), in the release namespace, so its address is as constant
-    # as nats.url's. There is no admin DSN either way: the chart declares
-    # every workspace's database and role as CRDs, so nothing this binary
-    # does creates one.
-    host: postgres-rw.pocket-advisor.svc.cluster.local
+    # One shared StatefulSet (deviation 39), so its address is as constant
+    # as nats.url's. No admin DSN in this binary — ./pocket-advisor.sh deploy-workspace
+    # holds the one that exists, over psql, not this file or Go.
+    host: postgres.pocket-advisor.svc.cluster.local
     port: 5432
-    sslmode: require
+    # disable, not require: the plain StatefulSet offers no TLS at all — no
+    # cert, no key — where CloudNativePG issued one for free. require would
+    # refuse every connection outright.
+    sslmode: disable
 
 workspaces:
   config: workspaces/workspace-config.yaml           # what each workspace holds
@@ -261,46 +371,61 @@ workspaces:
 
 ```yaml
 # workspaces/pocket-advisor-infra.yaml — gitignored. How to REACH it, and the
-# Helm values override. Credentials and nothing else.
+# Helm values override, and what ./pocket-advisor.sh deploy-workspace/destroy-workspace
+# authenticate as. Credentials and nothing else.
 rustfs:
-  credentials:
-    rootUser: ...          # administrative; only the operator uses it
-    rootPassword: ...
+  adminRustFSUser: ...     # administrative; the chart AND deploy-workspace use it
+  adminRustFSPassword: ...
+
+postgres:
+  adminPostgresUser: postgres
+  adminPostgresPassword: ... # real and ongoing — deploy-workspace/destroy-workspace
+                              # authenticate as this to create/drop each workspace's own
+                              # database and role (deviation 39)
 
 workspaces:
   - id: matter
     rustfs:
-      credentials: { secretKey: ... }
+      password: ...
     postgres:
-      credentials: { password: ... }
+      password: ...
     nats:
-      credentials: { password: ... }
+      password: ...
 ```
 
 The per-workspace entries use the same section names as the root blocks, one
-scope down. There is deliberately no `nats.credentials` or `postgres` block at
-the root: NATS accounts and CNPG clusters are configuration rendered by the
-chart, so nothing ever authenticates to either as an administrator. RustFS
-alone keeps a root credential, because the operator needs one to create each
-tenant's bucket and identity — and only the chart ever reads it.
+scope down. There is deliberately no `nats.credentials` at the root: NATS
+accounts are configuration rendered by the chart, so nothing ever
+authenticates to it as an administrator. RustFS and Postgres each keep one
+root credential, for the same reason in both cases — one shared instance
+needs something that predates any workspace existing and can create one:
+RustFS's root user, and Postgres's admin/superuser (deviation 39 — both are
+real, ongoing credentials now, not the CNPG-era placeholder nothing ever
+connected to). Both the chart and `./pocket-advisor.sh
+deploy-workspace`/`destroy-workspace` read them from this same file, so
+there is exactly one place either can drift from the other.
 
-**No names, only secrets.** 1.x carried a name per resource per workspace
-here, so an id that was legal in the registry need not also satisfy the naming
-rules of three other systems. One namespace per workspace made that
-indirection dead weight: every name inside a namespace is a constant now
-(§2), so the values file has nothing left to say but passwords.
+**No per-workspace names, only credentials.** Every workspace resource name
+is derived from its `id`: the RustFS bucket, identity and policy; the
+Postgres database and `<id>_user` role; and the NATS account and user. The
+values file therefore carries no second, independently editable resource-name
+mapping that could drift from the registry. `postgres.adminPostgresUser`
+is the one non-secret root setting: it names the fixed administrative role the
+StatefulSet creates before any workspace exists.
 
 The two files are joined on `id`: content in the first, infrastructure in the
 second. Splitting them is what let the chart own the NATS accounts — it needs
 credentials but must never see a corpus path, and the CLI needs both
 (`ingestion-design.md` deviation 18).
 
-`internal/config.Config.Workspace(id string) (Workspace, error)` parses
-`workspaces/pocket-advisor-infra.yaml` directly — a minimal, non-strict read
-of the `rustfs`, `postgres` and `nats` objects, ignoring everything else —
-and returns a `Workspace` with every address and name already resolved, so
-callers never derive one themselves. It reads the file per call rather than at
-`Load`: a mode that never touches a workspace should not fail because some
+`internal/config.Config.Workspace(id string) (Workspace, error)` expands any
+`${NAME}` placeholders from the environment, then parses
+`workspaces/pocket-advisor-infra.yaml` — a minimal, non-strict read of the
+`rustfs`, `postgres` and `nats` objects, ignoring everything else — and
+returns a `Workspace` with every address and name already resolved, so callers
+never derive one themselves. An unset placeholder is a configuration error,
+not an empty password passed to a store. It reads the file per call rather than
+at `Load`: a mode that never touches a workspace should not fail because some
 workspace's file is missing.
 
 This is deliberately independent of `internal/workspace`'s own, fuller parse
@@ -315,15 +440,19 @@ password.
 
 ## 4. Package Layout
 
-`internal/provision` still exists, but it provisions nothing. It holds the two
-things a workspace needs that its chart cannot declare:
+`internal/provision` still exists, but it provisions nothing. It holds the one
+thing a workspace needs that its chart cannot declare:
 
 ```
 internal/provision/
 ├── provision.go   # EnsureWorkspace — the only entry point
-├── schema.go      # Tier 2/3 DDL, applied as the workspace's own role
-└── notify.go      # the bucket notification rule, set as its own identity
+└── schema.go      # Tier 2/3 DDL, applied as the workspace's own role
 ```
+
+`notify.go` — the bucket notification rule, once set here as the workspace's
+own identity — is deleted (deviation 35). It never needed to run from this
+binary; `./pocket-advisor.sh deploy-workspace` (`aws-cli`) sets it now, alongside
+everything else that workspace needs (deviation 39).
 
 `postgres.go`, `rustfs.go` and `nats.go` were deleted outright, along with
 `guard.go`'s planned home — the write-authority guard lives in
@@ -360,89 +489,99 @@ connects with exactly one workspace's own credentials:
 continues to exist; neither touches infrastructure.
 
 **The binary holds no administrative credentials at all.** This is the
-property to preserve when adding anything here. The schema is applied as the
-workspace's own Postgres role; the bucket notification rule is set as its own
-RustFS identity, which its Tenant policy already grants — measured against a
-live tenant rather than assumed. `RequireProvisioning`, `infra.rustfs.root_*`
-and `infra.kubernetes.*` are all gone.
+property to preserve when adding anything here, and it still holds —
+deviation 39 moved the administrative Postgres and RustFS credentials
+somewhere new (`pocket-advisor.sh`, over the shell), never into this binary.
+The schema is applied as the workspace's own Postgres role — measured
+against a live cluster rather than assumed. The bucket notification rule,
+the database, the role, the bucket, the identity, the streams — all of it
+is `./pocket-advisor.sh deploy-workspace` now, as an admin/root credential
+this binary never sees. `RequireProvisioning`, `infra.rustfs.root_*` and
+`infra.kubernetes.*` are all still gone.
 
 ---
 
 ## 6. Workspace Lifecycle
 
-**Creating one is two file edits and a deploy:**
+**Creating one is two file edits and two commands, not one deploy — a real
+change from every earlier version of this document.** `./pocket-advisor.sh deploy-infra`
+used to be the whole thing, because the chart declared everything a
+workspace needed as a CRD an operator would reconcile once applied. There is
+no operator to do that any more (deviation 39), so the chart only brings up
+the three shared stores; a workspace's own data inside them is a second,
+explicit step:
 
-1. Add what it *holds* to `workspaces/workspace-config.yaml` — collections and
-   their paths.
+1. Add what it *holds* to `workspaces/workspace-config.yaml` — collections
+   and their paths.
 2. Add what it needs to *reach* to `workspaces/pocket-advisor-infra.yaml` —
    three generated secrets under its `id`.
-3. `make deploy-infra`.
+3. `./pocket-advisor.sh deploy-infra` — brings up Postgres/RustFS/NATS if they are not
+   already up. A no-op on a cluster that already has them.
+4. `./pocket-advisor.sh deploy-workspace <id>` — creates that workspace's
+   database and role (psql), bucket/identity/policy and notification binding
+   (`rc`/`aws-cli`), and three streams (`natscli`). Idempotent: re-running it
+   against an already-provisioned workspace skips what exists rather than
+   failing on it.
 
-One release manages every workspace. The chart renders that workspace's
-namespace, its `Tenant`, its three `Stream`s, and its account block in the
-shared NATS config — plus, in the *shared* release namespace rather than its
-own, its `Database` and `DatabaseRole` on the one Postgres `Cluster`
-(deviation 34, §2.1). `make deploy-infra` waits for each to report Ready.
+**Removing one is the true inverse now, not an asymmetric one.**
+`./pocket-advisor.sh destroy-workspace <id>` drops the Postgres database (and
+everything in it), removes the RustFS identity/policy/bucket (and every
+object in it), and removes the three streams — genuinely destructive, scoped
+to one workspace, unlike `destroy-infra`/`destroy-state` which were never
+workspace-scoped at all. This is the scoped cleanup earlier versions of this
+document listed as missing (§10, deviation 34's own open item) — built
+directly as part of deviation 39 rather than as a follow-up, because
+building the provisioning side and not the teardown side would have left
+exactly the same gap under a different name. There is no confirmation prompt
+and no `--yes`; the same deliberate-not-defended posture `destroy-infra` and
+`destroy-state` already have.
 
-**Removing one is the same operation in reverse, with one asymmetry Postgres
-introduces.** Delete its entry and re-deploy. Helm removes the namespace,
-which takes its RustFS and NATS volumes with it, same as before. Its
-`Database`/`DatabaseRole` objects are pruned too — they are chart-rendered
-like everything else — but `databaseReclaimPolicy`/`databaseRoleReclaimPolicy`
-are deliberately `retain`, not `delete`: dropping a workspace should not
-silently take its Postgres data with it the way removing a namespace does for
-the other two stores, since the shared cluster has no per-workspace volume to
-delete *from*. The database and role survive, orphaned, until removed by
-hand — there is no `make destroy-state`-equivalent scoped to one workspace
-yet (§10). There is no confirmation prompt on the chart-edit path and no
-`--yes` either way — it is deliberate, and the Postgres asymmetry above is the
-one place "deliberate" now means "leaves data behind," not "removes it."
+**Ordering is explicit now, not reconciled.** 1.x's `--create-workspace` had
+to enforce ordering in code; the operator era after it got that for free,
+since a `Stream` whose account was not yet loaded simply retried until it
+was. Neither exists any more. `./pocket-advisor.sh deploy-workspace`'s steps
+run in a fixed sequence — database and role before extensions, bucket
+before its notification binding — because nothing will retry a step run
+out of order; it just fails, loudly, at that step.
 
-**Ordering, which 1.x's `--create-workspace` had to enforce in code and the
-chart gets for free.** Operators reconcile; they do not run in sequence. A
-`Stream` whose account is not yet loaded simply retries until it is, so
-partial state resolves itself rather than needing the rollback path §6 of
-1.1.0 specified.
-
-Two consequences worth knowing, both about the very first deploy on a bare
-cluster. Every operator's CRDs are applied from the chart's own `crds/`
-directory, before Helm renders anything — including CloudNativePG's, which are
-vendored there precisely because that operator templates its own, and a
-templated CRD cannot be applied in the same pass as the `Cluster` CRs that
-need it (`ingestion-design.md` deviation 25). After that, the first
-`helm upgrade` still fails once, because CNPG's admission webhook is not yet
-serving when the first `Cluster` is applied; `make deploy-infra` waits and
-retries automatically (deviation 24).
+There is no first-deploy CRD/webhook race to know about any more either —
+deviations 24 and 25 documented CloudNativePG's admission webhook not yet
+serving on a bare cluster's first `helm upgrade`, and the retry that worked
+around it. Removing CloudNativePG removed the webhook it was a workaround
+for; `deploy-infra` no longer retries anything.
 
 ---
 
 ## 7. What the Binary Still Does
 
-Two things cannot be expressed in a manifest, for the same underlying reason —
-both need something outside the cluster:
+One thing cannot be expressed in a manifest, and stays here for a real
+reason rather than because no tool exists yet:
 
-1. **The schema.** Its vector column is `halfvec(N)`, and N comes from probing
-   the embedding endpoint on the operator's own machine, which nothing inside
-   the cluster can reach (`ingestion-design.md` §4.4). Applied as the
-   workspace's own role, into its own database. Idempotent: `ApplySchema`
-   returns early when the recorded dimension already matches, and refuses
-   outright when it does not, since a changed dimension is a re-embed rather
-   than a migration.
-2. **The bucket notification rule.** The `Tenant` CRD declares buckets, users
-   and policies, but has no field for which bucket publishes to which target,
-   so it stays an S3 call. Scoped to `raw/` deliberately: `extracted/`
-   children are written by the email worker itself, and re-ingesting them
-   would loop.
+**The schema.** Its vector column is `halfvec(N)`, and N comes from probing
+the embedding endpoint on the operator's own machine, which nothing inside
+the cluster — and no infra tooling running elsewhere — can reach
+(`ingestion-design.md` §4.4). Applied as the workspace's own role, into its
+own database. Idempotent: `ApplySchema` returns early when the recorded
+dimension already matches, and refuses outright when it does not, since a
+changed dimension is a re-embed rather than a migration. Idempotent and
+cheap — a `SELECT` — which is why `--ingest-all` and `--listen` simply run it
+on every invocation rather than requiring a provisioning step someone can
+forget. Its failure path names the values file and tells the operator to run
+`./pocket-advisor.sh deploy-workspace <id>`, because "that workspace's database
+does not exist yet" is the only realistic reason it would fail now that
+nothing reconciles one into existence on its own.
 
-Both are idempotent and cheap — a `SELECT` and one S3 call — which is why
-`--ingest-all` and `--listen` simply run them on every invocation rather than
-requiring a provisioning step someone can forget. Verified by clearing the
-bucket rule and running `--ingest-all` with no preparation: the rule came
-back.
-
-Both failure paths name the values file and tell the operator to run
-`make deploy-infra`, because "the chart has not been deployed for this
-workspace" is the only realistic reason either would fail.
+**The bucket notification rule left with deviation 35, and stayed left with
+deviation 39.** It never needed to run from this binary — RustFS is exactly
+as reachable from a `pocket-advisor.sh` command on the same host as from
+this process — it simply had no tool before `aws s3api put-bucket-notification-
+configuration` gave it one. `./pocket-advisor.sh deploy-workspace` sets it
+now, alongside everything else that workspace needs, scoped to `raw/`
+deliberately for the
+same reason it always was: `extracted/` children are written by the email
+worker itself, and re-ingesting them would loop.
+`internal/provision/notify.go` is deleted; nothing replaced it inside this
+binary, because nothing needed to.
 
 ---
 
@@ -480,11 +619,14 @@ subscribe, consumer management within its account — is unaffected. It
 authenticates as its own `<id>` user against its own `<id>` account, the same
 posture as Postgres and RustFS.
 
-Stream *creation* is likewise no longer the binary's job: `app.New` used to
-call `EnsureStreams`, creating from Go the three streams the CRDs already own —
-wasted round trips and a second writer of an operator-managed resource, the
-same conflict class as above. A missing stream now means the chart has not
-been deployed, and says so.
+Stream *creation* is likewise not the binary's job. `app.New` used to call
+`EnsureStreams`, creating them from Go; deviation 22 moved that to a `Stream`
+CRD an operator reconciled, to stop being a second writer of an
+operator-managed resource; deviation 39 removed the operator and moved
+creation again, to `./pocket-advisor.sh deploy-workspace` over `natscli` —
+never back into Go. A missing stream now means that command has not been run for this
+workspace, not that the chart has not been deployed; the chart no longer
+creates streams at all.
 
 ---
 
@@ -525,28 +667,23 @@ vault and was refused on all 79 objects it tried to touch
    once. More pressing than in 1.x: `EnsureWorkspace` now applies the schema
    on every ingest, so "the DDL ran" and "the DDL is current" are the same
    moment, with nothing between them to run a migration.
-2. ~~`madmin-go` against RustFS, unverified.~~ **Moot as of 2.0.0.** It was
-   verified working on 2026-07-29, then deleted: the Tenant CRD owns the
-   bucket, identity and policy, so there is no admin-plane call left to make.
-3. ~~Kubernetes RBAC hardening.~~ **Moot as of 2.0.0.** The binary no longer
-   talks to the Kubernetes API at all (§8), so there is no ambient kubeconfig
-   to narrow. `make deploy-infra` still runs as the operator, which is
-   appropriate for a `helm upgrade`.
-4. **The RustFS operator needs a nudge.** Version 0.0.5 attempts tenant
-   provisioning once, and that attempt races RustFS's own storage
-   initialisation; when it loses, the tenant sits at `failed to list RustFS
-   canned policies` indefinitely while its pods run healthily.
-   `make deploy-infra` annotates every tenant to force the reconcile the
-   operator should retry itself. Remove the workaround once it does
-   (`ingestion-design.md` deviation 22).
-5. **No scoped Postgres cleanup for one removed workspace.** §6 records the
-   asymmetry deviation 34 introduced: removing a workspace's entry deletes its
-   `Database`/`DatabaseRole` Kubernetes objects, but their reclaim policy is
-   `retain`, so the underlying Postgres database and role survive, orphaned,
-   in the shared cluster. `make destroy-state` wipes every workspace's data at
-   once; nothing today targets one. Not built because the case has not come
-   up yet — a workspace has not actually been removed from a live cluster —
-   not because it is hard.
+2. ~~`madmin-go` against RustFS, unverified.~~ **Reopened by deviation 39,
+   moot in a different shape than 2.0.0 closed it.** 2.0.0 closed this
+   because the Tenant CRD owned the bucket, identity and policy, leaving no
+   admin-plane call to make. Deviation 39 removed the Tenant CRD and brought
+   the admin-plane call back — as `rc admin` (RustFS's own CLI, not
+   `madmin-go`), run from `./pocket-advisor.sh deploy-workspace`, never from
+   this binary. `madmin-go` itself stays out of `go.mod`: the call moved to a
+   CLI tool `pocket-advisor.sh` shells out to, not back into Go.
+3. ~~Kubernetes RBAC hardening.~~ **Moot as of 2.0.0, still moot.** The
+   binary never talked to the Kubernetes API even before deviation 39; there
+   was never an ambient kubeconfig to narrow, operators or not.
+4. ~~The RustFS operator needs a nudge.~~ **Moot as of deviation 39.** There
+   is no RustFS operator any more to need one.
+5. ~~No scoped Postgres cleanup for one removed workspace.~~ **Resolved by
+   deviation 39.** `./pocket-advisor.sh destroy-workspace <id>` is that
+   command now — and, being built directly rather than left as a gap, covers
+   RustFS and NATS too, not just Postgres (§6).
 
 ---
 

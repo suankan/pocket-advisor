@@ -1191,7 +1191,7 @@ is enabled — the same requirement Tesseract already imposes, pinned in
 
 Two artefacts, with a clean split of responsibility.
 
-**`make build`** produces `bin/pocket-advisor`. Go is pinned by `mise.toml`
+**`./pocket-advisor.sh build`** produces `bin/pocket-advisor`. Go is pinned by `mise.toml`
 alongside `CGO_ENABLED=1` and the Homebrew include and library paths Tesseract
 needs, so a working toolchain is checked into the repo rather than described
 in a README.
@@ -1369,7 +1369,7 @@ packages, not processes (§8.2).
 pocket-advisor/                    # repo root — single Go module
 ├── mise.toml                     # pinned Go + CGo paths for Tesseract
 ├── config.yaml                   # infra: endpoints, credentials, concurrency
-├── Makefile                      # build / test / deploy-infra
+├── pocket-advisor.sh              # build / test / deploy-infra / deploy-workspace
 │
 ├── cmd/pocket-advisor/           # the only binary; flag parsing only
 │
@@ -1489,7 +1489,7 @@ failure.
 
 One binary, one build, but OCR stays behind the `ocr` tag. With the tag,
 Tesseract is linked via CGo; without it, a stub returns `ErrUnavailable` and
-callers record `SKIPPED` / `OCR_UNAVAILABLE` rather than failing. `make build`
+callers record `SKIPPED` / `OCR_UNAVAILABLE` rather than failing. `./pocket-advisor.sh build`
 sets the tag, so the default binary can read scanned documents — the tag marks
 a *linkage* boundary, not an optional feature.
 
@@ -1662,22 +1662,22 @@ escapes written to a file are unreadable.
 
 ```
 [ Phase 1: Stores ]
-  │── make deploy-infra: helm upgrade --install -f workspaces/values.yaml,
-  │     then wait for the three StatefulSets to roll out. Renders one NATS
-  │     account per workspace; creates nothing else workspace-specific.
-  └── make build: produces bin/pocket-advisor (mise-pinned Go + CGo)
+  │── ./pocket-advisor.sh deploy-infra: helm upgrade --install -f
+  │     workspaces/pocket-advisor-infra.yaml, then wait for the three
+  │     StatefulSets to roll out. Renders one NATS account per workspace;
+  │     creates nothing else workspace-specific.
+  └── ./pocket-advisor.sh build: produces bin/pocket-advisor (mise-pinned Go + CGo)
 
 [ Phase 2: Workspace ]
-  └── no command. The stores are CRDs the chart renders from
-        workspaces/workspace-config.yaml, so Phase 1 already created the
-        Postgres database and role, the RustFS bucket and identity, and the
-        NATS account, user and streams (deviations 20, 22, 24).
-        The two things a manifest cannot express are done on demand by
+  └── ./pocket-advisor.sh deploy-workspace <id>: no CRD, no operator
+        (deviation 39) — creates the Postgres database and role, the RustFS
+        bucket, identity and policy, and the three JetStream streams
+        directly over psql/rc/aws-cli/natscli, idempotently.
+        The one thing this cannot do is done on demand by
         provision.EnsureWorkspace, which every run calls: the DDL, whose
-        halfvec(N) needs N probed from an embedding endpoint only the
-        operator's machine can reach (§4.4), and the bucket notification
-        rule, which the Tenant CRD has no field for (§5.2). Both idempotent,
-        both as the workspace's own credentials.
+        halfvec(N) needs N probed from an embedding endpoint only this
+        host can reach (§4.4). Idempotent, as the workspace's own
+        credentials.
 
 [ Phase 3: Corpus Load ]
   └── ./bin/pocket-advisor --ingest-all --workspace-id <id>
@@ -3364,13 +3364,604 @@ deliberate choice with a reason, not drift.
     actually been removed from a live cluster yet, not because scoped cleanup
     is hard to build.
 
-    Verified so far: the chart renders correctly against multiple workspaces
-    (`helm template`, inspected object by object — one `Cluster`, correctly
-    namespaced `Database`/`DatabaseRole` per workspace); and, against a real
-    `pg_textsearch`-enabled Postgres in a throwaway container, the full
-    `ApplySchema` DDL — REVOKE included — runs clean as a non-superuser
-    database-owner role, and a different role's connection is refused
-    afterward. **Not yet verified: an actual `make deploy-infra` against the
-    live cluster** — the CRDs' behaviour once the operator itself reconciles
-    them, rather than a container standing in for what it will eventually do,
-    is the one thing this deviation records as assumed rather than measured.
+    Verified twice over, not just rendered. First against a throwaway
+    container standing in for what the operator would eventually do: the
+    chart renders correctly for multiple workspaces (`helm template`,
+    inspected object by object), and the full `ApplySchema` DDL — REVOKE
+    included — runs clean as a non-superuser database-owner role against a
+    real `pg_textsearch`-enabled Postgres, refusing a different role's
+    connection afterward. Then live: `make deploy-infra`, a full ingest, and
+    a query all confirmed working against the operator's own reconciliation
+    of the shared `Cluster` and every workspace's `Database`/`DatabaseRole`.
+
+35. **RustFS moved back to one shared Tenant, and the bucket notification
+    rule left the binary entirely (2026-08-06).** Deviation 22 gave each
+    workspace its own RustFS server for the same reason deviation 20 gave
+    Postgres one: physical isolation over logical. Reverted, the same
+    direction as deviation 34: one shared `Tenant` again, with every
+    workspace's bucket, policy and identity declared as array entries on it
+    (`charts/pocket-advisor-infra/templates/rustfs.yaml`) rather than a new
+    mechanism — `buckets[]`, `policies[]` and `users[]` were already arrays
+    on the CRD, unused past one element per Tenant until now.
+
+    **What moved.** `internal/config.RustFS.Endpoint`, a `%s`-per-workspace
+    format string, became a plain constant — the shared Tenant has one
+    address, `rustfs-io.pocket-advisor.svc.cluster.local:9000`, the same
+    shape as `Postgres.Host`. `Workspace.BucketName`/`RustFSAccessKey` went
+    from the shared constant `workspace` to `<id>` — the same inversion
+    deviation 34 made for Postgres, and for the same reason: one server, so
+    workspaces need names that actually differ. Object names in the shared
+    namespace are prefixed with the workspace id (`<id>-rustfs-app`,
+    `<id>-rustfs-notify`, `<id>-rustfs-policy`) for the reason deviation 34's
+    Postgres objects were: what was unique enough alone in its own namespace
+    is not unique sharing one with every other workspace's.
+
+    **What a shared instance does not reopen, unlike Postgres's `PUBLIC`
+    connect.** `buckets[].deletionPolicy` and `policies[].deletionPolicy` on
+    the Tenant CRD accept exactly one value, `Retain` — there was no default
+    to close by hand here, because the schema never offered an unsafe one.
+
+    **What a shared instance does reopen, and Postgres's reversal had no
+    equivalent of: notification-publishing identity.** Before, "the server's
+    one NATS identity" and "the workspace's identity" were the same fact,
+    because each workspace had its own server. One shared server needs one
+    full `RUSTFS_NOTIFY_NATS_*` environment block *per workspace*, each
+    authenticating as that workspace's own NATS user, or every workspace's
+    events would have to publish through one identity reaching across the
+    account boundary `workspace-isolation.md` §2.3 exists to keep separate.
+    Verified rather than assumed: RustFS, like MinIO whose wire protocol it
+    implements, supports multiple simultaneously-configured targets of the
+    same type distinguished by an arbitrary trailing identifier. The suffix
+    is not the workspace id verbatim — environment variable names cannot
+    contain hyphens, workspace ids can — so the chart uppercases it and
+    replaces hyphens with underscores, and because RustFS lowercases
+    whatever suffix it finds when registering the target (an existing
+    single-target gotcha this codebase had already documented), the ARN a
+    binding call must use is that transform lowercased again
+    (`arn:rustfs:sqs::family_law_matters:nats`), not the id verbatim either.
+    Each target also gets its own notification queue directory now rather
+    than sharing the one path a single-target server used — untested whether
+    RustFS disambiguates retry-queue state for multiple targets sharing one
+    directory, and separating them costs nothing.
+
+    **What still cannot be expressed in the CRD, and where it went instead.**
+    Which bucket publishes to which target has no field on the Tenant CRD in
+    either the one-server or the one-Tenant shape — that never changed. What
+    changed is who sets it. It was `--ingest-all`, an S3 SDK call from this
+    binary (`internal/provision/notify.go`, deleted by this deviation). It
+    had no principled reason to run from Go — RustFS is exactly as reachable
+    from a Makefile target on the same host as from this process, it simply
+    had no tool before. `make configure-notify` sets it now: `aws s3api
+    put-bucket-notification-configuration`, run once per workspace as that
+    workspace's own scoped identity, against the endpoint-url/region-aware
+    interface every S3-compatible service supports. Chosen over RustFS's own
+    `rc` CLI after checking directly: `rc bucket event add` has no
+    `--prefix`/`--suffix` flag in the version tested (0.1.31), and the
+    binding this replaces is deliberately scoped to `raw/` — without prefix
+    filtering, `extracted/` writes would also fire the notification, and the
+    pipeline would try to re-ingest its own output. `aws s3api
+    put-bucket-notification-configuration --notification-configuration`
+    accepts `Filter.Key.FilterRules` directly, closing that gap. AWS COSI was
+    also considered and rejected before this: it standardises bucket and
+    credential *provisioning*, which the Tenant CRD already did, not
+    notifications, which was the actual open problem — adopting it would
+    have traded a working mechanism for a pre-GA one without touching what
+    needed solving.
+
+    **What a removed workspace now leaves behind, matching Postgres exactly.**
+    Deleting a workspace's entry and redeploying prunes its bucket, policy and
+    identity entries from the shared Tenant's arrays, chart-rendered like
+    everything else — but `deletionPolicy: Retain` being the only option means
+    the underlying bucket data was never going to disappear anyway, consolidated
+    or not. This corrects deviation 34's own account of workspace removal,
+    written when RustFS was still per-workspace-namespaced: RustFS state no
+    longer leaves with a deleted namespace, because it is no longer in one.
+
+    Verified the same two ways as deviation 34: rendered first — `helm
+    template` against multiple workspaces, inspected object by object, plus
+    the exact `yq`/ARN-construction/JSON shell logic run locally and checked
+    against `aws s3api`'s real `--help` output rather than trusted from docs
+    alone (the docs, in fact, undersold it — `put-bucket-notification-
+    configuration`'s prefix-filter support isn't mentioned in the page
+    summaries `rc`'s own maintainers would have needed to add it). Not yet
+    verified against the live operator's own reconciliation the way deviation
+    34 was — that is this deviation's one open item, not a claim made and
+    unmet.
+
+36. **Resource requests and limits removed entirely from every workload in
+    the shared namespace (2026-08-06).** The sizing an earlier incident
+    produced — RustFS at 2 CPU/2Gi, Postgres at 2 CPU/1536Mi, NATS at
+    300m/384Mi, each with a request roughly a quarter of its limit — assumed
+    a node with real headroom to divide up. That stopped being the operating
+    assumption once the cluster's actual ceiling became fixed and small: an
+    OrbStack VM capped at 4GB/4CPU total, for every pod in it including the
+    three operators. Per-container limits carved out of a budget that tight
+    do not protect anything from contention, they just relocate where
+    contention gets enforced — from the VM's own memory pressure, visible and
+    diagnosable, to a cgroup ceiling that kills a specific container before
+    the VM is actually under any pressure at all.
+
+    No `resources:` block on the Postgres `Cluster`, the RustFS `Tenant`'s
+    pool, or the NATS container — not reduced figures, removed entirely, so
+    every pod competes for whatever the VM actually has free rather than
+    holding a reservation carved out of it. Single-tenant, single-operator
+    cluster: there is nothing here for one workload's limit to protect from
+    another's, since the same person who would tune the limits is the only
+    one running anything against it.
+
+    **What this does not remove.** The OOMKill and probe-timeout failure
+    modes the original sizing (§12, and this file's own historical account
+    above) was written to prevent are still physically possible — a process
+    can still be killed for using too much memory, still be slow enough
+    under starvation to fail a `timeoutSeconds: 1` probe. What changes is
+    only where the ceiling is enforced: the VM's actual memory, not a number
+    chosen against a corpus size that had already tripled past it once
+    before. `values.yaml`'s `global.resourcePolicy` note is the durable
+    record of this decision, since there is no `resources:` block left
+    anywhere in the chart to attach a comment to.
+
+37. **`metrics-server` added as a fourth, optional chart dependency
+    (2026-08-06).** A direct consequence of deviation 36: removing every
+    `resources:` block made `kubectl top` the only way to actually see what
+    "compete freely" is doing to the VM, and nothing in a bare OrbStack
+    cluster provides it — checked directly (`kubectl top nodes`: "Metrics
+    API not available"; no `v1beta1.metrics.k8s.io` `APIService`; no
+    `metrics-server` `Deployment` anywhere in the cluster).
+
+    Off by default in the committed `values.yaml` (`condition:
+    metrics-server.enabled`, the same mechanism the other three dependencies
+    already use), on in `workspaces/pocket-advisor-infra.yaml` — the first
+    thing in that file that is not a credential or a workspace entry.
+    `--kubelet-insecure-tls` is set for it in the committed values: verified
+    the chart's own `defaultArgs` does not include it, and without it every
+    kubelet scrape fails TLS verification silently — pod healthy, APIService
+    registered, `kubectl top` simply returns nothing, with no error pointing
+    at TLS specifically.
+
+    Unlike the other three dependencies, this one ships no CRD — it
+    registers a Kubernetes-native `APIService`, so none of deviation 25's
+    ordering problem applies and no `crds/` entry was needed.
+
+    Verified by rendering the chart with it enabled and grepping the actual
+    Deployment's args for the flag, not just reading the values file back.
+
+38. **`destroy-infra` was silently irreversible for Postgres, and now isn't
+    (2026-08-06).** Found by watching it happen: a `make destroy-infra` run
+    left `nats-data-nats-0` and `vol-0-rustfs-pool-0-0` bound and untouched,
+    exactly as documented, but the Postgres PVC was simply gone afterward —
+    no `PersistentVolumeClaim` named `postgres-1` anywhere, confirmed by
+    `kubectl get pvc` immediately after.
+
+    The cause is CloudNativePG's own operator, not this chart. Checked
+    against CloudNativePG's own upstream discussion of exactly this
+    behavior: the operator deletes a Cluster's PVCs itself, as part of
+    reconciling the Cluster's deletion, regardless of what the StorageClass's
+    reclaim policy says — and there is no documented Cluster spec field or
+    annotation that turns it off. The one escape hatch that exists,
+    `kubectl cnpg destroy --keep-pvc`, is a kubectl-plugin command, not
+    something a `helm uninstall`-based `destroy-infra` naturally reaches.
+
+    **The fix doesn't try to stop CloudNativePG from deleting the PVC —
+    everything found says that isn't possible — it stops the PVC's deletion
+    from being the same event as the disk's.** `destroy-infra` now patches
+    the underlying `PersistentVolume`'s own `persistentVolumeReclaimPolicy`
+    to `Retain` before running `helm uninstall`, selecting it by the
+    `cnpg.io/cluster` label CloudNativePG itself sets on the PVC (confirmed
+    against CloudNativePG's labels/annotations reference — `cnpg.io/cluster`
+    is documented as the correct selector for "every PVC belonging to this
+    Cluster"). Patched on the PV object directly, not the StorageClass:
+    a StorageClass-level `reclaimPolicy` change only affects volumes
+    provisioned after the change, never the one already bound to a running
+    cluster — the exact workaround CloudNativePG's own discussion thread
+    warned does not retroactively help. CNPG still deletes the PVC; the PV
+    behind it now survives that as `Released` instead of being destroyed
+    with it.
+
+    A `Released` PV carries no labels of its own — labels live on the PVC,
+    which is gone — so finding it later needs a different handle: its
+    `spec.claimRef` still names the deleted PVC's namespace, even though the
+    PVC itself no longer exists. `destroy-state` now selects on exactly that
+    (`status.phase == Released`, `claimRef.namespace == pocket-advisor`) and
+    deletes it — the one place, per the standing rule this deviation exists
+    to enforce, where that disk actually goes away.
+
+    Verified: the `cnpg.io/cluster` label selector and the `Released`-plus-
+    `claimRef` selector both checked directly against the live cluster's real
+    PV/PVC objects and CloudNativePG's own documentation, not assumed from
+    general Kubernetes knowledge. Not yet verified end-to-end against a real
+    `destroy-infra` → `destroy-state` cycle with a live Postgres PVC in
+    place — the cluster was already torn down by the incident that found
+    this, so the next real cycle is this fix's first live test.
+
+39. **CloudNativePG, the RustFS operator and NACK are gone — every CRD this
+    project introduced across deviations 20, 22, 24, 34 and 35, removed in
+    one pass (2026-08-06).** A political decision, not a technical one: for a
+    single-tenant local cluster, an operator's reconciliation loop —
+    continuously correcting drift between desired and actual state, across
+    many clusters, unattended — is machinery bought to solve a problem this
+    deployment does not have. Replaced with the same operation an operator
+    would have made, run once by a human instead: plain `StatefulSet`s for
+    the three shared stores, and `make deploy-workspace WORKSPACE_ID=<id>` /
+    `destroy-workspace` calling psql, `rc` (RustFS's own admin CLI, §14),
+    `aws-cli`, and `natscli` directly for everything workspace-specific. This
+    supersedes deviations 37 and 38 in one specific way each: metrics-server
+    was the fourth chart *dependency* there — it has no dependency to be a
+    fourth of any more, since it moved to its own standalone
+    `make deploy-metrics-server` regardless of this deviation, for an
+    unrelated reason (its lifecycle was already independent). Deviation 38's
+    whole PV-retain-before-uninstall workaround is deleted outright, not
+    superseded: it existed because CloudNativePG actively deleted PVCs
+    regardless of StorageClass policy, and a plain StatefulSet's PVCs behave
+    by Kubernetes' ordinary default instead — the operator was the problem,
+    not this Makefile's workaround for it.
+
+    **What replaced each CRD, concretely.**
+
+    - *Postgres.* One `StatefulSet` (`templates/postgres.yaml`), same
+      `pg_textsearch` image. `make deploy-workspace` runs `CREATE ROLE`/
+      `CREATE DATABASE`/`CREATE EXTENSION` over `psql`, authenticating as a
+      real, ongoing admin credential this StatefulSet creates on first
+      boot — unlike the CNPG-era bootstrap placeholder nothing ever
+      connected to, removing the operator brings back the shared
+      administrative Postgres connection deviation 20 spent real effort
+      eliminating. Named cleanly: worth seeing stated, not just inherited.
+    - *RustFS.* One `StatefulSet` (`templates/rustfs.yaml`), env-var
+      credentials (`RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY`) in place of the
+      Tenant CRD's `credsSecret`. `make deploy-workspace` creates the bucket
+      and binds notifications over `aws-cli` (unchanged from deviation 35 —
+      those were always S3 data-plane operations) and creates the identity
+      and its policy over `rc admin` — checked directly, not assumed:
+      `aws s3api put-bucket-policy` rejects the same policy document
+      `rc admin policy create` accepts, because bucket resource policies and
+      IAM canned policies are different mechanisms with different required
+      shapes, and only the latter is what the old Tenant CRD's
+      `users[].policies` ever was.
+    - *NATS.* Unchanged in the one way that matters: accounts were already
+      plain config in a ConfigMap, never NACK's concern. Only `Stream`
+      creation moves, to `nats stream add` over `natscli`, run as that
+      workspace's own account.
+
+    **Two things stopped being free, and both needed a real fix, not a
+    workaround, because they were never actually true — CNPG only made them
+    look true.**
+
+    - *There is no TLS any more.* `sslmode: require` cost nothing while
+      CloudNativePG issued its own internal CA; the plain StatefulSet does
+      none of that — no cert, no key, no `ssl = on`. Left at `require`, every
+      connection would have been refused outright, not silently
+      unencrypted. Changed to `disable`, with the reasoning recorded in
+      `internal/config`, not just the value changed: revisit only if this
+      stops being a local, single-user cluster.
+    - *`Namespace` is a deleted field, not a renamed one.* Nothing is
+      Kubernetes-namespace-scoped per workspace any more — deviation 39
+      removed the last thing that was, the JetStream `Stream`s deviation 35
+      still had a namespace for. `Workspace.Namespace` in
+      `internal/config` had no remaining reader; deleted rather than kept
+      as an unused field with a comment explaining why it is unused.
+
+    **The custom Postgres image has no entrypoint at all, and that was
+    found by testing, not by reading its Dockerfile.** It is built from
+    CloudNativePG's own base image, for the operator's instance-manager to
+    drive — checked directly: `Entrypoint: null`, `Cmd: ["bash"]`, no
+    `docker-entrypoint.sh`, no `POSTGRES_USER`/`POSTGRES_PASSWORD` auto-init
+    the way the official postgres image has. `templates/postgres.yaml`'s
+    ConfigMap is a from-scratch replacement, and two things about it would
+    have been easy to get wrong and ship anyway, both caught only because
+    the built script was actually run against the real image before being
+    trusted:
+
+    - `initdb`'s own default, unset, is `SQL_ASCII`/`"C"` — silently wrong
+      for the bilingual English/Russian corpus, and not the kind of wrong
+      anything fails loudly on. Fixed with `--encoding=UTF8
+      --locale=C.utf8`, verified with `SHOW server_encoding` and
+      `pg_database.datcollate` against a real container, not inferred from
+      `initdb --help`.
+    - `initdb`'s own generated `pg_hba.conf` only ever covers loopback,
+      never anything reaching the server from the actual Kubernetes network
+      it will only ever be reached from — verified by trying exactly that
+      connection (host to a published container port, simulating pod-to-pod)
+      and watching it refuse with no matching `pg_hba.conf` entry, not a
+      permission error naming the cause. Fixed with an explicit
+      `host all all 0.0.0.0/0 scram-sha-256` appended after `initdb` runs.
+
+    **The conditional-`CREATE DATABASE` idiom does not work the way it looks
+    like it should, found by running it, not by reading `psql --help`.**
+    `SELECT ... WHERE NOT EXISTS (...) \gexec` is the standard idiom for a
+    database-less `IF NOT EXISTS`, but `\gexec` is a psql meta-command, and
+    meta-commands only run inside psql's own script-reading mode — passed as
+    a `-c` argument the way this Makefile initially tried, it fails with
+    `syntax error at or near "\"`, confirmed by actually running it against
+    a real container before the Makefile was trusted. `make deploy-workspace`
+    uses two separate `psql` invocations instead: role creation, which is
+    properly idempotent via the same `DO $$ ... EXCEPTION WHEN
+    duplicate_object` idiom `schemaSQL` already used elsewhere in this
+    codebase; and a plain `CREATE DATABASE` whose "already exists" error is
+    tolerated the same way bucket/policy/user creation already is, rather
+    than built as conditional SQL at all.
+
+    **Verified, itemised, because different pieces were verified different
+    ways and conflating them would overclaim.** Tested directly against real
+    containers, not assumed: the Postgres entrypoint script end to end
+    (UTF8 encoding, `shared_preload_libraries`, network `pg_hba.conf`, a
+    remote password-authenticated connection); the exact
+    role-then-database `psql` sequence, including a second run proving
+    idempotency; `rc admin user add`/`policy create`/`policy attach`
+    end to end, including a scoped user's actual bucket operations (not just
+    `rc`'s own alias-validation step, which calls `ListBuckets` — an
+    account-wide operation a bucket-scoped policy does not and should not
+    grant, confirmed to be exactly why that specific validation step fails
+    while the real operations it was trying to validate succeed); RustFS's
+    plain-container env vars against this exact image (beta.12), given a
+    known upstream issue reporting them not working in some deployment
+    modes elsewhere; `nats stream add` fully non-interactively against a
+    real JetStream server, and URL-embedded username/password auth against
+    a real password-protected one. Rendered and dry-run, not executed
+    against the live cluster: the full chart with the new templates,
+    inspected object by object; every rewritten Makefile target via
+    `make -n`. Not yet run for real: `deploy-infra`, `deploy-workspace`,
+    `destroy-workspace`, or `deploy-metrics-server` against the live
+    cluster — this deviation's actual first live test is still ahead of it.
+
+40. **The Makefile is gone. `./pocket-advisor.sh`, plain POSIX `sh`, replaces
+    it outright — not alongside it.** A follow-on to deviation 39 rather than
+    a separate motivation: once workspace provisioning became a fixed
+    sequence of shell commands rather than a Helm/CRD concern, the thing
+    running them stopped needing to be Make at all. The immediate trigger
+    was narrower, though — `deploy-workspace`/`destroy-workspace` took a
+    workspace id via `WORKSPACE_ID=<id>`, GNU Make's own idiom for a
+    variable set from the command line, and that idiom does not extend to
+    "take a plain positional argument" without `$(MAKECMDGOALS)` and a
+    catch-all `%:` rule to stop Make erroring on the extra word. That trick
+    has a real failure mode, not just an aesthetic one: any word that
+    collides with an existing target name gets built too, silently, in
+    addition to the intended one — and this repository's own `workspaces/
+    pocket-advisor-infra.yaml` has a workspace literally named `test`, the
+    same name as the Makefile's own `test` target (`go test ./...`). Running
+    `make deploy-workspace test` under that trick would provision the
+    workspace *and* run the full Go test suite, every time, for anyone who
+    happened to name a workspace after any existing target. A plain shell
+    script has no such namespace to collide with — `$2` is just `$2`.
+
+    Every prior `make <target>` maps onto `./pocket-advisor.sh <command>`
+    unchanged in name and behavior — `build`, `test`, `race`, `vet`, `fmt`,
+    `lint`, `docker-build-postgres`, `deploy-infra`, `destroy-infra`,
+    `destroy-state`, `deploy-metrics-server`, `destroy-metrics-server`,
+    `clean` — dispatched from a `case "$cmd" in ... esac` on `$1` rather than
+    Make's target graph. The two exceptions are exactly the ones the
+    `WORKSPACE_ID=<id>` problem was about: `deploy-workspace`/
+    `destroy-workspace` now take the workspace id as `$2`, a plain
+    positional argument (`./pocket-advisor.sh deploy-workspace test`), with
+    no collision possible by construction, since the dispatcher only ever
+    inspects `$1`.
+
+    Each Make recipe's own fault-tolerance was preserved line for line, not
+    just its command text — the original recipes mix lines meant to abort
+    the whole run (`|| exit 1`, or nothing after a lone recipe line, which
+    Make treats as fatal by default) with lines meant to tolerate an
+    "already exists" outcome (`|| true`, `|| echo "already exists,
+    skipping"`). Translating this correctly required understanding *why*
+    each one was written that way, not just carrying the shell fragment
+    over: a bare recipe line's default-fatal behavior has no equivalent
+    unless written out, so every step Make would have treated as fatal by
+    virtue of being its own recipe line now has an explicit `|| exit 1`
+    in the script, and every step already tolerant of failure keeps its
+    original `|| true`/`|| echo` exactly as it was. Getting this wrong in
+    either direction would have been a silent behavior change: too strict,
+    and an idempotent re-run of `deploy-workspace` starts failing on
+    "bucket already exists"; too lenient, and a real failure — a wrong
+    password, an unreachable host — gets swallowed and reported as success.
+
+    The `$$`/`$$$$`-style escaping the Makefile needed for the embedded
+    `psql -c "DO $$ ... $$;"` dollar-quoted block and the `$${id}_user`
+    shell-variable references disappears entirely outside Make — Make's own
+    `$$` → literal `$` collapse was one layer of indirection that a plain
+    script never had, so the translated script just writes `\$\$` and
+    `${id}_user` directly, the same *shell-level* escaping with one fewer
+    layer to reason about, verified against psql's actual dollar-quoting
+    behavior rather than assumed to carry over unchanged.
+
+    **Verified:** `sh -n`, `dash -n` and `bash -n` all parse the script
+    clean. `./pocket-advisor.sh build`, `lint` (which itself renders the
+    chart and asserts on its output), `test`, `clean`, the no-argument
+    usage error, and the unknown-command error were all run for real and
+    behaved as intended. `deploy-workspace` was run live against the real
+    cluster for the first time immediately after this deviation shipped —
+    it found a real bug, recorded as deviation 41 below — rather than the
+    dry-run-only state this paragraph originally reported.
+    `deploy-infra`, `destroy-workspace`, `deploy-metrics-server` and
+    `destroy-metrics-server` are still untested against the live cluster.
+
+41. **`aws s3api create-bucket` had no credentials at all — found by running
+    `deploy-workspace` live for the first time, immediately after deviation
+    40 shipped it, and watching the notification-binding step fail with
+    `NoSuchBucket`.** Every other `aws s3api`/`aws s3` call in
+    `deploy-workspace`/`destroy-workspace` sets `AWS_ACCESS_KEY_ID`/
+    `AWS_SECRET_ACCESS_KEY` explicitly — the workspace's own scoped identity
+    for the notification binding, since that call happens after the
+    identity exists. `create-bucket` (and `destroy-workspace`'s mirror
+    `aws s3 rb`) had neither: bucket creation happens *before* the
+    workspace identity does, so it needs RustFS's root credentials instead,
+    and that line was simply missing them, inherited unnoticed from the
+    Makefile recipe deviation 40 translated line-for-line — `rc alias set`
+    two lines above it configures `rc`'s own alias store, not `aws-cli`'s
+    credential resolution, so it silently provided no cover either. With no
+    credentials, `aws-cli` fails against whatever ambient AWS credentials
+    exist on the operator's machine (or none), and the following
+    `>/dev/null 2>&1 || true` — there specifically to tolerate "bucket
+    already exists," the same idempotency pattern used throughout this
+    function — swallowed that unrelated failure identically, so the bucket
+    was silently never created and the run only surfaced the problem two
+    steps later, on an error message that named the symptom
+    (`NoSuchBucket`) rather than the cause (no credentials). Fixed by
+    setting `AWS_ACCESS_KEY_ID=$root_user AWS_SECRET_ACCESS_KEY=$root_pass`
+    on both calls, matching the pattern the notification-binding call
+    already used with the workspace's own identity. Re-verified live
+    immediately after: the bucket now creates successfully and the run
+    reaches the notification-binding step, which then failed on a second,
+    unrelated bug (deviation 42) — deviation 41 itself is confirmed fixed.
+
+42. **RustFS needs a master `RUSTFS_NOTIFY_ENABLE=true` env var, undocumented
+    anywhere this chart's rustfs.yaml was written against, and templates/
+    rustfs.yaml never set it — found by the same live `deploy-workspace` run
+    that surfaced deviation 41, one step further in.** With deviation 41
+    fixed, the bucket now existed, but `PutBucketNotificationConfiguration`
+    still failed, this time with `InternalError: ... No notify targets
+    configured. Check RUSTFS_NOTIFY_ENABLE=true and instance-scoped target
+    env vars`. `kubectl get statefulset rustfs -o json` against the live
+    pod confirmed every per-target var deviation 35's design produced —
+    `RUSTFS_NOTIFY_NATS_ENABLE_TEST=on`, `_ADDRESS_TEST`, `_SUBJECT_TEST`,
+    `_JETSTREAM_ENABLE_TEST`, `_JETSTREAM_STREAM_NAME_TEST`,
+    `_QUEUE_DIR_TEST`, `_USERNAME_TEST`/`_PASSWORD_TEST` from the
+    workspace's own Secret — were present and correctly valued; RustFS's
+    own error message was naming a different, wholly separate switch this
+    chart had simply never rendered. Deviation 35's design (and every
+    revision of `templates/rustfs.yaml` since) accounted for the per-target
+    block but not a subsystem-wide enable flag sitting above it — a gap
+    that predates deviation 39 and both scripting deviations (40, 41)
+    entirely; nothing about the CRD-to-StatefulSet move or the Makefile-to-
+    script move touches this env var, it was simply never added. Fixed by
+    rendering `RUSTFS_NOTIFY_ENABLE: "true"` once, gated on
+    `$.Values.workspaces` being non-empty — the same condition the
+    per-target `range` block already depends on implicitly, so a values
+    file with zero workspaces still renders a pod with the notify
+    subsystem off rather than on with nothing to publish. Verified via
+    `helm template` that the var now renders with a workspace present;
+    `./pocket-advisor.sh lint`'s chart-render assertion still passes
+    unchanged. Re-verified live immediately after, via
+    `./pocket-advisor.sh deploy-infra` (rolled `rustfs-0` with the new env
+    var) then `deploy-workspace test` again — the notification-binding call
+    itself now succeeded, but the run surfaced a third, unrelated bug one
+    step later (deviation 43).
+
+43. **`nats stream add INGESTION_DLQ` was missing `--discard=new`, present
+    on the other two streams, and fell back to an interactive prompt —
+    found by the same live run, immediately after deviations 41 and 42
+    were both fixed.** With bucket creation and the notification binding
+    both now working, `deploy-workspace test` reached the NATS step and
+    reported `INGESTION_DLQ already exists, skipping` — but `nats stream
+    ls` against the workspace's own account showed only `INGESTION` and
+    `RUSTFS_EVENTS`; `INGESTION_DLQ` did not exist. Running the exact
+    underlying `nats stream add INGESTION_DLQ` command directly, without
+    the script's `>/dev/null 2>&1 || echo "already exists, skipping"`
+    wrapper hiding the outcome, gave the real error: `nats: error: invalid
+    input: cannot prompt for user input without a terminal`. `nats-cli`
+    prompts for Discard Policy when it is not supplied and cannot be
+    inferred, regardless of `--retention`; `INGESTION` and `RUSTFS_EVENTS`
+    both pass `--discard=new` explicitly and never hit this, but
+    `INGESTION_DLQ`'s flag set — present in the original Makefile recipe
+    unchanged, so this predates deviation 40 as much as deviations 41 and
+    42 do — never set it. Non-interactively, that prompt fails outright,
+    and the failure looked identical to a real "stream already exists"
+    outcome to the same blanket `|| echo` tolerance pattern that masked
+    deviations 41 and 42, for the same underlying reason: idempotency
+    tolerance and real-failure tolerance were not actually distinguished
+    anywhere in this function, only assumed to coincide. Fixed by adding
+    `--discard=new` to `INGESTION_DLQ`'s `nats stream add`, matching the
+    other two streams. Verified live, twice: `deploy-workspace test` after
+    the fix created `INGESTION_DLQ` for real (`nats stream ls` confirmed
+    all three streams present, with distinct `created` timestamps proving
+    two of them were untouched and one was genuinely new); running it a
+    third time immediately after was a clean idempotent no-op — same three
+    streams, same `created` timestamps, exit 0, no error text of any kind.
+
+    **`deploy-workspace` is now confirmed stably successful end to end,
+    not just exit-code-zero.** Beyond the tool's own success message, every
+    downstream artifact was checked directly against the live cluster
+    rather than trusted: the bucket exists (`head-bucket`); the
+    notification binding is correctly bound to it
+    (`get-bucket-notification-configuration` returns the exact
+    `QueueConfigurations` block expected); the workspace's own scoped
+    identity — not the root credential — can actually `PutObject` and
+    `DeleteObject` against its bucket; and all three JetStream streams
+    exist under the workspace's own NATS account. `destroy-infra`,
+    `destroy-workspace` and `deploy-metrics-server`/`destroy-metrics-server`
+    remain untested against the live cluster.
+
+44. **`internal/config` no longer has a Go-side default for any store
+    address, endpoint, or fixed model name — config.yaml is the only
+    source of truth for them, and `./pocket-advisor.sh` reads the same file
+    rather than carrying its own copy.** Political decision, the same shape
+    as deviation 39: `defaultRustFSEndpoint`, `defaultNATSURL`,
+    `defaultPostgresHost`, `defaultEmbeddingEndpoint`, `defaultRerankEndpoint`,
+    `defaultLLMEndpoint`, `defaultWorkspacesConfigPath`,
+    `defaultWorkspacesValuesPath`, `RerankModel` and `LLMModel` all deleted
+    outright — every one of them duplicated a value config.yaml already
+    committed, so a value could drift between the Go default and the
+    committed file without either side noticing (and did, once already:
+    `ingestion-design.md`'s own history records `rustfs.endpoint` sitting
+    stale as a `%s` template in config.yaml through deviation 35, invisible
+    because the Go default was already correct and nothing ever needed the
+    file's value to matter). `RerankModel`/`LLMModel` move to config.yaml's
+    `infra.reranking.model`/`infra.llm.model` as plain fields on the
+    `Reranking`/`LLM` config structs — no longer enforced by the type
+    system as unconfigurable, only argued against by a comment, which is a
+    real cost given retrieval-design.md §8's own reasoning for fixing them
+    was specifically to prevent a casual swap; accepted because config.yaml
+    being the sole source of truth for infrastructure was the more
+    important property to hold here, uniformly, than making this one pair
+    of fields structurally uneditable.
+
+    `DefaultPath = "config.yaml"` is the only literal left in Go — Load has
+    to know where to look before it can read anything that would tell it
+    otherwise. Everything requireInfra checks (`infra.rustfs.endpoint`,
+    `infra.nats.url`, `infra.postgres.host`, `infra.reranking.endpoint`,
+    `infra.reranking.model`, `infra.llm.endpoint`, `infra.llm.model`,
+    `workspaces.config`, `workspaces.values`) now starts at its Go zero
+    value and is validated present, together, in one combined error, after
+    `applyFile` and `applyEnv` both run — so an operator missing one of
+    these gets one clear message naming every gap at once, at startup,
+    rather than a connection failure two layers down naming none of them.
+    `infra.embedding.endpoint` deliberately stayed out of that check: it
+    already had a lazy validator (`RequireEmbedding`, called only by the
+    modes that need it), and folding it into requireInfra would have given
+    the same field two sources of truth for whether it was required.
+    Removing its Go-side default did what actually mattered here anyway —
+    `RequireEmbedding` had been unreachable dead code since the default was
+    added, since `c.Embedding.Endpoint` could never be empty for it to
+    catch; deleting the default made an existing check meaningful again
+    without writing a new one.
+
+    `./pocket-advisor.sh` had its own, independent copy of exactly four of
+    these — `POSTGRES_HOST`, `POSTGRES_PORT`, `RUSTFS_ENDPOINT_URL` (as
+    `http://` + `infra.rustfs.endpoint`), `NATS_HOST` (as `infra.nats.url`
+    with its `nats://` scheme stripped) — hardcoded at the top of the
+    script, unconditionally, before this deviation. A new `resolve_infra`
+    function reads all four from config.yaml via `yq` instead, matching the
+    Go side field for field; deliberately lazy, called only from
+    `deploy_workspace`/`destroy_workspace` rather than at the top of the
+    script, since no other command touches Postgres/RustFS/NATS directly
+    and nothing else should have to find `yq` or a valid config.yaml just
+    to `build` or `test`. `POSTGRES_ADMIN_USER` is deliberately read from
+    `postgres.adminPostgresUser` in the private Helm-values override,
+    not config.yaml: it names a Helm value rather than an `infra:` key, so
+    moving it into config.yaml would create the exact kind of second source
+    of truth this deviation was written to remove.
+
+    Both the Go loader and `pocket-advisor.sh` expand `${NAME}` placeholders
+    in config.yaml and the private values file from the launch environment.
+    Both refuse unset placeholders rather than silently replacing a required
+    password or endpoint with an empty string. That keeps `.envrc` as the
+    secret source while making the binary, Helm invocation and provisioning
+    script consume the same resolved values.
+
+    **Verified:** the real committed config.yaml loads through the new
+    `requireInfra` path cleanly (checked directly, not assumed — a
+    throwaway test loaded it and printed every resolved field). All five
+    rewritten `config_test.go` cases pass, including two new ones asserting
+    that a missing config file and a missing `workspaces.values` key are
+    now both configuration errors naming what's missing, replacing the two
+    tests whose premise (defaults describe a stock local cluster) this
+    deviation removed. `go build`, `go vet`, `go test ./...` and
+    `./pocket-advisor.sh lint` all pass. `resolve_infra` was checked
+    directly against the real config.yaml and produced byte-identical
+    values to the constants it replaced. `deploy-workspace test` was
+    re-run live, twice, through the rewritten script, and reached
+    "provisioned" both times with no new failures — though the second run
+    showed all three JetStream streams with fresh `created` timestamps
+    rather than the unchanged ones an idempotent re-run should show,
+    despite `nats-0` reporting zero restarts and the same PVC mounted
+    throughout. That discrepancy was not chased down: `resolve_infra`
+    itself was independently confirmed to produce the same `NATS_HOST` as
+    the value it replaced, so it is very unlikely to be this deviation's
+    doing, but it is recorded here rather than silently ignored, since
+    nothing about it was actually explained.

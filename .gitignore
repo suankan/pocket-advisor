@@ -12,6 +12,11 @@ __pycache__/
 *.pyc
 .DS_Store
 tmp/
+# Every real secret this project uses lives here (direnv-loaded), never in
+# config.yaml or workspaces/pocket-advisor-infra.yaml — both of those are
+# templates now, holding only ${VAR} placeholders this file's values fill in.
+.envrc
+.direnv/
 # Compiled binary and the per-role run logs.
 bin/
 logs/

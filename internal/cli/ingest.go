@@ -57,9 +57,10 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	// An earlier revision had --ingest-all call CreateWorkspace idempotently,
 	// which was convenient and widened the most commonly run command to require
 	// shared root credentials (deviation 10 recorded that as a real cost at the
-	// time). There is no provisioning left to widen it: the stores are CRDs, and
-	// every mode — ingest, query, mcp — connects with one workspace's own
-	// credentials and nothing more (deviation 24).
+	// time). There is no provisioning left to widen it: workspace creation is
+	// `./pocket-advisor.sh deploy-workspace`, run once by a human (deviation
+	// 39), and every mode — ingest, query, mcp — connects with one
+	// workspace's own credentials and nothing more (deviation 24).
 	// --scan needs the uploader role as much as --ingest-all does: it triggers
 	// work by touching raw/ objects, which only that role may do (§5.1).
 	if o.IngestAll || o.Scan {
@@ -72,10 +73,11 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 	defer a.Close()
 
-	// The two things the chart cannot declare — the schema, which needs the
-	// embedding endpoint's vector width, and the bucket notification rule.
-	// Both idempotent and cheap, so they run on every ingest rather than
-	// needing a separate provisioning command (deviation 24).
+	// The one thing `./pocket-advisor.sh deploy-workspace` cannot do — the
+	// schema, since its vector width needs the embedding endpoint, reachable
+	// only from this host (§4.4). Idempotent and cheap, so it runs on every
+	// ingest rather than needing a separate provisioning command (deviation
+	// 24, deviation 39).
 	// Fatal at startup, not a warning: embedding at one dimension into a column
 	// sized for another writes vectors that are silently not comparable to
 	// their neighbours (§4.4).

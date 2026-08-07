@@ -3,8 +3,30 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// validInfra supplies every field requireInfra checks — none of them has a
+// Go-side default any more (deviation 41), so a test about something else
+// entirely (path anchoring, env overrides) would otherwise fail on an
+// unrelated "missing infra.rustfs.endpoint" rather than testing what it
+// means to test. Each test below adds its own workspaces: block on top.
+const validInfra = `
+infra:
+  rustfs:
+    endpoint: rustfs.example:9000
+  nats:
+    url: nats://nats.example:4222
+  postgres:
+    host: postgres.example
+  reranking:
+    endpoint: http://localhost:8000/v1/rerank
+    model: test-rerank-model
+  llm:
+    endpoint: http://localhost:8000/v1/chat/completions
+    model: test-llm-model
+`
 
 // The workspace paths are the only configuration that names another file, so
 // they are the only configuration whose meaning depends on where it is read
@@ -26,7 +48,7 @@ func TestWorkspacePathsResolveAgainstTheConfigFile(t *testing.T) {
 	// irrelevant. The test binary runs in the package directory, so a config
 	// read from tmp proves the anchor is the file rather than the cwd.
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, `
+	path := writeConfig(t, tmp, validInfra+`
 workspaces:
   config: workspaces/workspace-config.yaml
   values: workspaces/pocket-advisor-infra.yaml
@@ -47,21 +69,19 @@ workspaces:
 	}
 }
 
-func TestWorkspaceDefaultsResolveAgainstTheConfigFile(t *testing.T) {
-	// A config that says nothing about workspaces still has to find them: the
-	// built-in defaults describe the same repository layout, so they anchor the
-	// same way. This is the case a minimal config.yaml actually hits.
+func TestMissingWorkspacesValuesIsAConfigurationError(t *testing.T) {
+	// workspaces.values has no Go-side default any more (deviation 41) —
+	// config.yaml is the only place left that can supply it, so omitting it
+	// must fail loudly rather than silently resolving to nothing.
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, "infra:\n  nats:\n    url: nats://example:4222\n")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n")
 
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("want an error for missing workspaces.values, got nil")
 	}
-
-	want := filepath.Join(tmp, defaultWorkspacesValuesPath)
-	if c.WorkspacesValuesPath != want {
-		t.Errorf("values path = %q, want %q", c.WorkspacesValuesPath, want)
+	if !strings.Contains(err.Error(), "workspaces.values") {
+		t.Errorf("error = %q, want it to name workspaces.values", err.Error())
 	}
 }
 
@@ -71,7 +91,7 @@ func TestAbsoluteWorkspacePathsAreLeftAlone(t *testing.T) {
 	tmp := t.TempDir()
 	elsewhere := t.TempDir()
 	abs := filepath.Join(elsewhere, "registry.yaml")
-	path := writeConfig(t, tmp, "workspaces:\n  config: "+abs+"\n")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: "+abs+"\n  values: workspaces/pocket-advisor-infra.yaml\n")
 
 	c, err := Load(path)
 	if err != nil {
@@ -86,7 +106,7 @@ func TestEnvironmentOverrideIsTakenLiterally(t *testing.T) {
 	// The environment is set by whoever launches the process, in their own
 	// working directory, so it wins over the file and is not re-anchored to it.
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, "workspaces:\n  values: workspaces/pocket-advisor-infra.yaml\n")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n  values: workspaces/pocket-advisor-infra.yaml\n")
 	t.Setenv("WORKSPACES_VALUES", "some/other/values.yaml")
 
 	c, err := Load(path)
@@ -98,17 +118,42 @@ func TestEnvironmentOverrideIsTakenLiterally(t *testing.T) {
 	}
 }
 
-func TestMissingConfigFileLeavesDefaultsRelative(t *testing.T) {
-	// A missing file is not an error — the defaults describe a stock local
-	// cluster. With no file there is nothing to anchor to, so the paths stay as
-	// they were rather than being anchored to a directory that does not exist.
-	c, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+func TestMissingConfigFileIsAConfigurationError(t *testing.T) {
+	// A missing file used to fall back to a built-in default describing a
+	// stock local cluster. There is no such default left (deviation 41) —
+	// config.yaml is the only source of truth for these fields now, so a
+	// missing file leaves them all empty and Load must refuse to proceed.
+	_, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err == nil {
+		t.Fatal("want an error for a missing config file, got nil")
+	}
+}
+
+func TestConfigExpandsRequiredEnvironmentPlaceholders(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${TEST_RUSTFS_ENDPOINT}", 1)+`
+workspaces:
+  config: workspaces/workspace-config.yaml
+  values: workspaces/pocket-advisor-infra.yaml
+`)
+	t.Setenv("TEST_RUSTFS_ENDPOINT", "rustfs.from-env:9000")
+
+	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.WorkspacesValuesPath != defaultWorkspacesValuesPath {
-		t.Errorf("values path = %q, want the unanchored default %q",
-			c.WorkspacesValuesPath, defaultWorkspacesValuesPath)
+	if c.RustFS.Endpoint != "rustfs.from-env:9000" {
+		t.Errorf("RustFS.Endpoint = %q, want expanded value", c.RustFS.Endpoint)
+	}
+}
+
+func TestConfigRejectsUnsetEnvironmentPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${UNSET_RUSTFS_ENDPOINT}", 1))
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "UNSET_RUSTFS_ENDPOINT") {
+		t.Fatalf("Load error = %v, want unset placeholder error", err)
 	}
 }
 

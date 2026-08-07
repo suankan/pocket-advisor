@@ -53,9 +53,7 @@ copy of the image version.
 
 app.kubernetes.io/part-of is load-bearing rather than decorative. The
 VMServiceScrape selector matches on it, so a workload missing this label is
-silently not scraped (ingestion-design.md §9.2), and `make deploy-infra` and
-`make destroy-state` both enumerate workspace namespaces by it — a namespace
-rendered without it would be waited on by nothing and wiped by nothing.
+silently not scraped (ingestion-design.md §9.2).
 
 None of this is a deletion index. Helm does not consult labels to decide what
 to remove on uninstall — that is driven entirely by the release manifest stored

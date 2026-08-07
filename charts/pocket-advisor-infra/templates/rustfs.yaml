@@ -1,65 +1,48 @@
 {{/*
-This workspace's RustFS, as a Tenant the operator reconciles.
+RustFS as a plain StatefulSet — no rustfs-operator, no Tenant CRD
+(deviation 39). One shared instance, same as the Tenant it replaces
+(deviation 35); what changed is who creates buckets, identities and
+policies. That was already partly true before this deviation — the Tenant
+CRD never expressed bucket-notification bindings either — and now covers
+all of it: ./pocket-advisor.sh deploy-workspace creates the bucket (aws-cli), the identity
+and its policy (rc admin, since that is RustFS's own IAM-style admin API,
+not something aws-cli's S3-only surface can reach at all — checked directly,
+not assumed: `aws s3api put-bucket-policy` rejects the same policy document
+`rc admin policy create` accepts, because bucket resource policies and IAM
+canned policies are different mechanisms with different required shapes),
+and the notification binding (aws-cli, unchanged from deviation 35).
 
-It replaces a hand-written StatefulFor plus a Service plus most of
-internal/provision/rustfs.go: the Tenant declares the bucket, the workspace
-identity and its IAM policy, so nothing has to create them over the admin API
-afterwards (ingestion-design.md deviation 22).
-
-Three things about the CRD are not guessable, and all three were found by
-building a Tenant and reading its status rather than its schema:
-
-  * users[].name is a *Secret* name, not a username. The operator reads
-    accesskey/secretkey out of it; with no such Secret it reports
-    "user Secret 'workspace' was not found" and blocks provisioning while the
-    pods themselves come up healthy.
-  * A user must carry at least one policy, and a policy's document must come
-    from a ConfigMap — it cannot be inlined.
-  * persistence.volumesPerServer is required, though the schema does not mark
-    it so until the rest of the object validates.
-
-The Services are the operator's, not ours: <tenant>-io carries S3 on 9000,
-which is why config.yaml's endpoint template ends in -io.
+Root credentials only, here: RUSTFS_ACCESS_KEY/RUSTFS_SECRET_KEY, verified
+directly against this exact image (beta.12) rather than trusted from
+docs — a known upstream issue reports them not taking effect in some
+deployment modes, and this is not that one.
 */}}
-{{- range .Values.workspaces }}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  namespace: {{ .id }}
+  namespace: {{ $.Values.global.namespace }}
   name: rustfs-root
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "RustFS root credentials, in the accesskey/secretkey shape the Tenant CRD expects") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "RustFS root credentials — ./pocket-advisor.sh deploy-workspace uses these to provision each workspace") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
 type: Opaque
 stringData:
-  accesskey: {{ required "rustfs.credentials.rootUser is required" $.Values.rustfs.credentials.rootUser | quote }}
-  secretkey: {{ required "rustfs.credentials.rootPassword is required" $.Values.rustfs.credentials.rootPassword | quote }}
+  accesskey: {{ required "rustfs.adminRustFSUser is required" $.Values.rustfs.adminRustFSUser | quote }}
+  secretkey: {{ required "rustfs.adminRustFSPassword is required" $.Values.rustfs.adminRustFSPassword | quote }}
+{{- range $.Values.workspaces }}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  namespace: {{ .id }}
-  # Named for the user it defines: the Tenant refers to it by this name.
-  name: {{ $.Values.workspace.name }}
+  namespace: {{ $.Values.global.namespace }}
+  name: {{ .id }}-rustfs-notify
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
-type: Opaque
-stringData:
-  accesskey: {{ $.Values.workspace.name | quote }}
-  secretkey: {{ required (printf "workspaces[%s].rustfs.credentials.secretKey is required" .id) .rustfs.credentials.secretKey | quote }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  namespace: {{ .id }}
-  name: rustfs-notify
-  labels:
-    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "The NATS identity RustFS publishes bucket notifications as") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" (printf "The NATS identity this workspace's RustFS notifications publish as" .id)) }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
@@ -69,116 +52,128 @@ stringData:
   # account naming changed, and the stale key name silently broke publishing
   # (deviation 21).
   nats-user: {{ .id | quote }}
-  nats-password: {{ required (printf "workspaces[%s].nats.credentials.password is required" .id) .nats.credentials.password | quote }}
+  nats-password: {{ required (printf "workspaces[%s].nats.password is required" .id) .nats.password | quote }}
+{{- end }}
 ---
-apiVersion: v1
-kind: ConfigMap
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
-  namespace: {{ .id }}
-  name: rustfs-policy
-  labels:
-    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
-data:
-  # Full control of this workspace's bucket and nothing else — the same "no
-  # grant, no access" isolation the Postgres cluster has by construction.
-  policy.json: |
-    {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Action": ["s3:*"],
-          "Resource": [
-            "arn:aws:s3:::{{ $.Values.workspace.name }}",
-            "arn:aws:s3:::{{ $.Values.workspace.name }}/*"
-          ]
-        }
-      ]
-    }
----
-apiVersion: rustfs.com/v1alpha1
-kind: Tenant
-metadata:
-  namespace: {{ .id }}
+  namespace: {{ $.Values.global.namespace }}
   name: rustfs
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Object storage for this workspace — Tier 1, the corpus source of truth") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Shared object storage — Tier 1, the corpus source of truth for every workspace") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
 spec:
-  image: {{ $.Values.rustfs.image }}
-  credsSecret:
-    name: rustfs-root
-
-  buckets:
-    - name: {{ $.Values.workspace.name }}
-  policies:
-    - name: {{ $.Values.workspace.name }}
-      document:
-        configMapKeyRef:
-          name: rustfs-policy
-          key: policy.json
-  users:
-    - name: {{ $.Values.workspace.name }}
-      policies: [{{ $.Values.workspace.name | quote }}]
-
-  pools:
-    - name: pool-0
-      servers: 1
-      persistence:
-        volumesPerServer: 1
-        volumeClaimTemplate:
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: {{ $.Values.rustfs.persistence.size }}
-      resources:
-        {{- toYaml $.Values.rustfs.resources | nindent 8 }}
-
-  # Bucket notifications, configured entirely through the environment because
-  # RustFS reads its notify target at startup and madmin's SetConfigKV crashes
-  # the server (§5.2). Three details are load-bearing and each was a silent
-  # failure before it was found:
-  #
-  #   1. RUSTFS_NOTIFY_ENABLE is a separate top-level module gate; without it
-  #      no target is constructed at all, silently.
-  #   2. The default queue dir (/opt/rustfs/events) is unwritable by RustFS's
-  #      non-root user (§12 bug 1).
-  #   3. The target stream's duplicate window must exceed RustFS's retry
-  #      lifetime (~274s observed) or it refuses to publish — RUSTFS_EVENTS is
-  #      declared with 10m to match (templates/streams.yaml).
-  env:
-    - name: RUSTFS_NOTIFY_ENABLE
-      value: "true"
-    - name: RUSTFS_NOTIFY_NATS_ENABLE_PRIMARY
-      value: "on"
-    - name: RUSTFS_NOTIFY_NATS_ADDRESS_PRIMARY
-      value: {{ printf "nats.%s.svc.cluster.local:%d" $.Release.Namespace (int $.Values.nats.clientPort) | quote }}
-    - name: RUSTFS_NOTIFY_NATS_SUBJECT_PRIMARY
-      value: {{ $.Values.rustfs.notify.subject | quote }}
-    - name: RUSTFS_NOTIFY_NATS_JETSTREAM_ENABLE_PRIMARY
-      value: "on"
-    - name: RUSTFS_NOTIFY_NATS_JETSTREAM_STREAM_NAME_PRIMARY
-      value: {{ $.Values.rustfs.notify.jetstreamStreamName | quote }}
-    - name: RUSTFS_NOTIFY_NATS_QUEUE_DIR_PRIMARY
-      value: {{ $.Values.rustfs.notify.queueDir | quote }}
-    # The NATS identity RustFS publishes as. Rendered here, not written later
-    # by the CLI: this chart already holds every workspace's NATS password, so
-    # the identity is known at render time. That removed the Secret-write and
-    # the pod restart that used to follow it — provisioning had to restart
-    # RustFS because env from a secretKeyRef is resolved at pod start, so a
-    # Secret written after the fact was invisible until the pod cycled
-    # (deviation 24).
-    - name: RUSTFS_NOTIFY_NATS_USERNAME_PRIMARY
-      valueFrom:
-        secretKeyRef:
-          name: rustfs-notify
-          key: nats-user
-    - name: RUSTFS_NOTIFY_NATS_PASSWORD_PRIMARY
-      valueFrom:
-        secretKeyRef:
-          name: rustfs-notify
-          key: nats-password
-{{- end }}
+  serviceName: rustfs
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      containers:
+        - name: rustfs
+          image: {{ $.Values.rustfs.image }}
+          env:
+            - name: RUSTFS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-root
+                  key: accesskey
+            - name: RUSTFS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-root
+                  key: secretkey
+            - name: RUSTFS_VOLUMES
+              value: /data
+            - name: RUSTFS_ADDRESS
+              value: {{ printf ":%d" (int $.Values.rustfs.apiPort) | quote }}
+            # Bucket notifications, configured entirely through the
+            # environment because RustFS reads its notify target at startup
+            # and madmin's SetConfigKV crashes the server (§5.2). One full
+            # block per workspace: before, "the server's one NATS identity"
+            # and "the workspace's identity" were the same fact, because
+            # each workspace had its own server; one shared server needs a
+            # full credential set per workspace to keep publishing under the
+            # right NATS account (deviation 35 has the complete account,
+            # including the hyphen/underscore suffix transform and why each
+            # target gets its own queue dir).
+            #
+            # RUSTFS_NOTIFY_ENABLE is the master switch for the whole notify
+            # subsystem, separate from (and in addition to) each target's own
+            # RUSTFS_NOTIFY_NATS_ENABLE_<SUFFIX> below — without it RustFS
+            # registers no targets at all and every PutBucketNotification-
+            # Configuration call fails with "No notify targets configured",
+            # regardless of how many per-target env vars are set (found live,
+            # deviation 41). Gated on there being at least one workspace, the
+            # same as the per-target block it precedes.
+            {{- if $.Values.workspaces }}
+            - name: RUSTFS_NOTIFY_ENABLE
+              value: "true"
+            {{- end }}
+            {{- range $.Values.workspaces }}
+            {{- $suffix := .id | replace "-" "_" | upper }}
+            - name: RUSTFS_NOTIFY_NATS_ENABLE_{{ $suffix }}
+              value: "on"
+            - name: RUSTFS_NOTIFY_NATS_ADDRESS_{{ $suffix }}
+              value: {{ printf "nats.%s.svc.cluster.local:%d" $.Values.global.namespace (int $.Values.nats.clientPort) | quote }}
+            - name: RUSTFS_NOTIFY_NATS_SUBJECT_{{ $suffix }}
+              value: {{ $.Values.rustfs.notify.subject | quote }}
+            - name: RUSTFS_NOTIFY_NATS_JETSTREAM_ENABLE_{{ $suffix }}
+              value: "on"
+            - name: RUSTFS_NOTIFY_NATS_JETSTREAM_STREAM_NAME_{{ $suffix }}
+              value: {{ $.Values.rustfs.notify.jetstreamStreamName | quote }}
+            - name: RUSTFS_NOTIFY_NATS_QUEUE_DIR_{{ $suffix }}
+              value: {{ printf "%s/%s" $.Values.rustfs.notify.queueDir .id | quote }}
+            - name: RUSTFS_NOTIFY_NATS_USERNAME_{{ $suffix }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .id }}-rustfs-notify
+                  key: nats-user
+            - name: RUSTFS_NOTIFY_NATS_PASSWORD_{{ $suffix }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .id }}-rustfs-notify
+                  key: nats-password
+            {{- end }}
+          ports:
+            - containerPort: {{ $.Values.rustfs.apiPort }}
+          # No resources block, deliberately — see global.resourcePolicy.
+          volumeMounts:
+            - name: rustfs-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: rustfs-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $.Values.rustfs.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: {{ $.Values.global.namespace }}
+  name: rustfs
+  labels:
+    {{- include "pa.labels" (dict "ctx" $ "component" "object-store") | nindent 4 }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "Cluster-internal S3 endpoint for RustFS") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $.Values.rustfs.apiPort }}
+      targetPort: {{ $.Values.rustfs.apiPort }}
+      name: s3
+  selector:
+    app: rustfs

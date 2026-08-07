@@ -1,145 +1,122 @@
-# Answer Generation Design
+# Generation Design
 
-**Version:** `1.0.0`
+This document is the design authority for cited answer generation, answer-model access, evidence isolation, and the intended generation service. It describes target state. Pocket Advisor does not currently run an in-repository generation service.
 
-**Status:** target design of record. Pocket Advisor does not yet run an
-in-repository generation service: an MCP client currently reads retrieval
-packets and writes the answer. This document defines the boundary for the
-future service without changing that shipped behaviour.
+In the current system, the workspace-bound stdio MCP server returns retrieval evidence to an external agent, and that agent writes any answer. [Retrieval design](retrieval-design.md) owns evidence selection, [API server design](api-server-design.md) owns authentication and routing, and [workspace isolation](workspace-isolation.md) owns credential boundaries.
 
----
+## Purpose and boundary
 
-## 1. Purpose and Boundary
+Generation composes a cited answer from a retrieval result. It does not search PostgreSQL, fetch arbitrary RustFS objects, ingest content, modify the index, or decide which workspace a caller may access.
 
-Generation composes a cited answer from evidence packets. It does not search
-the corpus, index documents, write derived text into Tier 2/3, or decide which
-workspace a caller may access. Those responsibilities belong respectively to
-retrieval, ingestion, and the API gateway/control plane.
+The dependency is one-way: generation calls its paired retrieval service. Retrieval remains complete and usable without generation and never receives answer-model credentials.
 
 ```mermaid
 flowchart LR
-  Caller["Authorised caller"] --> Gateway["API gateway / control plane"]
-  Gateway --> Generation["Per-workspace generation service"]
+  Caller["Authorized caller"] --> Gateway["Gateway and control plane"]
+  Gateway --> Generation["Workspace generation service"]
   Generation --> Retrieval["Paired retrieval service"]
-  Retrieval --> Packets["Cited evidence packets"]
-  Packets --> Generation
+  Retrieval --> Generation
   Generation --> Model["Answer model endpoint"]
-  Generation --> Result["Answer + validated citations"]
+  Generation --> Response["Answer, citations, evidence, and warnings"]
 ```
 
-Retrieval is useful and complete without generation. Therefore the dependency
-is one-way: generation calls retrieval; retrieval must never call generation.
-A generation outage degrades to source packets, not to an unavailable search
-system.
+## Deployment and isolation
 
----
+Generation is a separate long-running Deployment and Service for one fixed workspace. It may share an image family with retrieval but has distinct credentials, network policy, scaling, and failure behavior.
 
-## 2. Deployment and Isolation
+The generation workload receives:
 
-Generation is a separate long-running Kubernetes Deployment beside the
-retrieval Deployment for the same workspace. A workspace gets one deployment
-of each, configured with its own identity and route. The services may use the
-same application image family, but they have different credentials, network
-policy, scaling, and failure domains.
+- network access to its paired retrieval service;
+- network access to the configured answer-model endpoint; and
+- only the credential needed for that model endpoint, if one is required.
 
-The generation pod has:
+It receives no PostgreSQL, RustFS, NATS, provisioning, ingestion, or Kubernetes administrative credential. Giving generation direct storage access would create a second retrieval path and weaken the workspace boundary.
 
-- network access to its paired retrieval Service;
-- access to its configured answer-model endpoint; and
-- only the secret needed to authenticate to that endpoint, if any.
+The gateway authenticates the caller, authorizes the workspace, and routes to the matching generation workload. A workspace value in the request cannot override that workload's configured scope.
 
-It has no PostgreSQL, RustFS, NATS, ingestion-worker, or Kubernetes API
-credentials. Direct evidence-store access would create a second, unaudited
-retrieval implementation and would weaken workspace isolation.
+## External-model egress
 
-If an answer model is external, generation is the sole egress boundary for
-corpus-derived material. Retrieval has neither provider credentials nor egress
-permission, so a normal search cannot export evidence merely as a side effect
-of serving a request.
+If the answer model runs outside the local trust boundary, generation is the explicit egress point for source-derived text. Operators must be able to determine what provider receives evidence, which credential is used, and what retention policy applies.
 
----
+External model support requires:
 
-## 3. Evidence and Citation Contract
+- an explicit per-workspace or deployment policy allowing egress;
+- bounded evidence and prompt size;
+- TLS and authenticated model access;
+- provider retention and training settings compatible with private content;
+- logs that omit questions, evidence, prompts, and generated text; and
+- failure behavior that never falls back to an unapproved provider.
 
-The input to generation is a retrieval result: the original question, searched
-sub-queries, warnings, and source packets with `doc_id`, Tier 1 URI, character
-range, and packet index. Generation may summarise and reason over packet text,
-but every factual claim in its response must cite one or more supplied packet
-indexes.
+Retrieval must not gain provider credentials or general outbound access merely because generation is enabled.
 
-Before returning an answer, the service validates that each emitted citation:
+## Evidence contract
+
+Generation receives the complete `retrieval.Result`: original question, effective sub-queries, evidence packets, retrieval warnings, and context-budget use. Each packet includes stable document and chunk identifiers, UTF-8 byte offsets, source hash, Tier 1 URI, text admitted by the retrieval budget, and related-document labels.
+
+Generation may reason over only the evidence supplied for that request. It must not ask the model to fill evidentiary gaps from general knowledge while presenting the result as grounded in the workspace. When evidence is absent, insufficient, or conflicting, the answer shape must say so.
+
+The model-facing prompt assigns a compact packet reference to every supplied packet. The model returns structured claims and packet references rather than free-form citation strings.
+
+## Citation contract
+
+Before returning a successful answer, generation validates that every citation:
 
 1. names a packet supplied to this request;
-2. retains that packet's immutable provenance; and
-3. does not fabricate a document, URI, offset, or speaker attribution.
+2. resolves to that packet's immutable provenance;
+3. does not invent a document, URI, byte range, relationship, or speaker; and
+4. is attached to a claim in the response schema.
 
-Citation validation proves provenance linkage, not that the model's reasoning
-is correct. The response must therefore retain the original packets or their
-stable references so a caller can inspect the source material independently.
+Reference validation proves that a cited source exists; it does not prove that the source entails the claim. The response therefore retains the evidence packets or stable references needed for independent inspection. Whether semantic entailment checking is also required remains an open decision.
 
-Generated answers, prompts, model traces, and caches are not source text. They
-must never enter `documents.normalized_text`, `document_chunks`, or any other
-retrieval index. Any future answer history has a separate store, schema,
-retention policy, and deletion behaviour.
+Every factual claim derived from workspace material must cite at least one packet. Introductory phrasing, uncertainty statements, and clearly labeled reasoning may follow a separately specified policy, but they must not obscure which claims are evidenced.
 
----
+## Request flow
 
-## 4. Request Flow and Failure Semantics
+1. Receive an authorized question for the workload's fixed workspace.
+2. Call the paired retrieval service using a bounded timeout.
+3. If retrieval succeeds, construct a prompt from the question, evidence packets, warning state, and answer policy.
+4. Call the configured answer model.
+5. Parse the structured response and validate its citations.
+6. Return the answer, validated citations, retrieval warnings, evidence references, and model/degradation metadata allowed by policy.
 
-```mermaid
-sequenceDiagram
-  participant C as Caller
-  participant G as Generation service
-  participant R as Retrieval service
-  participant M as Answer model
+Generation is stateless between requests. Multi-turn conversation, if added, uses bounded caller-supplied history under an explicit API contract. Hidden server-side model state is not part of the design.
 
-  C->>G: question
-  G->>R: retrieve evidence for its fixed workspace
-  R-->>G: cited packets and warnings
-  G->>M: question plus packets
-  M-->>G: draft answer with packet citations
-  G->>G: validate citations and response shape
-  G-->>C: answer, citations, warnings
-```
+## Failure semantics
 
-If retrieval fails, generation returns that failure without asking the model to
-guess. If the model fails or citations do not validate, generation returns a
-clear generation failure and the retrieval packets remain available through the
-retrieval API/MCP tool. A client may then answer manually or retry generation.
+- A retrieval failure ends the generation request; the model is not asked to guess.
+- An empty retrieval result produces an evidence-insufficient response without a model call unless the API explicitly needs the model to phrase a refusal.
+- An answer-model timeout, unavailable endpoint, malformed output, or failed citation validation is a generation failure.
+- A generation failure does not make retrieval unavailable; clients can request evidence directly.
+- Retrieval warnings are preserved in the generation response and may require a qualified answer.
+- The service never changes provider, model, workspace, or evidence source as an implicit fallback.
 
-Generation is stateless with respect to conversation history. Multi-turn chat,
-if introduced, is an explicit API feature: bounded caller-supplied history is
-an auditable input, never hidden state held by the model service.
+Streaming, if enabled, must not expose an unvalidated answer as final. One acceptable design streams provisional text with an explicit state and emits a final validated response; another buffers until validation. The protocol decision must be made before streaming is implemented.
 
----
+## Persistence and privacy
 
-## 5. Relationship to MCP and the API Server
+Generated answers, prompts, model responses, conversation state, and caches are not source documents. They must never enter `documents.normalized_text`, `document_chunks`, or the retrieval index.
 
-Today MCP exposes retrieval only. The agent is the generation layer and the
-operator chooses when evidence enters that conversation. This remains the
-default until the service defined here is implemented.
+Any persistent answer history requires a separate store and explicit workspace scope, retention, deletion, backup, export, and audit rules. Until that design exists, generation remains request-stateless and does not persist prompts or answers.
 
-When generation is introduced, the API gateway authorises the workspace before
-routing to the paired generation service. MCP may expose a generation tool as
-an additional adapter, but an MCP tool name, URL path, or request parameter is
-not authority to select a workspace. The gateway/control plane owns that
-decision, as defined in `docs/api-server-design.md`.
+Telemetry records timings, response states, model identifiers, citation counts, and bounded cardinalities. It must not record questions, evidence text, prompts, model output, source paths, document titles, or workspace names.
 
-The query-preparation LLM used by retrieval is not an answer model. It remains
-inside the retrieval path for mechanical decomposition only; it must not be
-reused for answer generation without a separate quality decision.
+## Relationship to MCP
 
----
+Current MCP exposes retrieval only, and the MCP client acts as the generation layer. When the target service exists, an MCP adapter may offer generation as an additional tool, but it must use the same authenticated route and response contract as HTTP. A tool name or workspace argument is never authorization.
 
-## 6. Open Decisions
+The local chat-completions model used by retrieval decomposition is not implicitly the answer model. Reusing it requires an explicit quality, privacy, and capacity decision.
 
-1. **Answer model and placement.** Local model, external provider, or both;
-   the choice determines quality, cost, latency, and egress policy.
-2. **Prompt and output schema.** Define the answer format, claim-to-citation
-   requirements, refusal behaviour, and treatment of conflicting evidence.
-3. **Citation-validation depth.** Packet-reference validation is required;
-   determine whether additional quote/entailment checks are necessary.
-4. **Persistence.** Decide whether answers are ephemeral or stored outside the
-   retrieval corpus, including retention, deletion, and audit requirements.
-5. **Streaming.** Decide whether answer streaming is worth supporting. It must
-   not emit uncited partial claims as though they were final evidence.
+## Verification expectations
+
+Implementation must test citation-reference validation, refusal and insufficient-evidence behavior, workspace route enforcement, prompt-size limits, provider allowlists, log redaction, timeouts, malformed model output, and retrieval-warning propagation. Security tests must prove the service has no data-store credentials and cannot reach another workspace's retrieval service.
+
+Use the repository checks in [README §9](../README.md#9-verification) for existing components; service-specific tests will be added with implementation.
+
+## Open decisions
+
+- Choose the answer model or models, placement, and per-workspace egress policy.
+- Define the prompt, structured answer schema, claim granularity, refusal behavior, and treatment of conflicting evidence.
+- Decide whether citation validation also performs quotation or entailment checks.
+- Decide whether answers remain ephemeral or use a separate workspace-scoped history store.
+- Choose streaming semantics that preserve final citation validation.
+- Define quality, latency, cost, and privacy acceptance tests for answer-model changes.

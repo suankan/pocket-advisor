@@ -69,4 +69,4 @@ Treat a history rewrite as exceptional: make a bundle backup, prove the procedur
 
 ## Verification
 
-Use the supported commands in [README.md §7, “Verification”](README.md#7-verification).
+Use the supported commands in [README.md §9, “Verification”](README.md#9-verification).

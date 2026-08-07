@@ -1,151 +1,131 @@
-# API Server & Multi-Interface Architecture
+# API Server Design
 
-**Version:** `0.2.0`
+This document is the design authority for Pocket Advisor's public and control-plane APIs, service boundaries, interface adapters, and CLI coupling. It describes intended architecture. No API server, authenticated gateway, Web UI, host agent, or Kubernetes application workload defined here is implemented yet.
 
-**Status:** target architecture of record — **nothing in this document is
-built yet.** The host CLI and three-store infrastructure remain the shipped
-system. This file owns the public/control-plane interface and the boundary
-between workloads; `docs/ingestion-design.md`, `docs/retrieval-design.md`,
-`docs/generation-design.md`, and `docs/workspace-isolation.md` own their
-respective mechanics.
+[Ingestion design](ingestion-design.md), [retrieval design](retrieval-design.md), [generation design](generation-design.md), and [workspace isolation](workspace-isolation.md) remain authoritative for their own mechanics.
 
----
+## Current interfaces
 
-## 1. Direction
+Pocket Advisor currently runs as a host CLI process. `internal/cli` parses commands and calls the ingestion, retrieval, storage, and reset packages directly. The implemented interfaces are:
 
-Today `pocket-advisor` is a single CLI binary that directly implements
-everything it does — uploads, discovery, worker pools, schema bootstrap,
-resets (`ingestion-design.md` §8). The long-term direction is an authenticated
-API/control plane over specialised workloads:
+- bounded ingestion and maintenance commands;
+- an interactive ingestion listener;
+- a direct query command; and
+- a workspace-bound stdio MCP server over newline-delimited JSON-RPC.
 
-1. **The API Server becomes the source of truth for public API behaviour,
-   identity, workspace authorisation, and operation state.** It is not a
-   monolith that must execute every workload itself. The CLI progressively
-   becomes a client of this control plane.
-2. **Two API surfaces, split by audience:**
-   * **Administrative API** — bootstrapping and operational concerns:
-     workspace lifecycle (`docs/workspace-isolation.md` §3), schema
-     bootstrap, corpus load/reset operations currently under
-     `internal/cli` (`ingestion-design.md` §8.1).
-   * **User API** — per-workspace retrieval, and later optional generation.
-     Retrieval already follows §2's bridge rule: its logic is a
-     transport-agnostic Go package, so HTTP and MCP remain thin adapters.
-3. **A WebUI is a future client of the same API Server** — not a separate
-   backend, not a reason to grow a second source of truth.
-4. **Standing rule for all new work from here on:** any new management or
-   operational functionality is designed **API-first**, with CLI support
-   and WebUI support built in parallel against that same API — never CLI
-   logic first with an API retrofitted later.
+The current MCP server is an adapter over `internal/retrieval`. It is fixed to one workspace when launched and does not provide an HTTP or network MCP endpoint. Answer generation is performed by the MCP client or another external consumer of evidence packets.
+
+## Target architecture
+
+The intended architecture adds an authenticated gateway and control plane over specialized workloads:
 
 ```mermaid
 flowchart TB
-  Client["CLI · Web UI · MCP client"] --> Edge["API gateway / control plane<br/>authentication · workspace authorisation · routing"]
-  Edge --> Admin["Administrative API<br/>operation state and lifecycle"]
-  Edge --> Retrieval["Per-workspace retrieval service<br/>evidence packets"]
-  Edge --> Generation["Per-workspace generation service<br/>optional cited answers"]
-  Admin --> Ingest["Ingestion batch workload<br/>host process today; Job or agent later"]
-  Retrieval --> Postgres["Workspace PostgreSQL / pgvector"]
-  Retrieval --> Models["Embedding · reranking · query preparation"]
+  Clients["CLI, Web UI, and MCP clients"] --> Edge["Gateway and control plane"]
+  Edge --> Admin["Administrative API"]
+  Edge --> Retrieval["Workspace retrieval service"]
+  Edge --> Generation["Optional workspace generation service"]
+  Admin --> Agent["Authenticated host agent"]
+  Agent --> Ingestion["Bounded ingestion or maintenance process"]
+  Retrieval --> Postgres["Workspace PostgreSQL database"]
+  Retrieval --> Models["Embedding, reranking, and query-preparation models"]
   Generation --> Retrieval
   Generation --> AnswerModel["Answer model endpoint"]
 ```
 
-**Why this order, not the reverse:** retrofitting an API onto
-CLI-embedded logic means re-deriving the same behavior twice and risking
-the two drifting apart (input validation, error semantics, confirmation
-prompts vs. structured responses). Designing the API surface first and
-having the CLI consume it means there is exactly one implementation of
-each operation, ever.
+The control plane becomes authoritative for public API behavior, caller identity, workspace authorization, routing, and administrative operation state. It does not become a monolith that performs ingestion, retrieval, and generation inside request handlers.
 
----
+## API surfaces
 
-## 2. What Changes, What Doesn't
+### Administrative API
 
-**Unaffected:** the ingestion pipeline itself (`ingestion-design.md` §1–§9)
-does not become an API — it is a batch process invoked to
-completion (`--ingest-all`, `--scan`, `--reconcile`), and nothing about
-this document changes that shape. What moves behind an API is the
-*invocation and management* of these operations, not the pipeline's own
-internal architecture (worker pools, JetStream, the three stores).
+The administrative surface authorizes, records, dispatches, and reports bounded operations such as:
 
-**Changes:** where a caller reaches an operation, how it is authorised, and
-which workload executes it.
+- workspace provisioning and removal;
+- schema application and compatibility checks;
+- ingest-all, scan, reconcile, and listener lifecycle;
+- dataset reset and selected-source forgetting; and
+- operation status and failure details.
 
-* **Today:** `internal/cli` parses flags and calls straight into
-  `internal/app`, `internal/pipeline`, `internal/uploader`, etc.
-* **Direction:** the API/control plane authorises and records an operation,
-  then routes it to the correct specialised workload. `internal/cli` becomes
-  a thin client issuing requests and rendering responses. The live dashboard
-  becomes a client-side view of operation progress, not a competing controller.
+An HTTP handler must not run worker pools or a long reset inline. The API records an operation and dispatches it to an executor with an explicit lifecycle.
 
-**Bridge, before any of this exists:** write new operational logic as plain,
-transport-agnostic Go functions in a reusable package — not inline in CLI flag
-handling. (The original example here was `--create-workspace`/
-`--delete-workspace`; both were deleted once the chart took over provisioning
-entirely — `ingestion-design.md` deviation 24 — which is the strongest version
-of the same point: logic that belongs somewhere else should live there.) A CLI mode calls the function directly today;
-an API handler calls the identical function later. This is the entire cost
-of being "API-first" before an API Server exists, and it's the only part
-of this document actionable right now.
+Local corpus paths and the current model endpoints exist on the host, so the first executor is a separately authenticated host agent that invokes reusable application packages or the supported CLI workflow. A cluster Job becomes appropriate only after corpus staging, model access, credentials, cancellation, and progress reporting have cluster-native designs.
 
----
+### User API
 
-## 3. Surface Scope
+The user surface exposes retrieval and, when implemented, optional cited generation. Retrieval's Go package remains transport-independent; HTTP and network MCP handlers translate their requests to `retrieval.Request` and preserve `retrieval.Result` semantics. Generation is a separate consumer of retrieval packets and never queries storage directly.
 
-| Surface | Owns | Backed by |
-| --- | --- | --- |
-| Administrative API | Workspace lifecycle (create/delete), schema bootstrap, corpus load/scan/reconcile, dataset reset (delete-data/forget) | `internal/cli` modes today; `workspace-isolation.md` §3 for workspace lifecycle specifically |
-| User API | Per-workspace retrieval; later optional generation | `retrieval-design.md` §7's transport-agnostic `internal/retrieval` package, exposed by HTTP and MCP adapters. `generation-design.md` owns the separately-failable answer service, which calls retrieval rather than its database. |
+The Web UI is a client of these APIs. It must not introduce a parallel backend or implement its own workspace authorization rules.
 
-All existing ingestion and reset modes are Administrative operations. They
-remain bounded jobs, never HTTP handlers.
+## Identity and workspace routing
 
----
+The gateway authenticates a caller, authorizes a workspace, and selects the corresponding service route. A workspace ID in a URL, request body, MCP argument, or tool name is a requested resource, not proof of authority.
 
-## 4. Service Shape
+Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database, bucket, and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
 
-The control plane is long-running. Retrieval is a distinct long-running
-Deployment and Service **per workspace**; the same image can be reused, but
-each Deployment has one fixed workspace id and only that workspace's
-least-privilege credentials. Generation follows the same boundary when it is
-implemented. This deliberately prevents a cross-workspace query at the
-database-credential boundary.
+Administrative access is distinct from user query access. Destructive operations require explicit permissions, an auditable operation record, and confirmation semantics suitable for non-interactive clients. The API must not expose shared PostgreSQL or RustFS administrative credentials.
 
-MCP is an adapter over retrieval today, and may be an adapter over generation
-later. It does not select a workspace by itself. The edge authenticates the
-caller and authorises the workspace before routing; a URL segment, tool name,
-or request parameter is never authority to choose a corpus.
+## Service topology
 
-Kubernetes owns the deployment/network boundary: Services, health checks,
-rollouts, network policy, and gateway integration for TLS and authentication.
-It does not implement MCP or make an unauthenticated service safe. Initial
-exposure is cluster-internal or by port-forward; remote access requires an
-authenticated gateway before an Ingress is created.
+The target control plane is a long-running workload. Retrieval is a separate long-running Deployment and Service per workspace. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
 
-The existing `pocket-advisor-infra` chart continues to deploy only RustFS,
-PostgreSQL, and NATS. API and data-plane workloads belong in a separate chart
-or release, so an infrastructure upgrade cannot roll them out.
+Kubernetes provides scheduling, service discovery, health checks, rollout control, and network policy. It does not supply protocol authorization. Initial development access may be cluster-internal or through port forwarding; remote ingress requires TLS, authentication, authorization, request limits, and audit policy first.
 
----
+The current `pocket-advisor-infra` chart remains responsible only for PostgreSQL, RustFS, and NATS. Target control-plane and application workloads belong in a separate chart or release so infrastructure changes do not implicitly roll application services.
 
-## 5. Ingestion Operations and Open Decisions
+## Package boundary and CLI migration
 
-The Administrative API records an authorised ingestion/reset operation and
-dispatches it; it does not execute worker pools in an HTTP handler. Source
-folders are host staging feeds and the current OCR/model toolchain is
-host-local, so the first executor is a host agent using the existing CLI. A
-Kubernetes Job is a later migration only after corpus upload and model access
-have deliberate cluster-native designs.
+Operational behavior should live in reusable Go packages with explicit inputs and results. CLI commands, future HTTP handlers, and the host agent are adapters around those packages. Transport-specific concerns such as flags, JSON, streaming, and status codes must not enter ingestion or retrieval business logic.
 
-Open decisions:
+During transition, the CLI may continue calling packages directly. Once an API operation is stable and available, the CLI should become its client so authorization, validation, operation state, and error semantics have one public implementation. The migration must preserve a supported local recovery path for bringing up or repairing the control plane itself.
 
-1. **Identity provider and gateway.** Select authentication and MCP-client
-   compatibility before any remote ingress is exposed.
-2. **Administrative dispatcher.** Define the authenticated host-agent contract
-   before the control plane becomes authoritative for ingest operations.
-3. **Model placement.** Decide whether embedding, reranking, query preparation,
-   and future answer models remain host-local or become cluster Services.
-4. **API contract.** Establish versioning, routes, durable operation records,
-   and streaming policy before third-party clients depend on them.
-5. **Web UI shape.** Decide its rendering model and whether it includes
-   administration as well as retrieval.
+## Operation model
+
+Every administrative request receives a durable operation ID and records at least:
+
+- authenticated actor and authorized workspace;
+- operation type and validated parameters;
+- queued, running, succeeded, failed, or canceled state;
+- creation, start, update, and completion times;
+- executor identity and retry attempt; and
+- structured error and safe progress information.
+
+Operation records must not contain credentials, corpus paths, source content, query text, or model prompts. Logs and metrics use opaque or low-cardinality labels rather than workspace names.
+
+Idempotency keys are required for create, dispatch, and destructive requests where client retries could duplicate work. Cancellation must distinguish stopping active processing from rolling back completed external changes; no operation should claim rollback unless its implementation provides it.
+
+## Protocol behavior
+
+Before third-party clients depend on the API, define:
+
+- versioned HTTP routes and schemas;
+- a consistent structured error envelope;
+- authentication and authorization failures that do not reveal workspace existence;
+- request size, timeout, concurrency, and rate limits;
+- pagination and filtering for operation lists;
+- streaming semantics for progress and generated answers; and
+- compatibility rules for HTTP and MCP adapters.
+
+Health endpoints must separate process liveness from dependency readiness. A retrieval service is ready only after configuration, workspace scope, database schema, and required model endpoints pass their startup checks.
+
+## Failure and degradation
+
+- If authorization fails, the gateway does not route the request.
+- If the control plane cannot dispatch an accepted operation, the operation remains failed or retryable with an explicit reason; it is never reported as running without an executor.
+- If retrieval fails, the user request fails without invoking generation.
+- If generation fails, the retrieval result remains independently available.
+- Retrieval warning codes survive every adapter unchanged.
+- A workspace workload with a scope or credential mismatch fails readiness and does not accept traffic.
+
+## Verification expectations
+
+Implementation must add contract tests for authentication, authorization, workspace routing, operation idempotency, errors, and adapter parity. Isolation tests must prove that a caller authorized for one workspace cannot reach another through route manipulation, request fields, MCP tools, or direct service access. Use the general repository checks in [README §9](../README.md#9-verification) for existing components.
+
+## Open decisions
+
+- Select the identity provider, gateway, and authorization policy model.
+- Define the host-agent authentication, dispatch, progress, cancellation, and upgrade protocol.
+- Choose the API versioning scheme, route shapes, durable operation store, and event-streaming protocol.
+- Decide whether model endpoints remain host-local or move behind cluster services.
+- Define Web UI scope and whether it includes administrative operations.
+- Define the bootstrap and recovery workflow when the control plane itself is unavailable.

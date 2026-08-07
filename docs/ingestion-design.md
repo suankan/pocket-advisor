@@ -1141,8 +1141,8 @@ threading — and that is an accepted cost, not an oversight.
 
 ### 6.1 Unified Deployment Topology
 
-The pipeline runs on the host. The cluster carries only the three stores it
-talks to.
+**Shipped topology.** The pipeline runs on the host. The cluster carries only
+the three stores it talks to.
 
 ```
   HOST (macOS)                              KUBERNETES CLUSTER (ns: pocket-advisor)
@@ -1187,6 +1187,30 @@ names. This works through the system resolver, which Go consults only when cgo
 is enabled — the same requirement Tesseract already imposes, pinned in
 `mise.toml` so the two cannot drift apart.
 
+**Future API/data-plane topology.** This does not move the pipeline into an
+HTTP server or change its one-shot semantics. `docs/api-server-design.md`
+decides that the long-running read path becomes a per-workspace Kubernetes
+retrieval Deployment, with a future generation Deployment beside it. Ingestion
+remains a bounded batch workload: the Administrative API starts and observes
+it through a host agent first, and may use a Kubernetes Job only after
+host-staged corpus upload and model access have cluster-native designs.
+
+```mermaid
+flowchart LR
+  Host["Host ingestion batch<br/>uploader · discovery · worker pools"] --> RustFS["RustFS"]
+  Host --> NATS["NATS JetStream"]
+  Host --> Postgres["PostgreSQL / pgvector"]
+  Gateway["API gateway / control plane"] --> Host
+  Gateway --> Retrieval["Per-workspace retrieval service"]
+  Retrieval --> Postgres
+  Generation["Future per-workspace generation service"] --> Retrieval
+```
+
+The retrieval and generation pods receive no RustFS write identity, NATS
+credentials, administrative credentials, OCR/PDF runtime, or source-corpus
+mount. Keeping these privileges and dependencies out of the read image is as
+important as keeping generation out of the ingestion index.
+
 ### 6.2 Deployment Mechanism
 
 Two artefacts, with a clean split of responsibility.
@@ -1197,8 +1221,10 @@ needs, so a working toolchain is checked into the repo rather than described
 in a README.
 
 **`charts/pocket-advisor-infra`** deploys RustFS, PostgreSQL+pgvector and
-NATS, and nothing else. It builds no images. One setup task accompanies every
-install and upgrade:
+NATS, and nothing else. It builds no images. Future API, retrieval, and
+generation workloads use a separate chart or release so an infrastructure
+upgrade cannot roll out the data plane. One setup task accompanies every
+infrastructure install and upgrade:
 
 **There is no setup Job.** One existed until deviation 19, creating a global
 bucket and two scoped identities that per-workspace isolation had already made
@@ -1360,8 +1386,9 @@ that summarises anything, per pillar 8.
 ## 8. Codebase Layout
 
 Absorbed from the former `v3/docs/project-layout.md` and brought current with
-§5. One Go module, one build pipeline, one binary total — the roles are
-packages, not processes (§8.2).
+§5. One Go module and one shipped host binary — the ingestion roles are
+packages, not processes (§8.2). Future long-running read workloads are
+separate build targets, not a reversal of the ingestion process model.
 
 ### 8.1 Directory Layout
 
@@ -1371,7 +1398,7 @@ pocket-advisor/                    # repo root — single Go module
 ├── config.yaml                   # infra: endpoints, credentials, concurrency
 ├── pocket-advisor.sh              # build / test / deploy-infra / deploy-workspace
 │
-├── cmd/pocket-advisor/           # the only binary; flag parsing only
+├── cmd/pocket-advisor/           # shipped host CLI; flag parsing only
 │
 ├── api/proto/v1/
 │   ├── ingestion.proto           # DocumentMetadata + 5 commands     (§4.1)
@@ -1434,15 +1461,24 @@ pocket-advisor/                    # repo root — single Go module
     ├── ingestion-design.md       # this file
     ├── pdf-to-text.md            # PDF → text: extraction, layout, OCR
     ├── retrieval-design.md
+    ├── generation-design.md      # future answer service
     ├── workspace-isolation.md
     └── api-server-design.md
 ```
 
-`cmd/` holds one binary where it once held eight. The roles did not merge —
+`cmd/` holds one shipped binary where it once held eight. The roles did not merge —
 they were already separate packages under `internal/`, addressed by subject,
 and each still owns its own consumer, lane count and log file. What
 disappeared is the process boundary between them, and with it eight `main`
 functions that differed only in which consumer they wired up.
+
+The future read image is deliberately a different build target, not an
+extension of the host batch binary: `cmd/pocket-advisor-retrieval` will wire
+`internal/retrieval`, `internal/mcp`, and a small read-service bootstrap. It
+must not import OCR/PDF engines, uploader/discovery, workers, NATS,
+RustFS-write clients, or administrative provisioning. A future generation
+entry point depends on retrieval's service contract, not on evidence stores
+directly. These names are design targets, not current directories.
 
 ### 8.2 Layering Rules
 
@@ -1760,10 +1796,12 @@ to `docs/retrieval-design.md`.
    writes and query latency. Not yet a measured problem; sizing is settled
    (§6.4) but contention is not. Revisit if `rag_query_duration_seconds`
    degrades during ingestion runs.
-4. **The read path is unbuilt.** `retrieval-design.md` §7 owns it. Whether it
-   becomes a mode of this binary or a separate long-running service is open —
-   the write path is one-shot and the read path is not, so the argument that
-   collapsed the workers into one process does not automatically carry over.
+4. **Read-service implementation.** The topology is decided: retrieval is a
+   separate long-running Kubernetes Deployment per workspace, and future
+   generation is its separate neighbour (`api-server-design.md` §4). What is
+   still unbuilt is the image, chart/release, authenticated gateway, and the
+   model-connectivity path from those pods. The host batch pipeline remains
+   unaffected.
 5. **Vertical scaling only.** Pool sizes come from the host's core count
    (§6.3), so throughput is now bounded by one machine. Correct for a
    single-user corpus and the current measured volume. If ingest time stops

@@ -1,12 +1,20 @@
 # RAG Retrieval & Answer-Generation Architecture
 
-**Version:** `2.7.0`
+**Version:** `2.8.0`
 
 **Architecture Paradigm:** Hybrid Dense + Lexical Retrieval, In-Database Rank
 Fusion, transport-agnostic Go package
 
 **Target Runtime:** Go over PostgreSQL + pgvector + pg_textsearch, HTTP to
 local model endpoints
+
+**Changes in 2.8.0:** resolves the read-service topology with
+`api-server-design.md`. Retrieval is a long-running Kubernetes service per
+workspace; MCP and HTTP are adapters over the same transport-agnostic query
+package. The current Claude-over-MCP answer path remains, while the new
+`generation-design.md` records a future separately deployable generation
+neighbour. The control plane authenticates and authorises a workspace before
+routing, rather than trusting a tool name or request parameter.
 
 **Changes in 2.7.0:** the lexical leg is real BM25 (`pg_textsearch`), not
 `ts_rank_cd` scoring a hand-built disjunctive `tsquery`. `ts_rank_cd` has no
@@ -33,9 +41,9 @@ that §6.1 makes the consumer. The threshold is calibrated rather than
 guessed: off-domain questions score every candidate below zero, so zero is
 the model's own boundary and the system can now return nothing and mean it.
 
-**Changes in 2.5.0:** generation is decided — Claude, over MCP, outside this
-codebase (§6.1), with the local LLM restricted to query preparation. No
-`generation-design.md` will be written; the boundary is the design.
+**Changes in 2.5.0:** generation was decided as Claude over MCP, outside the
+retrieval codebase, with the local LLM restricted to query preparation. The
+future service topology was subsequently specified in 2.8.0.
 
 **Changes in 2.4.0:** the reranker and the general-purpose LLM are fixed at
 `jina-reranker-v3-mlx` and `Qwen3.5-4B-MLX-4bit` rather than configured — every
@@ -905,8 +913,9 @@ Retrieval ends at the content packets. They are the deliverable and are
 complete on their own — the immediate consumer is a human or agent reading
 the result.
 
-Answer generation stays **out of this codebase**, and the boundary is fixed
-here:
+Answer generation stays **out of the retrieval service**, and the boundary is
+fixed here. `docs/generation-design.md` owns the future generation service;
+today, an MCP client performs that role outside Pocket Advisor.
 
 * Generation is a **separate, separately-failable call**. A generation outage
   degrades the product to "here are your sources" rather than taking it down.
@@ -920,11 +929,12 @@ here:
 
 ### 6.1 Who generates, and how
 
-**Decided 2026-08-03: generation is performed by Claude, reached over MCP.**
-Retrieval exposes `Query` as an MCP tool; the agent calls it, receives
-packets, and writes the cited answer itself. Nothing in this repository
-performs generation, so `docs/generation-design.md` is not needed — the
-boundary *is* the design.
+**Today: generation is performed by Claude, reached over MCP.** Retrieval
+exposes `Query` as an MCP tool; the agent calls it, receives packets, and
+writes the cited answer itself. This remains the shipped answer path. A future
+Pocket Advisor generation service is separately-failable, per workspace, and
+calls retrieval rather than its evidence stores directly
+(`generation-design.md` §1–§3).
 
 **One tool per workspace, named from the registry** (`internal/mcp`):
 `search_<workspace_id>`, with the workspace's own description. A single
@@ -933,6 +943,25 @@ servers advertising the same name would leave it disambiguating on description
 alone. Picking the wrong corpus is not a soft failure here — it answers a
 financial question from legal correspondence, and cites confidently either
 way.
+
+**MCP is an adapter to the per-workspace retrieval service.** Stdio remains
+the desktop-client transport. Streamable HTTP is the deployment transport for
+the future Kubernetes retrieval service: one `/mcp` endpoint per workspace,
+behind the API gateway/control plane. It returns ordinary `application/json`
+responses rather than SSE because this read-only service has no
+server-initiated messages. The gateway authenticates the caller and authorises
+the workspace before it reaches this endpoint; a tool name, URL path, or
+request parameter is not authority to select a corpus. Neither transport owns
+retrieval logic.
+
+```mermaid
+flowchart LR
+  Client["MCP client or user API client"] --> Edge["API gateway<br/>authenticate + authorise workspace"]
+  Edge --> MCP["MCP / HTTP adapter"]
+  MCP --> Retrieval["Fixed-workspace retrieval service"]
+  Retrieval --> Packets["Cited evidence packets"]
+  Packets --> Client
+```
 
 **`infra.llm` is for query preparation only and must never be used for answer
 generation.** It is already wired up, fast and local, which makes it exactly
@@ -972,12 +1001,11 @@ that reads those bytes reassigns them to the wrong person.
   added to a pipeline that currently has none.
 * **The separately-failable requirement above is satisfied structurally**
   rather than by discipline: retrieval does not know generation exists.
-* **It is a second adapter, not a second implementation** — §7's
-  transport-agnostic package means the MCP surface sits alongside the CLI over
-  the same `Query`.
+* **They are adapters, not second implementations** — §7's transport-agnostic
+  package means the MCP surfaces sit alongside the CLI over the same `Query`.
 
-`docs/api-server-design.md` owns the surface itself; this section owns only
-the constraint that generation happens there and not here.
+`docs/api-server-design.md` owns the API/control-plane surface; this section
+owns the constraint that retrieval ends at cited packets.
 
 ---
 
@@ -1007,10 +1035,11 @@ type Service struct {
 func (s *Service) Query(ctx context.Context, req Request) (*Result, error)
 ```
 
-No HTTP types in the signature, no `net/http` import in the package. Whether
-`Query` is later reached by a `--query` CLI mode, a `--serve` mode of the
-existing binary, or a separate deployment is `api-server-design.md`'s open
-decision 1 and is unaffected by anything here.
+No HTTP types in the signature, no `net/http` import in the package. `Query`
+is reached by the existing `--query` CLI mode today and by a separate
+per-workspace Kubernetes retrieval deployment in the target architecture.
+The deployment's bootstrap, HTTP/MCP adapters, and identity belong outside
+this package (`api-server-design.md` §3–§4).
 
 What must survive from v2's warm daemon is the **warm client seam**:
 embedding and reranker clients are constructed once and injected, never per
@@ -1274,9 +1303,10 @@ re-litigated from scratch.
    values are unmeasured — there has never been a two-namespace backfill on
    this cluster to measure against. Set them when the first model change
    happens, not before.
-2. **Generation pass scope.** §6 fixes the boundary but not the prompt, the
-   model, or where generation runs. Retrieval is complete and useful without
-   it.
+2. **Generation configuration.** The boundary and per-workspace service shape
+   are decided in §6 and `generation-design.md`; the answer model, prompt,
+   citation-validation depth, persistence, and streaming policy remain open.
+   Retrieval is complete and useful without it.
 3. **Query-time date and sender filters.** Now *implementable* — `email_date`
    is an indexed `TIMESTAMPTZ` and `email_from`/`email_to` are columns as of
    `ingestion-design.md` deviation 11, where previously the data existed only

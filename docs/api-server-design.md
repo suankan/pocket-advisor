@@ -1,15 +1,13 @@
 # API Server & Multi-Interface Architecture
 
-**Version:** `0.1.0`
+**Version:** `0.2.0`
 
-**Status:** forward-looking design of record — **nothing in this document
-is being built now.** It exists so the direction is written down once,
-consistently, rather than re-derived piecemeal every time a new
-operational capability is added. Peer to `docs/ingestion-design.md`
-(write path), `docs/retrieval-design.md` (read path), and
-`docs/workspace-isolation.md` (per-workspace store isolation) — this file
-owns the *interface* architecture all three are eventually exposed
-through, not their mechanics.
+**Status:** target architecture of record — **nothing in this document is
+built yet.** The host CLI and three-store infrastructure remain the shipped
+system. This file owns the public/control-plane interface and the boundary
+between workloads; `docs/ingestion-design.md`, `docs/retrieval-design.md`,
+`docs/generation-design.md`, and `docs/workspace-isolation.md` own their
+respective mechanics.
 
 ---
 
@@ -17,29 +15,40 @@ through, not their mechanics.
 
 Today `pocket-advisor` is a single CLI binary that directly implements
 everything it does — uploads, discovery, worker pools, schema bootstrap,
-resets (`ingestion-design.md` §8). The long-term direction, decided
-2026-07-29, inverts that:
+resets (`ingestion-design.md` §8). The long-term direction is an authenticated
+API/control plane over specialised workloads:
 
-1. **An API Server becomes the source of truth.** It holds the actual
-   operational logic; the CLI stops being the implementation and becomes
-   a **client** of the API Server, the same as any other caller.
+1. **The API Server becomes the source of truth for public API behaviour,
+   identity, workspace authorisation, and operation state.** It is not a
+   monolith that must execute every workload itself. The CLI progressively
+   becomes a client of this control plane.
 2. **Two API surfaces, split by audience:**
    * **Administrative API** — bootstrapping and operational concerns:
      workspace lifecycle (`docs/workspace-isolation.md` §3), schema
      bootstrap, corpus load/reset operations currently under
      `internal/cli` (`ingestion-design.md` §8.1).
-   * **User API** — the retrieval surface, i.e. an HTTP route over
-     `docs/retrieval-design.md` §7's `internal/retrieval` package, and
-     whatever else the read path grows into. A "Retrieval API" is the first
-     concrete piece of this. Note that retrieval already follows §2's bridge
-     rule: its logic is specified as transport-agnostic Go, so this surface
-     is a thin adapter rather than a reimplementation.
+   * **User API** — per-workspace retrieval, and later optional generation.
+     Retrieval already follows §2's bridge rule: its logic is a
+     transport-agnostic Go package, so HTTP and MCP remain thin adapters.
 3. **A WebUI is a future client of the same API Server** — not a separate
    backend, not a reason to grow a second source of truth.
 4. **Standing rule for all new work from here on:** any new management or
    operational functionality is designed **API-first**, with CLI support
    and WebUI support built in parallel against that same API — never CLI
    logic first with an API retrofitted later.
+
+```mermaid
+flowchart TB
+  Client["CLI · Web UI · MCP client"] --> Edge["API gateway / control plane<br/>authentication · workspace authorisation · routing"]
+  Edge --> Admin["Administrative API<br/>operation state and lifecycle"]
+  Edge --> Retrieval["Per-workspace retrieval service<br/>evidence packets"]
+  Edge --> Generation["Per-workspace generation service<br/>optional cited answers"]
+  Admin --> Ingest["Ingestion batch workload<br/>host process today; Job or agent later"]
+  Retrieval --> Postgres["Workspace PostgreSQL / pgvector"]
+  Retrieval --> Models["Embedding · reranking · query preparation"]
+  Generation --> Retrieval
+  Generation --> AnswerModel["Answer model endpoint"]
+```
 
 **Why this order, not the reverse:** retrofitting an API onto
 CLI-embedded logic means re-deriving the same behavior twice and risking
@@ -59,16 +68,15 @@ this document changes that shape. What moves behind an API is the
 *invocation and management* of these operations, not the pipeline's own
 internal architecture (worker pools, JetStream, the three stores).
 
-**Changes:** where the actual Go logic for an operation lives, and how the
-CLI reaches it.
+**Changes:** where a caller reaches an operation, how it is authorised, and
+which workload executes it.
 
 * **Today:** `internal/cli` parses flags and calls straight into
   `internal/app`, `internal/pipeline`, `internal/uploader`, etc.
-* **Direction:** that same logic moves to (or is called by) API handlers;
-  `internal/cli` becomes a thin HTTP client issuing requests to the API
-  Server and rendering its responses, including the live dashboard
-  (`ingestion-design.md` §9.5) — which becomes a client-side rendering of
-  progress reported by the server, not a local view of local state.
+* **Direction:** the API/control plane authorises and records an operation,
+  then routes it to the correct specialised workload. `internal/cli` becomes
+  a thin client issuing requests and rendering responses. The live dashboard
+  becomes a client-side view of operation progress, not a competing controller.
 
 **Bridge, before any of this exists:** write new operational logic as plain,
 transport-agnostic Go functions in a reusable package — not inline in CLI flag
@@ -87,67 +95,57 @@ of this document actionable right now.
 | Surface | Owns | Backed by |
 | --- | --- | --- |
 | Administrative API | Workspace lifecycle (create/delete), schema bootstrap, corpus load/scan/reconcile, dataset reset (delete-data/forget) | `internal/cli` modes today; `workspace-isolation.md` §3 for workspace lifecycle specifically |
-| User API | Retrieval | `retrieval-design.md` §7 — logic specified as a transport-agnostic `internal/retrieval` package. Two adapters are planned over it: a CLI mode, and an **MCP tool** (decided 2026-08-03) through which an agent performs answer generation. An HTTP surface remains this document's to define and is unbuilt. |
+| User API | Per-workspace retrieval; later optional generation | `retrieval-design.md` §7's transport-agnostic `internal/retrieval` package, exposed by HTTP and MCP adapters. `generation-design.md` owns the separately-failable answer service, which calls retrieval rather than its database. |
 
-The exact administrative/user boundary for the existing ingestion CLI
-modes (is `--ingest-all` an administrative operation, or its own
-category?) is not settled — see §5.
+All existing ingestion and reset modes are Administrative operations. They
+remain bounded jobs, never HTTP handlers.
 
 ---
 
 ## 4. Service Shape
 
-Not decided, and deliberately left open rather than guessed at:
+The control plane is long-running. Retrieval is a distinct long-running
+Deployment and Service **per workspace**; the same image can be reused, but
+each Deployment has one fixed workspace id and only that workspace's
+least-privilege credentials. Generation follows the same boundary when it is
+implemented. This deliberately prevents a cross-workspace query at the
+database-credential boundary.
 
-* **One process or several?** Whether the API Server is a new mode of the
-  existing `pocket-advisor` binary (a `--serve` flag alongside
-  `--ingest-all` etc.) or a separate binary/deployment is the same open
-  question `ingestion-design.md` §11.4 already raised for the read path
-  generally — "whether it becomes a mode of this binary or a separate
-  long-running service." This document does not resolve it, because the
-  ingestion pipeline is one-shot (the argument that collapsed five
-  Deployments into one binary, `ingestion-design.md` "Changes in 4.0.0")
-  while an API Server is by definition long-running — the same argument
-  does not automatically transfer.
-* **Access model.** `pocket-advisor` today is a personal, local,
-  single-user tool (`README.md`) with no authentication anywhere in the
-  stack. Whether the API Server needs its own auth (even loopback-only)
-  once it can create and delete workspaces over HTTP is unresolved — see
-  §5.
+MCP is an adapter over retrieval today, and may be an adapter over generation
+later. It does not select a workspace by itself. The edge authenticates the
+caller and authorises the workspace before routing; a URL segment, tool name,
+or request parameter is never authority to choose a corpus.
+
+Kubernetes owns the deployment/network boundary: Services, health checks,
+rollouts, network policy, and gateway integration for TLS and authentication.
+It does not implement MCP or make an unauthenticated service safe. Initial
+exposure is cluster-internal or by port-forward; remote access requires an
+authenticated gateway before an Ingress is created.
+
+The existing `pocket-advisor-infra` chart continues to deploy only RustFS,
+PostgreSQL, and NATS. API and data-plane workloads belong in a separate chart
+or release, so an infrastructure upgrade cannot roll them out.
 
 ---
 
-## 5. Open Decisions
+## 5. Ingestion Operations and Open Decisions
 
-1. **Process topology.** Mode of the existing binary vs. separate
-   long-running service (§4). Blocks almost everything else — the CLI
-   client shape, deployment story, and chart changes all depend on it.
-2. **Administrative/User surface boundary for existing CLI modes.**
-   Whether `--ingest-all`/`--scan`/`--reconcile`/`--delete-data`/`--forget`
-   are all "Administrative," split across both surfaces, or need a third
-   category. Workspace lifecycle and schema bootstrap are clearly
-   Administrative; the rest is unassigned.
-3. **API authentication.** None exists anywhere in this stack today. A
-   server that can create/delete workspaces (`workspace-isolation.md` §3)
-   needs at least a stated position on this before it is built, even if
-   the answer is "loopback-only, no auth, matching the single-user
-   local-tool premise."
-4. **API versioning and stability.** Whether `/v1/...` is a real contract
-   from day one or informal until a WebUI or external consumer exists. Note
-   that `retrieval-design.md` §7.1 no longer presumes a URL shape — it
-   specifies Go request/result types, leaving the route entirely to this
-   document.
-5. **Whether MCP changes the process-topology question (item 1).** An MCP
-   server is long-running by nature, like the API Server, but far smaller —
-   it exposes one tool over `internal/retrieval` and holds no state
-   (`retrieval-design.md` §6.1). Whether it is a mode of the existing binary,
-   a separate small process, or the thing that settles item 1 outright is
-   unresolved.
+The Administrative API records an authorised ingestion/reset operation and
+dispatches it; it does not execute worker pools in an HTTP handler. Source
+folders are host staging feeds and the current OCR/model toolchain is
+host-local, so the first executor is a host agent using the existing CLI. A
+Kubernetes Job is a later migration only after corpus upload and model access
+have deliberate cluster-native designs.
 
-6. **WebUI shape.** Server-rendered vs. SPA, and whether it talks to the
-   Administrative API at all or is retrieval-only — not discussed yet
-   beyond "a future client of the same API Server" (§1).
+Open decisions:
 
-None of these need resolving before the bridge principle in §2 is
-followed for new work — they only block actually building the API Server
-itself.
+1. **Identity provider and gateway.** Select authentication and MCP-client
+   compatibility before any remote ingress is exposed.
+2. **Administrative dispatcher.** Define the authenticated host-agent contract
+   before the control plane becomes authoritative for ingest operations.
+3. **Model placement.** Decide whether embedding, reranking, query preparation,
+   and future answer models remain host-local or become cluster Services.
+4. **API contract.** Establish versioning, routes, durable operation records,
+   and streaming policy before third-party clients depend on them.
+5. **Web UI shape.** Decide its rendering model and whether it includes
+   administration as well as retrieval.

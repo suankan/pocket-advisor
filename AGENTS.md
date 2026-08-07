@@ -31,8 +31,8 @@ For every task, load in order:
    - [`docs/api-server-design.md`](docs/api-server-design.md) — the
      longer-term API-first direction. Not built; read it before adding
      anything that couples logic to the CLI.
-   - `docs/generation-design.md` — answer generation, once that concern is
-     taken up. Does not exist yet; do not create it speculatively.
+   - [`docs/generation-design.md`](docs/generation-design.md) — answer
+     generation and its future service boundary.
 
 For work involving a specific matter or corpus, additionally load
 `workspaces/workspace-config.yaml` to resolve the workspace/collection the
@@ -86,6 +86,20 @@ commit changes a user-facing workflow, include any migration, upgrade, or
 cleanup implications. Git history is a durable part of this project's
 documentation, so do not use terse messages that require readers to reconstruct
 intent from the diff.
+
+Prompt the developer/operator to commit after each more-or-less self-contained
+piece of work. Do this before beginning a separate concern, so unrelated
+implementation, operational, and documentation changes do not accumulate in
+one mixed commit. A user may decline or choose a different boundary; otherwise
+make the nudge explicit in the handoff.
+
+Commit messages are plain paragraphs: no Markdown lists, trailers, or agent
+attribution. In particular, never add `Co-authored-by`, model names, agent
+identifiers, or other AI provenance to a commit message. Hard-wrap every
+subject and body paragraph at 80–82 columns, matching the project's existing
+history. The commit body must contain literal line-feed characters, never the
+two-character escape sequence `\n`; pass separate paragraphs or a message file
+to Git, then inspect `git log -1 --format=%B` before handing off.
 
 ## Hard rules
 

@@ -1,0 +1,40 @@
+#!/bin/sh
+
+set -eu
+
+message_file=$1
+subject=$(sed -n '1p' "$message_file")
+
+fail() {
+  printf '%s\n' "commit-msg: $1" >&2
+  exit 1
+}
+
+[ ${#subject} -lt 50 ] || fail 'subject must be under 50 characters'
+case "$subject" in
+  ''|\#*|\ \#*) fail 'subject must state the outcome' ;;
+esac
+
+awk '
+  /^#/ { next }
+  NR > 1 && length($0) > 72 {
+    printf "commit-msg: body line %d exceeds 72 characters\n", NR > "/dev/stderr"
+    exit 1
+  }
+  /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/ {
+    printf "commit-msg: Markdown lists are not allowed (line %d)\n", NR > "/dev/stderr"
+    exit 1
+  }
+  /^[[:space:]]*#{1,6}[[:space:]]/ || /^[[:space:]]*```/ {
+    printf "commit-msg: Markdown is not allowed (line %d)\n", NR > "/dev/stderr"
+    exit 1
+  }
+  tolower($0) ~ /^[[:space:]]*(co-authored-by|generated-by|agent(-| )?(id|model))[[:space:]]*:/ {
+    printf "commit-msg: agent attribution is not allowed (line %d)\n", NR > "/dev/stderr"
+    exit 1
+  }
+' "$message_file" || exit 1
+
+if grep -F '\n' "$message_file" >/dev/null; then
+  fail 'use literal line feeds, not backslash-n escapes'
+fi

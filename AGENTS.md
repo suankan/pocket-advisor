@@ -1,141 +1,72 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local, Kubernetes-deployed RAG engine over personal
-content: a Go microservice pipeline (RustFS Tier 1 → Postgres/pgvector Tier
-2/3), driven by NATS JetStream, deployed via a single Helm chart.
+Pocket Advisor is a local, Kubernetes-deployed RAG engine over personal content: a Go microservice pipeline (RustFS Tier 1 → Postgres/pgvector Tier 2/3), driven by NATS JetStream, deployed via a single Helm chart.
 
-`retired-v2/` is a frozen prior implementation (Python, single-process). It
-is history, not a reference architecture — do not build on it, and do not
-treat anything under it as current design.
+`retired-v2/` is a frozen prior implementation (Python, single-process). It is history, not a reference architecture — do not build on it, and do not treat anything under it as current design.
 
 ## Read first
 
 For every task, load in order:
 
 1. this file;
-2. [`README.md`](README.md) — the operator handbook: install, load a
-   corpus, watch it drain, remove documents, upgrade. Load this whenever the
-   task touches running the stack, not just its code.
-3. the one holistic doc for the concern the task touches:
-   - [`docs/ingestion-design.md`](docs/ingestion-design.md) — everything
-     write-path: contracts, schemas, every microservice, deployment,
-     codebase layout, observability. §12 "Implementation Deviations" is the
-     record of where the shipped system diverged from the rest of the doc,
-     and is usually the fastest way to find out why something looks as it
-     does.
-   - [`docs/retrieval-design.md`](docs/retrieval-design.md) — everything
-     read-path: candidate generation, fusion, reranking, expansion.
-   - [`docs/workspace-isolation.md`](docs/workspace-isolation.md) — how
-     workspaces are kept apart across all three stores, what the chart
-     declares, and what little the binary still does itself.
-   - [`docs/api-server-design.md`](docs/api-server-design.md) — the
-     longer-term API-first direction. Not built; read it before adding
-     anything that couples logic to the CLI.
-   - [`docs/generation-design.md`](docs/generation-design.md) — answer
-     generation and its future service boundary.
+2. [`README.md`](README.md) — the handbook and highest-level guide to working with the solution for developers, operators, and users. It defines the supported workflows for operating and verifying the solution.
+3. the design document or documents that own the concern the task touches:
 
-For work involving a specific matter or corpus, additionally load
-`workspaces/workspace-config.yaml` to resolve the workspace/collection the
-task refers to before touching any document.
+   | Concern | Description | Design document |
+   | --- | --- | --- |
+   | Ingestion | Write path: upload, discovery, extraction, indexing, workers, and pipeline operations | [`docs/ingestion-design.md`](docs/ingestion-design.md) |
+   | PDF text | PDF classification, extraction, layout analysis, OCR, and viability | [`docs/pdf-to-text.md`](docs/pdf-to-text.md) |
+   | Retrieval | Read path: query preparation, candidate generation, fusion, reranking, and evidence packets | [`docs/retrieval-design.md`](docs/retrieval-design.md) |
+   | Workspace isolation | Workspace data, credentials, storage boundaries, provisioning, and request isolation | [`docs/workspace-isolation.md`](docs/workspace-isolation.md) |
+   | API and interfaces | Public/control-plane APIs, service boundaries, CLI coupling, and transports | [`docs/api-server-design.md`](docs/api-server-design.md) |
+   | Generation | Cited answer generation, model access, evidence isolation, and the future generation service | [`docs/generation-design.md`](docs/generation-design.md) |
 
-## Documentation philosophy — one doc per concern, no exceptions
+Read the document matching the active concern. Read additional documents when they provide necessary broader context. If a task crosses concerns or ownership is unclear, read all relevant design documents. `docs/tasks/` contains task briefs, not design authority.
 
-There are exactly four design docs today, and there will only ever be a
-handful: one per major concern (ingestion, retrieval, workspace isolation,
-the API-first direction, eventually generation). This is a deliberate
-rejection of the previous approach —
-per-feature design files under `docs/<concern>/<feature>.md`, plus separate
-`roadmap.md` / `work-in-progress.md` / `changelog.md` bookkeeping files.
-That structure fragmented faster than anyone could keep it honest: designs
-went stale the moment a feature shipped differently than planned, because
-updating them meant finding and touching N scattered files instead of one.
+For work involving a specific matter or corpus, additionally load `workspaces/workspace-config.yaml` to resolve the workspace/collection the task refers to before touching any document.
 
-The rule going forward:
+## Documentation philosophy — current and target state
 
-- **A new feature or design decision is a new section (or an edit to an
-  existing section) in the relevant concern's doc — never a new file.** If
-  you're about to create `docs/<anything>.md` for a specific feature, stop;
-  put it in the holistic doc instead, under the section it belongs to.
-- **Update the doc in place when the implementation changes.** They already
-  carry the machinery for this: an "Open Decisions" section in each
-  (`ingestion-design.md` §11, `retrieval-design.md` §12,
-  `workspace-isolation.md` §10) for unresolved questions, and
-  `ingestion-design.md` §12 "Implementation Deviations" for places the
-  shipped code diverged from the original design. Use those instead of a
-  separate roadmap/changelog file. A design doc that still describes a
-  deleted mechanism is the failure mode this section exists to prevent —
-  rewrite the section, and keep only what explains why something present
-  looks the way it does.
-- **Git history is the changelog.** There is no `docs/changelog.md` to
-  update — a descriptive commit message on the design-doc edit and the
-  matching implementation is the record.
-- **There is no work-in-progress scratch file.** Use the conversation's own
-  task tracking for in-flight work; commit the doc update once the design is
-  actually settled, not as a running draft.
+Design documentation is the concise source of truth for the system that exists now and the system that is deliberately intended next. It is not a changelog, decision diary, migration narrative, or archive of superseded architecture. Git history, through comprehensive commit messages, owns those concerns.
 
-If a concern grows enough that its single doc becomes unwieldy, that's a
-conversation to have explicitly — split deliberately, don't let it happen by
-accretion.
+The rules are:
+
+- **One authoritative design document per major concern.** Add a feature or design decision to the relevant existing document and section. Create a new design document only with developer/operator approval when a genuinely new major concern needs its own durable owner; do not create per-feature design files by default.
+- **State current and target design plainly.** Retain a statement only when it describes shipped behaviour, a current invariant or operational constraint, an explicitly intended future design, or a genuinely unresolved decision. Label current and target state where doing so prevents ambiguity. Confirm current-state claims against the code, chart, configuration, and operator workflow before editing.
+- **Write idiomatic Markdown.** Use semantic headings, paragraphs, lists, tables, links, and fenced code blocks according to general Markdown code-style conventions. Do not manually word-wrap prose at a fixed column; keep each paragraph on one source line and let renderers wrap it. Preserve line breaks only where Markdown semantics or preformatted content require them.
+- **Remove historical bookkeeping.** Delete version-by-version changes, implementation-deviation logs, superseded alternatives, completed migration narratives, and rationale that no longer constrains the system. Do not replace removed material with a historical summary or a new changelog.
+- **Keep open decisions current.** Record only questions that remain open and materially affect the target design. Once settled, fold the result into the main design and remove the open item.
+- **Update documentation in place.** When implementation or the target design changes, revise the affected design document so it remains an accurate, readable description. Keep cross-references for navigation, not to duplicate another concern's detailed design.
+- **Git history is the changelog.** Do not add a `docs/changelog.md`, roadmap, or work-in-progress scratch file. Use the task conversation while work is in flight and write a comprehensive commit message when a self-contained change is complete.
+
+If a concern grows too large for one document, discuss and approve a deliberate split rather than fragmenting it by accretion.
 
 ## Commit messages
 
-Write comprehensive commit messages. The subject should state the outcome;
-the body must explain the problem, the substantive implementation changes,
-operational or behavioural effects, and the verification performed. When a
-commit changes a user-facing workflow, include any migration, upgrade, or
-cleanup implications. Git history is a durable part of this project's
-documentation, so do not use terse messages that require readers to reconstruct
-intent from the diff.
+Git history is durable project documentation. Every commit message must make its purpose and consequences understandable without reconstructing intent from the diff.
 
-Prompt the developer/operator to commit after each more-or-less self-contained
-piece of work. Do this before beginning a separate concern, so unrelated
-implementation, operational, and documentation changes do not accumulate in
-one mixed commit. A user may decline or choose a different boundary; otherwise
-make the nudge explicit in the handoff.
+- **Use a concise outcome subject.** Keep it on one plain-text line and under 50 characters. State what changed, rather than the work performed.
+- **Write a comprehensive prose body.** Use plain paragraphs, separated by blank lines and hard-wrapped at 72 columns. Explain the problem, the substantive implementation changes, operational or behavioural effects, and verification performed. For user-facing workflow changes, include relevant migration, upgrade, or cleanup implications.
+- **Keep messages plain text.** Do not use Markdown, Markdown lists, trailers, or agent attribution. Never add `Co-authored-by`, model names, agent identifiers, or other AI provenance.
+- **Pass real newlines to Git.** The body must contain literal line-feed characters, never the two-character escape sequence `\n`. Pass separate paragraphs or a message file, then inspect `git log -1 --format=%B` before handoff.
+- **Protect commit boundaries.** Prompt the developer/operator to commit after each more-or-less self-contained piece of work, before beginning a separate concern. A user may decline or choose a different boundary; otherwise make the nudge explicit in the handoff.
 
-Commit messages are plain paragraphs: no Markdown lists, trailers, or agent
-attribution. In particular, never add `Co-authored-by`, model names, agent
-identifiers, or other AI provenance to a commit message. Hard-wrap every
-subject and body paragraph at 80–82 columns, matching the project's existing
-history. The commit body must contain literal line-feed characters, never the
-two-character escape sequence `\n`; pass separate paragraphs or a message file
-to Git, then inspect `git log -1 --format=%B` before handing off.
+### Historical message cleanup
+
+[`scripts/normalize-pocket-advisor-commit-message.pl`](scripts/normalize-pocket-advisor-commit-message.pl) is the repository-specific normalizer used for whole-history cleanup. Use it only when a similar repair is explicitly authorised. It removes disallowed attribution and list formatting, rewraps prose at 72 columns, applies known subject replacements, and compacts remaining subjects to fewer than 50 characters. Review generated subjects before changing real refs.
+
+Treat a history rewrite as exceptional: make a bundle backup, prove the procedure on a disposable clone, and verify commit count, tree identities, author timestamps, and committer timestamps before changing real refs. Rewrite only the intended branch refs, preserve unrelated uncommitted work, and use `git push --force-with-lease` only when a rewritten published branch must be updated.
 
 ## Hard rules
 
-1. **Source-of-truth corpora are read-only.** Never write, rename, or
-   delete anything under a collection root (`workspaces/corpora/...` or a
-   registry path). Durable identity is `(collection_id, sha256)`, never a
-   path.
-2. **RustFS Tier 1 is the sole ingested source of truth**, not the
-   filesystem. A workspace's corpus folders are a staging feed the uploader
-   reads once; nothing downstream ever reads them directly
-   (`ingestion-design.md` §5.1). Postgres (Tier 2/3) is derived state —
-   losing it costs a re-scan, not data.
-3. **One doc per concern** (see above) — this is a hard rule, not a
-   preference, because the previous structure's failure mode was silent and
-   gradual.
+1. **Workspace material is private.** Never copy names, paths, content, credentials, identifiers, or other material from `./workspaces` into version-controlled code, documentation, comments, examples, tests, or commit messages.
+2. **Source corpora are read-only.** Never write, rename, or delete anything under `workspaces/corpora`. Use temporary fixtures for tests; do not modify real corpus files to construct them.
+3. **Workspace isolation is end-to-end.** A workspace's data, credentials, and request path must remain confined to that workspace across RustFS, Postgres, NATS, retrieval, generation, and transport adapters. Do not add a shared fallback credential, cross-workspace query, or client-selectable workspace scope that bypasses this boundary.
+4. **Design documentation records current and target state only.** Keep one authoritative design document per major concern. Do not retain or add changelogs, implementation-deviation logs, superseded designs, or migration narratives; Git history owns the historical record.
+5. **History rewrites require explicit authority.** Never rewrite published or local history merely for convenience. When explicitly authorised, follow the backup, disposable-clone, timestamp, and tree-identity checks in the commit-message cleanup guidance above.
+6. **Project knowledge must be harness-agnostic.** Agents and harnesses may use their native context, memory, plans, or bookkeeping, but project-relevant current and target design must not exist only there. Prioritise recording durable decisions and implementation knowledge in this repository according to [Documentation philosophy — current and target state](#documentation-philosophy--current-and-target-state), then reconcile it with the relevant design document before handoff.
+7. **Secrets and personal content stay outside version control.** Never commit credentials, tokens, private endpoints, or real personal content; use placeholders and redacted examples. Use the existing separation rather than creating an exception: `workspaces/` is gitignored for private workspace material and `.envrc` is gitignored for local secrets.
 
 ## Verification
 
-```bash
-go build ./... && go vet ./... && gofmt -l .
-go test ./...
-helm lint ./charts/pocket-advisor
-```
-
-This host has no local Go toolchain; run the Go checks in a container with a
-persistent module cache instead of re-downloading every time:
-
-```bash
-docker run --rm -v "$PWD":/src -v gomodcache:/go/pkg/mod -w /src \
-  golang:1.25-alpine sh -c "go build ./... && go vet ./... && go test ./... && gofmt -l ."
-```
-
-Never modify real corpus files to construct a test fixture — use temp
-fixtures. Before handing off a change:
-
-```bash
-git diff --check
-git status --short
-```
+Use the supported commands in [README.md §7, “Verification”](README.md#7-verification).

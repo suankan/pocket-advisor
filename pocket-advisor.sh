@@ -98,6 +98,7 @@ usage: ./pocket-advisor.sh <command> [args]
   vet                       go vet ./...
   fmt                       gofmt -l -w .
   lint                      fmt, vet, helm lint, chart-render assertion
+  install-hooks             enable this clone's versioned Git hooks
   docker-build-postgres     build the local Postgres image
   deploy-infra              helm install/upgrade the three shared stores
   destroy-infra             helm uninstall (PVCs retained)
@@ -152,6 +153,11 @@ cmd_lint() {
     && [ "$(grep -c 'kind: StatefulSet' /tmp/pa-lint.yaml)" = "3" ] \
     && echo "ok: chart renders three StatefulSets and the workspace's notify block" \
     || { echo "FAIL: rendered chart is incomplete"; exit 1; }
+}
+
+cmd_install_hooks() {
+  git config --local core.hooksPath .githooks
+  echo "Git hooks enabled from .githooks"
 }
 
 # Expands ${VAR} scalars in the private values template into a throwaway copy
@@ -475,6 +481,7 @@ case "$cmd" in
   vet) cmd_vet ;;
   fmt) cmd_fmt ;;
   lint) cmd_lint ;;
+  install-hooks) cmd_install_hooks ;;
   docker-build-postgres) cmd_docker_build_postgres ;;
   deploy-infra) cmd_deploy_infra ;;
   destroy-infra) cmd_destroy_infra ;;

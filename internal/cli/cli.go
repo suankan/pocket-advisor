@@ -60,6 +60,9 @@ type Options struct {
 	MCPHTTPTrustedProxyCIDRs     string
 	MCPHTTPMaxConcurrent         int
 
+	Doctor  bool
+	Recover bool
+
 	Evaluate       bool
 	EvalCases      string
 	EvalReport     string
@@ -96,6 +99,9 @@ Modes (exactly one):
   --mcp-http          serve the same fixed-workspace tools over authenticated
                       Streamable HTTP. The backend is loopback-only and must
                       sit behind the documented TLS gateway.
+  --doctor            read-only workspace health checks
+  --recover           plan and optionally apply ingestion recovery
+                      (default: dry-run; use --yes to apply)
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Requires --eval-cases. Emits a human summary by default;
                       --json emits machine-readable output.
@@ -178,6 +184,8 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.MCP, "mcp", false, "serve the read path as an MCP tool over stdio")
 	fs.BoolVar(&o.MCPHTTP, "mcp-http", false, "serve the read path as authenticated Streamable HTTP MCP")
+	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
+	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
 
 	fs.IntVar(&o.TopK, "top-k", 0, "maximum results for --query (0 = config default)")
 	fs.BoolVar(&o.JSON, "json", false, "emit --query results as JSON")
@@ -227,6 +235,8 @@ func (o *Options) modes() []string {
 		{o.Query != "", "--query"},
 		{o.MCP, "--mcp"},
 		{o.MCPHTTP, "--mcp-http"},
+		{o.Doctor, "--doctor"},
+		{o.Recover, "--recover"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -240,7 +250,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --mcp-http, --evaluate, --delete-data, --forget (--help for details)")
+			"--query, --mcp, --mcp-http, --doctor, --recover, --evaluate, --delete-data, --forget (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -347,6 +357,10 @@ func Run(o *Options) error {
 		return runMCP(o, cfg, logs)
 	case o.MCPHTTP:
 		return runMCPHTTP(o, cfg, logs)
+	case o.Doctor:
+		return runDoctor(o, cfg, logs)
+	case o.Recover:
+		return runRecover(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

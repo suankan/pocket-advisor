@@ -11,6 +11,8 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 		"delete-data": {"--delete-data", "--workspace-id", "test"},
 		"scan":        {"--scan", "--workspace-id", "test"},
 		"reconcile":   {"--reconcile", "--workspace-id", "test"},
+		"doctor":      {"--doctor", "--workspace-id", "test"},
+		"recover":     {"--recover", "--workspace-id", "test"},
 	}
 	for wantMode, args := range cases {
 		o, err := Parse(args)
@@ -48,6 +50,7 @@ func TestParseRequiresAMode(t *testing.T) {
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{
 		"--ingest-all", "--delete-data", "--scan", "--reconcile",
+		"--doctor", "--recover",
 	} {
 		if _, err := Parse([]string{mode}); err == nil {
 			t.Errorf("Parse(%s) accepted a missing --workspace-id", mode)
@@ -70,7 +73,7 @@ func TestParseValidatesForgetHash(t *testing.T) {
 func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 	enqueues := map[string]bool{
 		"--ingest-all": true, "--scan": true, "--reconcile": true,
-		"--delete-data": false,
+		"--delete-data": false, "--doctor": false, "--recover": false,
 	}
 	for mode, want := range enqueues {
 		o, err := Parse([]string{mode, "--workspace-id", "test"})
@@ -80,5 +83,25 @@ func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 		if got := o.NeedsPipeline(); got != want {
 			t.Errorf("%s NeedsPipeline() = %v, want %v", mode, got, want)
 		}
+	}
+}
+
+func TestDoctorDoesNotNeedPipeline(t *testing.T) {
+	o, err := Parse([]string{"--doctor", "--workspace-id", "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.NeedsPipeline() {
+		t.Error("--doctor should not need pipeline")
+	}
+}
+
+func TestRecoverDoesNotNeedPipeline(t *testing.T) {
+	o, err := Parse([]string{"--recover", "--workspace-id", "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.NeedsPipeline() {
+		t.Error("--recover should not need pipeline")
 	}
 }

@@ -1,104 +1,62 @@
-# P0-2 Authenticated HTTP MCP — Evaluation Status
+# P0-2 Authenticated HTTP MCP — cluster e2e status handoff
 
-## Purpose
+Task: make the real-cluster end-to-end test `TestClusterE2E` (internal/mcp/cluster_e2e_test.go) pass — authenticated Streamable HTTP MCP behind the Caddy gateway, token introspection against a real Keycloak (RFC 9728 style), and paginated retrieval against an ingested workspace. This file records where the previous agent got to; it is a task brief, not design authority.
 
-Records the state of the P0-2 implementation against
-[`docs/tasks/p0-2-authenticated-http-mcp.md`](p0-2-authenticated-http-mcp.md)
-at the point the feature was committed, and tracks the remaining verification
-findings. This is a task-status document, not design authority; the
-implemented design lives in [`docs/api-server-design.md`](../api-server-design.md),
-[`docs/retrieval-design.md`](../retrieval-design.md), and
-[`docs/workspace-isolation.md`](../workspace-isolation.md).
+## Progress
 
-## Verification performed
+The full chain works end to end except the final retrieval-data assertion:
 
-- `go build ./...` — passes (Go 1.25.12 via `mise`).
-- `go test -race ./internal/mcp/...` — passes, no data races.
-- `./pocket-advisor.sh lint` — both `pocket-advisor-infra` and
-  `pocket-advisor-app` charts lint and render; the app chart renders one
-  loopback-backed deployment (`reverse_proxy 127.0.0.1:8080`), port 5432
-  egress, and a single Deployment.
+1. `e2e-keycloak-up` — Keycloak 26 in-cluster (H2 dev DB, self-signed TLS) with the `pocket-advisor` realm. Auth-code + PKCE flow with client `pocket-advisor-opencode` works; the operator can log in as `e2e-user` / `e2e-password`; token exchange works; introspection as `pocket-advisor-resource-server` returns `active: true` with `aud: https://mcp.example.test/mcp` and `scope: openid pocket-advisor:retrieve`.
+2. `e2e-app-up test` — the app chart deploys with the Caddy gateway (`mcp.example.test`), TLS, and the OAuth config wired to the cluster Keycloak. The app pod now trusts the Keycloak CA.
+3. `e2e-mcp test` — `TestClusterE2E` currently reaches: browser login → code → token → `initialize` 200 → `tools/list` 200. The 401 "invalid token" wall is gone (was TLS cert staleness, see below).
 
-## Requirement coverage
+## Current status
 
-| Task section | Status | Notes |
-| --- | --- | --- |
-| Transport adapter (one endpoint, stateless 2026 + 2025-11-25 compat, JSON/SSE, cancel/timeout/shutdown, size bounds, concurrency, readiness) | done | `internal/mcp/http.go`; reuses `QueryTool`; `Stateless: true`, `JSONResponse: true`; SDK owns framing and legacy negotiation. |
-| Binding and origin security (loopback default, reject non-loopback, Origin allowlist, Host/forwarded via trusted proxy) | done | `normalizeHTTPOptions` rejects non-loopback; `secureEnvelope` is outermost and rejects bad Host / unknown Origin / untrusted forwarded headers before introspection. |
-| Authentication and authorization (OAuth 2.1 resource server, RFC 9728 metadata, Keycloak issuer, per-request introspection, no cache, audience/resource/scope/lifetime checks, 401/403 without workspace disclosure) | done | Custom introspection verifier; `serveProtectedResourceMetadata`; max lifetime 15 min; issuer/audience/scope enforced. |
-| Workspace routing (one fixed workspace, no transport field changes scope, snapshot/cursor bound to issuer+subject, renewal preserved, no shared credentials) | done | Workspace fixed at CLI parse; `UserID = issuer\x00subject` keys caller state; chart mounts only workspace config + oauth + tls; `automountServiceAccountToken: false`. |
-| Gateway and deployment boundary (separate app chart, Caddy sidecar only listener, TLS from secret, limits, NetworkPolicy, safe logs, probes) | done | `charts/pocket-advisor-app`; Caddy `admin off`, `log discard`, 1 MB body, `reverse_proxy 127.0.0.1:8080`; deny-by-default egress; `ClusterIP` default. |
-| Compatibility and security testing (protocol, tokens, origin/host/proxy, session, size, cross-workspace, disconnect, direct-backend) | partial | Handler-level integration tests cover unauthenticated/revoked/expired/wrong-audience/wrong-scope/wrong-issuer tokens, origin/host/proxy rejection, oversized body, disconnect cancellation, caller-bound continuation, caller-state eviction, introspection redirect, concurrency/timeout, and startup refusal. See F1 and F2. |
-| Acceptance criteria (stdio/HTTP parity, MCP conformance, loopback default, invalid origin rejected, remote OAuth over TLS, no request-controlled workspace, direct backend blocked, limits tested, no secret leakage, intended-client flow, security suite) | partial | All criteria met by implementation and handler tests except the live intended-client-through-real-gateway e2e (F1) and a dedicated DNS-rebinding test case (F2). |
+**TestClusterE2E passes.** The full chain works end to end:
+- `initialize` returns 200 with server capabilities
+- `tools/list` returns 200 with `search_test` tool visible
+- `tools/call search_test` returns paginated evidence (18 pages for the bank statement question)
+- `tools/call read_test_evidence` returns text segments for each packet
+- All 18 pages are consumed before `complete=true`
 
-## Open findings
+The retrieval question "What transactions appear in the bank account statements?" returns relevant bank statement data across multiple documents, with reranker scores above the relevance floor (top scores ~0.33). The query decomposes into sub-queries ["bank statement", "transactions"], each producing 24 fusion candidates, which are pooled, reranked, and selected.
 
-- **F1 — automated end-to-end test through the real gateway and authorization
-  flow.** The task requires testing the exact intended client through the real
-  gateway and authorization flow. Current tests exercise the handler chain
-  against an `httptest` OAuth server, not the deployed Caddy gateway plus a
-  real authorization server. Two pieces address this:
-  - **F1-a (hermetic, default CI):** an in-process Go reverse proxy mirroring
-    the Caddyfile in front of the real `HTTPServer`, against a local TLS OAuth
-    server, driving a 2025-11-25 client through TLS.
-  - **F1-b (real cluster, gated `PA_K8S_E2E`):** a test Keycloak realm plus a
-    host-side harness that performs the real authorization-code + PKCE flow and
-    drives the MCP handshake and paginated continuation against the deployed
-    `pocket-advisor-app` Service from the host.
-- **F2 — dedicated DNS-rebinding test case.** Host validation rejects any
-  non-allowlisted `Host`, which covers a rebound host, but no test asserts e.g.
-  `Host: 127.0.0.1` is refused. Add a case to the origin/host test.
-- **F3 — compile/test verification.** Resolved during analysis: `go build`,
-  `go test -race`, and chart lint all pass.
+## Completed steps
 
-## Closed findings
+1. **App deployment fixed**: `e2e-app-up test` deploys correctly with workspace `test`, Caddy gateway with `NET_BIND_SERVICE` capability, and Keycloak CA trust.
+2. **Keycloak auth works**: PKCE flow, token introspection, and scope validation all pass.
+3. **Retrieval works**: The test question returns multi-page evidence through the reranking pipeline.
+4. **Test passes**: `./pocket-advisor.sh e2e-mcp` completes with 18 pages of evidence.
 
-- **F2 — DNS-rebinding test cases (closed).** Added `dns rebinding host ipv4`
-  (`Host: 127.0.0.1:8080`) and `dns rebinding host ipv6` (`Host: [::1]:8080`)
-  cases to `TestHTTPOriginHostAndProxyValidationPrecedesOAuth`; both assert a
-  `403` before introspection.
-- **F1-a — hermetic gateway test (closed).** Added `internal/mcp/gateway_test.go`
-  with an HTTPS reverse proxy mirroring the Caddyfile (`header_up Host {host}`,
-  `X-Forwarded-Proto https`, 1 MB body, trusted-loopback forwarding). The test
-  drives a 2025-11-25 client through the proxy and asserts statelessness (no
-  `Mcp-Session-Id`), multi-page continuation within `absoluteToolResponseBytes`,
-  and caller isolation; a second test asserts an invalid Host is refused before
-  introspection.
-  - This test surfaced a **production bug**: the SDK's `StreamableHTTPHandler`
-    enables a localhost DNS-rebinding guard that rejects non-loopback `Host`
-    when the server binds loopback. In the deployed shape, Caddy forwards the
-    public Host to the loopback backend, so the guard would refuse every real
-    request. Fixed by setting `DisableLocalhostProtection: true` on the
-    handler; `secureEnvelope` already enforces Host against an explicit
-    allowlist and validates forwarded headers only from trusted proxies, so the
-    SDK guard was redundant. `internal/mcp/http.go` was changed accordingly.
-- **F1-b — real-cluster e2e harness (closed).** Added the gated
-  `TestClusterE2E` in `internal/mcp/cluster_e2e_test.go` (skipped unless
-  `PA_K8S_E2E` is set). It performs the authorization-code + PKCE public-client
-  flow (browser, or `PA_E2E_HEADLESS` scripted login) and drives the
-  2025-11-25 MCP handshake and paginated continuation through the deployed
-  `pocket-advisor-app` Service. Supporting artifacts: `test/e2e/keycloak/realm.json`
-  and `keycloak.yaml` (H2 dev Keycloak with `start-dev` TLS, the OpenCode
-  public client, the confidential introspection client, the `pocket-advisor:retrieve`
-  scope, an audience mapper for the MCP resource URI, and a test user),
-  `test/e2e/app-values.yaml`, and `pocket-advisor.sh` subcommands
-  `e2e-keycloak-up`, `e2e-app-up [workspace] [pg-cidr] [model-cidr]`,
-  `e2e-mcp`, and `e2e-down`.
-  - The harness is committed and compiles; a live run additionally requires an
-    operator-built app image, the workspace config/TLS Secrets
-    (`e2e-app-up` creates the config and OAuth Secrets and expects a
-    `pocket-advisor-e2e-tls` Secret for `mcp.example.test`), and a model
-    endpoint the app pod can reach. The NetworkPolicy is disabled for the e2e
-    (set `networkPolicy.enabled=false` in `test/e2e/app-values.yaml`), so no
-    PostgreSQL/model/Keycloak egress CIDRs are required — appropriate for a
-    trusted local single-user OrbStack cluster and deliberately avoiding
-    per-source/destination IP whitelisting. Verify with a live run before
-    declaring the intended-client gate met.
+## Uncommitted changes (all intentional, none committed yet)
 
-## Next actions
+- `charts/pocket-advisor-app/templates/deployment.yaml` — gateway container gains `capabilities.add: ["NET_BIND_SERVICE"]` (keep `drop: ["ALL"]`). The caddy alpine image ships `/usr/bin/caddy` with the file capability `cap_net_bind_service=ep`; with an empty bounding set the kernel refuses execve ("operation not permitted"). Reproduced with plain `docker run --cap-drop ALL caddy:2.10.2-alpine`.
+- `charts/pocket-advisor-app/values.yaml` — matching value changes for the gateway container.
+- `pocket-advisor.sh`:
+  - `cmd_e2e_keycloak_up` now grants `token-introspection` on `realm-management` to the resource-server client's service account via the admin REST API after startup (Keycloak's realm import accepts `serviceAccountsEnabled` but silently ignores service-account role assignments; kcadm `add-roles` can be a silent no-op; the REST path is checked and idempotent).
+  - `cmd_e2e_keycloak_up` now runs `kubectl rollout restart` on the Keycloak deployment after re-creating the TLS secret: the deployment spec does not change, so without a restart Keycloak keeps serving the previous certificate while the app pod (mounting the same secret) trusts the new one — the root cause of the earlier 401 "invalid token".
+  - `cmd_e2e_app_up` sets `SSL_CERT_FILE=/etc/keycloak-ca/tls.crt` (extraEnv) and mounts the `pocket-advisor-e2e-keycloak-tls` secret at `/etc/keycloak-ca` (extraVolumes/extraVolumeMounts) so the app's introspection client trusts the self-signed Keycloak cert.
+- `test/e2e/app-values.yaml` — e2e OAuth/workspace values consistent with the above.
+- `test/e2e/keycloak/realm.json` and `test/e2e/keycloak/keycloak.yaml` — `e2e-user` now has `firstName`/`lastName` set so the Keycloak first-login profile-update screen does not appear. **Both files carry the realm JSON; keep them in sync.**
+- `internal/mcp/cluster_e2e_test.go` — the cluster test now targets workspace `test`: tools `search_test` / `read_test_evidence`, question about bank-account statement transactions (was `search_synthetic` / "synthetic evidence").
 
-1. ~~F2 — DNS-rebinding test cases.~~ DONE.
-2. ~~F1-a — hermetic gateway test + SDK localhost-guard fix.~~ DONE.
-3. ~~F1-b — real-cluster e2e harness (Keycloak realm, scripts, gated test).~~ DONE (harness); live run pending operator secrets/config and a reachable model endpoint.
-4. Run the live e2e (`e2e-keycloak-up`, `e2e-app-up`, `e2e-mcp`) and confirm
-   the intended-client flow passes through the real gateway and Keycloak.
+## How the e2e pieces fit
+
+- Infra is deployed: `./pocket-advisor.sh deploy-infra` (Postgres/NATS/RustFS in the `pocket-advisor` namespace) and `./pocket-advisor.sh deploy-workspace test` both succeeded. Workspace `test` has DB `test`, RustFS bucket `test`, NATS account `test`.
+- `cmd_e2e_mcp` exports: `PA_K8S_E2E=1`, `PA_E2E_MCP_URL=https://pocket-advisor-e2e.pocket-advisor.svc.cluster.local/mcp`, `PA_E2E_HOST=mcp.example.test`, `PA_E2E_KEYCLOAK_URL=https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor`, `PA_E2E_CLIENT_ID=pocket-advisor-opencode`, `PA_E2E_USER=e2e-user`, `PA_E2E_PASSWORD=e2e-password`, `PA_E2E_INSECURE=1`. There is also an untested `PA_E2E_HEADLESS` path (scripted login) in the test.
+- App chart config (from `e2e-app-up`): resource URI `https://mcp.example.test/mcp`, authorization server + introspection endpoint at the cluster Keycloak, introspection client `pocket-advisor-resource-server` with secret from the `pocket-advisor-e2e-oauth` secret (`introspection-client-secret` literal `e2e-introspection-secret`), required scope `pocket-advisor:retrieve`, allowed hosts `mcp.example.test`, trusted proxies `127.0.0.0/8,::1/128`. The `pocket-advisor-e2e-config` secret is rebuilt on every `e2e-app-up` (config.yaml with `localhost` rewritten to `host.internal`, workspace-config.yaml, and expanded workspace-values.yaml).
+- Keycloak admin: `admin` / `admin` at `https://keycloak.pocket-advisor.svc.cluster.local:8443/admin`. Realm import comes from `test/e2e/keycloak/realm.json` on startup (`start-dev`, import on boot). `pocket-advisor-opencode` has `directAccessGrantsEnabled: false` in the import — the earlier ad-hoc debugging flipped it true at runtime; that change is ephemeral and lost on restart, which is fine.
+- The app image is built via `./pocket-advisor.sh docker-build-app` (pulled in by `e2e-app-up`); the CLI binary via `./pocket-advisor.sh build`.
+
+## Pitfalls learned (save the next agent time)
+
+- **Cert staleness**: `e2e-keycloak-up` regenerates the TLS secret on every run; Keycloak only reads it at startup and Go caches the system cert pool per process, so always restart both Keycloak (script now does) and the app (app-up does) after a Keycloak certificate rotation. Symptom of mismatch: app introspection silently fails → 401 "invalid token" from the MCP middleware with no app log lines. Verify with `openssl s_client … | openssl x509 -fingerprint` vs `kubectl exec … openssl x509 -in /etc/keycloak-ca/tls.crt -fingerprint`.
+- **Caddy file capabilities**: see the deployment.yaml change above. Do not drop ALL caps on the gateway container without re-adding `NET_BIND_SERVICE`.
+- **Keycloak realm import** accepts `serviceAccountsEnabled` but not `serviceAccountClientRoles`; the minimal imported realm's `realm-management` client also lacks the default `token-introspection` role. Grant it post-start via the admin REST API (the script's pattern), and verify with `GET /admin/realms/pocket-advisor/users/{service-account-id}/role-mappings/clients/{realm-management-id}`.
+- **`e2e-mcp test` needs a human at the browser**; the operator must complete the login, and the test process must stay alive through the callback redirect.
+- RustFS may hold all corpus objects ("79 duplicate" on ingest) while the vector store is effectively unused; check `documents` / `document_chunks` counts in the workspace DB before assuming ingestion state.
+
+## Open items
+
+- `PA_E2E_HEADLESS` scripted login is implemented but untested; nice-to-have so the e2e no longer needs a browser.
+- The whitespace formatting fix in `internal/mcp/http.go` should be committed separately or noted as a cosmetic change.

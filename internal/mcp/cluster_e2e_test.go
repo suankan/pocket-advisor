@@ -107,23 +107,23 @@ func runMCPHandshakeE2E(t *testing.T, client *http.Client, mcpURL, token, scope,
 	initialize.Body.Close()
 
 	list := e2eMCPPost(t, client, mcpURL, host, token, "2025-11-25", "tools/list", "", nil)
-	if list.StatusCode != http.StatusOK || !contains(list, "search_synthetic") {
+	if list.StatusCode != http.StatusOK || !contains(list, "search_test") {
 		body, _ := io.ReadAll(list.Body)
 		t.Fatalf("tools/list status = %d, body=%s", list.StatusCode, body)
 	}
 	list.Body.Close()
 
-	search := e2eMCPPost(t, client, mcpURL, host, token, "2025-11-25", "tools/call", "search_synthetic", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "synthetic evidence"},
+	search := e2eMCPPost(t, client, mcpURL, host, token, "2025-11-25", "tools/call", "search_test", map[string]any{
+		"name": "search_test", "arguments": map[string]any{"question": "What transactions appear in the bank account statements?"},
 	})
 	page, isError := decodeGatewayPage(t, search)
 	if isError || page.Complete || page.NextCursor == nil {
 		t.Fatalf("first page complete=%v cursor=%v isError=%v", page.Complete, page.NextCursor, isError)
 	}
-		pages := 1
+	pages := 1
 	for !page.Complete {
-		response := e2eMCPPost(t, client, mcpURL, host, token, "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
-			"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+		response := e2eMCPPost(t, client, mcpURL, host, token, "2025-11-25", "tools/call", "read_test_evidence", map[string]any{
+			"name": "read_test_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 		})
 		raw, err := io.ReadAll(response.Body)
 		if err != nil {

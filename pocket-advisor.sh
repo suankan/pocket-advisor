@@ -517,22 +517,64 @@ E2E_NS="$POCKET_ADVISOR_NAMESPACE"
 E2E_RELEASE="pocket-advisor-e2e"
 
 cmd_e2e_keycloak_up() {
+  # Self-signed certificate for the Keycloak HTTPS listener. The e2e client
+  # skips verification (PA_E2E_INSECURE) and the app pod trusts it via
+  # SSL_CERT_FILE, so neither the CN nor the CA chain matters.
+  local certkey certcrt certcfg
+  certkey="$(mktemp)"
+  certcrt="$(mktemp)"
+  certcfg="$(mktemp)"
+  cat > "$certcfg" <<EOF
+[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = keycloak.$E2E_NS.svc.cluster.local
+[ext]
+subjectAltName = DNS:keycloak.$E2E_NS.svc.cluster.local
+EOF
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -keyout "$certkey" -out "$certcrt" \
+    -config "$certcfg" -extensions ext >/dev/null 2>&1 || exit 1
+  kubectl create secret tls pocket-advisor-e2e-keycloak-tls \
+    --cert="$certcrt" --key="$certkey" \
+    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+  rm -f "$certkey" "$certcrt" "$certcfg"
   kubectl apply -f test/e2e/keycloak/keycloak.yaml -n "$E2E_NS" || exit 1
+  # The TLS secret above is re-created on every run, but the deployment spec
+  # does not change, so without a restart Keycloak keeps serving the previous
+  # certificate while the app pod (which mounts the same secret) trusts the
+  # new one. Restart so both pods always use the same, current certificate.
+  kubectl rollout restart deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" || exit 1
   kubectl rollout status deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" --timeout=5m || exit 1
   # Keycloak's realm import accepts serviceAccountsEnabled but not a service
-  # account role assignment, so grant token-introspection to the
-  # resource-server client's service account after startup.
-  local pod
-  pod="$(kubectl get pods -n "$E2E_NS" -l app.kubernetes.io/component=e2e-keycloak \
-    -o jsonpath='{.items[0].metadata.name}')" || exit 1
-  kubectl exec -n "$E2E_NS" "$pod" -- /opt/keycloak/bin/kcadm.sh config credentials \
-    --server http://localhost:8080 --realm master --user admin --password admin >/dev/null 2>&1 || exit 1
-  kubectl exec -n "$E2E_NS" "$pod" -- /opt/keycloak/bin/kcadm.sh add-roles -r pocket-advisor \
-    --uclient pocket-advisor-resource-server --cclient realm-management \
-    --rolename token-introspection >/dev/null 2>&1 || exit 1
-  # Keycloak's dev profile serves plain HTTP on 8080 only; the realm has
-  # sslRequired none, so the e2e flow is unencrypted within the cluster.
-  echo "keycloak ready at http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor"
+  # account role assignment, and a minimal realm import leaves the
+  # realm-management client without its default token-introspection role, so
+  # create the role and grant it to the resource-server client's service
+  # account through the admin REST API after startup. Each step is checked
+  # and idempotent.
+  local base adm tok sa_uid rm_id role_id
+  base="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms"
+  adm="https://keycloak.$E2E_NS.svc.cluster.local:8443/admin/realms/pocket-advisor"
+  tok="$(curl -sk --max-time 20 -X POST "$base/master/protocol/openid-connect/token" \
+    -d client_id=admin-cli -d username=admin -d password=admin -d grant_type=password | jq -r .access_token)" || exit 1
+  rm_id="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/clients?clientId=realm-management" | jq -r '.[0].id')" || exit 1
+  if ! curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/clients/$rm_id/roles/token-introspection" \
+    | jq -e . >/dev/null 2>&1; then
+    curl -sk --max-time 20 -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
+      -d '{"name":"token-introspection"}' "$adm/clients/$rm_id/roles" >/dev/null 2>&1 || exit 1
+  fi
+  sa_uid="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" \
+    "$adm/users?username=service-account-pocket-advisor-resource-server&exact=true" | jq -r '.[0].id')" || exit 1
+  if ! curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/users/$sa_uid/role-mappings/clients/$rm_id" \
+    | jq -e '.[] | select(.name == "token-introspection")' >/dev/null 2>&1; then
+    role_id="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" \
+      "$adm/clients/$rm_id/roles/token-introspection" | jq -r .id)" || exit 1
+    curl -sk --max-time 20 -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
+      -d "{\"id\":\"$role_id\",\"name\":\"token-introspection\"}" \
+      "$adm/users/$sa_uid/role-mappings/clients/$rm_id" >/dev/null 2>&1 || exit 1
+  fi
+  echo "keycloak ready at https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor"
 }
 
 cmd_e2e_app_up() {
@@ -544,17 +586,26 @@ cmd_e2e_app_up() {
   # before creating the Secret. The operator's workspaces/ files are untouched.
   # The chart's configuration Secret carries three keys: the app config
   # (config.yaml), the workspace registry (workspace-config.yaml), and the
-  # private infra/credentials override (workspace-values.yaml).
-  local tmpcfg
+  # private infra/credentials override (workspace-values.yaml). The infra file
+  # uses ${VAR} placeholders resolved from the operator's environment (the
+  # binary expands them at runtime, but the pod has no such environment), so
+  # expand them before the Secret is created; values may contain characters
+  # that break YAML quoting, so every quoted scalar is re-escaped and the
+  # result validated before it is stored.
+  local tmpcfg tmpvals
   tmpcfg="$(mktemp)"
+  tmpvals="$(mktemp)"
   yq '(.. | select(tag == "!!str" and test("localhost"))) |= sub("localhost", "host.internal")' \
     config.yaml > "$tmpcfg" || exit 1
+  perl -pe 'if (/^(\s*[\w.-]+:\s*)"\$\{(\w+)\}"\s*$/) { my ($k, $n) = ($1, $2); my $v=$ENV{$n}; $v =~ s/\\/\\\\/g; $v =~ s/"/\\"/g; $_ = "$k\"$v\"\n"; }' \
+    workspaces/pocket-advisor-infra.yaml > "$tmpvals" || exit 1
+  yq e '.' "$tmpvals" >/dev/null || { echo "workspace values expansion produced invalid YAML"; exit 1; }
   kubectl create secret generic "$E2E_RELEASE-config" \
     --from-file=config.yaml="$tmpcfg" \
     --from-file=workspace-config.yaml="workspaces/workspace-config.yaml" \
-    --from-file=workspace-values.yaml="workspaces/pocket-advisor-infra.yaml" \
+    --from-file=workspace-values.yaml="$tmpvals" \
     -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
-  rm -f "$tmpcfg"
+  rm -f "$tmpcfg" "$tmpvals"
   kubectl create secret generic "$E2E_RELEASE-oauth" \
     --from-literal=introspection-client-secret='e2e-introspection-secret' \
     -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
@@ -577,10 +628,16 @@ cmd_e2e_app_up() {
   helm upgrade --install "$E2E_RELEASE" "$APP_CHART" -n "$E2E_NS" --create-namespace \
     -f test/e2e/app-values.yaml \
     --set workspace.id="$ws" \
-    --set oauth.authorizationServer="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor" \
-    --set oauth.introspectionEndpoint="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
+    --set oauth.authorizationServer="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
+    --set oauth.introspectionEndpoint="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
+    --set-json 'extraEnv=[{"name":"SSL_CERT_FILE","value":"/etc/keycloak-ca/tls.crt"}]' \
+    --set-json 'extraVolumeMounts=[{"name":"keycloak-ca","mountPath":"/etc/keycloak-ca"}]' \
+    --set-json 'extraVolumes=[{"name":"keycloak-ca","secretName":"pocket-advisor-e2e-keycloak-tls"}]' \
     --set networkPolicy.enabled=false \
     || exit 1
+  # The configuration Secret is mounted via subPath, which does not pick up
+  # content changes without a pod restart.
+  kubectl rollout restart deployment/"$E2E_RELEASE" -n "$E2E_NS" || exit 1
   kubectl rollout status deployment/"$E2E_RELEASE" -n "$E2E_NS" --timeout=5m || exit 1
 }
 
@@ -588,7 +645,7 @@ cmd_e2e_mcp() {
   PA_K8S_E2E=1 \
   PA_E2E_MCP_URL="https://$E2E_RELEASE.$E2E_NS.svc.cluster.local/mcp" \
   PA_E2E_HOST="mcp.example.test" \
-  PA_E2E_KEYCLOAK_URL="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor" \
+  PA_E2E_KEYCLOAK_URL="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
   PA_E2E_CLIENT_ID="pocket-advisor-opencode" \
   PA_E2E_REDIRECT_URI="http://127.0.0.1:19876/mcp/oauth/callback" \
   PA_E2E_USER="e2e-user" \

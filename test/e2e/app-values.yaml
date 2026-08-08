@@ -14,8 +14,8 @@ mcp:
   maxConcurrent: 8
 
 oauth:
-  authorizationServer: http://keycloak.pocket-advisor.svc.cluster.local:8080/realms/pocket-advisor
-  introspectionEndpoint: http://keycloak.pocket-advisor.svc.cluster.local:8080/realms/pocket-advisor/protocol/openid-connect/token/introspect
+  authorizationServer: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor
+  introspectionEndpoint: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect
   introspectionClientID: pocket-advisor-resource-server
   secretName: pocket-advisor-e2e-oauth
   secretKey: introspection-client-secret

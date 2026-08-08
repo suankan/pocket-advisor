@@ -54,6 +54,8 @@
     {
       "username": "e2e-user",
       "enabled": true,
+      "firstName": "End-to-End",
+      "lastName": "Test",
       "email": "e2e@example.test",
       "emailVerified": true,
       "credentials": [

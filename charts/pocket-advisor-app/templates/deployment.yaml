@@ -74,6 +74,10 @@ spec:
               value: /config/workspace-config.yaml
             - name: WORKSPACES_VALUES
               value: /config/workspace-values.yaml
+            {{- range .Values.extraEnv }}
+            - name: {{ .name | quote }}
+              value: {{ .value | quote }}
+            {{- end }}
           ports:
             - name: backend
               containerPort: 8080
@@ -90,6 +94,11 @@ spec:
               mountPath: /config/workspace-values.yaml
               subPath: {{ .Values.workspace.valuesKey }}
               readOnly: true
+            {{- range .Values.extraVolumeMounts }}
+            - name: {{ .name | quote }}
+              mountPath: {{ .mountPath | quote }}
+              readOnly: true
+            {{- end }}
           securityContext:
             runAsUser: 65532
             runAsGroup: 65532
@@ -131,6 +140,10 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+              # The caddy:*-alpine image ships /usr/bin/caddy with the file
+              # capability cap_net_bind_service=ep; with an empty bounding
+              # set the kernel refuses to exec it ("operation not permitted").
+              add: ["NET_BIND_SERVICE"]
             readOnlyRootFilesystem: true
           readinessProbe:
             tcpSocket:
@@ -154,3 +167,8 @@ spec:
           emptyDir: {}
         - name: caddy-config
           emptyDir: {}
+        {{- range .Values.extraVolumes }}
+        - name: {{ .name | quote }}
+          secret:
+            secretName: {{ .secretName | quote }}
+        {{- end }}

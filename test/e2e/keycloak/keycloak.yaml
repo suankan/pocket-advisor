@@ -56,6 +56,8 @@ data:
         {
           "username": "e2e-user",
           "enabled": true,
+          "firstName": "End-to-End",
+          "lastName": "Test",
           "email": "e2e@example.test",
           "emailVerified": true,
           "credentials": [{ "type": "password", "value": "e2e-password", "temporary": false }],
@@ -83,22 +85,34 @@ spec:
       containers:
         - name: keycloak
           image: quay.io/keycloak/keycloak:24.0.3
-          args: ["start-dev", "--import-realm"]
+          args:
+            - start
+            - --http-enabled=true
+            - --https-port=8443
+            - --https-certificate-file=/etc/keycloak-tls/tls.crt
+            - --https-certificate-key-file=/etc/keycloak-tls/tls.key
+            - --hostname-strict=false
+            - --import-realm
           env:
             - name: KEYCLOAK_ADMIN
               value: admin
             - name: KEYCLOAK_ADMIN_PASSWORD
               value: admin
           ports:
+            - name: https
+              containerPort: 8443
             - name: http
               containerPort: 8080
           volumeMounts:
             - name: realm
               mountPath: /opt/keycloak/data/import
+            - name: keycloak-tls
+              mountPath: /etc/keycloak-tls
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /realms/master
-              port: 8080
+              port: http
             initialDelaySeconds: 15
             periodSeconds: 10
           resources:
@@ -109,6 +123,9 @@ spec:
         - name: realm
           configMap:
             name: pocket-advisor-e2e-realm
+        - name: keycloak-tls
+          secret:
+            secretName: pocket-advisor-e2e-keycloak-tls
 ---
 apiVersion: v1
 kind: Service
@@ -121,6 +138,6 @@ spec:
   selector:
     app.kubernetes.io/component: e2e-keycloak
   ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
+    - name: https
+      port: 8443
+      targetPort: 8443

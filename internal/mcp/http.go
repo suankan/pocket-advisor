@@ -104,7 +104,7 @@ func NewHTTPServer(base *QueryTool, opts HTTPOptions) (*HTTPServer, error) {
 		// header validation are enforced by secureEnvelope against an explicit
 		// allowlist and trusted-proxy set, so the SDK guard is redundant and
 		// must be disabled or it would refuse every real request.
-		DisableLocalhostProtection:    true,
+		DisableLocalhostProtection: true,
 		// Generic protocol logs can include values that are private in this
 		// service. Pocket Advisor emits its own bounded operational events.
 		Logger:                       nil,

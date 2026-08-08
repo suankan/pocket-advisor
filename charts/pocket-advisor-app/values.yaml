@@ -52,3 +52,12 @@ networkPolicy:
   #   ports: [5432]
 
 resources: {}
+
+# Test/e2e escape hatches for the pocket-advisor container: extra
+# environment variables, extra Secret-backed volume mounts (read-only),
+# and the volumes they reference. Used by the cluster e2e to inject the
+# Keycloak CA bundle via SSL_CERT_FILE. Empty by default for real
+# deployments.
+extraEnv: []
+extraVolumeMounts: []
+extraVolumes: []

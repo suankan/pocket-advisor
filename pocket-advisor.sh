@@ -525,19 +525,34 @@ cmd_e2e_keycloak_up() {
 cmd_e2e_app_up() {
   local ws="${1:-e2e}"
   cmd_docker_build_app || exit 1
+  # The deployed pod runs in the cluster, so localhost means the pod, not the
+  # Mac host where the model server listens. OrbStack pods reach the host at
+  # host.internal, so rewrite any localhost endpoint in the config to that
+  # before creating the Secret. The operator's workspaces/ file is untouched.
+  local tmpcfg
+  tmpcfg="$(mktemp)"
+  yq '(.. | select(tag == "!!str" and test("localhost"))) |= sub("localhost", "host.internal")' \
+    "workspaces/$ws-config.yaml" > "$tmpcfg" || exit 1
   kubectl create secret generic "$E2E_RELEASE-config" \
-    --from-file=config.yaml="workspaces/$ws-config.yaml" \
+    --from-file=config.yaml="$tmpcfg" \
     --from-file=workspace-config.yaml="workspaces/$ws-workspace-config.yaml" \
     --from-file=workspace-values.yaml="workspaces/$ws-workspace-values.yaml" \
     -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+  rm -f "$tmpcfg"
   kubectl create secret generic "$E2E_RELEASE-oauth" \
     --from-literal=introspection-client-secret='e2e-introspection-secret' \
     -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+  # Auto-generate the self-signed TLS Secret for mcp.example.test if missing;
+  # the e2e client skips verification (PA_E2E_INSECURE), so the CN mismatch
+  # with the Service DNS does not matter.
   if ! kubectl get secret "$E2E_RELEASE-tls" -n "$E2E_NS" >/dev/null 2>&1; then
-    echo "create a TLS secret $E2E_RELEASE-tls for mcp.example.test before continuing, e.g.:" >&2
-    echo "  openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 1 -subj /CN=mcp.example.test" >&2
-    echo "  kubectl create secret tls $E2E_RELEASE-tls --cert=cert.pem --key=key.pem -n $E2E_NS" >&2
-    exit 1
+    echo "generating self-signed TLS secret $E2E_RELEASE-tls for mcp.example.test"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout /tmp/"$E2E_RELEASE"-key.pem -out /tmp/"$E2E_RELEASE"-cert.pem \
+      -days 1 -subj /CN=mcp.example.test >/dev/null 2>&1 || exit 1
+    kubectl create secret tls "$E2E_RELEASE-tls" \
+      --cert=/tmp/"$E2E_RELEASE"-cert.pem --key=/tmp/"$E2E_RELEASE"-key.pem \
+      -n "$E2E_NS" || exit 1
   fi
   # Trusted local single-user OrbStack cluster: turn the NetworkPolicy off so
   # the app pod can reach PostgreSQL, the model endpoints, and Keycloak

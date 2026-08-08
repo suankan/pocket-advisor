@@ -155,39 +155,39 @@ The following diagram shows the end-to-end OAuth 2.1 authorization-code flow wit
 
 ```mermaid
 sequenceDiagram
-    participant Mac as Mac Host<br/>(OpenCode)
+    participant Mac as Mac Host (OpenCode)
     participant Browser as Browser
-    participant KC as Keycloak<br/>(in-cluster)
-    participant MCP as MCP Server<br/>(in-cluster)
+    participant KC as Keycloak (in-cluster)
+    participant MCP as MCP Server (in-cluster)
 
-    Note over Mac: 1. Start local callback listener<br/>on 127.0.0.1:19876
+    Note over Mac: 1. Start local callback listener on 127.0.0.1:19876
 
-    Note over Mac,Browser: 2. Open authorization URL in browser<br/>https://keycloak...svc.cluster.local/.../auth<br/>?client_id=pocket-advisor-opencode<br/>&redirect_uri=http://127.0.0.1:19876/...<br/>&code_challenge=...&code_challenge_method=S256<br/>&scope=openid pocket-advisor:retrieve
+    Note over Mac,Browser: 2. Open authorization URL in browser
 
     Browser->>KC: 3. User logs in at Keycloak
-    KC-->>Browser: 4. Redirect to Mac-local callback<br/>http://127.0.0.1:19876/.../callback?code=...
+    KC-->>Browser: 4. Redirect to Mac-local callback with code
 
-    Browser->>Mac: 5. Authorization code received<br/>at local listener
+    Browser->>Mac: 5. Authorization code received at local listener
 
-    Note over Mac: 6. Exchange code for tokens<br/>(code_verifier sent to Keycloak)
+    Note over Mac: 6. Exchange code for tokens (code_verifier sent)
 
-    Mac->>KC: POST /protocol/openid-connect/token<br/>grant_type=authorization_code<br/>&code=...&code_verifier=...
+    Mac->>KC: 7. POST token endpoint with code + code_verifier
 
-    KC-->>Mac: 7. Access token + refresh token
+    KC-->>Mac: 8. Access token + refresh token
 
-    Note over Mac,MCP: 8. Call MCP with Bearer token
+    Note over Mac,MCP: 9. Call MCP with Bearer token
 
-    Mac->>MCP: POST /mcp<br/>Authorization: Bearer &lt;access_token&gt;<br/>Host: pocket-advisor-app...svc.cluster.local
+    Mac->>MCP: 10. POST /mcp with Authorization header
 
-    Note over MCP: 9. Introspect token against Keycloak
+    Note over MCP: 11. Introspect token against Keycloak
 
-    MCP->>KC: POST /protocol/openid-connect/token/introspect<br/>token=... (confidential client credentials)
+    MCP->>KC: 12. POST introspect with token + client credentials
 
-    KC-->>MCP: 10. {active: true, sub: "...", scope: "...", aud: "..."}
+    KC-->>MCP: 13. Token claims (active, sub, scope, aud)
 
-    Note over MCP: 11. Validate audience, scope, expiry
+    Note over MCP: 14. Validate audience, scope, expiry
 
-    MCP-->>Mac: 12. MCP response (evidence)
+    MCP-->>Mac: 15. MCP response (evidence packets)
 ```
 
 **Flow summary:**
@@ -197,13 +197,16 @@ sequenceDiagram
 3. The user logs in at Keycloak (in-cluster, reached via OrbStack DNS from macOS).
 4. Keycloak redirects the browser back to the Mac-local callback with an authorization code.
 5. The local listener receives the code.
-6. The client exchanges the code for tokens by calling Keycloak's token endpoint, including the PKCE code verifier.
-7. Keycloak returns an access token and refresh token.
-8. The client calls the MCP server with the access token in the `Authorization: Bearer` header.
-9. The MCP server introspects the token against Keycloak using its confidential client credentials.
-10. Keycloak confirms the token is active and returns subject, scope, and audience claims.
-11. The MCP server validates that the audience matches the MCP resource URI and the scope includes `pocket-advisor:retrieve`.
-12. The MCP server returns the MCP response (evidence packets).
+6. The client prepares to exchange the code for tokens by calling Keycloak's token endpoint, including the PKCE code verifier.
+7. The client sends the token request to Keycloak.
+8. Keycloak returns an access token and refresh token.
+9. The client prepares to call the MCP server with the access token in the `Authorization: Bearer` header.
+10. The client sends the MCP request to the server (reached via OrbStack DNS from macOS).
+11. The MCP server introspects the token against Keycloak using its confidential client credentials.
+12. The client credentials and token are sent to Keycloak's introspection endpoint.
+13. Keycloak confirms the token is active and returns subject, scope, and audience claims.
+14. The MCP server validates that the audience matches the MCP resource URI and the scope includes `pocket-advisor:retrieve`.
+15. The MCP server returns the MCP response (evidence packets).
 
 **Key points:**
 

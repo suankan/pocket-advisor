@@ -1,0 +1,37 @@
+# Canonical values for the F1-b real-cluster e2e (see docs/tasks/
+# p0-2-authenticated-http-mcp-eval-status.md). Secrets and dynamic fields
+# (Keycloak URLs, NetworkPolicy egress) are supplied at deploy time by
+# `pocket-advisor.sh e2e-app-up`; this file is the operator-readable shape.
+workspace:
+  id: e2e
+  configurationSecret: pocket-advisor-e2e-config
+
+mcp:
+  publicURI: https://mcp.example.test/mcp
+  allowedHosts: mcp.example.test
+  allowedOrigins: ""
+  requiredScope: pocket-advisor:retrieve
+  maxConcurrent: 8
+
+oauth:
+  authorizationServer: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor
+  introspectionEndpoint: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect
+  introspectionClientID: pocket-advisor-resource-server
+  secretName: pocket-advisor-e2e-oauth
+  secretKey: introspection-client-secret
+
+tls:
+  secretName: pocket-advisor-e2e-tls
+
+service:
+  # ClusterIP is safe by default. The e2e opens ingress from the host (see
+  # networkPolicy.ingressCIDRs); a remote deployment would use LoadBalancer
+  # with explicit source ranges instead.
+  type: ClusterIP
+
+networkPolicy:
+  enabled: true
+  ingressCIDRs:
+    - 0.0.0.0/0
+  # Filled by e2e-app-up: PostgreSQL, model endpoint, and Keycloak CIDRs/ports.
+  egress: []

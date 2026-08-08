@@ -500,6 +500,70 @@ cmd_clean() {
   rm -rf bin
 }
 
+# F1-b real-cluster end-to-end: bring up a test Keycloak (H2 dev, start-dev
+# TLS) and the app chart, then run the gated TestClusterE2E against the
+# deployed gateway. The app image must be built first (docker-build-app) and
+# reachable by the cluster; the workspace config, TLS, and egress CIDRs are
+# operator-provided so no private material enters version control.
+E2E_NS="$POCKET_ADVISOR_NAMESPACE"
+E2E_RELEASE="pocket-advisor-e2e"
+
+cmd_e2e_keycloak_up() {
+  kubectl apply -f test/e2e/keycloak/keycloak.yaml -n "$E2E_NS" || exit 1
+  kubectl rollout status deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" --timeout=5m || exit 1
+  echo "keycloak ready at https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor"
+}
+
+cmd_e2e_app_up() {
+  local ws="${1:-e2e}"
+  local pg_cidr="$2"
+  local model_cidr="$3"
+  cmd_docker_build_app || exit 1
+  kubectl create secret generic "$E2E_RELEASE-config" \
+    --from-file=config.yaml="workspaces/$ws-config.yaml" \
+    --from-file=workspace-config.yaml="workspaces/$ws-workspace-config.yaml" \
+    --from-file=workspace-values.yaml="workspaces/$ws-workspace-values.yaml" \
+    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+  kubectl create secret generic "$E2E_RELEASE-oauth" \
+    --from-literal=introspection-client-secret='e2e-introspection-secret' \
+    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+  if ! kubectl get secret "$E2E_RELEASE-tls" -n "$E2E_NS" >/dev/null 2>&1; then
+    echo "create a TLS secret $E2E_RELEASE-tls for mcp.example.test before continuing, e.g.:" >&2
+    echo "  openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 1 -subj /CN=mcp.example.test" >&2
+    echo "  kubectl create secret tls $E2E_RELEASE-tls --cert=cert.pem --key=key.pem -n $E2E_NS" >&2
+    exit 1
+  fi
+  local kc
+  kc="$(kubectl get svc keycloak -n "$E2E_NS" -o jsonpath='{.spec.clusterIP}')"
+  helm upgrade --install "$E2E_RELEASE" "$APP_CHART" -n "$E2E_NS" --create-namespace \
+    -f test/e2e/app-values.yaml \
+    --set workspace.id="$ws" \
+    --set oauth.authorizationServer="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
+    --set oauth.introspectionEndpoint="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
+    --set 'networkPolicy.egress[0].cidr='"$pg_cidr" --set 'networkPolicy.egress[0].ports[0]=5432' \
+    --set 'networkPolicy.egress[1].cidr='"$model_cidr" --set 'networkPolicy.egress[1].ports[0]=8080' \
+    --set 'networkPolicy.egress[2].cidr='"$kc/32" --set 'networkPolicy.egress[2].ports[0]=8443' \
+    || exit 1
+  kubectl rollout status deployment/"$E2E_RELEASE" -n "$E2E_NS" --timeout=5m || exit 1
+}
+
+cmd_e2e_mcp() {
+  PA_K8S_E2E=1 \
+  PA_E2E_MCP_URL="https://$E2E_RELEASE.$E2E_NS.svc.cluster.local/mcp" \
+  PA_E2E_HOST="mcp.example.test" \
+  PA_E2E_KEYCLOAK_URL="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
+  PA_E2E_CLIENT_ID="pocket-advisor-opencode" \
+  PA_E2E_REDIRECT_URI="http://127.0.0.1:19876/mcp/oauth/callback" \
+  PA_E2E_USER="e2e-user" \
+  PA_E2E_PASSWORD="e2e-password" \
+  PA_E2E_INSECURE=1 \
+  go test ./internal/mcp/ -run TestClusterE2E -v
+}
+
+cmd_e2e_down() {
+  helm uninstall "$E2E_RELEASE" -n "$E2E_NS" 2>/dev/null || true
+}
+
 cmd=${1:-}
 if [ $# -gt 0 ]; then
   shift
@@ -518,6 +582,10 @@ case "$cmd" in
   install-hooks) cmd_install_hooks ;;
   docker-build-postgres) cmd_docker_build_postgres ;;
   docker-build-app) cmd_docker_build_app ;;
+  e2e-keycloak-up) cmd_e2e_keycloak_up ;;
+  e2e-app-up) cmd_e2e_app_up "${1:-}" "${2:-}" "${3:-}" ;;
+  e2e-mcp) cmd_e2e_mcp ;;
+  e2e-down) cmd_e2e_down ;;
   deploy-infra) cmd_deploy_infra ;;
   destroy-infra) cmd_destroy_infra ;;
   destroy-state) cmd_destroy_state ;;

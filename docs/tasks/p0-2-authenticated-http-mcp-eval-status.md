@@ -65,18 +65,36 @@ implemented design lives in [`docs/api-server-design.md`](../api-server-design.m
   and caller isolation; a second test asserts an invalid Host is refused before
   introspection.
   - This test surfaced a **production bug**: the SDK's `StreamableHTTPHandler`
-    enables a localhost DNS-rebinding guard that rejects any non-loopback
-    `Host` when the server binds loopback. In the deployed shape, Caddy forwards
-    the public Host to the loopback backend, so the guard would refuse every
-    real request. Fixed by setting `DisableLocalhostProtection: true` on the
+    enables a localhost DNS-rebinding guard that rejects non-loopback `Host`
+    when the server binds loopback. In the deployed shape, Caddy forwards the
+    public Host to the loopback backend, so the guard would refuse every real
+    request. Fixed by setting `DisableLocalhostProtection: true` on the
     handler; `secureEnvelope` already enforces Host against an explicit
     allowlist and validates forwarded headers only from trusted proxies, so the
     SDK guard was redundant. `internal/mcp/http.go` was changed accordingly.
+- **F1-b — real-cluster e2e harness (closed).** Added the gated
+  `TestClusterE2E` in `internal/mcp/cluster_e2e_test.go` (skipped unless
+  `PA_K8S_E2E` is set). It performs the authorization-code + PKCE public-client
+  flow (browser, or `PA_E2E_HEADLESS` scripted login) and drives the
+  2025-11-25 MCP handshake and paginated continuation through the deployed
+  `pocket-advisor-app` Service. Supporting artifacts: `test/e2e/keycloak/realm.json`
+  and `keycloak.yaml` (H2 dev Keycloak with `start-dev` TLS, the OpenCode
+  public client, the confidential introspection client, the `pocket-advisor:retrieve`
+  scope, an audience mapper for the MCP resource URI, and a test user),
+  `test/e2e/app-values.yaml`, and `pocket-advisor.sh` subcommands
+  `e2e-keycloak-up`, `e2e-app-up [workspace] [pg-cidr] [model-cidr]`,
+  `e2e-mcp`, and `e2e-down`.
+  - The harness is committed and compiles; a live run additionally requires an
+    operator-built app image, the workspace config/TLS Secrets
+    (`e2e-app-up` creates the config and OAuth Secrets and expects a
+    `pocket-advisor-e2e-tls` Secret for `mcp.example.test`), and the
+    PostgreSQL/model egress CIDRs for the cluster. Verify with a live run
+    before declaring the intended-client gate met.
 
 ## Next actions
 
-1. ~~F2 — add a DNS-rebinding (`Host: 127.0.0.1`) case to the origin/host test.~~ DONE.
-2. ~~F1-a — add `internal/mcp/gateway_test.go` (hermetic Caddy-mirror proxy).~~ DONE; also fixed the SDK localhost-protection bug it exposed.
-3. F1-b — add test Keycloak realm/config, `pocket-advisor.sh` e2e
-   subcommands, and `internal/mcp/cluster_e2e_test.go` gated by `PA_K8S_E2E`.
-4. Update this document as each finding is closed.
+1. ~~F2 — DNS-rebinding test cases.~~ DONE.
+2. ~~F1-a — hermetic gateway test + SDK localhost-guard fix.~~ DONE.
+3. ~~F1-b — real-cluster e2e harness (Keycloak realm, scripts, gated test).~~ DONE (harness); live run pending operator secrets/config.
+4. Run the live e2e (`e2e-keycloak-up`, `e2e-app-up`, `e2e-mcp`) and confirm
+   the intended-client flow passes through the real gateway and Keycloak.

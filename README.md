@@ -298,7 +298,7 @@ kubectl create secret tls <release>-tls \
   --key=<private-key>
 ```
 
-Keep the release values under the gitignored `workspaces/` boundary. A minimal shape is:
+Keep the release values under the gitignored `workspaces/` boundary. For a local OrbStack cluster, the `publicURI` and `allowedHosts` use the OrbStack-resolved cluster DNS name. The `authorizationServer` and `introspectionEndpoint` point to the in-cluster Keycloak service. A minimal shape is:
 
 ```yaml
 workspace:
@@ -306,13 +306,15 @@ workspace:
   configurationSecret: example-mcp-configuration
 
 mcp:
-  publicURI: https://mcp.example.test/mcp
-  allowedHosts: mcp.example.test
+  # OrbStack resolves *.pocket-advisor.svc.cluster.local from macOS
+  publicURI: https://pocket-advisor-app.pocket-advisor.svc.cluster.local/mcp
+  allowedHosts: pocket-advisor-app.pocket-advisor.svc.cluster.local
   allowedOrigins: ""
 
 oauth:
-  authorizationServer: https://auth.example.test/realms/pocket-advisor
-  introspectionEndpoint: https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect
+  # In-cluster Keycloak service
+  authorizationServer: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor
+  introspectionEndpoint: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect
   introspectionClientID: pocket-advisor-resource-server
   secretName: example-mcp-oauth
 
@@ -320,20 +322,13 @@ tls:
   secretName: example-mcp-tls
 
 service:
-  type: LoadBalancer
-  loadBalancerSourceRanges:
-    - 192.0.2.0/24
+  # ClusterIP for local; use LoadBalancer with source ranges for remote
+  type: ClusterIP
 
+# For local OrbStack: disable NetworkPolicy (all traffic is trusted)
+# For remote: enable with explicit ingress/egress CIDRs
 networkPolicy:
-  ingressCIDRs:
-    - 192.0.2.0/24
-  egress:
-    - cidr: 198.51.100.10/32 # selected PostgreSQL
-      ports: [5432]
-    - cidr: 198.51.100.11/32 # selected model endpoint
-      ports: [8080]
-    - cidr: 203.0.113.20/32  # selected authorization server
-      ports: [443]
+  enabled: false
 ```
 
 Install one release per workspace:
@@ -347,7 +342,7 @@ kubectl rollout status deployment/<release> -n pocket-advisor --timeout=5m
 
 The TLS Secret is lifecycle-managed outside this chart. After replacing its certificate or key, restart and verify the release so Caddy loads the new material: `kubectl rollout restart deployment/<release> -n pocket-advisor`, followed by the rollout-status command above and a certificate check against the public address.
 
-For OpenCode 1.18.15, register the pre-created public client and fixed callback explicitly:
+For OpenCode 1.18.15 on the local Mac, register the public client with the OrbStack-resolved cluster URL. OrbStack resolves `*.svc.cluster.local` DNS from macOS, so the MCP endpoint is the internal cluster service URL (such as `https://<release>.pocket-advisor.svc.cluster.local/mcp`). The `allowedHosts` in the Helm values must match this hostname. The OAuth callback listener runs on the Mac host at `127.0.0.1:19876`.
 
 ```json
 {
@@ -355,7 +350,7 @@ For OpenCode 1.18.15, register the pre-created public client and fixed callback 
   "mcp": {
     "pocket-advisor": {
       "type": "remote",
-      "url": "https://mcp.example.test/mcp",
+      "url": "https://pocket-advisor-app.pocket-advisor.svc.cluster.local/mcp",
       "enabled": true,
       "oauth": {
         "clientId": "pocket-advisor-opencode",
@@ -367,6 +362,8 @@ For OpenCode 1.18.15, register the pre-created public client and fixed callback 
   }
 }
 ```
+
+The `redirectUri` `http://127.0.0.1:19876/mcp/oauth/callback` is the Mac-local listener where OpenCode receives the OAuth redirect from Keycloak. This is not inside the cluster. Replace the release name in the URL if your deployment uses a different release.
 
 Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`. Do not set `oauth: false`, inject a static bearer header, increase the client's tool-output limit, expose backend port 8080, or permit wildcard redirect URIs. A release is not ready for remote use until the populated, paginated-large, empty, disconnect, token-renewal, and token-revocation synthetic checks pass through its public TLS address.
 

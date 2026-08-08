@@ -149,6 +149,69 @@ Host and forwarded headers are validated only through a trusted proxy configurat
 
 Pocket Advisor is an OAuth 2.1 resource server. It publishes RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource/mcp`, identifies the operator-managed Keycloak issuer, and introspects every request without following redirects or caching active status, so revocation affects the next request. Keycloak is a separate authorization server; the application chart does not deploy or administer it.
 
+### Authentication flow
+
+The following diagram shows the end-to-end OAuth 2.1 authorization-code flow with PKCE when an MCP client (such as OpenCode on a local Mac) connects to the authenticated MCP server running in a local OrbStack Kubernetes cluster:
+
+```mermaid
+sequenceDiagram
+    participant Mac as Mac Host<br/>(OpenCode)
+    participant Browser as Browser
+    participant KC as Keycloak<br/>(in-cluster)
+    participant MCP as MCP Server<br/>(in-cluster)
+
+    Note over Mac: 1. Start local callback listener<br/>on 127.0.0.1:19876
+
+    Note over Mac,Browser: 2. Open authorization URL in browser<br/>https://keycloak...svc.cluster.local/.../auth<br/>?client_id=pocket-advisor-opencode<br/>&redirect_uri=http://127.0.0.1:19876/...<br/>&code_challenge=...&code_challenge_method=S256<br/>&scope=openid pocket-advisor:retrieve
+
+    Browser->>KC: 3. User logs in at Keycloak
+    KC-->>Browser: 4. Redirect to Mac-local callback<br/>http://127.0.0.1:19876/.../callback?code=...
+
+    Browser->>Mac: 5. Authorization code received<br/>at local listener
+
+    Note over Mac: 6. Exchange code for tokens<br/>(code_verifier sent to Keycloak)
+
+    Mac->>KC: POST /protocol/openid-connect/token<br/>grant_type=authorization_code<br/>&code=...&code_verifier=...
+
+    KC-->>Mac: 7. Access token + refresh token
+
+    Note over Mac,MCP: 8. Call MCP with Bearer token
+
+    Mac->>MCP: POST /mcp<br/>Authorization: Bearer &lt;access_token&gt;<br/>Host: pocket-advisor-app...svc.cluster.local
+
+    Note over MCP: 9. Introspect token against Keycloak
+
+    MCP->>KC: POST /protocol/openid-connect/token/introspect<br/>token=... (confidential client credentials)
+
+    KC-->>MCP: 10. {active: true, sub: "...", scope: "...", aud: "..."}
+
+    Note over MCP: 11. Validate audience, scope, expiry
+
+    MCP-->>Mac: 12. MCP response (evidence)
+```
+
+**Flow summary:**
+
+1. The client starts a local HTTP listener on the Mac at `127.0.0.1:19876` to receive the OAuth callback.
+2. The client opens the Keycloak authorization URL in the user's browser. The URL includes the PKCE code challenge, the redirect URI pointing to the Mac-local listener, and the required scope.
+3. The user logs in at Keycloak (in-cluster, reached via OrbStack DNS from macOS).
+4. Keycloak redirects the browser back to the Mac-local callback with an authorization code.
+5. The local listener receives the code.
+6. The client exchanges the code for tokens by calling Keycloak's token endpoint, including the PKCE code verifier.
+7. Keycloak returns an access token and refresh token.
+8. The client calls the MCP server with the access token in the `Authorization: Bearer` header.
+9. The MCP server introspects the token against Keycloak using its confidential client credentials.
+10. Keycloak confirms the token is active and returns subject, scope, and audience claims.
+11. The MCP server validates that the audience matches the MCP resource URI and the scope includes `pocket-advisor:retrieve`.
+12. The MCP server returns the MCP response (evidence packets).
+
+**Key points:**
+
+- The `127.0.0.1` in the redirect URI is the Mac host's loopback, not inside the cluster.
+- OrbStack resolves `*.svc.cluster.local` DNS from macOS, so both Keycloak and the MCP server are reached via their internal cluster DNS names.
+- The MCP server never sees the user's credentials; it only receives and introspects the access token.
+- Token introspection uses a separate confidential client with its own credentials, mounted as a Kubernetes Secret.
+
 ### Keycloak client configuration
 
 The selected authorization design uses an operator-managed Keycloak realm. Configure two clients:

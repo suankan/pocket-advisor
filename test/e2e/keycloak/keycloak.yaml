@@ -6,9 +6,6 @@ metadata:
     app.kubernetes.io/component: e2e-keycloak
 data:
   realm.json: |
-    # Imported by Keycloak start-dev --import-realm from /opt/keycloak/data/import.
-    # See test/e2e/keycloak/realm.json for the source of truth; this copy is
-    # inlined so a single manifest brings up the e2e authorization server.
     {
       "realm": "pocket-advisor",
       "enabled": true,
@@ -33,8 +30,7 @@ data:
           "secret": "e2e-introspection-secret",
           "protocol": "openid-connect",
           "serviceAccountsEnabled": true,
-          "defaultClientScopes": ["pocket-advisor:retrieve"],
-          "serviceAccountClientRoles": { "realm-management": ["token-introspection"] }
+          "defaultClientScopes": ["pocket-advisor:retrieve"]
         }
       ],
       "clientScopes": [
@@ -88,17 +84,21 @@ spec:
         - name: keycloak
           image: quay.io/keycloak/keycloak:24.0.3
           args: ["start-dev", "--import-realm"]
+          env:
+            - name: KEYCLOAK_ADMIN
+              value: admin
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: admin
           ports:
-            - name: https
-              containerPort: 8443
+            - name: http
+              containerPort: 8080
           volumeMounts:
             - name: realm
               mountPath: /opt/keycloak/data/import
           readinessProbe:
             httpGet:
               path: /realms/master
-              port: 8443
-              scheme: HTTPS
+              port: 8080
             initialDelaySeconds: 15
             periodSeconds: 10
           resources:
@@ -121,6 +121,6 @@ spec:
   selector:
     app.kubernetes.io/component: e2e-keycloak
   ports:
-    - name: https
-      port: 8443
-      targetPort: 8443
+    - name: http
+      port: 8080
+      targetPort: 8080

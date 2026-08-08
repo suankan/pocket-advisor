@@ -25,10 +25,7 @@
       "secret": "e2e-introspection-secret",
       "protocol": "openid-connect",
       "serviceAccountsEnabled": true,
-      "defaultClientScopes": ["pocket-advisor:retrieve"],
-      "serviceAccountClientRoles": {
-        "realm-management": ["token-introspection"]
-      }
+      "defaultClientScopes": ["pocket-advisor:retrieve"]
     }
   ],
   "clientScopes": [

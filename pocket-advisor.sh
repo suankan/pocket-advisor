@@ -519,7 +519,20 @@ E2E_RELEASE="pocket-advisor-e2e"
 cmd_e2e_keycloak_up() {
   kubectl apply -f test/e2e/keycloak/keycloak.yaml -n "$E2E_NS" || exit 1
   kubectl rollout status deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" --timeout=5m || exit 1
-  echo "keycloak ready at https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor"
+  # Keycloak's realm import accepts serviceAccountsEnabled but not a service
+  # account role assignment, so grant token-introspection to the
+  # resource-server client's service account after startup.
+  local pod
+  pod="$(kubectl get pods -n "$E2E_NS" -l app.kubernetes.io/component=e2e-keycloak \
+    -o jsonpath='{.items[0].metadata.name}')" || exit 1
+  kubectl exec -n "$E2E_NS" "$pod" -- /opt/keycloak/bin/kcadm.sh config credentials \
+    --server http://localhost:8080 --realm master --user admin --password admin >/dev/null 2>&1 || exit 1
+  kubectl exec -n "$E2E_NS" "$pod" -- /opt/keycloak/bin/kcadm.sh add-roles -r pocket-advisor \
+    --uclient pocket-advisor-resource-server --cclient realm-management \
+    --rolename token-introspection >/dev/null 2>&1 || exit 1
+  # Keycloak's dev profile serves plain HTTP on 8080 only; the realm has
+  # sslRequired none, so the e2e flow is unencrypted within the cluster.
+  echo "keycloak ready at http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor"
 }
 
 cmd_e2e_app_up() {
@@ -528,15 +541,18 @@ cmd_e2e_app_up() {
   # The deployed pod runs in the cluster, so localhost means the pod, not the
   # Mac host where the model server listens. OrbStack pods reach the host at
   # host.internal, so rewrite any localhost endpoint in the config to that
-  # before creating the Secret. The operator's workspaces/ file is untouched.
+  # before creating the Secret. The operator's workspaces/ files are untouched.
+  # The chart's configuration Secret carries three keys: the app config
+  # (config.yaml), the workspace registry (workspace-config.yaml), and the
+  # private infra/credentials override (workspace-values.yaml).
   local tmpcfg
   tmpcfg="$(mktemp)"
   yq '(.. | select(tag == "!!str" and test("localhost"))) |= sub("localhost", "host.internal")' \
-    "workspaces/$ws-config.yaml" > "$tmpcfg" || exit 1
+    config.yaml > "$tmpcfg" || exit 1
   kubectl create secret generic "$E2E_RELEASE-config" \
     --from-file=config.yaml="$tmpcfg" \
-    --from-file=workspace-config.yaml="workspaces/$ws-workspace-config.yaml" \
-    --from-file=workspace-values.yaml="workspaces/$ws-workspace-values.yaml" \
+    --from-file=workspace-config.yaml="workspaces/workspace-config.yaml" \
+    --from-file=workspace-values.yaml="workspaces/pocket-advisor-infra.yaml" \
     -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
   rm -f "$tmpcfg"
   kubectl create secret generic "$E2E_RELEASE-oauth" \
@@ -561,8 +577,8 @@ cmd_e2e_app_up() {
   helm upgrade --install "$E2E_RELEASE" "$APP_CHART" -n "$E2E_NS" --create-namespace \
     -f test/e2e/app-values.yaml \
     --set workspace.id="$ws" \
-    --set oauth.authorizationServer="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
-    --set oauth.introspectionEndpoint="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
+    --set oauth.authorizationServer="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor" \
+    --set oauth.introspectionEndpoint="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
     --set networkPolicy.enabled=false \
     || exit 1
   kubectl rollout status deployment/"$E2E_RELEASE" -n "$E2E_NS" --timeout=5m || exit 1
@@ -572,7 +588,7 @@ cmd_e2e_mcp() {
   PA_K8S_E2E=1 \
   PA_E2E_MCP_URL="https://$E2E_RELEASE.$E2E_NS.svc.cluster.local/mcp" \
   PA_E2E_HOST="mcp.example.test" \
-  PA_E2E_KEYCLOAK_URL="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
+  PA_E2E_KEYCLOAK_URL="http://keycloak.$E2E_NS.svc.cluster.local:8080/realms/pocket-advisor" \
   PA_E2E_CLIENT_ID="pocket-advisor-opencode" \
   PA_E2E_REDIRECT_URI="http://127.0.0.1:19876/mcp/oauth/callback" \
   PA_E2E_USER="e2e-user" \

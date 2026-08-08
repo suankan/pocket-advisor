@@ -367,7 +367,106 @@ The `redirectUri` `http://127.0.0.1:19876/mcp/oauth/callback` is the Mac-local l
 
 Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`. Do not set `oauth: false`, inject a static bearer header, increase the client's tool-output limit, expose backend port 8080, or permit wildcard redirect URIs. A release is not ready for remote use until the populated, paginated-large, empty, disconnect, token-renewal, and token-revocation synthetic checks pass through its public TLS address.
 
-## 8. Remove content or a workspace
+## 8. Evaluate retrieval quality
+
+The evaluation framework measures whether retrieval returns the right evidence before model, index, chunking, fusion, reranking, or selection changes are accepted. It uses a versioned case format with synthetic content to avoid leaking private data.
+
+### Run the synthetic evaluation
+
+Run the evaluation against the committed synthetic corpus:
+
+```sh
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --workspace-id example
+```
+
+The command runs all 14 synthetic cases covering exact identifiers, paraphrases, bilingual search, multi-topic decomposition, threads, and off-domain queries. It prints a human-readable summary and exits with status 0 when all thresholds pass.
+
+### Readiness check
+
+Before running queries, verify that the embedding endpoint, model, dimension, and indexes are compatible:
+
+```sh
+./bin/pocket-advisor --evaluate --eval-readiness --workspace-id example
+```
+
+This checks that the configured embedding endpoint is reachable, the endpoint model and dimension match `schema_metadata`, stored chunks do not contain an incompatible active namespace, and the HNSW and BM25 indexes exist. Fail readiness with an actionable error before the first search.
+
+### Filter by category or case ID
+
+Run only specific cases or categories:
+
+```sh
+# Run only bilingual cases
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-filter-cats bilingual   --workspace-id example
+
+# Run specific cases by ID
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-filter-ids exact-identifier-001,paraphrase-001   --workspace-id example
+```
+
+### HNSW vs exact search comparison
+
+Compare approximate HNSW results with exact dense search to measure recall:
+
+```sh
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-hnsw   --eval-ef-search 40   --workspace-id example
+```
+
+The `--eval-ef-search` flag sets the HNSW `ef_search` parameter for comparison (default 40). The report shows approximate recall for each case and aggregate statistics.
+
+### Machine-readable output
+
+Emit JSON instead of human-readable text:
+
+```sh
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --json   --workspace-id example
+```
+
+### Write reports
+
+Save a report to a file (path must be gitignored):
+
+```sh
+./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-report eval-reports/example.json   --workspace-id example
+```
+
+### Synthetic evaluation cases
+
+The committed synthetic cases under `test/fixtures/eval/` exercise:
+
+| Category | Cases | What it tests |
+| --- | --- | --- |
+| `exact-identifier` | 3 | Direct matches for document titles or IDs |
+| `paraphrase` | 3 | Semantic similarity without exact keyword overlap |
+| `bilingual` | 2 | Cross-language retrieval (English + Russian) |
+| `multi-topic` | 2 | Question decomposition and topic-group coverage |
+| `thread` | 2 | Email thread context and conversation flow |
+| `off-domain` | 2 | Queries that should return no results |
+
+Each case specifies expected sources, topic groups (for multi-topic), forbidden sources (for false positives), and optional relevance grades. The baseline thresholds are in `test/fixtures/eval/baseline.json`.
+
+### Metrics
+
+The evaluation reports:
+
+- **Source recall at k**: fraction of expected sources found in top-k results
+- **Reciprocal rank**: 1/rank of first acceptable source
+- **nDCG**: normalized discounted cumulative gain with relevance grades
+- **Topic group coverage**: fraction of topic groups with at least one hit
+- **Forbidden hits**: unexpected documents that indicate false positives
+- **Empty pass rate**: off-domain queries correctly returning no results
+- **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select)
+
+### Private evaluation
+
+For private corpus evaluation, create a case file under `workspaces/` (gitignored) with real questions and expected sources. Use the `--eval-cases` flag to point to your private case file. Reports are written to `eval-reports/` (gitignored by default).
+
+### Interpretation
+
+- Exit code 0: all thresholds passed
+- Exit code 1: one or more thresholds failed or an error occurred
+- Check the summary for specific failures (low recall, forbidden hits, etc.)
+
+## 9. Remove content or a workspace
 
 Remove one selected document by content hash:
 
@@ -391,7 +490,7 @@ Destroy the workspace infrastructure itself while its credentials are still pres
 
 Then remove its entries from both private workspace files and run `./pocket-advisor.sh deploy-infra` so the chart removes its NATS account and RustFS notification environment.
 
-## 9. Verification
+## 10. Verification
 
 These commands are the supported verification interface. Select the checks appropriate to the change:
 
@@ -407,7 +506,7 @@ git status --short
 
 `lint` runs formatting, Go vet, Helm lint, and a chart-render assertion. Install the repository’s commit-message hook once per clone with `install-hooks`.
 
-## 10. Upgrade and teardown
+## 11. Upgrade and teardown
 
 Upgrade the shared-store release with the supported wrapper:
 

@@ -1,0 +1,34 @@
+Pocket Advisor Architecture Overview
+
+The system follows a microservice pipeline architecture:
+
+Ingestion Path:
+  Upload -> Discovery -> Extraction -> Chunking -> Embedding -> Indexing
+  (RustFS)  (NATS)     (Workers)    (Workers)   (Workers)   (Postgres)
+
+Retrieval Path:
+  Query -> Decompose -> Embed -> Dense Search -> Lexical Search -> Fuse
+       -> Pool -> Rerank -> Select -> Expand -> Budget -> Return
+
+Key components:
+
+1. NATS JetStream provides durable message queuing between ingestion
+   stages. Each workspace has its own streams for isolation.
+
+2. PostgreSQL with pgvector handles both lineage (Tier 2) and vector/
+   lexical indexes (Tier 3). HNSW indexes enable fast approximate
+   nearest neighbor search.
+
+3. RustFS serves as the authoritative document store (Tier 1).
+   Content-addressed objects ensure deduplication.
+
+4. Model endpoints provide embedding, reranking, and query preparation
+   (decomposition) capabilities. These are local, OpenAI-compatible APIs.
+
+The system is deployed as a single Go binary on the host, with shared
+stores running in a local Kubernetes cluster (OrbStack).
+
+Configuration is split between:
+- config.yaml: infrastructure endpoints and model settings
+- workspace-config.yaml: collections and paths (gitignored)
+- pocket-advisor-infra.yaml: credentials (gitignored)

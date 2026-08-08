@@ -1,0 +1,25 @@
+From: alice@company.com
+To: team@company.com
+Subject: Q3 Planning Meeting Notes
+Date: 2025-07-15
+
+Hi team,
+
+Here are the notes from today's Q3 planning session.
+
+Agenda items covered:
+1. Budget allocation for infrastructure upgrades
+2. Hiring plan for senior engineers
+3. Product roadmap priorities
+
+Key decisions:
+- We will migrate from CloudNativePG to a plain PostgreSQL StatefulSet
+- The embedding endpoint will be upgraded to support 2048 dimensions
+- We are adding a new reranking model for better cross-lingual support
+
+Action items:
+- Alice: Prepare infrastructure migration plan by July 30
+- Bob: Draft hiring requirements for 3 senior Go engineers
+- Carol: Update product roadmap with new Q3 milestones
+
+Next meeting: July 22 at 10:00 AM

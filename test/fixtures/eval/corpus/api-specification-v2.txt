@@ -1,0 +1,36 @@
+API Specification Version 2.0
+
+Endpoint: POST /api/v2/query
+Authentication: Bearer token via OAuth 2.0
+Rate limit: 100 requests per minute
+
+Request body:
+{
+  "question": "string (required)",
+  "top_k": "integer (default: 15, max: 50)",
+  "rerank": "boolean (default: true)",
+  "decompose": "boolean (default: true)"
+}
+
+Response:
+{
+  "question": "string",
+  "sub_queries": ["string"],
+  "packets": [...],
+  "warnings": ["string"],
+  "budget": {
+    "bytes_used": "integer",
+    "bytes_allowed": "integer"
+  }
+}
+
+Error codes:
+- 400: Invalid request parameters
+- 401: Authentication required
+- 403: Insufficient permissions
+- 429: Rate limit exceeded
+- 500: Internal server error
+
+The API uses MCP (Model Context Protocol) for tool-based access.
+The evidence interface returns cited packets with document metadata,
+UTF-8 byte offsets, and Tier 1 citations.

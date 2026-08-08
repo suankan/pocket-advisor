@@ -1,0 +1,20 @@
+Project Alpha Design Document
+
+Project Alpha is a distributed task scheduler built on NATS JetStream.
+The system uses a three-tier architecture: Tier 1 stores task definitions in
+RustFS, Tier 2 maintains lineage in PostgreSQL, and Tier 3 provides vector
+search for task similarity.
+
+The embedding model used is jina-embeddings-v5-text-small-mlx with 1024
+dimensions. Chunks are 2000 characters with 200-character overlap.
+
+Key design decisions:
+- HNSW index with m=16, ef_construction=64 for the embedding column
+- BM25 index using simple text configuration for bilingual support
+- Reciprocal rank fusion with k=60 combining dense and lexical legs
+- Reranking window of 24 candidates with pool floor reservations
+- Context budget of 120000 UTF-8 bytes per query response
+
+The system processes approximately 1000 tasks per hour during peak load.
+Latency requirements are under 500ms for dense search and under 200ms for
+lexical search at the 95th percentile.

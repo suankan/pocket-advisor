@@ -1,0 +1,26 @@
+From: carol@company.com
+To: security@company.com
+Subject: Security review for database credentials
+Date: 2025-07-20
+
+Team,
+
+I've been reviewing how we handle database credentials in the
+Pocket Advisor deployment. Currently, passwords are stored in
+workspaces/pocket-advisor-infra.yaml with ${VAR} placeholders
+that get expanded from the environment.
+
+This approach works for local development but has issues:
+1. The .envrc file must be kept secure
+2. No rotation mechanism exists
+3. Audit trail is limited
+
+I recommend we implement:
+- Automatic credential rotation via Kubernetes operator
+- Integration with external secret management (Vault, AWS Secrets Manager)
+- Enhanced audit logging for credential access
+
+Please review and provide feedback by end of week.
+
+Thanks,
+Carol

@@ -1,0 +1,30 @@
+Security Audit Report - August 2025
+
+Scope: Pocket Advisor infrastructure and application
+
+Findings:
+
+HIGH: Database credentials stored in plaintext
+- Recommendation: Use Kubernetes Secrets or external secret management
+- Status: Mitigated via environment variable expansion
+
+MEDIUM: No TLS between application and PostgreSQL
+- Recommendation: Enable TLS termination at the database proxy
+- Status: Accepted for local cluster, required for production
+
+LOW: Default admin credentials in Helm values
+- Recommendation: Rotate credentials after initial deployment
+- Status: Documented in deployment guide
+
+Informational:
+- Workspace isolation is enforced at the database level
+- Each workspace has its own PostgreSQL role and database
+- NATS accounts provide message-level isolation
+- RustFS buckets are workspace-scoped
+
+Overall assessment: The system meets security requirements for
+local single-user deployment. Production deployment requires
+additional hardening as documented above.
+
+Audit performed by: Security Team
+Date: 2025-08-01

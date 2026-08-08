@@ -1,0 +1,20 @@
+From: bob@company.com
+To: team@company.com
+Subject: Re: Q3 Planning Meeting Notes
+Date: 2025-07-16
+
+Thanks Alice for the notes. A few follow-up points:
+
+1. The PostgreSQL migration timeline looks tight. I suggest we start with
+   a staging environment test before committing to production.
+
+2. For the embedding upgrade, we should benchmark the new model against
+   our existing test cases to ensure retrieval quality doesn't degrade.
+
+3. The reranking model change needs evaluation - we have synthetic test
+   cases that measure recall, MRR, and nDCG scores.
+
+Let me know if anyone has concerns about the proposed timeline.
+
+Best,
+Bob

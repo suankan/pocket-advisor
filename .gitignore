@@ -23,3 +23,7 @@ logs/
 # Helm resolves these from the repos pinned in Chart.yaml; Chart.lock is what
 # we commit, so the tarballs are build output.
 charts/*/charts/*.tgz
+
+# Evaluation reports (private output)
+eval-reports/
+*.eval.json

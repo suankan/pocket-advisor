@@ -1,0 +1,25 @@
+From: alice@company.com
+To: security@company.com
+Subject: Re: Security review for database credentials
+Date: 2025-07-21
+
+Carol,
+
+Good points. A few thoughts:
+
+1. For local development, the current approach is acceptable since
+   the environment is single-user and trusted.
+
+2. For production, we should definitely move to Kubernetes Secrets
+   or an external manager. The Helm chart already supports mounting
+   secrets from Kubernetes.
+
+3. Automatic rotation is more complex - we need to coordinate
+   PostgreSQL role password changes with application restarts.
+
+4. I agree on audit logging. We should track when credentials are
+   accessed and by which component.
+
+Let's schedule a follow-up to discuss implementation details.
+
+Alice

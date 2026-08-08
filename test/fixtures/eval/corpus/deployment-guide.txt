@@ -1,0 +1,33 @@
+Deployment Guide - Pocket Advisor
+
+Prerequisites:
+- OrbStack or local Kubernetes cluster
+- mise for pinned Go and CGo environment
+- Tesseract for OCR processing
+- Helm, kubectl, Docker, psql
+
+Installation steps:
+
+1. Deploy infrastructure:
+   ./pocket-advisor.sh deploy-infra
+
+2. Build the binary:
+   ./pocket-advisor.sh build
+
+3. Provision workspace:
+   ./pocket-advisor.sh deploy-workspace example
+
+4. Ingest content:
+   ./bin/pocket-advisor --ingest-all --workspace-id example
+
+5. Verify retrieval:
+   ./bin/pocket-advisor --query "test query" --workspace-id example
+
+The Helm chart deploys PostgreSQL with pgvector, RustFS for object storage,
+and NATS JetStream for durable messaging. Each workspace gets its own
+database, bucket, and NATS account for complete isolation.
+
+Monitoring:
+- Dashboard shows upload progress, queue depths, and pool use
+- Prometheus metrics at localhost:9090/metrics
+- Structured logs in logs/ directory

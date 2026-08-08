@@ -60,6 +60,16 @@ type Options struct {
 	MCPHTTPTrustedProxyCIDRs     string
 	MCPHTTPMaxConcurrent         int
 
+	Evaluate       bool
+	EvalCases      string
+	EvalReport     string
+	EvalFilterIDs  string
+	EvalFilterCats string
+	EvalRunHNSW    bool
+	EvalEfSearch   int
+	EvalReadiness  bool
+	EvalThresholds string
+
 	StaleAfter time.Duration
 	HighWater  uint64
 	LowWater   uint64
@@ -86,6 +96,9 @@ Modes (exactly one):
   --mcp-http          serve the same fixed-workspace tools over authenticated
                       Streamable HTTP. The backend is loopback-only and must
                       sit behind the documented TLS gateway.
+  --evaluate          run retrieval quality evaluation against evaluation cases.
+                      Requires --eval-cases. Emits a human summary by default;
+                      --json emits machine-readable output.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
 
@@ -102,6 +115,16 @@ Query options:
   --json                    machine-readable output
   --no-rerank               skip the cross-encoder; serve fused order
   --no-decompose            do not split a multi-topic question
+
+Evaluate options:
+  --eval-cases <path>        evaluation case set JSON (required for --evaluate)
+  --eval-report <path>       write report to path (gitignored, default: none)
+  --eval-filter-ids <csv>    comma-separated case IDs to evaluate
+  --eval-filter-cats <csv>   comma-separated categories to evaluate
+  --eval-hnsw                run exact vs HNSW dense search comparison
+  --eval-ef-search N         HNSW ef_search for comparison (default 40)
+  --eval-readiness           check readiness without running queries
+  --eval-thresholds <path>   thresholds JSON (default: synthetic thresholds)
 
 Options:
   --yes                     skip destructive confirmation prompts
@@ -217,7 +240,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --mcp-http, --delete-data, --forget (--help for details)")
+			"--query, --mcp, --mcp-http, --evaluate, --delete-data, --forget (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -305,6 +328,19 @@ func Run(o *Options) error {
 	switch {
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
+	case o.Evaluate:
+		eo := evaluateOptions{
+			CaseSet:    o.EvalCases,
+			ReportPath: o.EvalReport,
+			FilterIDs:  o.EvalFilterIDs,
+			FilterCats: o.EvalFilterCats,
+			JSON:       o.JSON,
+			RunHNSW:    o.EvalRunHNSW,
+			EfSearch:   o.EvalEfSearch,
+			Readiness:  o.EvalReadiness,
+			Thresholds: o.EvalThresholds,
+		}
+		return runEvaluate(o, cfg, logs, eo)
 	case o.Query != "":
 		return runQuery(o, cfg, logs)
 	case o.MCP:

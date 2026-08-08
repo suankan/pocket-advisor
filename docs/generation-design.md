@@ -102,7 +102,7 @@ Telemetry records timings, response states, model identifiers, citation counts, 
 
 ## Relationship to MCP
 
-Current MCP exposes retrieval only, and the MCP client acts as the generation layer. When the target service exists, an MCP adapter may offer generation as an additional tool, but it must use the same authenticated route and response contract as HTTP. A tool name or workspace argument is never authorization.
+Current MCP exposes retrieval only, and the MCP client acts as the generation layer. MCP transport details are described in [MCP server design](mcp.md). When the target service exists, an MCP adapter may offer generation as an additional tool, but it must use the same authenticated route and response contract as HTTP. A tool name or workspace argument is never authorization.
 
 The local chat-completions model used by retrieval decomposition is not implicitly the answer model. Reusing it requires an explicit quality, privacy, and capacity decision.
 

@@ -245,6 +245,8 @@ Zero packets is a valid result when nothing relevant exists in the workspace.
 
 ### MCP
 
+The MCP server exposes retrieval evidence through stdio (local) and authenticated Streamable HTTP (remote). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
+
 Run one stdio MCP server per workspace:
 
 ```sh
@@ -268,46 +270,11 @@ Clients that launch from another working directory need an absolute binary path 
 
 The MCP tools return source evidence. The client or agent generates prose and should cite the complete result-scoped packet references. Pocket Advisor does not send corpus data to an answer model automatically.
 
-The stdio server supports the final MCP revisions `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`, preferring `2025-11-25` when a client proposes an unknown revision. Clients must complete the initialize response and `notifications/initialized` handshake before listing or calling tools.
-
-`tools/list` describes two read-only tools whose workspace is fixed by the process. `search_<workspace>` accepts a required question of at most 8,192 Unicode characters and an optional `top_k` from 1 to 50. It returns a compact ranked index. `read_<workspace>_evidence` accepts only an opaque `cursor` returned by the same server session and delivers the admitted source text in bounded pages. Both reject unknown arguments, including a workspace selector, result identifier, document identifier, or client-selected byte range.
-
-Successful calls return two representations generated from the same result:
-
-- `structuredContent` follows the advertised JSON Schema 2020-12 page contract. Evidence packets use collision-free references such as `R0123456789ab:E1`, explicit UTF-8 byte offsets and budget units, stable empty arrays, nullable dates and identifiers, and explicit text availability and omission state.
-- `content` contains a readable text fallback generated from the same page for clients that do not consume structured content. It carries the same references, continuation state, and page evidence.
-
-The search response contains ranked metadata and snippets rather than admitted full-document text. When `complete` is false, the consuming agent calls the named `continuation_tool` with exactly `next_cursor`. The server chooses the next packet and UTF-8-safe text range; the agent never constructs a cursor or range. The cursor addresses an immutable session-local result snapshot, is idempotent on retry, expires after 10 minutes without access, and may be evicted when the session reaches eight snapshots or 2 MiB of snapshot data. Snapshots and cursors are released when the stdio session ends.
-
-Each result retains the retrieval service's aggregate evidence allowance, which defaults to 120,000 UTF-8 bytes across all pages. Each encoded `CallToolResult`, including structured and readable representations together, targets at most 48 KiB and 1,800 readable lines. The complete JSON-RPC response has an absolute 50 KiB limit, and successful readable content cannot exceed 2,000 lines. These page bounds do not reduce the aggregate evidence allowance.
-
-The consuming agent should cite claims with complete references such as `[R0123456789ab:E1]`, preserve attribution and relationship labels, report retrieval and delivery warnings, and say that the corpus supplied no evidence when a completed search has no packets. It must reach `complete: true` before claiming that all evidence admitted for the result was reviewed. The tool does not validate or persist the agent's final prose.
-
-Malformed JSON-RPC and unknown methods are protocol errors. Invalid tool arguments, including expired, evicted, malformed, wrong-session, or wrong-workspace cursors, return `isError: true` with a correctable safe message. Database and model failures do not expose endpoints, SQL, workspace details, questions, or evidence. Evidence metadata that cannot fit a bounded page produces a safe instruction to narrow and rerun the search; an input frame over 8 MiB ends the invalid session.
-
-Cancellation uses `notifications/cancelled` with the original request ID. Closing stdin or terminating the process cancels in-flight retrieval before shutdown. Protocol diagnostics go to the private application log; stdout remains JSON-RPC only.
-
-### MCP client compatibility
-
-The synthetic fixture at `internal/mcp/testdata/synthetic_server` exercises client behavior without loading workspace configuration or private content.
-
-| Client or check | Version | Negotiation | Structured result and fallback | Large result | Cancellation | Citation behavior |
-| --- | --- | --- | --- | --- | --- | --- |
-| OpenCode | 1.18.15 | `2025-11-25` | The model-visible session retained readable `content`; no separate `structuredContent` field was retained | 156,200 admitted UTF-8 bytes arrived in one search and seven continuation calls; no page was marked truncated and the largest encoded result was 49,057 bytes | Interrupting `opencode run` terminated the client but left its persisted tool state `running`; no MCP cancellation notification reached the server | The model followed cursors through `complete=true`, preserved two distinct first-ranked references in one answer, and declined to invent an answer for completed empty evidence |
-| Automated protocol fixture | MCP final revisions 2024-11-05 through 2025-11-25 | Every advertised revision tested | Both schemas compile and every generated page validates | Byte and line targets, absolute JSON-RPC bound, large UTF-8 document, and multi-packet paging tested | In-flight request cancellation, continuation cancellation, and clean shutdown tested | Result namespaces do not collide; empty-evidence and incomplete-coverage instructions tested |
-
-Repeat the populated, paginated-large, empty, and cancellation synthetic cases when upgrading an intended client. It must discover both synthetic tools, preserve a complete result-scoped reference, follow opaque cursors without spill-file recovery, and decline to answer from completed empty evidence. A client process interrupt is not evidence of MCP cancellation unless the server observes `notifications/cancelled`; graceful OpenCode CLI cancellation remains unsupported in the tested version. Do not use a real workspace for compatibility testing.
+The synthetic fixture at `internal/mcp/testdata/synthetic_server` exercises client behavior without loading workspace configuration or private content. Repeat the populated, paginated-large, empty, and cancellation synthetic cases when upgrading an intended client. Do not use a real workspace for compatibility testing.
 
 ### Authenticated HTTP MCP
 
-The remote adapter serves the same tools at one canonical HTTPS `/mcp` resource. MCP 2026-07-28 clients use stateless per-request metadata. OpenCode 1.18.15 negotiates the compatible 2025-11-25 transport on the same endpoint. The Go process never opens a network-facing socket: it listens on `127.0.0.1:8080` inside the pod, while the Caddy sidecar terminates TLS on the only Service port and forwards over pod loopback.
-
-The selected authorization design uses an operator-managed Keycloak realm. Configure two clients:
-
-- A public OpenCode client with authorization-code flow, PKCE `S256`, refresh-token rotation, and the single exact redirect URI `http://127.0.0.1:19876/mcp/oauth/callback`. Do not configure a client secret. Issue five-minute access tokens and revoke refresh-token families on reuse.
-- A confidential resource-server client allowed only to call token introspection. Its secret is mounted separately. Configure token audiences so introspection returns both the canonical MCP resource URI and the introspection client ID, and configure the `pocket-advisor:retrieve` scope. The introspection response must include `iss`, `sub`, `aud`, `scope`, `iat`, and `exp`.
-
-Disable Keycloak dynamic client registration for this realm. The public client has no wildcard redirect. Keep Keycloak and the public MCP resource on HTTPS; the registered loopback callback is the OAuth native-client exception. Pocket Advisor publishes RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp`, introspects every request without following redirects, accepts a maximum 15-minute token lifetime, and does not cache active status, so revocation affects the next request. Introspection and MCP execution share the same concurrency and request-timeout boundary. Caller evidence state is bound to issuer and subject, capped at 128 active callers, and evicted after fifteen idle minutes or least-recently-used pressure; the stateless endpoint does not issue an HTTP MCP session identifier.
+The remote adapter serves the same tools at one canonical HTTPS `/mcp` resource. The Go process listens on `127.0.0.1:8080` inside the pod; the Caddy sidecar terminates TLS on the only Service port and forwards over pod loopback. Authorization and Keycloak client configuration are described in [MCP server design](docs/mcp.md#authentication-and-authorization).
 
 Build the application image:
 

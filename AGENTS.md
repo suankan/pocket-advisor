@@ -17,6 +17,7 @@ For every task, load in order:
    | Ingestion | Write path: upload, discovery, extraction, indexing, workers, and pipeline operations | [`docs/ingestion-design.md`](docs/ingestion-design.md) |
    | PDF text | PDF classification, extraction, layout analysis, OCR, and viability | [`docs/pdf-to-text.md`](docs/pdf-to-text.md) |
    | Retrieval | Read path: query preparation, candidate generation, fusion, reranking, and evidence packets | [`docs/retrieval-design.md`](docs/retrieval-design.md) |
+   | MCP | Model Context Protocol server: tool contract, evidence interface, authentication, transports | [`docs/mcp.md`](docs/mcp.md) |
    | Workspace isolation | Workspace data, credentials, storage boundaries, provisioning, and request isolation | [`docs/workspace-isolation.md`](docs/workspace-isolation.md) |
    | API and interfaces | Public/control-plane APIs, service boundaries, CLI coupling, and transports | [`docs/api-server-design.md`](docs/api-server-design.md) |
    | Generation | Cited answer generation, model access, evidence isolation, and the future generation service | [`docs/generation-design.md`](docs/generation-design.md) |

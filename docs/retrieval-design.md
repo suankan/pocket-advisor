@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor's read path. It describ
 
 ## Status
 
-The transport-independent Go retrieval package, host CLI query mode, workspace-bound stdio MCP server, authenticated Streamable HTTP MCP adapter, and per-workspace Kubernetes MCP deployment are current. A general HTTP user API and an in-repository answer-generation service remain target state.
+The transport-independent Go retrieval package and host CLI query mode are current. The workspace-bound stdio MCP server and authenticated Streamable HTTP MCP adapter are described in [MCP server design](mcp.md). A general HTTP user API and an in-repository answer-generation service remain target state.
 
 ## Principles
 
@@ -114,29 +114,9 @@ The current process emits structured logs and includes warning codes in CLI and 
 
 `./bin/pocket-advisor --query '<question>' --workspace-id <id>` builds a retrieval service for the selected workspace, asserts database scope, runs the query, and prints packet metadata and text. `--top-k`, `--json`, `--no-rerank`, and `--no-decompose` override request behavior or output.
 
-### stdio MCP
+### MCP transports
 
-`./bin/pocket-advisor --mcp --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes generated search and evidence-reading tools. It implements the final MCP revisions from 2024-11-05 through 2025-11-25, negotiates only those revisions, enforces initialize/initialized lifecycle order, supports ping and cancellation, and does not open a network listener. The direct protocol implementation remains smaller than introducing an SDK for this bounded method set; every advertised revision and method is covered by protocol tests.
-
-`tools/list` advertises closed, bounded input schemas and one shared JSON Schema 2020-12 evidence-page output schema. Both tools have display titles and read-only, non-destructive, idempotent, closed-world annotations. Workspace scope is absent from their inputs. The search tool accepts a bounded question and optional result count. The evidence reader accepts only an opaque continuation cursor; clients cannot select a result, document, byte range, storage location, or workspace.
-
-A search creates an immutable session-local snapshot of the typed retrieval result and returns a compact ranked index. Packets have collision-free result-scoped references such as `R0123456789ab:E1`; document and chunk identifiers; source hash and Tier 1 URI; match snippet, score, search legs, explicit UTF-8 byte offsets; text availability and omission state; and related-document counts. Dates and absent identifiers are nullable and collections are never null. Subsequent evidence pages use the same references and deliver primary and related admitted text in server-selected UTF-8-safe ranges, preferring paragraph boundaries when they fit.
-
-Every page is returned both as typed `structuredContent` and as readable `TextContent` generated from the same value. It reports `complete`, nullable `next_cursor` and `continuation_tool`, current response budget, aggregate evidence budget, retrieval warnings, and an explicit delivery warning while more evidence remains. The aggregate retrieval allowance defaults to 120,000 UTF-8 bytes across the result; it is not reset per page. An agent may stop when it has enough cited support, but it cannot claim complete admitted-evidence coverage until a page reports `complete: true`.
-
-The server targets at most 48 KiB for the encoded `CallToolResult` and 1,800 readable lines so the complete JSON-RPC response remains below an absolute 50 KiB and 2,000-readable-line client boundary. Both structured and readable representations count toward the result target. The server never depends on client spill files or tool-output truncation recovery.
-
-Continuation cursors are random, opaque, and idempotent on retry. They reference the immutable snapshot rather than rerunning retrieval. Stdio binds them to its connection and fixed workspace. Authenticated HTTP binds them to the exact authorization issuer and subject plus the fixed workspace because its current and compatibility handlers are stateless at the transport layer; a refreshed token for the same subject can continue, while another caller cannot. Access extends a ten-minute expiry; each state namespace retains at most eight snapshots and 2 MiB of encoded snapshot data, evicts the least recently used snapshot when necessary, and releases state at shutdown or caller-state expiry. The HTTP adapter retains at most 128 active caller namespaces and closes the least recently used namespace before admitting another. Every invalid boundary returns the same bounded correctable tool error.
-
-Invalid tool arguments return a correctable tool error. An unknown tool is a protocol error. Retrieval and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded page is rejected with an instruction to narrow and rerun the question. Valid request frames are limited to 8 MiB, request identifiers to 256 encoded bytes, questions to 8,192 Unicode characters before whitespace trimming, cursors to 256 bytes, and `top_k` to 50.
-
-The external MCP agent uses complete result-scoped packet references for citations and performs answer generation. It must preserve warning, relation, and incomplete-delivery semantics; it says that the corpus supplied no evidence when a completed search has no packets rather than answering from general knowledge.
-
-### Authenticated Streamable HTTP MCP
-
-`./bin/pocket-advisor --mcp-http --workspace-id <id> ...` serves the same two tools through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
-
-The process is a loopback-only backend to the Caddy TLS sidecar described in [API server design](api-server-design.md). It starts only after database scope succeeds, and readiness continues checking database scope plus required model and authorization-server endpoint reachability. OAuth issuer, subject, resource audience, scope, and active state authorize access but cannot select a workspace. The application release supplies only one workspace's PostgreSQL credential and one fixed `--workspace-id`.
+Both the stdio and authenticated Streamable HTTP MCP transports are described in [MCP server design](mcp.md). They expose the same tool contract, evidence interface, citation system, pagination, and response bounds over the retrieval package. The retrieval package remains transport-independent; both MCP adapters are thin boundaries over `internal/retrieval` and the shared `internal/mcp.QueryTool`.
 
 ## Target service boundary
 
@@ -148,7 +128,7 @@ Target observability should expose per-stage latency, candidate yields by leg, w
 
 ## Verification
 
-Use the repository commands in [README §9](../README.md#9-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, MCP lifecycle and cancellation fixtures, JSON Schema validation, and the manual query and supported-client smoke checks in the handbook.
+Use the repository commands in [README §9](../README.md#9-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, and the manual query and supported-client smoke checks in the handbook. MCP-specific tests are described in [MCP server design](mcp.md#testing).
 
 ## Open decisions
 

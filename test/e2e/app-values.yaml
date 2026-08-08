@@ -24,14 +24,13 @@ tls:
   secretName: pocket-advisor-e2e-tls
 
 service:
-  # ClusterIP is safe by default. The e2e opens ingress from the host (see
-  # networkPolicy.ingressCIDRs); a remote deployment would use LoadBalancer
+  # ClusterIP is safe by default. A remote deployment would use LoadBalancer
   # with explicit source ranges instead.
   type: ClusterIP
 
+# The e2e runs on a trusted local, single-user OrbStack cluster, so the
+# NetworkPolicy is disabled: the app pod reaches PostgreSQL, the model
+# endpoints, and Keycloak without enumerating source or destination IPs.
+# Real deployments keep this enabled with explicit egress/ingress CIDRs.
 networkPolicy:
-  enabled: true
-  ingressCIDRs:
-    - 0.0.0.0/0
-  # Filled by e2e-app-up: PostgreSQL, model endpoint, and Keycloak CIDRs/ports.
-  egress: []
+  enabled: false

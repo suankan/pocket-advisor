@@ -87,14 +87,18 @@ implemented design lives in [`docs/api-server-design.md`](../api-server-design.m
   - The harness is committed and compiles; a live run additionally requires an
     operator-built app image, the workspace config/TLS Secrets
     (`e2e-app-up` creates the config and OAuth Secrets and expects a
-    `pocket-advisor-e2e-tls` Secret for `mcp.example.test`), and the
-    PostgreSQL/model egress CIDRs for the cluster. Verify with a live run
-    before declaring the intended-client gate met.
+    `pocket-advisor-e2e-tls` Secret for `mcp.example.test`), and a model
+    endpoint the app pod can reach. The NetworkPolicy is disabled for the e2e
+    (set `networkPolicy.enabled=false` in `test/e2e/app-values.yaml`), so no
+    PostgreSQL/model/Keycloak egress CIDRs are required — appropriate for a
+    trusted local single-user OrbStack cluster and deliberately avoiding
+    per-source/destination IP whitelisting. Verify with a live run before
+    declaring the intended-client gate met.
 
 ## Next actions
 
 1. ~~F2 — DNS-rebinding test cases.~~ DONE.
 2. ~~F1-a — hermetic gateway test + SDK localhost-guard fix.~~ DONE.
-3. ~~F1-b — real-cluster e2e harness (Keycloak realm, scripts, gated test).~~ DONE (harness); live run pending operator secrets/config.
+3. ~~F1-b — real-cluster e2e harness (Keycloak realm, scripts, gated test).~~ DONE (harness); live run pending operator secrets/config and a reachable model endpoint.
 4. Run the live e2e (`e2e-keycloak-up`, `e2e-app-up`, `e2e-mcp`) and confirm
    the intended-client flow passes through the real gateway and Keycloak.

@@ -7,7 +7,7 @@ reasoning_effort: xhigh
 
 ## Outcome
 
-Pocket Advisor exposes the same fixed-workspace MCP query tool through specification-compliant Streamable HTTP behind an authenticated, TLS-terminated boundary, without weakening storage credentials or allowing request-selected workspace scope.
+Pocket Advisor exposes the same fixed-workspace MCP query tool through MCP 2026-07-28 Streamable HTTP behind an authenticated, TLS-terminated boundary, while retaining MCP 2025-11-25 HTTP compatibility for the intended OpenCode client, without weakening storage credentials or allowing request-selected workspace scope.
 
 ## Why this task is needed
 
@@ -21,7 +21,7 @@ The authoritative future interface and routing design remains [`docs/api-server-
 
 This is a P0 usability blocker. The operator cannot use the system through the intended client while MCP is limited to local stdio, so authenticated Streamable HTTP is an activated near-term requirement rather than a conditional future task.
 
-This task depends on [`p0-1-mcp-evidence-interface.md`](p0-1-mcp-evidence-interface.md) and should follow it immediately in the same milestone. Before implementation, select the intended client, identity provider or authorization server, gateway, deployment location, and exposure boundary. Reconcile those choices into the API server design and remove any open decision they settle.
+This task depends on [`p0-1-mcp-evidence-interface.md`](p0-1-mcp-evidence-interface.md) and follows it in the same milestone. The intended client is OpenCode 1.18.15, with newer OpenCode versions expected to negotiate the current protocol when their MCP SDK gains support. The selected authorization server is an operator-managed Keycloak realm with a pre-registered public OpenCode client and a confidential introspection client. The selected gateway is a Caddy sidecar in the separate `pocket-advisor-app` Helm release. Caddy is the pod's only network listener and TLS boundary; the fixed-workspace Go resource server listens only on pod loopback. A remote release uses an explicitly source-restricted `LoadBalancer` Service, while the chart remains safe by default with `ClusterIP`.
 
 Do not begin by exposing an unauthenticated prototype and planning to add security later.
 
@@ -29,13 +29,13 @@ Do not begin by exposing an unauthenticated prototype and planning to add securi
 
 ### Transport adapter
 
-Implement the final MCP Streamable HTTP transport supported by the intended clients. Reuse the same typed MCP method handling, compact search and cursor-only evidence-reader definitions, result namespace, immutable snapshot, structured page, readable fallback, safe error contract, and fixed workspace as stdio. Do not introduce a second cursor format or transport-specific evidence result.
+Implement MCP 2026-07-28 Streamable HTTP and its 2025-11-25 compatibility behavior used by OpenCode 1.18.15. Reuse the same compact search and cursor-only evidence-reader implementation, result namespace, immutable snapshot, structured page, readable fallback, safe error contract, and fixed workspace as stdio. The official Go MCP SDK owns HTTP framing and version-specific transport behavior; it invokes Pocket Advisor's existing `QueryTool` rather than introducing a second cursor format or transport-specific evidence result.
 
 The adapter must implement:
 
 - one documented MCP endpoint;
 - POST handling and accepted response content types required by the specification;
-- session negotiation and secure session identifiers when sessions are used;
+- stateless per-request metadata and header validation for 2026-07-28, plus SDK-managed legacy negotiation when a 2025-11-25 client connects;
 - JSON responses and server-sent event behavior required by supported clients;
 - cancellation, disconnect, timeout, and clean shutdown behavior;
 - the stdio contract's 48 KiB encoded-result target, 51,200-byte complete-response ceiling, 1,800-readable-line target, and 2,000-readable-line ceiling without reducing the aggregate evidence budget;
@@ -54,7 +54,7 @@ Validate host and forwarded headers only through a trusted proxy configuration. 
 
 ### Authentication and authorization
 
-Select and implement an MCP-compatible OAuth 2.1 authorization design for non-loopback access, including protected-resource metadata and the discovery behavior required by the selected final specification.
+Implement Pocket Advisor as an OAuth 2.1 resource server. Publish RFC 9728 protected-resource metadata, identify the operator-managed Keycloak issuer, and introspect every request without an active-token cache so revocation takes effect on the next request. Keycloak remains a separate authorization server; the application chart does not deploy or administer it.
 
 The design must include:
 
@@ -72,7 +72,7 @@ If the selected client cannot implement the required authorization flow, stop an
 
 ### Workspace routing
 
-Deploy or launch one HTTP MCP service for one fixed workspace. The authenticated route selects that service; request paths, bodies, headers, tool names, and session state cannot change its workspace. Bind every evidence snapshot and cursor to the authorized caller or secure MCP session as well as that fixed service. Cross-caller, cross-session, and cross-workspace cursor use returns the same bounded correctable error without revealing which boundary rejected it.
+Deploy or launch one HTTP MCP service for one fixed workspace. The authenticated route selects that service; request paths, bodies, headers, tool names, and protocol metadata cannot change its workspace. MCP 2026-07-28 removed protocol-level sessions, and the compatibility handler also runs statelessly and issues no legacy transport session identifier. Every evidence snapshot and cursor is therefore bound to the authorization issuer and subject as well as the fixed service. Token renewal for the same subject preserves continuation; another caller or workspace receives the same bounded correctable cursor error. A supplied session header has no authority over identity or state.
 
 The service receives only the selected workspace’s retrieval credentials. It receives no shared PostgreSQL, RustFS, NATS, provisioning, or Kubernetes administrative credential. Direct service access must be blocked by network policy or host binding when a gateway is authoritative.
 
@@ -95,11 +95,11 @@ Configure:
 Test the exact intended client through the real gateway and authorization flow. The client must receive a result larger than one page entirely through MCP continuation, without desktop-local spill files or increasing its configured tool-output limit. Add automated tests for protocol behavior and a repeatable security suite covering:
 
 - unauthenticated, expired, wrong-audience, wrong-resource, and insufficient-scope tokens;
-- invalid Origin, Host, forwarded headers, redirect URIs, and session identifiers;
+- invalid Origin, Host, forwarded headers, redirect URIs, and non-authoritative session identifiers;
 - DNS rebinding attempts;
 - request smuggling and oversized JSON or SSE traffic;
-- session fixation and cross-session message use;
-- cross-caller, cross-session, and cross-workspace continuation cursor use, expiry, eviction, and idempotent retry;
+- attempts to establish or fix a transport session on the stateless endpoint;
+- cross-caller and cross-workspace continuation cursor use, expiry, caller-state and snapshot eviction, and idempotent retry, including attempts to override caller identity with a legacy session header;
 - disconnect and cancellation resource cleanup;
 - direct backend access around the gateway; and
 - attempts to select another workspace by every transport field.
@@ -118,7 +118,7 @@ Test the exact intended client through the real gateway and authorization flow. 
 
 - Stdio and HTTP adapters expose the same tool schema, structured result, warnings, citations, and error semantics.
 - Stdio and HTTP adapters expose the same result-scoped references, aggregate-versus-page budgets, response bounds, immutable snapshot, and opaque continuation behavior.
-- HTTP conforms to the selected final MCP transport and authorization revisions used by the intended client.
+- HTTP conforms to MCP 2026-07-28 and retains 2025-11-25 compatibility used by OpenCode 1.18.15.
 - Loopback is the default and non-loopback startup fails without the approved authenticated mode.
 - Invalid origins are rejected before tool execution.
 - Remote requests require valid OAuth authorization over TLS with correct resource and scope.
@@ -126,7 +126,7 @@ Test the exact intended client through the real gateway and authorization flow. 
 - Direct backend access is unavailable outside its approved trust boundary.
 - Rate, concurrency, size, timeout, cursor expiry and eviction, retry, disconnect, cancellation, and shutdown limits are tested without mixing result namespaces or pages.
 - Logs and metrics contain no tokens, questions, evidence, source identifiers, private paths, or workspace names.
-- The intended client completes initialization, tool discovery, multi-page retrieval without spill-file recovery, cancellation, and token renewal through the deployed boundary.
+- The intended client completes legacy initialization, tool discovery, multi-page retrieval without spill-file recovery, disconnect cleanup, and token renewal through the deployed boundary; current clients complete stateless discovery and per-request metadata validation.
 - Security tests cover origin, redirect, token, proxy, session, size, and cross-workspace attacks.
 
 ## Verification
@@ -143,6 +143,7 @@ Do not retain prototype notes, migration narration, or rejected authentication a
 
 ## Primary references
 
-- [MCP 2025-11-25 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-- [MCP 2025-11-25 authorization framework](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
-- [MCP 2025-11-25 protocol overview](https://modelcontextprotocol.io/specification/2025-11-25/basic)
+- [MCP 2026-07-28 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+- [MCP 2026-07-28 authorization framework](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+- [MCP 2026-07-28 protocol overview](https://modelcontextprotocol.io/specification/2026-07-28/basic)
+- [MCP 2025-11-25 Streamable HTTP compatibility contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)

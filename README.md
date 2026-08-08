@@ -1,6 +1,6 @@
 # Pocket Advisor Operator Guide
 
-Pocket Advisor is a local retrieval-augmented generation system for personal document collections. One Go binary runs on the host and uses three stores in a local Kubernetes cluster:
+Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion and direct local retrieval run as one Go binary on the host. Authenticated remote MCP runs as an optional fixed-workspace application workload in the local Kubernetes cluster. Both use the same three stores:
 
 - RustFS is Tier 1 and the authoritative document store.
 - PostgreSQL is Tier 2 lineage and Tier 3 vector and lexical indexes.
@@ -19,7 +19,7 @@ pocket-advisor
   query preparation       -----------------> local model endpoint
 ```
 
-The Helm chart deploys only the three shared stores. Pipeline and retrieval code runs on the host, so application changes require rebuilding the binary rather than redeploying the chart.
+The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The separate `pocket-advisor-app` chart deploys one authenticated MCP workload per workspace when remote access is needed. Host CLI changes require rebuilding the binary; HTTP MCP changes require rebuilding the application image and rolling only the corresponding application release.
 
 ## 1. Concepts
 
@@ -47,6 +47,7 @@ The authoritative designs are:
 - Tesseract and the required language packs for scanned PDFs and images.
 - A local OpenAI-compatible model endpoint serving the embedding, reranking, and query-preparation models named in `config.yaml`.
 - Helm, `kubectl`, Docker, `psql`, `aws-cli`, RustFS `rc`, `natscli`, `yq`, and `envsubst`.
+- For authenticated HTTP MCP: an operator-managed Keycloak realm, a public DNS name, a TLS certificate Secret, and network-policy CIDRs for the client, PostgreSQL, local model endpoints, and Keycloak.
 
 On macOS:
 
@@ -296,6 +297,111 @@ The synthetic fixture at `internal/mcp/testdata/synthetic_server` exercises clie
 | Automated protocol fixture | MCP final revisions 2024-11-05 through 2025-11-25 | Every advertised revision tested | Both schemas compile and every generated page validates | Byte and line targets, absolute JSON-RPC bound, large UTF-8 document, and multi-packet paging tested | In-flight request cancellation, continuation cancellation, and clean shutdown tested | Result namespaces do not collide; empty-evidence and incomplete-coverage instructions tested |
 
 Repeat the populated, paginated-large, empty, and cancellation synthetic cases when upgrading an intended client. It must discover both synthetic tools, preserve a complete result-scoped reference, follow opaque cursors without spill-file recovery, and decline to answer from completed empty evidence. A client process interrupt is not evidence of MCP cancellation unless the server observes `notifications/cancelled`; graceful OpenCode CLI cancellation remains unsupported in the tested version. Do not use a real workspace for compatibility testing.
+
+### Authenticated HTTP MCP
+
+The remote adapter serves the same tools at one canonical HTTPS `/mcp` resource. MCP 2026-07-28 clients use stateless per-request metadata. OpenCode 1.18.15 negotiates the compatible 2025-11-25 transport on the same endpoint. The Go process never opens a network-facing socket: it listens on `127.0.0.1:8080` inside the pod, while the Caddy sidecar terminates TLS on the only Service port and forwards over pod loopback.
+
+The selected authorization design uses an operator-managed Keycloak realm. Configure two clients:
+
+- A public OpenCode client with authorization-code flow, PKCE `S256`, refresh-token rotation, and the single exact redirect URI `http://127.0.0.1:19876/mcp/oauth/callback`. Do not configure a client secret. Issue five-minute access tokens and revoke refresh-token families on reuse.
+- A confidential resource-server client allowed only to call token introspection. Its secret is mounted separately. Configure token audiences so introspection returns both the canonical MCP resource URI and the introspection client ID, and configure the `pocket-advisor:retrieve` scope. The introspection response must include `iss`, `sub`, `aud`, `scope`, `iat`, and `exp`.
+
+Disable Keycloak dynamic client registration for this realm. The public client has no wildcard redirect. Keep Keycloak and the public MCP resource on HTTPS; the registered loopback callback is the OAuth native-client exception. Pocket Advisor publishes RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp`, introspects every request without following redirects, accepts a maximum 15-minute token lifetime, and does not cache active status, so revocation affects the next request. Introspection and MCP execution share the same concurrency and request-timeout boundary. Caller evidence state is bound to issuer and subject, capped at 128 active callers, and evicted after fifteen idle minutes or least-recently-used pressure; the stateless endpoint does not issue an HTTP MCP session identifier.
+
+Build the application image:
+
+```sh
+./pocket-advisor.sh docker-build-app
+```
+
+Create an operator-only configuration Secret for exactly one workspace. The registry and values files must be reduced to that workspace; never mount the shared multi-workspace values file into an application pod. Supply an expanded configuration file whose model and PostgreSQL endpoints are reachable under the chart's egress policy.
+
+```sh
+kubectl create secret generic <release>-configuration \
+  --from-file=config.yaml=<expanded-config> \
+  --from-file=workspace-config.yaml=<single-workspace-registry> \
+  --from-file=workspace-values.yaml=<single-workspace-values>
+
+kubectl create secret generic <release>-oauth \
+  --from-literal=introspection-client-secret='<secret>'
+
+kubectl create secret tls <release>-tls \
+  --cert=<certificate-chain> \
+  --key=<private-key>
+```
+
+Keep the release values under the gitignored `workspaces/` boundary. A minimal shape is:
+
+```yaml
+workspace:
+  id: example
+  configurationSecret: example-mcp-configuration
+
+mcp:
+  publicURI: https://mcp.example.test/mcp
+  allowedHosts: mcp.example.test
+  allowedOrigins: ""
+
+oauth:
+  authorizationServer: https://auth.example.test/realms/pocket-advisor
+  introspectionEndpoint: https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect
+  introspectionClientID: pocket-advisor-resource-server
+  secretName: example-mcp-oauth
+
+tls:
+  secretName: example-mcp-tls
+
+service:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+    - 192.0.2.0/24
+
+networkPolicy:
+  ingressCIDRs:
+    - 192.0.2.0/24
+  egress:
+    - cidr: 198.51.100.10/32 # selected PostgreSQL
+      ports: [5432]
+    - cidr: 198.51.100.11/32 # selected model endpoint
+      ports: [8080]
+    - cidr: 203.0.113.20/32  # selected authorization server
+      ports: [443]
+```
+
+Install one release per workspace:
+
+```sh
+helm upgrade --install <release> charts/pocket-advisor-app \
+  --namespace pocket-advisor --create-namespace \
+  -f workspaces/<release>-mcp.yaml
+kubectl rollout status deployment/<release> -n pocket-advisor --timeout=5m
+```
+
+The TLS Secret is lifecycle-managed outside this chart. After replacing its certificate or key, restart and verify the release so Caddy loads the new material: `kubectl rollout restart deployment/<release> -n pocket-advisor`, followed by the rollout-status command above and a certificate check against the public address.
+
+For OpenCode 1.18.15, register the pre-created public client and fixed callback explicitly:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pocket-advisor": {
+      "type": "remote",
+      "url": "https://mcp.example.test/mcp",
+      "enabled": true,
+      "oauth": {
+        "clientId": "pocket-advisor-opencode",
+        "scope": "pocket-advisor:retrieve",
+        "callbackPort": 19876,
+        "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
+      }
+    }
+  }
+}
+```
+
+Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`. Do not set `oauth: false`, inject a static bearer header, increase the client's tool-output limit, expose backend port 8080, or permit wildcard redirect URIs. A release is not ready for remote use until the populated, paginated-large, empty, disconnect, token-renewal, and token-revocation synthetic checks pass through its public TLS address.
 
 ## 8. Remove content or a workspace
 

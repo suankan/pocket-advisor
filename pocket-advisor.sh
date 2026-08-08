@@ -29,6 +29,7 @@ BIN=./bin/pocket-advisor
 PKG=./cmd/pocket-advisor
 RELEASE=pocket-advisor
 CHART=./charts/pocket-advisor-infra
+APP_CHART=./charts/pocket-advisor-app
 
 TMPFS=$(mktemp -d)
 trap 'rm -rf "$TMPFS"' EXIT
@@ -100,6 +101,7 @@ usage: ./pocket-advisor.sh <command> [args]
   lint                      fmt, vet, helm lint, chart-render assertion
   install-hooks             enable this clone's versioned Git hooks
   docker-build-postgres     build the local Postgres image
+  docker-build-app          build the application image used by authenticated MCP
   deploy-infra              helm install/upgrade the three shared stores
   destroy-infra             helm uninstall (PVCs retained)
   destroy-state             delete every PVC in $POCKET_ADVISOR_NAMESPACE (irreversible)
@@ -135,6 +137,33 @@ cmd_lint() {
   cmd_fmt || exit 1
   cmd_vet || exit 1
   helm lint "$CHART" || exit 1
+  helm lint "$APP_CHART" \
+    --set workspace.id=synthetic \
+    --set workspace.configurationSecret=synthetic-config \
+    --set mcp.publicURI=https://mcp.example.test/mcp \
+    --set mcp.allowedHosts=mcp.example.test \
+    --set oauth.authorizationServer=https://auth.example.test/realms/pocket-advisor \
+    --set oauth.introspectionEndpoint=https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect \
+    --set oauth.introspectionClientID=resource-server \
+    --set oauth.secretName=oauth-secret \
+    --set tls.secretName=tls-secret || exit 1
+  helm template synthetic "$APP_CHART" \
+    --set workspace.id=synthetic \
+    --set workspace.configurationSecret=synthetic-config \
+    --set mcp.publicURI=https://mcp.example.test/mcp \
+    --set mcp.allowedHosts=mcp.example.test \
+    --set oauth.authorizationServer=https://auth.example.test/realms/pocket-advisor \
+    --set oauth.introspectionEndpoint=https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect \
+    --set oauth.introspectionClientID=resource-server \
+    --set oauth.secretName=oauth-secret \
+    --set tls.secretName=tls-secret \
+    --set 'networkPolicy.egress[0].cidr=192.0.2.10/32' \
+    --set 'networkPolicy.egress[0].ports[0]=5432' > "$TMPFS/app-lint.yaml" \
+    && grep -q 'reverse_proxy 127.0.0.1:8080' "$TMPFS/app-lint.yaml" \
+    && grep -q 'port: 5432' "$TMPFS/app-lint.yaml" \
+    && [ "$(grep -c 'kind: Deployment' "$TMPFS/app-lint.yaml")" = "1" ] \
+    && echo "ok: authenticated MCP chart renders one loopback-backed deployment" \
+    || { echo "FAIL: rendered authenticated MCP chart is incomplete"; exit 1; }
   # No more per-workspace rendering to assert on — deviation 39 removed
   # the last workspace-scoped template (Streams). What is left to check is
   # that the chart still renders at all with zero dependencies and that
@@ -148,11 +177,16 @@ cmd_lint() {
     --set workspaces[0].id=lintws \
     --set workspaces[0].rustfs.password=lint \
     --set workspaces[0].nats.password=lint \
-    --set workspaces[0].postgres.password=lint > /tmp/pa-lint.yaml \
-    && grep -q 'RUSTFS_NOTIFY_NATS_ENABLE_LINTWS' /tmp/pa-lint.yaml \
-    && [ "$(grep -c 'kind: StatefulSet' /tmp/pa-lint.yaml)" = "3" ] \
+    --set workspaces[0].postgres.password=lint > "$TMPFS/infra-lint.yaml" \
+    && grep -q 'RUSTFS_NOTIFY_NATS_ENABLE_LINTWS' "$TMPFS/infra-lint.yaml" \
+    && [ "$(grep -c 'kind: StatefulSet' "$TMPFS/infra-lint.yaml")" = "3" ] \
     && echo "ok: chart renders three StatefulSets and the workspace's notify block" \
     || { echo "FAIL: rendered chart is incomplete"; exit 1; }
+}
+
+cmd_docker_build_app() {
+  docker build --platform linux/arm64 \
+    -t "pocket-advisor:local" -f docker-images/app/Dockerfile .
 }
 
 cmd_install_hooks() {
@@ -483,6 +517,7 @@ case "$cmd" in
   lint) cmd_lint ;;
   install-hooks) cmd_install_hooks ;;
   docker-build-postgres) cmd_docker_build_postgres ;;
+  docker-build-app) cmd_docker_build_app ;;
   deploy-infra) cmd_deploy_infra ;;
   destroy-infra) cmd_destroy_infra ;;
   destroy-state) cmd_destroy_state ;;

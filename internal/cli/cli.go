@@ -36,6 +36,7 @@ type Options struct {
 	Forget     string
 	Query      string
 	MCP        bool
+	MCPHTTP    bool
 
 	TopK        int
 	JSON        bool
@@ -47,6 +48,17 @@ type Options struct {
 	EmbedConc   int
 	LogDir      string
 	NoDashboard bool
+
+	MCPHTTPAddr                  string
+	MCPHTTPResourceURI           string
+	MCPHTTPAuthorizationServer   string
+	MCPHTTPIntrospectionEndpoint string
+	MCPHTTPIntrospectionClientID string
+	MCPHTTPRequiredScope         string
+	MCPHTTPAllowedOrigins        string
+	MCPHTTPAllowedHosts          string
+	MCPHTTPTrustedProxyCIDRs     string
+	MCPHTTPMaxConcurrent         int
 
 	StaleAfter time.Duration
 	HighWater  uint64
@@ -71,6 +83,9 @@ Modes (exactly one):
                       agent can search the corpus and write cited answers.
                       This is where answer generation happens — outside this
                       binary (retrieval-design.md §6.1)
+  --mcp-http          serve the same fixed-workspace tools over authenticated
+                      Streamable HTTP. The backend is loopback-only and must
+                      sit behind the documented TLS gateway.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
 
@@ -96,12 +111,28 @@ Options:
   --log-dir <path>          per-role log files (default logs)
   --no-dashboard            plain line output instead of the live display
 
+Authenticated HTTP MCP:
+  --mcp-http-addr <addr>                 loopback backend address (default 127.0.0.1:8080)
+  --mcp-http-resource-uri <https-uri>    canonical public MCP resource URI
+  --mcp-http-authorization-server <uri>  OAuth authorization-server issuer
+  --mcp-http-introspection-endpoint <uri> OAuth token introspection endpoint
+  --mcp-http-introspection-client-id <id> resource-server introspection client
+  --mcp-http-required-scope <scope>      retrieval scope (default pocket-advisor:retrieve)
+  --mcp-http-allowed-origins <csv>       exact browser origins; absent Origin remains valid
+  --mcp-http-allowed-hosts <csv>         exact public Host values (default resource URI host)
+  --mcp-http-trusted-proxy-cidrs <csv>   peers allowed to send forwarding headers
+  --mcp-http-max-concurrent N            in-flight HTTP requests (default 8)
+
+  MCP_HTTP_INTROSPECTION_CLIENT_SECRET supplies the confidential resource-
+  server credential and must come from the environment or a mounted Secret.
+
 Every other pool is sized from the host's CPU count and is not configurable.
 
 Examples:
   pocket-advisor --ingest-all --workspace-id test
   pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
   pocket-advisor --mcp --workspace-id test
+  pocket-advisor --mcp-http --workspace-id test --mcp-http-resource-uri https://mcp.example.test/mcp ...
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -123,6 +154,7 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.MCP, "mcp", false, "serve the read path as an MCP tool over stdio")
+	fs.BoolVar(&o.MCPHTTP, "mcp-http", false, "serve the read path as authenticated Streamable HTTP MCP")
 
 	fs.IntVar(&o.TopK, "top-k", 0, "maximum results for --query (0 = config default)")
 	fs.BoolVar(&o.JSON, "json", false, "emit --query results as JSON")
@@ -135,6 +167,17 @@ func Parse(args []string) (*Options, error) {
 	fs.IntVar(&o.EmbedConc, "embedding-concurrency", 0, "concurrent embedding sessions (0 = config default)")
 	fs.StringVar(&o.LogDir, "log-dir", "", "per-role log directory (empty = config default)")
 	fs.BoolVar(&o.NoDashboard, "no-dashboard", false, "plain line output instead of the live display")
+
+	fs.StringVar(&o.MCPHTTPAddr, "mcp-http-addr", "127.0.0.1:8080", "loopback HTTP MCP backend address")
+	fs.StringVar(&o.MCPHTTPResourceURI, "mcp-http-resource-uri", "", "canonical public HTTPS MCP resource URI")
+	fs.StringVar(&o.MCPHTTPAuthorizationServer, "mcp-http-authorization-server", "", "OAuth authorization-server issuer")
+	fs.StringVar(&o.MCPHTTPIntrospectionEndpoint, "mcp-http-introspection-endpoint", "", "OAuth token introspection endpoint")
+	fs.StringVar(&o.MCPHTTPIntrospectionClientID, "mcp-http-introspection-client-id", "", "OAuth resource-server introspection client id")
+	fs.StringVar(&o.MCPHTTPRequiredScope, "mcp-http-required-scope", "pocket-advisor:retrieve", "required OAuth retrieval scope")
+	fs.StringVar(&o.MCPHTTPAllowedOrigins, "mcp-http-allowed-origins", "", "comma-separated exact allowed browser origins")
+	fs.StringVar(&o.MCPHTTPAllowedHosts, "mcp-http-allowed-hosts", "", "comma-separated exact allowed public Host values")
+	fs.StringVar(&o.MCPHTTPTrustedProxyCIDRs, "mcp-http-trusted-proxy-cidrs", "127.0.0.0/8,::1/128", "comma-separated trusted proxy CIDRs")
+	fs.IntVar(&o.MCPHTTPMaxConcurrent, "mcp-http-max-concurrent", 8, "maximum concurrent authenticated HTTP MCP requests")
 
 	fs.DurationVar(&o.StaleAfter, "stale-after", 30*time.Minute, "PENDING age that counts as stalled")
 	fs.Uint64Var(&o.HighWater, "high-water", 10_000, "pause enqueueing above this many pending messages")
@@ -160,6 +203,7 @@ func (o *Options) modes() []string {
 		{o.Forget != "", "--forget"},
 		{o.Query != "", "--query"},
 		{o.MCP, "--mcp"},
+		{o.MCPHTTP, "--mcp-http"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -173,7 +217,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --delete-data, --forget (--help for details)")
+			"--query, --mcp, --mcp-http, --delete-data, --forget (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -248,7 +292,7 @@ func Run(o *Options) error {
 	// Claude Desktop attempt died, before the handshake and with the reason
 	// only visible in the client's own log.
 	var logs *telemetry.Logs
-	if o.MCP || o.Query != "" {
+	if o.MCP || o.MCPHTTP || o.Query != "" {
 		logs = telemetry.StderrLogs(cfg.LogLevel)
 	} else {
 		logs, err = telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
@@ -265,6 +309,8 @@ func Run(o *Options) error {
 		return runQuery(o, cfg, logs)
 	case o.MCP:
 		return runMCP(o, cfg, logs)
+	case o.MCPHTTP:
+		return runMCPHTTP(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor's read path. It describ
 
 ## Status
 
-The transport-independent Go retrieval package, host CLI query mode, and workspace-bound stdio MCP server are current. An authenticated HTTP API, a Kubernetes retrieval deployment, and an in-repository answer-generation service are target state and are not implemented.
+The transport-independent Go retrieval package, host CLI query mode, workspace-bound stdio MCP server, authenticated Streamable HTTP MCP adapter, and per-workspace Kubernetes MCP deployment are current. A general HTTP user API and an in-repository answer-generation service remain target state.
 
 ## Principles
 
@@ -126,15 +126,21 @@ Every page is returned both as typed `structuredContent` and as readable `TextCo
 
 The server targets at most 48 KiB for the encoded `CallToolResult` and 1,800 readable lines so the complete JSON-RPC response remains below an absolute 50 KiB and 2,000-readable-line client boundary. Both structured and readable representations count toward the result target. The server never depends on client spill files or tool-output truncation recovery.
 
-Continuation cursors are random, opaque, bound to the current stdio session and fixed workspace, and idempotent on retry. They reference the immutable snapshot rather than rerunning retrieval. Access extends a ten-minute expiry; the session retains at most eight snapshots and 2 MiB of encoded snapshot data, evicts the least recently used snapshot when necessary, and releases all state at shutdown. Expired, evicted, malformed, wrong-session, and wrong-workspace cursors return the same bounded correctable tool error.
+Continuation cursors are random, opaque, and idempotent on retry. They reference the immutable snapshot rather than rerunning retrieval. Stdio binds them to its connection and fixed workspace. Authenticated HTTP binds them to the exact authorization issuer and subject plus the fixed workspace because its current and compatibility handlers are stateless at the transport layer; a refreshed token for the same subject can continue, while another caller cannot. Access extends a ten-minute expiry; each state namespace retains at most eight snapshots and 2 MiB of encoded snapshot data, evicts the least recently used snapshot when necessary, and releases state at shutdown or caller-state expiry. The HTTP adapter retains at most 128 active caller namespaces and closes the least recently used namespace before admitting another. Every invalid boundary returns the same bounded correctable tool error.
 
 Invalid tool arguments return a correctable tool error. An unknown tool is a protocol error. Retrieval and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded page is rejected with an instruction to narrow and rerun the question. Valid request frames are limited to 8 MiB, request identifiers to 256 encoded bytes, questions to 8,192 Unicode characters before whitespace trimming, cursors to 256 bytes, and `top_k` to 50.
 
 The external MCP agent uses complete result-scoped packet references for citations and performs answer generation. It must preserve warning, relation, and incomplete-delivery semantics; it says that the corpus supplied no evidence when a completed search has no packets rather than answering from general knowledge.
 
+### Authenticated Streamable HTTP MCP
+
+`./bin/pocket-advisor --mcp-http --workspace-id <id> ...` serves the same two tools through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
+
+The process is a loopback-only backend to the Caddy TLS sidecar described in [API server design](api-server-design.md). It starts only after database scope succeeds, and readiness continues checking database scope plus required model and authorization-server endpoint reachability. OAuth issuer, subject, resource audience, scope, and active state authorize access but cannot select a workspace. The application release supplies only one workspace's PostgreSQL credential and one fixed `--workspace-id`.
+
 ## Target service boundary
 
-The intended network deployment is one long-running retrieval workload per workspace, reached only through the authenticated API gateway described in [API server design](api-server-design.md). HTTP and network MCP adapters will translate transport requests into the same `retrieval.Request` and return the same result semantics. They must not accept a caller-supplied workspace that bypasses the gateway's authenticated route.
+The broader user API remains one long-running retrieval workload per workspace, reached only through the authenticated API gateway described in [API server design](api-server-design.md). Future non-MCP HTTP adapters translate transport requests into the same `retrieval.Request` and return the same result semantics. They must not accept a caller-supplied workspace that bypasses the gateway's authenticated route.
 
 The future generation service described in [generation design](generation-design.md) is a separate consumer of evidence packets. Retrieval remains usable without it and does not gain answer-model credentials.
 

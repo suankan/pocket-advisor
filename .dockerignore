@@ -1,6 +1,11 @@
-workspaces/
-*.log
 .git/
+.envrc
+.claude/
+bin/
+charts/
+docs/
+logs/
+*.log
 retired-v2/
 tmp/
-.claude/
+workspaces/

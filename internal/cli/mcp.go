@@ -2,10 +2,14 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/client/llm"
@@ -34,42 +38,122 @@ func runMCP(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log := logs.Logger(telemetry.RoleApp)
-
-	dsn, err := cfg.WorkspacePostgresDSN(o.WorkspaceID)
+	tool, _, closeDB, err := newMCPTool(ctx, o, cfg, logs)
 	if err != nil {
 		return err
+	}
+	defer closeDB()
+	log := logs.Logger(telemetry.RoleApp)
+
+	log.Info("mcp server ready", "workspace_id", o.WorkspaceID,
+		"transport", "stdio", "collections", len(tool.Corpus))
+	srv := mcp.NewServer(tool, os.Stdin, os.Stdout, log)
+	return srv.Serve(ctx)
+}
+
+// runMCPHTTP serves the same tool through a loopback-only backend. The public
+// socket belongs to the Caddy gateway, which terminates TLS before forwarding
+// into the pod's shared loopback namespace. OAuth is still enforced here at
+// the resource server so a gateway routing mistake cannot bypass identity.
+func runMCPHTTP(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	tool, svc, closeDB, err := newMCPTool(ctx, o, cfg, logs)
+	if err != nil {
+		return err
+	}
+	defer closeDB()
+
+	secret := os.Getenv("MCP_HTTP_INTROSPECTION_CLIENT_SECRET")
+	server, err := mcp.NewHTTPServer(tool, mcp.HTTPOptions{
+		Address: o.MCPHTTPAddr, ResourceURI: o.MCPHTTPResourceURI,
+		AuthorizationServer:   o.MCPHTTPAuthorizationServer,
+		IntrospectionEndpoint: o.MCPHTTPIntrospectionEndpoint,
+		IntrospectionClientID: o.MCPHTTPIntrospectionClientID,
+		IntrospectionSecret:   secret, RequiredScope: o.MCPHTTPRequiredScope,
+		AllowedOrigins: splitCSV(o.MCPHTTPAllowedOrigins), AllowedHosts: splitCSV(o.MCPHTTPAllowedHosts),
+		TrustedProxyCIDRs: splitCSV(o.MCPHTTPTrustedProxyCIDRs), MaxConcurrent: o.MCPHTTPMaxConcurrent,
+		Readiness: func(readyCtx context.Context) error {
+			if err := svc.AssertScope(readyCtx); err != nil {
+				return fmt.Errorf("workspace database unavailable")
+			}
+			return assertMCPEndpoints(readyCtx, cfg, o.MCPHTTPIntrospectionEndpoint)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure HTTP MCP: %w", err)
+	}
+	logs.Logger(telemetry.RoleApp).Info("mcp server ready",
+		"transport", "streamable_http", "collections", len(tool.Corpus))
+	return server.Serve(ctx)
+}
+
+func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telemetry.Logs) (*mcp.QueryTool, *retrieval.Service, func(), error) {
+	log := logs.Logger(telemetry.RoleApp)
+	dsn, err := cfg.WorkspacePostgresDSN(o.WorkspaceID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	db, err := postgres.Connect(ctx, dsn, cfg.Postgres.MaxConns)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	defer db.Close()
-
 	svc := retrieval.New(db,
 		embedding.New(cfg.Embedding),
 		reranking.New(cfg.Reranking),
 		llm.New(cfg.LLM),
 		cfg.Query, o.WorkspaceID, log)
-
-	// Fail before the handshake rather than on the first search: a scope
-	// violation surfaced mid-conversation would look like a bad answer.
 	if err := svc.AssertScope(ctx); err != nil {
-		return err
+		db.Close()
+		return nil, nil, nil, err
 	}
-
-	// Describe the corpus from the registry rather than by its workspace id.
-	// With several servers registered, the agent chooses between them on the
-	// tool description alone, and "case-documents-demo" tells it nothing about
-	// whether that is where the bank statements live.
 	title, corpus := describeCorpus(o)
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus}, svc, db.Close, nil
+}
 
-	log.Info("mcp server ready", "workspace_id", o.WorkspaceID,
-		"transport", "stdio", "collections", len(corpus))
-	srv := mcp.NewServer(
-		&mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus},
-		os.Stdin, os.Stdout, log)
-	return srv.Serve(ctx)
+func assertMCPEndpoints(ctx context.Context, cfg *config.Config, introspectionEndpoint string) error {
+	endpoints := []string{cfg.Embedding.Endpoint}
+	if cfg.Query.RerankEnabled {
+		endpoints = append(endpoints, cfg.Reranking.Endpoint)
+	}
+	if cfg.Query.DecomposeEnabled {
+		endpoints = append(endpoints, cfg.LLM.Endpoint)
+	}
+	endpoints = append(endpoints, introspectionEndpoint)
+	for _, endpoint := range endpoints {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Hostname() == "" {
+			return fmt.Errorf("required HTTP dependency endpoint is invalid")
+		}
+		port := u.Port()
+		if port == "" {
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			case "http":
+				port = "80"
+			default:
+				return fmt.Errorf("required HTTP dependency endpoint is invalid")
+			}
+		}
+		connection, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
+		if err != nil {
+			return fmt.Errorf("required HTTP dependency endpoint is unavailable")
+		}
+		_ = connection.Close()
+	}
+	return nil
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // describeCorpus renders the workspace registry as human-readable contents.

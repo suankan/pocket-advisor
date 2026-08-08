@@ -6,7 +6,7 @@ This document is the design authority for workspace data, credentials, resource 
 
 Workspace isolation is implemented across shared PostgreSQL, RustFS, and NATS servers. Each workspace has separate credentials and logical resources inside those servers. Provisioning is an explicit operator workflow driven by `./pocket-advisor.sh`; there are no operators or custom resources reconciling workspace state.
 
-The future API and read-service topology adds authenticated routing and per-workspace Kubernetes workloads. Those components are target state and do not replace the current storage boundaries.
+The authenticated HTTP MCP topology adds a per-workspace Kubernetes workload and TLS gateway without replacing the storage boundaries. The broader administrative API and control plane remain target state.
 
 ## Invariants
 
@@ -72,9 +72,15 @@ Subject names may be identical across workspaces because account scope separates
 
 Every CLI invocation includes a workspace ID. Configuration resolution happens before clients are created, and the resulting process owns only that workspace's PostgreSQL, RustFS, and NATS clients. Ingestion jobs also carry workspace and collection identifiers; consumers validate job scope against the process workspace before doing work.
 
-The current stdio MCP server follows the same rule: `./bin/pocket-advisor --mcp --workspace-id <id>` fixes its workspace at startup and exposes a workspace-specific tool without a workspace argument. The tool name is a convenience for the client, not the security boundary; fixed credentials and database scope are the boundary.
+Both MCP transports follow the same rule: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name, public route, OAuth audience, and subject are routing and authorization inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
 
-The target gateway must authenticate the caller, authorize a workspace, and route to the corresponding per-workspace retrieval or generation workload. Downstream services must trust only the gateway-established route and deployment configuration, never an unverified workspace value from the request body.
+Authenticated HTTP MCP runs one `pocket-advisor-app` release per workspace. The operator-created configuration Secret mounted into that release contains a registry and values file reduced to the selected workspace; mounting the shared multi-workspace values file is forbidden because it would give the pod credentials it does not need. The pod receives no RustFS, NATS, provisioning, Kubernetes API, or shared PostgreSQL administrative credential. Its service account token is disabled.
+
+The Go process binds only pod loopback. A Caddy sidecar is the only network listener, terminates TLS from an operator-managed certificate Secret, discards access logs, bounds request bodies, and proxies to loopback. NetworkPolicy permits ingress only to Caddy and denies egress except DNS and explicitly configured PostgreSQL, model, and authorization-server destinations. The application chart defaults to `ClusterIP`; a remote `LoadBalancer` additionally requires explicit source ranges.
+
+The Go process validates every request independently of Caddy. It requires an active OAuth token from the configured issuer with the exact public MCP URI in its audience and the retrieval scope. Token introspection uses a separate confidential client Secret and is not cached. Continuation snapshots are partitioned by issuer and subject, so renewing a token does not lose a result and another authenticated caller cannot acquire it.
+
+Future non-MCP gateway routes must preserve the implemented pattern: authenticate the caller, authorize one workspace, and route to a workload whose deployment and credentials already fix that workspace. Downstream services must trust only that deployment boundary, never an unverified workspace value from a request.
 
 ## Provisioning lifecycle
 

@@ -51,11 +51,32 @@ implemented design lives in [`docs/api-server-design.md`](../api-server-design.m
 - **F3 — compile/test verification.** Resolved during analysis: `go build`,
   `go test -race`, and chart lint all pass.
 
+## Closed findings
+
+- **F2 — DNS-rebinding test cases (closed).** Added `dns rebinding host ipv4`
+  (`Host: 127.0.0.1:8080`) and `dns rebinding host ipv6` (`Host: [::1]:8080`)
+  cases to `TestHTTPOriginHostAndProxyValidationPrecedesOAuth`; both assert a
+  `403` before introspection.
+- **F1-a — hermetic gateway test (closed).** Added `internal/mcp/gateway_test.go`
+  with an HTTPS reverse proxy mirroring the Caddyfile (`header_up Host {host}`,
+  `X-Forwarded-Proto https`, 1 MB body, trusted-loopback forwarding). The test
+  drives a 2025-11-25 client through the proxy and asserts statelessness (no
+  `Mcp-Session-Id`), multi-page continuation within `absoluteToolResponseBytes`,
+  and caller isolation; a second test asserts an invalid Host is refused before
+  introspection.
+  - This test surfaced a **production bug**: the SDK's `StreamableHTTPHandler`
+    enables a localhost DNS-rebinding guard that rejects any non-loopback
+    `Host` when the server binds loopback. In the deployed shape, Caddy forwards
+    the public Host to the loopback backend, so the guard would refuse every
+    real request. Fixed by setting `DisableLocalhostProtection: true` on the
+    handler; `secureEnvelope` already enforces Host against an explicit
+    allowlist and validates forwarded headers only from trusted proxies, so the
+    SDK guard was redundant. `internal/mcp/http.go` was changed accordingly.
+
 ## Next actions
 
-1. F2 — add a DNS-rebinding (`Host: 127.0.0.1`) case to
-   `TestHTTPOriginHostAndProxyValidationPrecedesOAuth`.
-2. F1-a — add `internal/mcp/gateway_test.go` (hermetic Caddy-mirror proxy).
+1. ~~F2 — add a DNS-rebinding (`Host: 127.0.0.1`) case to the origin/host test.~~ DONE.
+2. ~~F1-a — add `internal/mcp/gateway_test.go` (hermetic Caddy-mirror proxy).~~ DONE; also fixed the SDK localhost-protection bug it exposed.
 3. F1-b — add test Keycloak realm/config, `pocket-advisor.sh` e2e
    subcommands, and `internal/mcp/cluster_e2e_test.go` gated by `PA_K8S_E2E`.
 4. Update this document as each finding is closed.

@@ -97,6 +97,14 @@ func NewHTTPServer(base *QueryTool, opts HTTPOptions) (*HTTPServer, error) {
 	transport := sdkmcp.NewStreamableHTTPHandler(s.serverForRequest, &sdkmcp.StreamableHTTPOptions{
 		Stateless:    true,
 		JSONResponse: true,
+		// The SDK's default localhost DNS-rebinding guard rejects any request
+		// whose Host is not loopback when the server binds loopback. This
+		// deployment binds loopback on purpose: Caddy terminates TLS and
+		// forwards the public Host to 127.0.0.1. Origin, Host, and forwarded
+		// header validation are enforced by secureEnvelope against an explicit
+		// allowlist and trusted-proxy set, so the SDK guard is redundant and
+		// must be disabled or it would refuse every real request.
+		DisableLocalhostProtection:    true,
 		// Generic protocol logs can include values that are private in this
 		// service. Pocket Advisor emits its own bounded operational events.
 		Logger:                       nil,

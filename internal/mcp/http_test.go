@@ -225,6 +225,8 @@ func TestHTTPOriginHostAndProxyValidationPrecedesOAuth(t *testing.T) {
 		}, http.StatusForbidden},
 		{"deceptive origin", func(r *http.Request) { r.Header.Set("Origin", "https://app.example.test.evil.test") }, http.StatusForbidden},
 		{"wrong host", func(r *http.Request) { r.Host = "mcp.example.test.evil.test" }, http.StatusForbidden},
+		{"dns rebinding host ipv4", func(r *http.Request) { r.Host = "127.0.0.1:8080" }, http.StatusForbidden},
+		{"dns rebinding host ipv6", func(r *http.Request) { r.Host = "[::1]:8080" }, http.StatusForbidden},
 		{"untrusted forwarded", func(r *http.Request) {
 			r.Header.Set("X-Forwarded-Host", "mcp.example.test")
 			r.RemoteAddr = "192.0.2.10:1234"

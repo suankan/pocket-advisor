@@ -81,7 +81,7 @@
     {
       "id": "bilingual-001",
       "category": "bilingual",
-      "question": "\u041a\u0430\u043a\u0438\u0435 \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f \u0432 \u0430\u0440\u0445\u0438\u0442\u0435\u043a\u0442\u0443\u0440\u0435 Pocket Advisor?",
+      "question": "Какие компоненты используются в архитектуре Pocket Advisor?",
       "expected_sources": [
         {
           "fixture_id": "russian-design-notes",
@@ -100,7 +100,7 @@
     {
       "id": "bilingual-002",
       "category": "bilingual",
-      "question": "What are the performance requirements for dense and lexical search? (\u0432\u043a\u043b\u044e\u0447\u0430\u044f \u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f \u043a \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u0438)",
+      "question": "What are the performance requirements for dense and lexical search? (включая требования к производительности)",
       "expected_sources": [
         {
           "fixture_id": "russian-design-notes",
@@ -256,7 +256,7 @@
     {
       "id": "off-domain-002",
       "category": "off-domain",
-      "question": "How do I train a machine learning model for image classification?",
+      "question": "What is the best recipe for chocolate cake with raspberries?",
       "expected_sources": [],
       "expected_empty": true,
       "forbidden_sources": [

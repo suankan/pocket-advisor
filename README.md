@@ -369,38 +369,48 @@ Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `ope
 
 ## 8. Evaluate retrieval quality
 
-The evaluation framework measures whether retrieval returns the right evidence before model, index, chunking, fusion, reranking, or selection changes are accepted. It uses a versioned case format with synthetic content to avoid leaking private data.
+The evaluation framework measures whether retrieval returns the right evidence before model, index, chunking, fusion, reranking, or selection changes are accepted. It generates evaluation cases from the actual workspace content using the LLM, so tests reflect real retrieval scenarios rather than synthetic fixtures.
 
-### Run the synthetic evaluation
+### Generate evaluation fixtures
 
-Run the evaluation against the committed synthetic corpus:
+Before running evaluation, generate cases from your workspace:
 
 ```sh
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --workspace-id example
+./bin/pocket-advisor --evaluate --generate-fixtures --workspace-id test
 ```
 
-The command runs all 14 synthetic cases covering exact identifiers, paraphrases, bilingual search, multi-topic decomposition, threads, and off-domain queries. It prints a human-readable summary and exits with status 0 when all thresholds pass.
+This samples ~30 documents from the workspace, generates questions using the LLM, and writes cases to `test/fixtures/eval/test/cases.json`. The generator creates cases across categories: exact identifiers, paraphrases, multi-topic decomposition, and thread-aware queries.
+
+### Run evaluation
+
+Run evaluation using the convention-based case path (no `--eval-cases` needed):
+
+```sh
+./bin/pocket-advisor --evaluate --workspace-id test
+```
+
+The evaluator looks for cases at `test/fixtures/eval/<workspace>/cases.json` by default. It prints a human-readable summary and exits with status 0 when all thresholds pass.
 
 ### Readiness check
 
 Before running queries, verify that the embedding endpoint, model, dimension, and indexes are compatible:
 
 ```sh
-./bin/pocket-advisor --evaluate --eval-readiness --workspace-id example
+./bin/pocket-advisor --evaluate --eval-readiness --workspace-id test
 ```
 
-This checks that the configured embedding endpoint is reachable, the endpoint model and dimension match `schema_metadata`, stored chunks do not contain an incompatible active namespace, and the HNSW and BM25 indexes exist. Fail readiness with an actionable error before the first search.
+This checks that the configured embedding endpoint is reachable, the endpoint model and dimension match `schema_metadata`, stored chunks do not contain an incompatible active namespace, and the HNSW and BM25 indexes exist.
 
 ### Filter by category or case ID
 
 Run only specific cases or categories:
 
 ```sh
-# Run only bilingual cases
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-filter-cats bilingual   --workspace-id example
+# Run only paraphrase cases
+./bin/pocket-advisor --evaluate --eval-filter-cats paraphrase --workspace-id test
 
 # Run specific cases by ID
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-filter-ids exact-identifier-001,paraphrase-001   --workspace-id example
+./bin/pocket-advisor --evaluate --eval-filter-ids gen-0001,gen-0002 --workspace-id test
 ```
 
 ### HNSW vs exact search comparison
@@ -408,7 +418,7 @@ Run only specific cases or categories:
 Compare approximate HNSW results with exact dense search to measure recall:
 
 ```sh
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-hnsw   --eval-ef-search 40   --workspace-id example
+./bin/pocket-advisor --evaluate --eval-hnsw --eval-ef-search 40 --workspace-id test
 ```
 
 The `--eval-ef-search` flag sets the HNSW `ef_search` parameter for comparison (default 40). The report shows approximate recall for each case and aggregate statistics.
@@ -418,7 +428,7 @@ The `--eval-ef-search` flag sets the HNSW `ef_search` parameter for comparison (
 Emit JSON instead of human-readable text:
 
 ```sh
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --json   --workspace-id example
+./bin/pocket-advisor --evaluate --json --workspace-id test
 ```
 
 ### Write reports
@@ -426,23 +436,16 @@ Emit JSON instead of human-readable text:
 Save a report to a file (path must be gitignored):
 
 ```sh
-./bin/pocket-advisor --evaluate   --eval-cases test/fixtures/eval/cases.json   --eval-report eval-reports/example.json   --workspace-id example
+./bin/pocket-advisor --evaluate --eval-report eval-reports/test.json --workspace-id test
 ```
 
-### Synthetic evaluation cases
+### Override convention path
 
-The committed synthetic cases under `test/fixtures/eval/` exercise:
+Use a custom case file instead of the convention path:
 
-| Category | Cases | What it tests |
-| --- | --- | --- |
-| `exact-identifier` | 3 | Direct matches for document titles or IDs |
-| `paraphrase` | 3 | Semantic similarity without exact keyword overlap |
-| `bilingual` | 2 | Cross-language retrieval (English + Russian) |
-| `multi-topic` | 2 | Question decomposition and topic-group coverage |
-| `thread` | 2 | Email thread context and conversation flow |
-| `off-domain` | 2 | Queries that should return no results |
-
-Each case specifies expected sources, topic groups (for multi-topic), forbidden sources (for false positives), and optional relevance grades. The baseline thresholds are in `test/fixtures/eval/baseline.json`.
+```sh
+./bin/pocket-advisor --evaluate --eval-cases custom/cases.json --workspace-id test
+```
 
 ### Metrics
 
@@ -455,10 +458,6 @@ The evaluation reports:
 - **Forbidden hits**: unexpected documents that indicate false positives
 - **Empty pass rate**: off-domain queries correctly returning no results
 - **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select)
-
-### Private evaluation
-
-For private corpus evaluation, create a case file under `workspaces/` (gitignored) with real questions and expected sources. Use the `--eval-cases` flag to point to your private case file. Reports are written to `eval-reports/` (gitignored by default).
 
 ### Interpretation
 

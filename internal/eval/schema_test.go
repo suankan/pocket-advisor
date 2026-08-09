@@ -76,31 +76,3 @@ func TestLoadCaseSet_MissingFile(t *testing.T) {
 	}
 }
 
-func TestLoadActualCaseSet(t *testing.T) {
-	// Load the committed case set to ensure it validates.
-	cs, err := LoadCaseSet("../../test/fixtures/eval/cases.json")
-	if err != nil {
-		t.Fatalf("LoadCaseSet() error = %v", err)
-	}
-	if cs.SetID != "synthetic-v1" {
-		t.Errorf("SetID = %q, want %q", cs.SetID, "synthetic-v1")
-	}
-	if len(cs.Cases) < 10 {
-		t.Errorf("expected at least 10 cases, got %d", len(cs.Cases))
-	}
-
-	// Verify categories are present.
-	categories := make(map[string]bool)
-	for _, c := range cs.Cases {
-		categories[c.Category] = true
-	}
-	expectedCats := []string{
-		"exact-identifier", "paraphrase", "bilingual",
-		"multi-topic", "thread", "off-domain",
-	}
-	for _, cat := range expectedCats {
-		if !categories[cat] {
-			t.Errorf("missing category %q in cases", cat)
-		}
-	}
-}

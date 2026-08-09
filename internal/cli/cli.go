@@ -72,6 +72,7 @@ type Options struct {
 	EvalEfSearch   int
 	EvalReadiness  bool
 	EvalThresholds string
+	EvalGenerate   bool
 
 	StaleAfter time.Duration
 	HighWater  uint64
@@ -103,7 +104,7 @@ Modes (exactly one):
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
   --evaluate          run retrieval quality evaluation against evaluation cases.
-                      Requires --eval-cases. Emits a human summary by default;
+                      Uses test/fixtures/eval/<workspace>/cases.json by default.
                       --json emits machine-readable output.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
@@ -123,7 +124,7 @@ Query options:
   --no-decompose            do not split a multi-topic question
 
 Evaluate options:
-  --eval-cases <path>        evaluation case set JSON (required for --evaluate)
+  --eval-cases <path>        evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)
   --eval-report <path>       write report to path (gitignored, default: none)
   --eval-filter-ids <csv>    comma-separated case IDs to evaluate
   --eval-filter-cats <csv>   comma-separated categories to evaluate
@@ -131,6 +132,7 @@ Evaluate options:
   --eval-ef-search N         HNSW ef_search for comparison (default 40)
   --eval-readiness           check readiness without running queries
   --eval-thresholds <path>   thresholds JSON (default: synthetic thresholds)
+  --generate-fixtures        generate evaluation cases from workspace and exit
 
 Options:
   --yes                     skip destructive confirmation prompts
@@ -187,7 +189,7 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
-	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (required for --evaluate)")
+	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write report to path (gitignored)")
 	fs.StringVar(&o.EvalFilterIDs, "eval-filter-ids", "", "comma-separated case IDs to evaluate")
 	fs.StringVar(&o.EvalFilterCats, "eval-filter-cats", "", "comma-separated categories to evaluate")
@@ -195,6 +197,7 @@ func Parse(args []string) (*Options, error) {
 	fs.IntVar(&o.EvalEfSearch, "eval-ef-search", 40, "HNSW ef_search for comparison")
 	fs.BoolVar(&o.EvalReadiness, "eval-readiness", false, "check readiness without running queries")
 	fs.StringVar(&o.EvalThresholds, "eval-thresholds", "", "thresholds JSON (default: synthetic thresholds)")
+	fs.BoolVar(&o.EvalGenerate, "generate-fixtures", false, "generate evaluation cases from the workspace and exit")
 
 	fs.IntVar(&o.TopK, "top-k", 0, "maximum results for --query (0 = config default)")
 	fs.BoolVar(&o.JSON, "json", false, "emit --query results as JSON")
@@ -350,15 +353,16 @@ func Run(o *Options) error {
 		return runReset(o, cfg, logs)
 	case o.Evaluate:
 		eo := evaluateOptions{
-			CaseSet:    o.EvalCases,
-			ReportPath: o.EvalReport,
-			FilterIDs:  o.EvalFilterIDs,
-			FilterCats: o.EvalFilterCats,
-			JSON:       o.JSON,
-			RunHNSW:    o.EvalRunHNSW,
-			EfSearch:   o.EvalEfSearch,
-			Readiness:  o.EvalReadiness,
-			Thresholds: o.EvalThresholds,
+			CaseSet:          o.EvalCases,
+			ReportPath:       o.EvalReport,
+			FilterIDs:        o.EvalFilterIDs,
+			FilterCats:       o.EvalFilterCats,
+			JSON:             o.JSON,
+			RunHNSW:          o.EvalRunHNSW,
+			EfSearch:         o.EvalEfSearch,
+			Readiness:        o.EvalReadiness,
+			Thresholds:       o.EvalThresholds,
+			GenerateFixtures: o.EvalGenerate,
 		}
 		return runEvaluate(o, cfg, logs, eo)
 	case o.Query != "":

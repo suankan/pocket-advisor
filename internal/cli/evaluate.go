@@ -19,15 +19,16 @@ import (
 
 // evaluateOptions holds the --evaluate flag set.
 type evaluateOptions struct {
-	CaseSet    string
-	ReportPath string
-	FilterIDs  string
-	FilterCats string
-	JSON       bool
-	RunHNSW    bool
-	EfSearch   int
-	Readiness  bool
-	Thresholds string
+	CaseSet          string
+	ReportPath       string
+	FilterIDs        string
+	FilterCats       string
+	JSON             bool
+	RunHNSW          bool
+	EfSearch         int
+	Readiness        bool
+	Thresholds       string
+	GenerateFixtures bool
 }
 
 // runEvaluate runs the retrieval quality evaluation.
@@ -70,8 +71,28 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		return nil
 	}
 
-	if eo.CaseSet == "" {
-		return fmt.Errorf("--evaluate requires --eval-cases <path>")
+	// Generate fixtures mode: sample the workspace, produce cases, and exit.
+	if eo.GenerateFixtures {
+		if err := eval.GenerateFixtures(ctx, db, l, cfg.Query, o.WorkspaceID, eo.CaseSet, log); err != nil {
+			return fmt.Errorf("generate fixtures: %w", err)
+		}
+		path := eo.CaseSet
+		if path == "" {
+			path = eval.CasePath(o.WorkspaceID)
+		}
+		fmt.Fprintf(os.Stderr, "wrote evaluation cases to %s\n", path)
+		return nil
+	}
+
+	// Resolve convention-based case path when none is explicitly provided.
+	caseSetPath := eo.CaseSet
+	if caseSetPath == "" {
+		caseSetPath = eval.CasePath(o.WorkspaceID)
+		if _, err := os.Stat(caseSetPath); os.IsNotExist(err) {
+			return fmt.Errorf("no evaluation cases found; tried %s\n"+
+				"  generate cases with: pocket-advisor --evaluate --generate-fixtures --workspace-id %s",
+				caseSetPath, o.WorkspaceID)
+		}
 	}
 
 	// Load thresholds if specified.
@@ -92,7 +113,7 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 
 	report, err := evaluator.Run(ctx, eval.EvaluateConfig{
 		WorkspaceID: o.WorkspaceID,
-		CaseSetPath: eo.CaseSet,
+		CaseSetPath: caseSetPath,
 		ReportPath:  eo.ReportPath,
 		FilterIDs:   splitTrim(eo.FilterIDs),
 		FilterCats:  splitTrim(eo.FilterCats),

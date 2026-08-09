@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "set_id": "workspace-eval",
+  "cases": [
+    {
+      "id": "gen-0001",
+      "category": "exact-identifier",
+      "question": "What is the specific file path where passwords are currently stored in the Pocket Advisor deployment?",
+      "expected_sources": [
+        {
+          "fixture_id": "thread-security-discussion",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0002",
+      "category": "paraphrase",
+      "question": "Which component in the architecture pipeline is responsible for the 'Embedding' step?",
+      "expected_sources": [
+        {
+          "fixture_id": "architecture-overview",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0003",
+      "category": "exact-identifier",
+      "question": "In the Russian design notes, which database technology is designated for vector search alongside BM25?",
+      "expected_sources": [
+        {
+          "fixture_id": "russian-design-notes",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0004",
+      "category": "paraphrase",
+      "question": "According to the Q3 follow-up email, what environment is suggested for testing the PostgreSQL migration before production?",
+      "expected_sources": [
+        {
+          "fixture_id": "meeting-q3-followup",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0005",
+      "category": "multi-topic",
+      "question": "How many levels of storage are described in the Russian design notes, and what technology is used for the first level?",
+      "expected_sources": [
+        {
+          "fixture_id": "russian-design-notes",
+          "grade": 2
+        },
+        {
+          "fixture_id": "architecture-overview",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "gen-0006",
+      "category": "exact-identifier",
+      "question": "What ingredient quantity is required for the guanciale or pancetta in the Pasta Carbonara recipe?",
+      "expected_sources": [
+        {
+          "fixture_id": "off-domain-cooking",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0007",
+      "category": "exact-identifier",
+      "question": "What is the primary programming language used for the Tier 1 component in Project Alpha?",
+      "expected_sources": [
+        {
+          "fixture_id": "project-alpha-design",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0008",
+      "category": "multi-topic",
+      "question": "Which document mentions the recommendation to use Kubernetes Secrets for mitigating database credential storage issues?",
+      "expected_sources": [
+        {
+          "fixture_id": "security-audit-2025",
+          "grade": 2
+        },
+        {
+          "fixture_id": "deployment-guide",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "gen-0009",
+      "category": "paraphrase",
+      "question": "In the context of the Q3 planning meeting, what specific infrastructure upgrade was discussed regarding budget allocation?",
+      "expected_sources": [
+        {
+          "fixture_id": "meeting-q3-planning",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0010",
+      "category": "exact-identifier",
+      "question": "What specific tool is required for the environment setup when deploying Pocket Advisor according to the deployment guide?",
+      "expected_sources": [
+        {
+          "fixture_id": "deployment-guide",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0011",
+      "category": "paraphrase",
+      "question": "How does the security audit report classify the risk of storing database credentials in plaintext?",
+      "expected_sources": [
+        {
+          "fixture_id": "security-audit-2025",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0012",
+      "category": "thread",
+      "question": "Which document contains the email thread regarding the security review of database credentials?",
+      "expected_sources": [
+        {
+          "fixture_id": "thread-security-response",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0013",
+      "category": "exact-identifier",
+      "question": "What is the default value for the 'top_k' parameter in the request body?",
+      "expected_sources": [
+        {
+          "fixture_id": "api-specification-v2",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0014",
+      "category": "paraphrase",
+      "question": "Which authentication method is specified for the POST /api/v2/query endpoint?",
+      "expected_sources": [
+        {
+          "fixture_id": "api-specification-v2",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "gen-0015",
+      "category": "exact-identifier",
+      "question": "What is the maximum allowed value for the 'top_k' parameter?",
+      "expected_sources": [
+        {
+          "fixture_id": "api-specification-v2",
+          "grade": 3
+        }
+      ]
+    }
+  ]
+}

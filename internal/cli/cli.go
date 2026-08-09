@@ -246,6 +246,7 @@ func (o *Options) modes() []string {
 		{o.MCPHTTP, "--mcp-http"},
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
+		{o.Evaluate, "--evaluate"},
 	} {
 		if c.on {
 			m = append(m, c.name)

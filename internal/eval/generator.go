@@ -334,9 +334,9 @@ func truncate(s string, n int) string {
 }
 
 // CasePath returns the convention-based path for evaluation cases for a
-// workspace: test/fixtures/eval/<workspace-id>/cases.json.
+// workspace: workspaces/evaluation/<workspace-id>/cases.json.
 func CasePath(workspaceID string) string {
-	return filepath.Join("test", "fixtures", "eval", workspaceID, "cases.json")
+	return filepath.Join("workspaces", "evaluation", workspaceID, "cases.json")
 }
 
 // GenerateFixtures is the top-level entry point called from the CLI. It

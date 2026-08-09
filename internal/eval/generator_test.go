@@ -102,7 +102,7 @@ func TestParseLLMQuestions(t *testing.T) {
 
 func TestCasePath(t *testing.T) {
 	got := CasePath("my-workspace")
-	want := filepath.Join("test", "fixtures", "eval", "my-workspace", "cases.json")
+	want := filepath.Join("workspaces", "evaluation", "my-workspace", "cases.json")
 	if got != want {
 		t.Errorf("CasePath(%q) = %q, want %q", "my-workspace", got, want)
 	}

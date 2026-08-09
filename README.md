@@ -379,7 +379,7 @@ Before running evaluation, generate cases from your workspace:
 ./bin/pocket-advisor --evaluate --generate-fixtures --workspace-id test
 ```
 
-This samples ~30 documents from the workspace, generates questions using the LLM, and writes cases to `test/fixtures/eval/test/cases.json`. The generator creates cases across categories: exact identifiers, paraphrases, multi-topic decomposition, and thread-aware queries.
+This samples ~30 documents from the workspace, generates questions using the LLM, and writes cases to `workspaces/evaluation/test/cases.json`. The generator creates cases across categories: exact identifiers, paraphrases, multi-topic decomposition, and thread-aware queries.
 
 ### Run evaluation
 
@@ -389,7 +389,7 @@ Run evaluation using the convention-based case path (no `--eval-cases` needed):
 ./bin/pocket-advisor --evaluate --workspace-id test
 ```
 
-The evaluator looks for cases at `test/fixtures/eval/<workspace>/cases.json` by default. It prints a human-readable summary and exits with status 0 when all thresholds pass.
+The evaluator looks for cases at `workspaces/evaluation/<workspace>/cases.json` by default. It prints a human-readable summary and exits with status 0 when all thresholds pass.
 
 ### Readiness check
 

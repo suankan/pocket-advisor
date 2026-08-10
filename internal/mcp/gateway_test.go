@@ -12,11 +12,12 @@ import (
 	"testing"
 )
 
-// newGatewayProxy stands up an HTTPS reverse proxy that mirrors the deployed
-// Caddy sidecar: it terminates TLS, keeps the client Host (Caddy's
-// `header_up Host {host}`), stamps X-Forwarded-Proto https, and bounds the
-// request body to 1 MB. This exercises the real HTTPServer behind the same
-// trusted-proxy contract the chart applies, without a cluster or Keycloak.
+// newGatewayProxy stands up an example HTTPS reverse proxy — the kind an
+// operator might put in front of `mcp start` for TLS termination or a public
+// hostname: it terminates TLS, keeps the client Host, stamps
+// X-Forwarded-Proto https, and bounds the request body to 1 MB. This
+// exercises the real HTTPServer behind the same trusted-proxy contract such a
+// proxy would need to satisfy, without an actual proxy or a real Google.
 func newGatewayProxy(t *testing.T, backendURL string) *httptest.Server {
 	t.Helper()
 	target, err := url.Parse(backendURL)
@@ -114,18 +115,17 @@ func decodeGatewayPage(t *testing.T, resp *http.Response) (*EvidencePage, bool) 
 // asserts statelessness, host/origin enforcement, multi-page continuation
 // within the response bound, and caller isolation.
 func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	resource := "https://mcp.example.test/mcp"
-	as.issue("caller-a", "subject-a", resource, defaultHTTPScope)
-	as.issue("caller-b", "subject-b", resource, defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticTextResult(strings.Repeat("large synthetic evidence 🙂\n", 5500))})
+	google := newTestGoogleServer(t)
+	callerA := google.issue("subject-a", "caller-a@example.test")
+	callerB := google.issue("subject-b", "caller-b@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticTextResult(strings.Repeat("large synthetic evidence 🙂\n", 5500))})
 
 	backend := httptest.NewServer(server.httpServer.Handler)
 	defer backend.Close()
 	proxy := newGatewayProxy(t, backend.URL)
 	defer proxy.Close()
 
-	initialize := gatewayPost(t, proxy, "caller-a", "2025-11-25", "initialize", "", map[string]any{
+	initialize := gatewayPost(t, proxy, callerA, "2025-11-25", "initialize", "", map[string]any{
 		"protocolVersion": "2025-11-25",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "opencode", "version": "1.18.15"},
@@ -139,14 +139,14 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 	}
 	initialize.Body.Close()
 
-	list := gatewayPost(t, proxy, "caller-a", "2025-11-25", "tools/list", "", nil)
+	list := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/list", "", nil)
 	if list.StatusCode != http.StatusOK || !contains(list, "search_synthetic") {
 		body, _ := io.ReadAll(list.Body)
 		t.Fatalf("legacy tools/list status = %d, body=%s", list.StatusCode, body)
 	}
 	list.Body.Close()
 
-	search := gatewayPost(t, proxy, "caller-a", "2025-11-25", "tools/call", "search_synthetic", map[string]any{
+	search := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "search_synthetic", map[string]any{
 		"name": "search_synthetic", "arguments": map[string]any{"question": "large synthetic evidence"},
 	})
 	page, isError := decodeGatewayPage(t, search)
@@ -154,7 +154,7 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 		t.Fatalf("first page complete=%v cursor=%v isError=%v", page.Complete, page.NextCursor, isError)
 	}
 
-	foreign := gatewayPost(t, proxy, "caller-b", "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
+	foreign := gatewayPost(t, proxy, callerB, "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
 		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, foreignError := decodeGatewayPage(t, foreign)
@@ -164,7 +164,7 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 
 	pages := 1
 	for !page.Complete {
-		response := gatewayPost(t, proxy, "caller-a", "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
+		response := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
 			"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 		})
 		raw, err := io.ReadAll(response.Body)
@@ -203,22 +203,22 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 // public name is refused by the backend even though the trusted proxy adds
 // forwarding metadata.
 func TestHTTPGatewayRejectsInvalidHostBeforeAuth(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 
 	backend := httptest.NewServer(server.httpServer.Handler)
 	defer backend.Close()
 	proxy := newGatewayProxy(t, backend.URL)
 	defer proxy.Close()
 
-	before := as.callCount()
+	before := google.jwksFetchCount()
 	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Host = "mcp.example.test.evil.test"
-	req.Header.Set("Authorization", "Bearer valid")
+	req.Header.Set("Authorization", "Bearer "+valid)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
@@ -230,8 +230,8 @@ func TestHTTPGatewayRejectsInvalidHostBeforeAuth(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("invalid host status = %d", resp.StatusCode)
 	}
-	if as.callCount() != before {
-		t.Fatal("gateway forwarded invalid host to OAuth introspection")
+	if google.jwksFetchCount() != before {
+		t.Fatal("gateway forwarded invalid host through to token verification")
 	}
 }
 

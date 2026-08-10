@@ -2,11 +2,11 @@
   "mcpServers": {
     "case-documents": {
       "command": "./bin/pocket-advisor",
-      "args": ["--mcp", "--workspace-id", "case-documents-demo"]
+      "args": ["mcp", "stdio", "--workspace-id", "case-documents-demo"]
     },
     "finance-documents": {
       "command": "./bin/pocket-advisor",
-      "args": ["--mcp", "--workspace-id", "personal-finance-demo"]
+      "args": ["mcp", "stdio", "--workspace-id", "personal-finance-demo"]
     }
   }
 }

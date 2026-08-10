@@ -86,7 +86,7 @@ Use transaction- or connection-local PostgreSQL settings so evaluation and produ
 
 ### Retrieval readiness
 
-Before `--query` or `--mcp` accepts work, verify:
+Before `--query` or an `mcp` subcommand accepts work, verify:
 
 - the configured embedding endpoint is reachable;
 - the endpoint model and dimension match `schema_metadata`;

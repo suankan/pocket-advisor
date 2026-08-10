@@ -67,13 +67,13 @@ Administrative access is distinct from user query access. Destructive operations
 
 ## Service topology
 
-Authenticated HTTP MCP deployment is described in [MCP server design](mcp.md#deployment). The chart defaults to `ClusterIP` and deny-by-default egress except DNS. Remote exposure requires an explicitly source-restricted `LoadBalancer`, matching public DNS and TLS certificate, and explicit PostgreSQL, model, and authorization-server egress CIDRs. The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL, RustFS, and NATS.
+Authenticated HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote-access options such as SSH tunneling or a reverse proxy) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL, RustFS, and NATS.
 
-The target general control plane is a separate long-running workload. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
+The target general control plane is a separate long-running workload — unlike MCP, one that is expected to run in Kubernetes. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
 
 Kubernetes provides scheduling, service discovery, health checks, rollout control, and network policy. It does not supply protocol authorization. Initial development access may be cluster-internal or through port forwarding; remote ingress requires TLS, authentication, authorization, request limits, and audit policy first.
 
-Application workloads belong in the separate `pocket-advisor-app` chart and release so infrastructure changes do not implicitly roll retrieval services.
+Whatever chart eventually deploys the control plane must be a separate chart and release from `pocket-advisor-infra`, so infrastructure changes do not implicitly roll it, following the same `ClusterIP`-by-default, explicitly-source-restricted-`LoadBalancer`-for-remote-exposure pattern MCP's own now-retired chart established.
 
 ## Package boundary and CLI migration
 
@@ -127,7 +127,7 @@ Implementation must add contract tests for authentication, authorization, worksp
 
 ## Open decisions
 
-- Define identity and authorization policy for the future administrative API and host agent; the MCP user surface uses Keycloak, Caddy, and the single retrieval scope described above.
+- Define identity and authorization policy for the future administrative API and host agent; the MCP user surface uses Google as its sole identity provider, described above.
 - Define the host-agent authentication, dispatch, progress, cancellation, and upgrade protocol.
 - Choose the API versioning scheme, route shapes, durable operation store, and event-streaming protocol.
 - Decide whether model endpoints remain host-local or move behind cluster services.

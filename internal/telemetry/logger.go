@@ -48,11 +48,12 @@ type Logs struct {
 // StderrLogs sends every role to stderr and touches no files.
 //
 // For the read path this is the right destination, not a fallback. --query is
-// a one-shot command whose operator is watching the terminal, and --mcp is
-// launched by a client that captures the server's stderr into its own log —
-// which is exactly where someone debugging a failed server will look. Both
-// may also be started from a directory they cannot write to, which is fatal
-// for the file-backed logger and meaningless for them.
+// a one-shot command whose operator is watching the terminal, and the mcp
+// stdio/start subcommands are launched by a client that captures the
+// server's stderr into its own log — which is exactly where someone
+// debugging a failed server will look. Both may also be started from a
+// directory they cannot write to, which is fatal for the file-backed logger
+// and meaningless for them.
 func StderrLogs(level string) *Logs {
 	return &Logs{
 		dir:     "",

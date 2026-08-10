@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -24,44 +24,52 @@ import (
 const (
 	defaultHTTPAddress          = "127.0.0.1:8080"
 	defaultHTTPEndpoint         = "/mcp"
-	defaultHTTPScope            = "pocket-advisor:retrieve"
 	defaultHTTPMaxRequestBytes  = 1 << 20
 	defaultHTTPMaxConcurrent    = 8
 	defaultHTTPRequestTimeout   = 2 * time.Minute
 	defaultHTTPShutdownTimeout  = 30 * time.Second
 	defaultPrincipalIdleTimeout = 15 * time.Minute
 	defaultMaxCallerStates      = 128
-	defaultMaxTokenLifetime     = 15 * time.Minute
+
+	// googleIssuerURL is the fixed, non-configurable Google OIDC issuer.
+	// Authenticated HTTP mode supports Google as the sole identity provider,
+	// so there is no operator-supplied authorization-server setting to get
+	// wrong or to silently point at something other than Google.
+	googleIssuerURL = "https://accounts.google.com"
 )
 
-// HTTPOptions configures the authenticated Streamable HTTP adapter. The Go
-// process is deliberately a loopback-only backend: the selected Caddy sidecar
-// is the sole network listener and TLS boundary in a deployed workload.
+// HTTPOptions configures the Streamable HTTP adapter. The Go process is
+// deliberately a loopback-only backend by default; CertFile/KeyFile let it
+// terminate TLS itself for direct remote/local-network use, and a reverse
+// proxy remains an option for anything more elaborate.
 type HTTPOptions struct {
-	Address                 string
-	Endpoint                string
-	ResourceURI             string
-	AuthorizationServer     string
-	IntrospectionEndpoint   string
-	IntrospectionClientID   string
-	IntrospectionSecret     string
-	RequiredScope           string
-	AllowedOrigins          []string
-	AllowedHosts            []string
-	TrustedProxyCIDRs       []string
-	MaxRequestBytes         int64
-	MaxConcurrent           int
-	RequestTimeout          time.Duration
-	ShutdownTimeout         time.Duration
-	PrincipalIdleTimeout    time.Duration
-	MaxCallerStates         int
-	MaxTokenLifetime        time.Duration
-	introspectionHTTPClient *http.Client
-	Readiness               func(context.Context) error
+	Address              string
+	Endpoint             string
+	ResourceURI          string
+	GoogleClientID       string
+	AllowedEmails        []string
+	CertFile             string
+	KeyFile              string
+	AllowedOrigins       []string
+	AllowedHosts         []string
+	TrustedProxyCIDRs    []string
+	MaxRequestBytes      int64
+	MaxConcurrent        int
+	RequestTimeout       time.Duration
+	ShutdownTimeout      time.Duration
+	PrincipalIdleTimeout time.Duration
+	MaxCallerStates      int
+	// googleIssuer and googleHTTPClient are test-only overrides: production
+	// always verifies against the real googleIssuerURL over the default HTTP
+	// client. Tests point these at a local fake OIDC provider.
+	googleIssuer     string
+	googleHTTPClient *http.Client
+	Readiness        func(context.Context) error
 }
 
-// HTTPServer is one fixed-workspace authenticated MCP resource server. Tool
-// state is partitioned by OAuth subject. It never reads a workspace selector
+// HTTPServer is one fixed-workspace MCP resource server, optionally
+// authenticated. Tool state is partitioned by OAuth subject when
+// authenticated. It never reads a workspace selector
 // from HTTP, OAuth, or MCP input.
 type HTTPServer struct {
 	opts HTTPOptions
@@ -78,62 +86,64 @@ type callerState struct {
 	lastUsed time.Time
 }
 
-// NewHTTPServer validates the complete authenticated boundary before a
-// listener can be opened. The introspection secret is supplied by the
-// environment or a mounted Kubernetes Secret, never committed configuration.
-func NewHTTPServer(base *QueryTool, opts HTTPOptions) (*HTTPServer, error) {
+// NewHTTPServer validates the complete boundary before a listener can be
+// opened. GoogleClientID/AllowedEmails are committed-configuration-safe (no
+// secret is required to verify a Google ID token); leaving GoogleClientID
+// empty runs the server unauthenticated on loopback for local development.
+func NewHTTPServer(ctx context.Context, base *QueryTool, opts HTTPOptions) (*HTTPServer, error) {
 	if base == nil || base.Service == nil || strings.TrimSpace(base.Workspace) == "" {
 		return nil, fmt.Errorf("mcp http requires a fixed workspace retrieval tool")
 	}
 	if err := normalizeHTTPOptions(&opts); err != nil {
 		return nil, err
 	}
-	verifier, err := newIntrospectionVerifier(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	s := &HTTPServer{opts: opts, base: base, states: make(map[string]*callerState)}
 	transport := sdkmcp.NewStreamableHTTPHandler(s.serverForRequest, &sdkmcp.StreamableHTTPOptions{
-		Stateless:    true,
-		JSONResponse: true,
-		// The SDK's default localhost DNS-rebinding guard rejects any request
-		// whose Host is not loopback when the server binds loopback. This
-		// deployment binds loopback on purpose: Caddy terminates TLS and
-		// forwards the public Host to 127.0.0.1. Origin, Host, and forwarded
-		// header validation are enforced by secureEnvelope against an explicit
-		// allowlist and trusted-proxy set, so the SDK guard is redundant and
-		// must be disabled or it would refuse every real request.
-		DisableLocalhostProtection: true,
-		// Generic protocol logs can include values that are private in this
-		// service. Pocket Advisor emits its own bounded operational events.
+		Stateless:                    true,
+		JSONResponse:                 true,
+		DisableLocalhostProtection:   true,
 		Logger:                       nil,
 		SessionTimeout:               opts.PrincipalIdleTimeout,
 		MaxRequestBodyBytes:          opts.MaxRequestBytes,
 		PropagateRequestCancellation: true,
 	})
 
-	metadataURL, metadataPath, err := protectedResourceMetadataLocation(opts.ResourceURI)
-	if err != nil {
-		return nil, err
+	// Google auth is optional. Skip authentication if not configured.
+	var handler http.Handler
+	metadataPath := ""
+	if opts.GoogleClientID != "" {
+		verifier, err := newGoogleVerifier(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		metadataURL, mp, err := protectedResourceMetadataLocation(opts.ResourceURI)
+		if err != nil {
+			return nil, err
+		}
+		metadataPath = mp
+		handler = mcpauth.RequireBearerToken(verifier.Verify, &mcpauth.RequireBearerTokenOptions{
+			ResourceMetadataURL: metadataURL,
+			ClockSkew:           5 * time.Second,
+		})(s.limitRate(transport))
+	} else {
+		// No Google auth - allow all requests (local development)
+		handler = s.limitRate(transport)
 	}
-	authorized := mcpauth.RequireBearerToken(verifier.Verify, &mcpauth.RequireBearerTokenOptions{
-		ResourceMetadataURL: metadataURL,
-		Scopes:              []string{opts.RequiredScope},
-		ClockSkew:           5 * time.Second,
-	})(s.limitRate(transport))
-	// Bound and time out authorization-server work as well as MCP execution.
-	// The envelope remains outermost so invalid Host, Origin, and forwarding
-	// headers never consume an introspection request.
-	protected := s.limitConcurrency(s.timeout(authorized))
+	// Bound and time out token verification as well as MCP execution. The
+	// envelope remains outermost so invalid Host, Origin, and forwarding
+	// headers never reach token verification at all.
+	protected := s.limitConcurrency(s.timeout(handler))
 
 	mux := http.NewServeMux()
 	mux.Handle(opts.Endpoint, protected)
-	mux.HandleFunc(metadataPath, s.serveProtectedResourceMetadata)
+	if metadataPath != "" {
+		mux.HandleFunc(metadataPath, s.serveProtectedResourceMetadata)
+	}
 	mux.HandleFunc("/livez", healthOK)
 	mux.HandleFunc("/readyz", s.serveReady)
 
-	handler := s.secureEnvelope(mux)
+	handler = s.secureEnvelope(mux)
 	s.httpServer = &http.Server{
 		Addr:              opts.Address,
 		Handler:           handler,
@@ -160,31 +170,31 @@ func normalizeHTTPOptions(opts *HTTPOptions) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("mcp http backend must bind to an explicit loopback address behind the authenticated TLS gateway")
+		return fmt.Errorf("mcp http backend must bind to an explicit loopback address; use a reverse proxy or SSH tunnel for remote access")
 	}
-	resource, err := url.Parse(opts.ResourceURI)
-	if err != nil || resource.Scheme != "https" || resource.Host == "" || resource.Fragment != "" || resource.RawQuery != "" {
-		return fmt.Errorf("mcp resource URI must be an absolute HTTPS URI without query or fragment")
+	if (opts.CertFile == "") != (opts.KeyFile == "") {
+		return fmt.Errorf("mcp http tls requires both a certificate file and a key file")
 	}
-	if resource.Path != opts.Endpoint {
-		return fmt.Errorf("mcp resource URI path must equal endpoint %q", opts.Endpoint)
-	}
-	issuer, err := url.Parse(opts.AuthorizationServer)
-	if err != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.RawQuery != "" || issuer.Fragment != "" {
-		return fmt.Errorf("mcp authorization server must be an absolute HTTPS issuer URI")
-	}
-	introspection, err := url.Parse(opts.IntrospectionEndpoint)
-	if err != nil || introspection.Scheme != "https" || introspection.Host == "" || introspection.RawQuery != "" || introspection.Fragment != "" {
-		return fmt.Errorf("mcp introspection endpoint must be an absolute HTTPS URI")
-	}
-	if opts.IntrospectionClientID == "" || opts.IntrospectionSecret == "" {
-		return fmt.Errorf("mcp introspection client id and secret are required")
-	}
-	if opts.RequiredScope == "" {
-		opts.RequiredScope = defaultHTTPScope
-	}
-	if fields := strings.Fields(opts.RequiredScope); len(fields) != 1 || fields[0] != opts.RequiredScope {
-		return fmt.Errorf("mcp required scope must be one OAuth scope token")
+
+	// Google auth is optional. When configured, the resource boundary and
+	// allowlist are validated strictly; when not, this is local unauthenticated
+	// loopback development and those checks do not apply. Either way, the
+	// shared limits below apply — they are not conditional on auth.
+	var resource *url.URL
+	if opts.GoogleClientID != "" {
+		if opts.googleIssuer == "" {
+			opts.googleIssuer = googleIssuerURL
+		}
+		resource, err = url.Parse(opts.ResourceURI)
+		if err != nil || resource.Scheme != "https" || resource.Host == "" || resource.Fragment != "" || resource.RawQuery != "" {
+			return fmt.Errorf("mcp resource URI must be an absolute HTTPS URI without query or fragment")
+		}
+		if resource.Path != opts.Endpoint {
+			return fmt.Errorf("mcp resource URI path must equal endpoint %q", opts.Endpoint)
+		}
+		if len(opts.AllowedEmails) == 0 {
+			return fmt.Errorf("mcp google oauth requires at least one allowed email")
+		}
 	}
 	if opts.MaxRequestBytes == 0 {
 		opts.MaxRequestBytes = defaultHTTPMaxRequestBytes
@@ -222,13 +232,7 @@ func normalizeHTTPOptions(opts *HTTPOptions) error {
 	if opts.MaxCallerStates < 1 || opts.MaxCallerStates > 4096 {
 		return fmt.Errorf("mcp http max caller states must be between 1 and 4096")
 	}
-	if opts.MaxTokenLifetime == 0 {
-		opts.MaxTokenLifetime = defaultMaxTokenLifetime
-	}
-	if opts.MaxTokenLifetime < time.Minute || opts.MaxTokenLifetime > defaultMaxTokenLifetime {
-		return fmt.Errorf("mcp http maximum token lifetime must be between one and fifteen minutes")
-	}
-	if len(opts.AllowedHosts) == 0 {
+	if len(opts.AllowedHosts) == 0 && resource != nil {
 		opts.AllowedHosts = []string{resource.Host}
 	}
 	for _, allowedHost := range opts.AllowedHosts {
@@ -338,8 +342,8 @@ func (s *HTTPServer) serveProtectedResourceMetadata(w http.ResponseWriter, r *ht
 		return
 	}
 	metadata := oauthex.ProtectedResourceMetadata{
-		Resource: s.opts.ResourceURI, AuthorizationServers: []string{s.opts.AuthorizationServer},
-		ScopesSupported: []string{s.opts.RequiredScope}, BearerMethodsSupported: []string{"header"},
+		Resource: s.opts.ResourceURI, AuthorizationServers: []string{s.opts.googleIssuer},
+		ScopesSupported: []string{"openid", "email"}, BearerMethodsSupported: []string{"header"},
 		ResourceName: "Pocket Advisor Evidence",
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -392,7 +396,9 @@ func (s *HTTPServer) serveReady(w http.ResponseWriter, r *http.Request) {
 }
 
 // Serve opens the validated loopback listener and drains in-flight HTTP work
-// on cancellation. Caddy owns the externally reachable TLS socket.
+// on cancellation. With CertFile/KeyFile configured this terminates TLS
+// itself; otherwise it serves plain HTTP, e.g. behind a reverse proxy that
+// terminates TLS instead.
 func (s *HTTPServer) Serve(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.opts.Address)
 	if err != nil {
@@ -400,7 +406,11 @@ func (s *HTTPServer) Serve(ctx context.Context) error {
 	}
 	defer s.closeStates()
 	done := make(chan error, 1)
-	go func() { done <- s.httpServer.Serve(listener) }()
+	if s.opts.CertFile != "" {
+		go func() { done <- s.httpServer.ServeTLS(listener, s.opts.CertFile, s.opts.KeyFile) }()
+	} else {
+		go func() { done <- s.httpServer.Serve(listener) }()
+	}
 	select {
 	case err := <-done:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -442,7 +452,15 @@ func (s *HTTPServer) secureEnvelope(next http.Handler) http.Handler {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			if !slices.Contains(s.opts.AllowedHosts, r.Host) {
+			// Host and Origin allowlists are only optional in the genuinely
+			// unauthenticated local-dev case (no Google auth configured). An
+			// authenticated deployment always enforces them, even if the
+			// operator left AllowedHosts/AllowedOrigins unset — AllowedHosts
+			// defaults from ResourceURI's host in that case (see
+			// normalizeHTTPOptions), so it is never actually empty when
+			// GoogleClientID is set.
+			localDev := s.opts.GoogleClientID == ""
+			if !(localDev && len(s.opts.AllowedHosts) == 0) && !slices.Contains(s.opts.AllowedHosts, r.Host) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -451,7 +469,7 @@ func (s *HTTPServer) secureEnvelope(next http.Handler) http.Handler {
 				return
 			}
 			origins := r.Header.Values("Origin")
-			if len(origins) > 1 || (len(origins) == 1 && !slices.Contains(s.opts.AllowedOrigins, origins[0])) {
+			if !(localDev && len(s.opts.AllowedOrigins) == 0) && (len(origins) > 1 || (len(origins) == 1 && !slices.Contains(s.opts.AllowedOrigins, origins[0]))) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -575,101 +593,52 @@ func (s *HTTPServer) limitRate(next http.Handler) http.Handler {
 	})
 }
 
-type introspectionVerifier struct {
-	endpoint, clientID, secret, issuer, resource, scope string
-	maxLifetime                                         time.Duration
-	http                                                *http.Client
+// googleVerifier verifies bearer tokens as Google-issued OIDC ID tokens: a
+// signature/issuer/audience/expiry check via go-oidc against Google's
+// published JWKS (fetched and cached by the library, not looked up per
+// request against a confidential introspection endpoint — Google ID tokens
+// are self-contained, so there is no secret to hold on the resource-server
+// side), followed by an application-level allowlist check on the verified
+// email claim.
+type googleVerifier struct {
+	verifier *oidc.IDTokenVerifier
+	allowed  map[string]bool
 }
 
-func newIntrospectionVerifier(opts HTTPOptions) (*introspectionVerifier, error) {
-	client := opts.introspectionHTTPClient
-	if client == nil {
-		client = &http.Client{}
+func newGoogleVerifier(ctx context.Context, opts HTTPOptions) (*googleVerifier, error) {
+	if opts.googleHTTPClient != nil {
+		ctx = oidc.ClientContext(ctx, opts.googleHTTPClient)
 	}
-	clientCopy := *client
-	if clientCopy.Timeout == 0 || clientCopy.Timeout > 10*time.Second {
-		clientCopy.Timeout = 10 * time.Second
+	provider, err := oidc.NewProvider(ctx, opts.googleIssuer)
+	if err != nil {
+		return nil, fmt.Errorf("google oidc discovery: %w", err)
 	}
-	// Never forward confidential resource-server credentials to a redirect
-	// target. An introspection endpoint is a configured, exact HTTPS URL.
-	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
+	allowed := make(map[string]bool, len(opts.AllowedEmails))
+	for _, email := range opts.AllowedEmails {
+		allowed[strings.ToLower(strings.TrimSpace(email))] = true
 	}
-	return &introspectionVerifier{
-		endpoint: opts.IntrospectionEndpoint, clientID: opts.IntrospectionClientID,
-		secret: opts.IntrospectionSecret, issuer: opts.AuthorizationServer,
-		resource: opts.ResourceURI, scope: opts.RequiredScope, maxLifetime: opts.MaxTokenLifetime,
-		http: &clientCopy,
+	return &googleVerifier{
+		verifier: provider.Verifier(&oidc.Config{ClientID: opts.GoogleClientID}),
+		allowed:  allowed,
 	}, nil
 }
 
-type introspectionResponse struct {
-	Active    bool            `json:"active"`
-	Scope     string          `json:"scope"`
-	Subject   string          `json:"sub"`
-	Issuer    string          `json:"iss"`
-	Audience  json.RawMessage `json:"aud"`
-	Expires   int64           `json:"exp"`
-	IssuedAt  int64           `json:"iat"`
-	NotBefore int64           `json:"nbf"`
-}
-
-func (v *introspectionVerifier) Verify(ctx context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
-	form := url.Values{"token": {token}, "token_type_hint": {"access_token"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.endpoint, strings.NewReader(form.Encode()))
+func (v *googleVerifier) Verify(ctx context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
+	idToken, err := v.verifier.Verify(ctx, token)
 	if err != nil {
 		return nil, invalidToken()
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth(v.clientID, v.secret)
-	resp, err := v.http.Do(req)
-	if err != nil {
+	var claims struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+	if err := idToken.Claims(&claims); err != nil || claims.Email == "" {
 		return nil, invalidToken()
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if !claims.EmailVerified || !v.allowed[strings.ToLower(claims.Email)] {
 		return nil, invalidToken()
 	}
-	var out introspectionResponse
-	decoder := json.NewDecoder(io.LimitReader(resp.Body, 64<<10))
-	if err := decoder.Decode(&out); err != nil || !out.Active || out.Subject == "" || out.Expires == 0 || out.IssuedAt == 0 {
-		return nil, invalidToken()
-	}
-	now := time.Now()
-	expires := time.Unix(out.Expires, 0)
-	issued := time.Unix(out.IssuedAt, 0)
-	if !expires.After(now) || issued.After(now.Add(5*time.Second)) || expires.Sub(issued) > v.maxLifetime {
-		return nil, invalidToken()
-	}
-	if out.NotBefore != 0 && time.Unix(out.NotBefore, 0).After(now.Add(5*time.Second)) {
-		return nil, invalidToken()
-	}
-	if subtle.ConstantTimeCompare([]byte(out.Issuer), []byte(v.issuer)) != 1 {
-		return nil, invalidToken()
-	}
-	audiences, err := stringClaim(out.Audience)
-	if err != nil || !slices.Contains(audiences, v.resource) {
-		return nil, invalidToken()
-	}
-	scopes := strings.Fields(out.Scope)
-	if !slices.Contains(scopes, v.scope) {
-		// Return valid token information and let RequireBearerToken produce the
-		// specification's 403 insufficient_scope challenge.
-		return &mcpauth.TokenInfo{Scopes: scopes, Expiration: expires, UserID: v.issuer + "\x00" + out.Subject}, nil
-	}
-	return &mcpauth.TokenInfo{Scopes: scopes, Expiration: expires, UserID: v.issuer + "\x00" + out.Subject}, nil
-}
-
-func stringClaim(raw json.RawMessage) ([]string, error) {
-	var one string
-	if err := json.Unmarshal(raw, &one); err == nil && one != "" {
-		return []string{one}, nil
-	}
-	var many []string
-	if err := json.Unmarshal(raw, &many); err != nil {
-		return nil, err
-	}
-	return many, nil
+	return &mcpauth.TokenInfo{Expiration: idToken.Expiry, UserID: idToken.Issuer + "\x00" + idToken.Subject}, nil
 }
 
 func invalidToken() error { return fmt.Errorf("%w", mcpauth.ErrInvalidToken) }

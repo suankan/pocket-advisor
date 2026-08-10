@@ -5,6 +5,8 @@ reasoning_effort: xhigh
 
 # Authenticated Streamable HTTP MCP
 
+> **Superseded.** This task's requirements shaped the first implementation, which used an operator-managed Keycloak realm behind a Caddy sidecar in a Kubernetes application chart. That design was later replaced: authenticated HTTP MCP now runs as a local process (no chart, no gateway) authenticated against Google as the sole identity provider. The Keycloak/Caddy/gateway/scope specifics below are historical — [`docs/mcp.md`](../mcp.md) is the current design authority, and [`p0-mcp-local-refactor.md`](p0-mcp-local-refactor.md) records what changed and why. The transport, binding/origin-security, cursor-isolation, and testing-shape requirements below still hold; only the identity-provider and deployment sections do not.
+
 ## Outcome
 
 Pocket Advisor exposes the same fixed-workspace MCP query tool through MCP 2026-07-28 Streamable HTTP behind an authenticated, TLS-terminated boundary, while retaining MCP 2025-11-25 HTTP compatibility for the intended OpenCode client, without weakening storage credentials or allowing request-selected workspace scope.
@@ -21,7 +23,7 @@ The authoritative future interface and routing design remains [`docs/api-server-
 
 This is a P0 usability blocker. The operator cannot use the system through the intended client while MCP is limited to local stdio, so authenticated Streamable HTTP is an activated near-term requirement rather than a conditional future task.
 
-This task depends on [`p0-1-mcp-evidence-interface.md`](p0-1-mcp-evidence-interface.md) and follows it in the same milestone. The intended client is OpenCode 1.18.15, with newer OpenCode versions expected to negotiate the current protocol when their MCP SDK gains support. The selected authorization server is an operator-managed Keycloak realm with a pre-registered public OpenCode client and a confidential introspection client. The selected gateway is a Caddy sidecar in the separate `pocket-advisor-app` Helm release. Caddy is the pod's only network listener and TLS boundary; the fixed-workspace Go resource server listens only on pod loopback. A remote release uses an explicitly source-restricted `LoadBalancer` Service, while the chart remains safe by default with `ClusterIP`.
+This task depends on [`p0-1-mcp-evidence-interface.md`](p0-1-mcp-evidence-interface.md) and follows it in the same milestone. The intended client is OpenCode 1.18.15, with newer OpenCode versions expected to negotiate the current protocol when their MCP SDK gains support. The selected authorization server is an operator-managed Keycloak realm with a pre-registered public OpenCode client and a confidential introspection client. The selected gateway is a Caddy sidecar in the separate `pocket-advisor-mcp` Helm release. Caddy is the pod's only network listener and TLS boundary; the fixed-workspace Go resource server listens only on pod loopback. A remote release uses an explicitly source-restricted `LoadBalancer` Service, while the chart remains safe by default with `ClusterIP`.
 
 Do not begin by exposing an unauthenticated prototype and planning to add security later.
 

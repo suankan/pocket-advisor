@@ -3,6 +3,8 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,93 +14,143 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-type tokenRecord struct {
-	active bool
-	sub    string
-	aud    string
-	scope  string
-	issuer string
-	exp    time.Time
-	iat    time.Time
+// testGoogleClientID is the fixed audience every test server configures as
+// its GoogleClientID; issued tokens use it as their "aud" unless a test
+// deliberately mismatches it.
+const testGoogleClientID = "test-mcp-client.apps.googleusercontent.com"
+
+// testAllowedEmails is the fixed allowlist every test server configures.
+// Tests exercising "not authorized" pass an email outside this list.
+var testAllowedEmails = []string{
+	"caller-a@example.test", "caller-b@example.test", "caller@example.test",
+	"valid@example.test", "first@example.test", "second@example.test",
 }
 
-type testAuthorizationServer struct {
+// tokenClaims controls what issue mints; issue's defaults are what a real
+// Google ID token for an allowlisted caller looks like, and tests override
+// only the field(s) under test.
+type tokenClaims struct {
+	subject       string
+	email         string
+	emailVerified bool
+	audience      string
+	issuer        string
+	issuedAt      time.Time
+	expiry        time.Time
+}
+
+// testGoogleServer is a fake Google OIDC provider: it serves OIDC discovery
+// and a JWKS over HTTPS, and mints ID tokens signed with the same key it
+// publishes, so the real production verifier (newGoogleVerifier, built on
+// go-oidc) can be exercised end-to-end without contacting the real Google.
+type testGoogleServer struct {
 	server *httptest.Server
-	mu     sync.Mutex
-	tokens map[string]tokenRecord
-	calls  int
+	key    *rsa.PrivateKey
+	keyID  string
+
+	mu        sync.Mutex
+	jwksCalls int
 }
 
-func newTestAuthorizationServer(t *testing.T) *testAuthorizationServer {
+func newTestGoogleServer(t *testing.T) *testGoogleServer {
 	t.Helper()
-	as := &testAuthorizationServer{tokens: make(map[string]tokenRecord)}
-	as.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		as.mu.Lock()
-		defer as.mu.Unlock()
-		as.calls++
-		if user, secret, ok := r.BasicAuth(); !ok || user != "resource-server" || secret != "secret" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		_ = r.ParseForm()
-		record := as.tokens[r.Form.Get("token")]
-		response := map[string]any{"active": record.active}
-		if record.active {
-			response["sub"] = record.sub
-			response["aud"] = record.aud
-			response["scope"] = record.scope
-			response["exp"] = record.exp.Unix()
-			response["iat"] = record.iat.Unix()
-			issuer := record.issuer
-			if issuer == "" {
-				issuer = as.server.URL
-			}
-			response["iss"] = issuer
-		}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &testGoogleServer{key: key, keyID: "test-key"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	t.Cleanup(as.server.Close)
-	return as
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 g.server.URL,
+			"jwks_uri":               g.server.URL + "/keys",
+			"authorization_endpoint": g.server.URL + "/auth",
+			"token_endpoint":         g.server.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		g.jwksCalls++
+		g.mu.Unlock()
+		set := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+			Key: &key.PublicKey, KeyID: g.keyID, Algorithm: "RS256", Use: "sig",
+		}}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(set)
+	})
+	g.server = httptest.NewServer(mux)
+	t.Cleanup(g.server.Close)
+	return g
 }
 
-func (as *testAuthorizationServer) issue(token, subject, audience, scope string) {
-	now := time.Now().Truncate(time.Second)
-	as.mu.Lock()
-	as.tokens[token] = tokenRecord{active: true, sub: subject, aud: audience, scope: scope, iat: now, exp: now.Add(5 * time.Minute)}
-	as.mu.Unlock()
+func (g *testGoogleServer) jwksFetchCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.jwksCalls
 }
 
-func (as *testAuthorizationServer) revoke(token string) {
-	as.mu.Lock()
-	record := as.tokens[token]
-	record.active = false
-	as.tokens[token] = record
-	as.mu.Unlock()
+// issue mints a signed ID token for a caller that should be accepted: an
+// allowlisted email, verified, the configured audience and issuer, and a
+// five-minute lifetime.
+func (g *testGoogleServer) issue(subject, email string) string {
+	return g.issueCustom(tokenClaims{
+		subject: subject, email: email, emailVerified: true,
+		audience: testGoogleClientID, issuer: g.server.URL,
+		issuedAt: time.Now(), expiry: time.Now().Add(5 * time.Minute),
+	})
 }
 
-func (as *testAuthorizationServer) callCount() int {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.calls
+func (g *testGoogleServer) issueCustom(c tokenClaims) string {
+	signer, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.RS256,
+		Key:       &jose.JSONWebKey{Key: g.key, KeyID: g.keyID, Algorithm: "RS256", Use: "sig"},
+	}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		panic(err)
+	}
+	claims := map[string]any{
+		"iss": c.issuer, "sub": c.subject, "aud": c.audience,
+		"email": c.email, "email_verified": c.emailVerified,
+		"iat": c.issuedAt.Unix(), "exp": c.expiry.Unix(),
+	}
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		panic(err)
+	}
+	return token
 }
 
-func newHTTPTestServer(t *testing.T, as *testAuthorizationServer, retriever Retriever) *HTTPServer {
+func newHTTPTestServer(t *testing.T, google *testGoogleServer, retriever Retriever) *HTTPServer {
 	t.Helper()
 	resource := "https://mcp.example.test/mcp"
-	server, err := NewHTTPServer(&QueryTool{Service: retriever, Workspace: "synthetic"}, HTTPOptions{
-		ResourceURI: resource, AuthorizationServer: as.server.URL,
-		IntrospectionEndpoint: as.server.URL, IntrospectionClientID: "resource-server", IntrospectionSecret: "secret",
-		introspectionHTTPClient: as.server.Client(), AllowedOrigins: []string{"https://app.example.test"},
+	server, err := NewHTTPServer(context.Background(), &QueryTool{Service: retriever, Workspace: "synthetic"}, testGoogleHTTPOptions(google, HTTPOptions{
+		ResourceURI: resource, AllowedOrigins: []string{"https://app.example.test"},
 		TrustedProxyCIDRs: []string{"127.0.0.0/8"},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(server.closeStates)
 	return server
+}
+
+// testGoogleHTTPOptions layers the fake-provider test hooks (issuer override,
+// http client, client ID, allowlist) onto whatever the caller already set.
+// http_test.go is part of package mcp, so it can reach the unexported
+// googleIssuer/googleHTTPClient test-injection fields directly.
+func testGoogleHTTPOptions(google *testGoogleServer, base HTTPOptions) HTTPOptions {
+	opts := base
+	opts.GoogleClientID = testGoogleClientID
+	opts.AllowedEmails = testAllowedEmails
+	opts.googleIssuer = google.server.URL
+	opts.googleHTTPClient = google.server.Client()
+	return opts
 }
 
 func mcpRequest(t *testing.T, server *HTTPServer, token, version, method, name string, params map[string]any) *httptest.ResponseRecorder {
@@ -138,77 +190,81 @@ func mcpRequest(t *testing.T, server *HTTPServer, token, version, method, name s
 	return recorder
 }
 
-func TestHTTPRejectsUnauthenticatedAndRevokedTokens(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	resource := "https://mcp.example.test/mcp"
-	as.issue("valid", "caller-a", resource, defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+func TestHTTPRejectsUnauthenticatedTokens(t *testing.T) {
+	google := newTestGoogleServer(t)
+	valid := google.issue("subject-a", "caller-a@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 
 	unauthenticated := mcpRequest(t, server, "", "2026-07-28", "server/discover", "", nil)
 	if unauthenticated.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d, body=%s", unauthenticated.Code, unauthenticated.Body.String())
 	}
-	if got := unauthenticated.Header().Get("WWW-Authenticate"); !strings.Contains(got, "resource_metadata=") || !strings.Contains(got, `scope="`+defaultHTTPScope+`"`) {
+	if got := unauthenticated.Header().Get("WWW-Authenticate"); !strings.Contains(got, "resource_metadata=") {
 		t.Fatalf("WWW-Authenticate = %q", got)
 	}
 
-	authorized := mcpRequest(t, server, "valid", "2026-07-28", "server/discover", "", nil)
+	authorized := mcpRequest(t, server, valid, "2026-07-28", "server/discover", "", nil)
 	if authorized.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d, body=%s", authorized.Code, authorized.Body.String())
 	}
-	as.revoke("valid")
-	revoked := mcpRequest(t, server, "valid", "2026-07-28", "server/discover", "", nil)
-	if revoked.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked status = %d, body=%s", revoked.Code, revoked.Body.String())
+
+	malformed := mcpRequest(t, server, "not-a-jwt", "2026-07-28", "server/discover", "", nil)
+	if malformed.Code != http.StatusUnauthorized {
+		t.Fatalf("malformed token status = %d, body=%s", malformed.Code, malformed.Body.String())
 	}
 }
 
-func TestHTTPTokenAudienceScopeAndLifetime(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	resource := "https://mcp.example.test/mcp"
-	as.issue("wrong-audience", "caller", "https://other.example.test/mcp", defaultHTTPScope)
-	as.issue("wrong-scope", "caller", resource, "other:scope")
-	as.issue("too-long", "caller", resource, defaultHTTPScope)
-	as.issue("expired", "caller", resource, defaultHTTPScope)
-	as.issue("wrong-issuer", "caller", resource, defaultHTTPScope)
-	as.mu.Lock()
-	long := as.tokens["too-long"]
-	long.exp = long.iat.Add(time.Hour)
-	as.tokens["too-long"] = long
-	expired := as.tokens["expired"]
-	expired.iat = expired.iat.Add(-10 * time.Minute)
-	expired.exp = expired.iat.Add(5 * time.Minute)
-	as.tokens["expired"] = expired
-	wrongIssuer := as.tokens["wrong-issuer"]
-	wrongIssuer.issuer = "https://other-issuer.example.test"
-	as.tokens["wrong-issuer"] = wrongIssuer
-	as.mu.Unlock()
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+func TestHTTPTokenClaimsAreValidated(t *testing.T) {
+	google := newTestGoogleServer(t)
+	now := time.Now()
 
-	for token, want := range map[string]int{
-		"wrong-audience": http.StatusUnauthorized,
-		"wrong-scope":    http.StatusForbidden,
-		"too-long":       http.StatusUnauthorized,
-		"expired":        http.StatusUnauthorized,
-		"wrong-issuer":   http.StatusUnauthorized,
-	} {
+	tokens := map[string]string{
+		"wrong-audience": google.issueCustom(tokenClaims{
+			subject: "caller", email: "caller@example.test", emailVerified: true,
+			audience: "someone-else.apps.googleusercontent.com", issuer: google.server.URL,
+			issuedAt: now, expiry: now.Add(5 * time.Minute),
+		}),
+		"expired": google.issueCustom(tokenClaims{
+			subject: "caller", email: "caller@example.test", emailVerified: true,
+			audience: testGoogleClientID, issuer: google.server.URL,
+			issuedAt: now.Add(-10 * time.Minute), expiry: now.Add(-5 * time.Minute),
+		}),
+		"wrong-issuer": google.issueCustom(tokenClaims{
+			subject: "caller", email: "caller@example.test", emailVerified: true,
+			audience: testGoogleClientID, issuer: "https://not-google.example.test",
+			issuedAt: now, expiry: now.Add(5 * time.Minute),
+		}),
+		"unverified-email": google.issueCustom(tokenClaims{
+			subject: "caller", email: "caller@example.test", emailVerified: false,
+			audience: testGoogleClientID, issuer: google.server.URL,
+			issuedAt: now, expiry: now.Add(5 * time.Minute),
+		}),
+		"unauthorized-email": google.issueCustom(tokenClaims{
+			subject: "caller", email: "attacker@example.test", emailVerified: true,
+			audience: testGoogleClientID, issuer: google.server.URL,
+			issuedAt: now, expiry: now.Add(5 * time.Minute),
+		}),
+	}
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
+
+	for name, token := range tokens {
 		recorder := mcpRequest(t, server, token, "2026-07-28", "server/discover", "", nil)
-		if recorder.Code != want {
-			t.Errorf("%s status = %d, want %d, body=%s", token, recorder.Code, want, recorder.Body.String())
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want %d, body=%s", name, recorder.Code, http.StatusUnauthorized, recorder.Body.String())
 		}
 	}
 }
 
-func TestHTTPOriginHostAndProxyValidationPrecedesOAuth(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+func TestHTTPOriginHostAndProxyValidationPrecedesAuth(t *testing.T) {
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 
 	baseBody := `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}`
 	makeRequest := func() *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(baseBody))
 		req.Host = "mcp.example.test"
-		req.Header.Set("Authorization", "Bearer valid")
+		req.Header.Set("Authorization", "Bearer "+valid)
 		return req
 	}
 
@@ -240,7 +296,6 @@ func TestHTTPOriginHostAndProxyValidationPrecedesOAuth(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			before := as.callCount()
 			req := makeRequest()
 			test.mutate(req)
 			recorder := httptest.NewRecorder()
@@ -248,16 +303,13 @@ func TestHTTPOriginHostAndProxyValidationPrecedesOAuth(t *testing.T) {
 			if recorder.Code != test.want {
 				t.Fatalf("status = %d, want %d, body=%s", recorder.Code, test.want, recorder.Body.String())
 			}
-			if as.callCount() != before {
-				t.Fatal("invalid envelope reached OAuth introspection")
-			}
 		})
 	}
 }
 
 func TestHTTPProtectedResourceMetadata(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 	req := httptest.NewRequest(http.MethodGet, "http://backend/.well-known/oauth-protected-resource/mcp", nil)
 	req.Host = "mcp.example.test"
 	recorder := httptest.NewRecorder()
@@ -273,21 +325,21 @@ func TestHTTPProtectedResourceMetadata(t *testing.T) {
 		t.Fatalf("resource = %v", metadata["resource"])
 	}
 	servers, _ := metadata["authorization_servers"].([]any)
-	if len(servers) != 1 || servers[0] != as.server.URL {
+	if len(servers) != 1 || servers[0] != google.server.URL {
 		t.Fatalf("authorization_servers = %v", servers)
 	}
 }
 
 func TestHTTPCurrentProtocolListsSharedTools(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 
-	discover := mcpRequest(t, server, "valid", "2026-07-28", "server/discover", "", nil)
+	discover := mcpRequest(t, server, valid, "2026-07-28", "server/discover", "", nil)
 	if discover.Code != http.StatusOK {
 		t.Fatalf("discover status = %d, body=%s", discover.Code, discover.Body.String())
 	}
-	list := mcpRequest(t, server, "valid", "2026-07-28", "tools/list", "", nil)
+	list := mcpRequest(t, server, valid, "2026-07-28", "tools/list", "", nil)
 	if list.Code != http.StatusOK {
 		t.Fatalf("tools/list status = %d, body=%s", list.Code, list.Body.String())
 	}
@@ -299,11 +351,11 @@ func TestHTTPCurrentProtocolListsSharedTools(t *testing.T) {
 }
 
 func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 
-	initialize := mcpRequest(t, server, "valid", "2025-11-25", "initialize", "", map[string]any{
+	initialize := mcpRequest(t, server, valid, "2025-11-25", "initialize", "", map[string]any{
 		"protocolVersion": "2025-11-25",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "opencode", "version": "1.18.15"},
@@ -319,7 +371,7 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 	}
 	fixation := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	fixation.Host = "mcp.example.test"
-	fixation.Header.Set("Authorization", "Bearer valid")
+	fixation.Header.Set("Authorization", "Bearer "+valid)
 	fixation.Header.Set("Content-Type", "application/json")
 	fixation.Header.Set("Accept", "application/json, text/event-stream")
 	fixation.Header.Set("MCP-Protocol-Version", "2025-11-25")
@@ -332,7 +384,7 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 	notificationBody := `{"jsonrpc":"2.0","method":"notifications/initialized"}`
 	notification := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(notificationBody))
 	notification.Host = "mcp.example.test"
-	notification.Header.Set("Authorization", "Bearer valid")
+	notification.Header.Set("Authorization", "Bearer "+valid)
 	notification.Header.Set("Content-Type", "application/json")
 	notification.Header.Set("Accept", "application/json, text/event-stream")
 	notification.Header.Set("MCP-Protocol-Version", "2025-11-25")
@@ -342,14 +394,14 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 		t.Fatalf("initialized notification status = %d, body=%s", notificationRecorder.Code, notificationRecorder.Body.String())
 	}
 
-	list := mcpRequest(t, server, "valid", "2025-11-25", "tools/list", "", nil)
+	list := mcpRequest(t, server, valid, "2025-11-25", "tools/list", "", nil)
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "search_synthetic") {
 		t.Fatalf("legacy tools/list status = %d, body=%s", list.Code, list.Body.String())
 	}
 
 	get := httptest.NewRequest(http.MethodGet, "http://backend/mcp", nil)
 	get.Host = "mcp.example.test"
-	get.Header.Set("Authorization", "Bearer valid")
+	get.Header.Set("Authorization", "Bearer "+valid)
 	getRecorder := httptest.NewRecorder()
 	server.httpServer.Handler.ServeHTTP(getRecorder, get)
 	if getRecorder.Code != http.StatusMethodNotAllowed {
@@ -358,10 +410,10 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 }
 
 func TestHTTPCurrentProtocolRejectsHeaderBodyMismatch(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
-	recorder := mcpRequest(t, server, "valid", "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
+	recorder := mcpRequest(t, server, valid, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
 		"name": "search_synthetic", "arguments": map[string]any{"question": "synthetic"},
 	})
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":-32020`) {
@@ -370,14 +422,13 @@ func TestHTTPCurrentProtocolRejectsHeaderBodyMismatch(t *testing.T) {
 }
 
 func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	resource := "https://mcp.example.test/mcp"
-	as.issue("caller-a", "subject-a", resource, defaultHTTPScope)
-	as.issue("caller-a-renewed", "subject-a", resource, defaultHTTPScope)
-	as.issue("caller-b", "subject-b", resource, defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticTextResult(strings.Repeat("large synthetic evidence 🙂\n", 5500))})
+	google := newTestGoogleServer(t)
+	callerA := google.issue("subject-a", "caller-a@example.test")
+	callerARenewed := google.issue("subject-a", "caller-a@example.test")
+	callerB := google.issue("subject-b", "caller-b@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticTextResult(strings.Repeat("large synthetic evidence 🙂\n", 5500))})
 
-	search := mcpRequest(t, server, "caller-a", "2026-07-28", "tools/call", "search_synthetic", map[string]any{
+	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search_synthetic", map[string]any{
 		"name": "search_synthetic", "arguments": map[string]any{"question": "large synthetic evidence"},
 	})
 	page, isError := decodeHTTPToolPage(t, search)
@@ -388,17 +439,17 @@ func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
 		t.Fatalf("search response = %d bytes", search.Body.Len())
 	}
 
-	foreign := mcpRequest(t, server, "caller-b", "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
+	foreign := mcpRequest(t, server, callerB, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
 		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, foreignError := decodeHTTPToolPage(t, foreign)
 	if !foreignError {
-		t.Fatal("another OAuth subject reused a continuation cursor")
+		t.Fatal("another caller reused a continuation cursor")
 	}
 
 	pages := 1
 	for !page.Complete {
-		response := mcpRequest(t, server, "caller-a-renewed", "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
+		response := mcpRequest(t, server, callerARenewed, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
 			"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 		})
 		if response.Body.Len() > absoluteToolResponseBytes {
@@ -420,14 +471,13 @@ func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
 }
 
 func TestHTTPCallerStateEvictionInvalidatesContinuation(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	resource := "https://mcp.example.test/mcp"
-	as.issue("caller-a", "subject-a", resource, defaultHTTPScope)
-	as.issue("caller-b", "subject-b", resource, defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticTextResult(strings.Repeat("bounded evidence\n", 5500))})
+	google := newTestGoogleServer(t)
+	callerA := google.issue("subject-a", "caller-a@example.test")
+	callerB := google.issue("subject-b", "caller-b@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticTextResult(strings.Repeat("bounded evidence\n", 5500))})
 	server.opts.MaxCallerStates = 1
 
-	search := mcpRequest(t, server, "caller-a", "2026-07-28", "tools/call", "search_synthetic", map[string]any{
+	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search_synthetic", map[string]any{
 		"name": "search_synthetic", "arguments": map[string]any{"question": "bounded evidence"},
 	})
 	page, isError := decodeHTTPToolPage(t, search)
@@ -435,7 +485,7 @@ func TestHTTPCallerStateEvictionInvalidatesContinuation(t *testing.T) {
 		t.Fatalf("search cursor=%v isError=%v", page.NextCursor, isError)
 	}
 
-	discover := mcpRequest(t, server, "caller-b", "2026-07-28", "server/discover", "", nil)
+	discover := mcpRequest(t, server, callerB, "2026-07-28", "server/discover", "", nil)
 	if discover.Code != http.StatusOK {
 		t.Fatalf("second caller status = %d, body=%s", discover.Code, discover.Body.String())
 	}
@@ -446,7 +496,7 @@ func TestHTTPCallerStateEvictionInvalidatesContinuation(t *testing.T) {
 		t.Fatalf("caller state count = %d, want 1", stateCount)
 	}
 
-	evicted := mcpRequest(t, server, "caller-a", "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
+	evicted := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
 		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, evictedError := decodeHTTPToolPage(t, evicted)
@@ -479,13 +529,13 @@ func decodeHTTPToolPage(t *testing.T, recorder *httptest.ResponseRecorder) (*Evi
 }
 
 func TestHTTPRejectsOversizedBody(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":%q}}}`, strings.Repeat("x", defaultHTTPMaxRequestBytes))
 	req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(body))
 	req.Host = "mcp.example.test"
-	req.Header.Set("Authorization", "Bearer valid")
+	req.Header.Set("Authorization", "Bearer "+valid)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	recorder := httptest.NewRecorder()
@@ -497,10 +547,10 @@ func TestHTTPRejectsOversizedBody(t *testing.T) {
 }
 
 func TestHTTPDisconnectCancelsCurrentProtocolToolCall(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	as.issue("valid", "caller", "https://mcp.example.test/mcp", defaultHTTPScope)
+	google := newTestGoogleServer(t)
+	valid := google.issue("caller", "caller@example.test")
 	retriever := &blockingRetriever{started: make(chan struct{})}
-	server := newHTTPTestServer(t, as, retriever)
+	server := newHTTPTestServer(t, google, retriever)
 
 	params := map[string]any{
 		"name": "search_synthetic", "arguments": map[string]any{"question": "cancel me"},
@@ -517,7 +567,7 @@ func TestHTTPDisconnectCancelsCurrentProtocolToolCall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", bytes.NewReader(body)).WithContext(ctx)
 	req.Host = "mcp.example.test"
-	req.Header.Set("Authorization", "Bearer valid")
+	req.Header.Set("Authorization", "Bearer "+valid)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
@@ -542,163 +592,125 @@ func TestHTTPDisconnectCancelsCurrentProtocolToolCall(t *testing.T) {
 	}
 }
 
-func TestHTTPStartupRefusesNonLoopbackOrIncompleteAuth(t *testing.T) {
-	base := &QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}
-	complete := HTTPOptions{
-		ResourceURI: "https://mcp.example.test/mcp", AuthorizationServer: "https://auth.example.test/realms/pocket-advisor",
-		IntrospectionEndpoint: "https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect",
-		IntrospectionClientID: "resource-server", IntrospectionSecret: "secret",
+// TestHTTPConcurrencyBoundsToolCalls exercises limitConcurrency (MaxConcurrent)
+// directly at the tool-call layer: a slow in-flight call occupies the sole
+// concurrency slot, so a second concurrent call is rejected with 503 rather
+// than queued. Unlike the introspection-based design this replaces, verifying
+// a Google ID token's signature against an already-cached JWKS is a local,
+// effectively instant operation with no comparable "slow verification"
+// scenario to simulate, so this test covers the same middleware from the
+// tool-execution side instead.
+func TestHTTPConcurrencyBoundsToolCalls(t *testing.T) {
+	google := newTestGoogleServer(t)
+	first := google.issue("subject-a", "first@example.test")
+	second := google.issue("subject-b", "second@example.test")
+	retriever := &blockingRetriever{started: make(chan struct{})}
+	server, err := NewHTTPServer(context.Background(), &QueryTool{Service: retriever, Workspace: "synthetic"}, testGoogleHTTPOptions(google, HTTPOptions{
+		ResourceURI: "https://mcp.example.test/mcp", MaxConcurrent: 1, RequestTimeout: time.Second,
+	}))
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(server.closeStates)
+
+	params := func(question string) map[string]any {
+		return map[string]any{
+			"name": "search_synthetic", "arguments": map[string]any{"question": question},
+			"_meta": map[string]any{
+				"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+				"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "synthetic-client", "version": "1"},
+				"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+			},
+		}
+	}
+	newReq := func(ctx context.Context, token, question string) *http.Request {
+		body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params(question)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", bytes.NewReader(body)).WithContext(ctx)
+		req.Host = "mcp.example.test"
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+		req.Header.Set("Mcp-Method", "tools/call")
+		req.Header.Set("Mcp-Name", "search_synthetic")
+		return req
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		server.httpServer.Handler.ServeHTTP(httptest.NewRecorder(), newReq(ctx, first, "first"))
+		close(firstDone)
+	}()
+	select {
+	case <-retriever.started:
+	case <-time.After(time.Second):
+		t.Fatal("first call did not start")
+	}
+
+	secondRecorder := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(secondRecorder, newReq(context.Background(), second, "second"))
+	if secondRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("concurrent call status = %d, body=%s", secondRecorder.Code, secondRecorder.Body.String())
+	}
+
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first call did not release the handler")
+	}
+}
+
+func TestHTTPStartupRefusesInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	base := &QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}
+	google := newTestGoogleServer(t)
+	complete := testGoogleHTTPOptions(google, HTTPOptions{ResourceURI: "https://mcp.example.test/mcp"})
+
 	badBind := complete
 	badBind.Address = "0.0.0.0:8080"
-	if _, err := NewHTTPServer(base, badBind); err == nil || !strings.Contains(err.Error(), "loopback") {
+	if _, err := NewHTTPServer(ctx, base, badBind); err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("non-loopback error = %v", err)
 	}
-	missingSecret := complete
-	missingSecret.IntrospectionSecret = ""
-	if _, err := NewHTTPServer(base, missingSecret); err == nil || !strings.Contains(err.Error(), "secret") {
-		t.Fatalf("missing secret error = %v", err)
+	missingEmails := complete
+	missingEmails.AllowedEmails = nil
+	if _, err := NewHTTPServer(ctx, base, missingEmails); err == nil || !strings.Contains(err.Error(), "allowed email") {
+		t.Fatalf("missing allowed emails error = %v", err)
+	}
+	insecureResource := complete
+	insecureResource.ResourceURI = "http://mcp.example.test/mcp"
+	if _, err := NewHTTPServer(ctx, base, insecureResource); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("insecure resource URI error = %v", err)
 	}
 	invalidProxy := complete
 	invalidProxy.TrustedProxyCIDRs = []string{"not-a-cidr"}
-	if _, err := NewHTTPServer(base, invalidProxy); err == nil || !strings.Contains(err.Error(), "trusted proxy CIDR") {
+	if _, err := NewHTTPServer(ctx, base, invalidProxy); err == nil || !strings.Contains(err.Error(), "trusted proxy CIDR") {
 		t.Fatalf("invalid proxy error = %v", err)
 	}
 	invalidHost := complete
 	invalidHost.AllowedHosts = []string{"mcp.example.test/path"}
-	if _, err := NewHTTPServer(base, invalidHost); err == nil || !strings.Contains(err.Error(), "allowed host") {
+	if _, err := NewHTTPServer(ctx, base, invalidHost); err == nil || !strings.Contains(err.Error(), "allowed host") {
 		t.Fatalf("invalid host error = %v", err)
-	}
-	invalidScope := complete
-	invalidScope.RequiredScope = "pocket-advisor:retrieve other:scope"
-	if _, err := NewHTTPServer(base, invalidScope); err == nil || !strings.Contains(err.Error(), "one OAuth scope") {
-		t.Fatalf("invalid scope error = %v", err)
 	}
 	invalidStateLimit := complete
 	invalidStateLimit.MaxCallerStates = -1
-	if _, err := NewHTTPServer(base, invalidStateLimit); err == nil || !strings.Contains(err.Error(), "max caller states") {
+	if _, err := NewHTTPServer(ctx, base, invalidStateLimit); err == nil || !strings.Contains(err.Error(), "max caller states") {
 		t.Fatalf("invalid caller state limit error = %v", err)
 	}
-}
-
-func TestHTTPIntrospectionRedirectIsNotFollowed(t *testing.T) {
-	var targetCalls int
-	var authorizationServer *httptest.Server
-	authorizationServer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/target" {
-			targetCalls++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"active":false}`)
-			return
-		}
-		http.Redirect(w, r, authorizationServer.URL+"/target", http.StatusTemporaryRedirect)
-	}))
-	t.Cleanup(authorizationServer.Close)
-	client := authorizationServer.Client()
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return nil }
-	server, err := NewHTTPServer(&QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}, HTTPOptions{
-		ResourceURI: "https://mcp.example.test/mcp", AuthorizationServer: authorizationServer.URL,
-		IntrospectionEndpoint: authorizationServer.URL, IntrospectionClientID: "resource-server", IntrospectionSecret: "secret",
-		introspectionHTTPClient: client,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(server.closeStates)
-
-	response := mcpRequest(t, server, "redirected", "2026-07-28", "server/discover", "", nil)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
-	}
-	if targetCalls != 0 {
-		t.Fatalf("introspection redirect followed %d times", targetCalls)
-	}
-}
-
-func TestHTTPConcurrencyAndTimeoutBoundIntrospection(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	authorizationServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started <- struct{}{}
-		select {
-		case <-release:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"active":false}`)
-		case <-r.Context().Done():
-		}
-	}))
-	t.Cleanup(authorizationServer.Close)
-	server, err := NewHTTPServer(&QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}, HTTPOptions{
-		ResourceURI: "https://mcp.example.test/mcp", AuthorizationServer: authorizationServer.URL,
-		IntrospectionEndpoint: authorizationServer.URL, IntrospectionClientID: "resource-server", IntrospectionSecret: "secret",
-		introspectionHTTPClient: authorizationServer.Client(), MaxConcurrent: 1, RequestTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(server.closeStates)
-
-	firstDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		firstDone <- mcpRequest(t, server, "first", "2026-07-28", "server/discover", "", nil)
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first introspection did not start")
-	}
-	second := mcpRequest(t, server, "second", "2026-07-28", "server/discover", "", nil)
-	if second.Code != http.StatusServiceUnavailable {
-		t.Fatalf("concurrent authorization status = %d, body=%s", second.Code, second.Body.String())
-	}
-	close(release)
-	select {
-	case first := <-firstDone:
-		if first.Code != http.StatusUnauthorized {
-			t.Fatalf("first status = %d, body=%s", first.Code, first.Body.String())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("first authorization did not finish")
-	}
-
-	timeoutStarted := make(chan struct{}, 1)
-	timeoutRelease := make(chan struct{})
-	timeoutAuthorizationServer := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		timeoutStarted <- struct{}{}
-		select {
-		case <-r.Context().Done():
-		case <-timeoutRelease:
-		}
-	}))
-	t.Cleanup(timeoutAuthorizationServer.Close)
-	timeoutServer, err := NewHTTPServer(&QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}, HTTPOptions{
-		ResourceURI: "https://mcp.example.test/mcp", AuthorizationServer: timeoutAuthorizationServer.URL,
-		IntrospectionEndpoint: timeoutAuthorizationServer.URL, IntrospectionClientID: "resource-server", IntrospectionSecret: "secret",
-		introspectionHTTPClient: timeoutAuthorizationServer.Client(), RequestTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(timeoutServer.closeStates)
-	begin := time.Now()
-	timedOut := mcpRequest(t, timeoutServer, "slow", "2026-07-28", "server/discover", "", nil)
-	close(timeoutRelease)
-	if timedOut.Code != http.StatusUnauthorized {
-		t.Fatalf("timed-out authorization status = %d, body=%s", timedOut.Code, timedOut.Body.String())
-	}
-	if elapsed := time.Since(begin); elapsed > 2*time.Second {
-		t.Fatalf("authorization timeout took %s", elapsed)
-	}
-	select {
-	case <-timeoutStarted:
-	default:
-		t.Fatal("timed authorization never reached introspection")
+	certWithoutKey := complete
+	certWithoutKey.CertFile = "/tmp/does-not-matter.pem"
+	if _, err := NewHTTPServer(ctx, base, certWithoutKey); err == nil || !strings.Contains(err.Error(), "certificate file and a key file") {
+		t.Fatalf("cert without key error = %v", err)
 	}
 }
 
 func TestHTTPReadinessDoesNotExposeDependency(t *testing.T) {
-	as := newTestAuthorizationServer(t)
-	server := newHTTPTestServer(t, as, &stubRetriever{result: syntheticResult()})
+	google := newTestGoogleServer(t)
+	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
 	server.opts.Readiness = func(context.Context) error { return fmt.Errorf("private database endpoint and workspace") }
 	req := httptest.NewRequest(http.MethodGet, "http://backend/readyz", nil)
 	recorder := httptest.NewRecorder()

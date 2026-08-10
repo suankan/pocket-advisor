@@ -24,6 +24,8 @@ import (
 
 // Options is the resolved command line.
 type Options struct {
+	SubCommand      string   // "mcp stdio", "mcp start", "mcp stop", "mcp status"
+	SubArgs         []string // Arguments after subcommand
 	ConfigPath      string
 	WorkspaceConfig string
 	WorkspaceID     string
@@ -35,8 +37,6 @@ type Options struct {
 	DeleteData bool
 	Forget     string
 	Query      string
-	MCP        bool
-	MCPHTTP    bool
 
 	TopK        int
 	JSON        bool
@@ -48,17 +48,6 @@ type Options struct {
 	EmbedConc   int
 	LogDir      string
 	NoDashboard bool
-
-	MCPHTTPAddr                  string
-	MCPHTTPResourceURI           string
-	MCPHTTPAuthorizationServer   string
-	MCPHTTPIntrospectionEndpoint string
-	MCPHTTPIntrospectionClientID string
-	MCPHTTPRequiredScope         string
-	MCPHTTPAllowedOrigins        string
-	MCPHTTPAllowedHosts          string
-	MCPHTTPTrustedProxyCIDRs     string
-	MCPHTTPMaxConcurrent         int
 
 	Doctor  bool
 	Recover bool
@@ -93,13 +82,6 @@ Modes (exactly one):
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
                       (retrieval-design.md §6.1)
-  --mcp               serve the read path as an MCP tool over stdio, so an
-                      agent can search the corpus and write cited answers.
-                      This is where answer generation happens — outside this
-                      binary (retrieval-design.md §6.1)
-  --mcp-http          serve the same fixed-workspace tools over authenticated
-                      Streamable HTTP. The backend is loopback-only and must
-                      sit behind the documented TLS gateway.
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
@@ -108,6 +90,24 @@ Modes (exactly one):
                       --json emits machine-readable output.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
+
+MCP (a subcommand, not a mode flag):
+  mcp stdio --workspace-id <id>
+                      serve the read path as an MCP tool over stdio, so an
+                      agent can search the corpus and write cited answers.
+                      This is where answer generation happens — outside this
+                      binary (retrieval-design.md §6.1)
+  mcp start --workspace-id <id> [options]
+                      serve the same fixed-workspace tools over Streamable
+                      HTTP, on loopback by default. Optionally authenticated
+                      against Google as the sole identity provider (config.yaml's
+                      mcp.oauth: google_client_id + allowed_emails); omit both
+                      to run unauthenticated for local development. See
+                      docs/mcp.md.
+  mcp stop --workspace-id <id>
+                      stop a running "mcp start" server for that workspace
+  mcp status --workspace-id <id>
+                      report whether that workspace's HTTP server is running
 
 Common:
   --workspace-id <id>       workspace from the registry (required by every mode)
@@ -142,34 +142,59 @@ Options:
   --log-dir <path>          per-role log files (default logs)
   --no-dashboard            plain line output instead of the live display
 
-Authenticated HTTP MCP:
-  --mcp-http-addr <addr>                 loopback backend address (default 127.0.0.1:8080)
-  --mcp-http-resource-uri <https-uri>    canonical public MCP resource URI
-  --mcp-http-authorization-server <uri>  OAuth authorization-server issuer
-  --mcp-http-introspection-endpoint <uri> OAuth token introspection endpoint
-  --mcp-http-introspection-client-id <id> resource-server introspection client
-  --mcp-http-required-scope <scope>      retrieval scope (default pocket-advisor:retrieve)
-  --mcp-http-allowed-origins <csv>       exact browser origins; absent Origin remains valid
-  --mcp-http-allowed-hosts <csv>         exact public Host values (default resource URI host)
-  --mcp-http-trusted-proxy-cidrs <csv>   peers allowed to send forwarding headers
-  --mcp-http-max-concurrent N            in-flight HTTP requests (default 8)
-
-  MCP_HTTP_INTROSPECTION_CLIENT_SECRET supplies the confidential resource-
-  server credential and must come from the environment or a mounted Secret.
-
 Every other pool is sized from the host's CPU count and is not configurable.
 
 Examples:
   pocket-advisor --ingest-all --workspace-id test
   pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
-  pocket-advisor --mcp --workspace-id test
-  pocket-advisor --mcp-http --workspace-id test --mcp-http-resource-uri https://mcp.example.test/mcp ...
+  pocket-advisor mcp stdio --workspace-id test
+  pocket-advisor mcp start --workspace-id test
   pocket-advisor --delete-data --workspace-id test
 `
 
 // Parse reads the command line into Options.
 func Parse(args []string) (*Options, error) {
 	o := &Options{}
+
+	// Check for subcommands (e.g., "mcp start", "mcp stop")
+	if len(args) >= 1 && args[0] == "mcp" {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("usage: pocket-advisor mcp <stdio|start|stop|status> [args] (--help for details)")
+		}
+		switch args[1] {
+		case "stdio", "start", "stop", "status":
+		default:
+			return nil, fmt.Errorf("unknown mcp subcommand %q; usage: pocket-advisor mcp <stdio|start|stop|status> [args]", args[1])
+		}
+		o.SubCommand = "mcp " + args[1]
+		// --config/-config selects the infra config file the same way it does
+		// for every other mode, but it is pulled out here rather than left for
+		// the subcommand's own flag.FlagSet: none of them define a config flag
+		// (config selection is global, not per-subcommand), so leaving a
+		// -config/--config token in SubArgs makes that FlagSet's own Parse
+		// reject it as undefined and exit(2) before the subcommand ever runs.
+		rest := args[2:]
+		subArgs := make([]string, 0, len(rest))
+		for i := 0; i < len(rest); i++ {
+			arg := rest[i]
+			switch {
+			case arg == "-config" || arg == "--config":
+				if i+1 < len(rest) {
+					o.ConfigPath = rest[i+1]
+					i++
+				}
+			case strings.HasPrefix(arg, "-config="):
+				o.ConfigPath = strings.TrimPrefix(arg, "-config=")
+			case strings.HasPrefix(arg, "--config="):
+				o.ConfigPath = strings.TrimPrefix(arg, "--config=")
+			default:
+				subArgs = append(subArgs, arg)
+			}
+		}
+		o.SubArgs = subArgs
+		return o, nil
+	}
+
 	fs := flag.NewFlagSet("pocket-advisor", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 
@@ -184,8 +209,6 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
-	fs.BoolVar(&o.MCP, "mcp", false, "serve the read path as an MCP tool over stdio")
-	fs.BoolVar(&o.MCPHTTP, "mcp-http", false, "serve the read path as authenticated Streamable HTTP MCP")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
@@ -211,17 +234,6 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.LogDir, "log-dir", "", "per-role log directory (empty = config default)")
 	fs.BoolVar(&o.NoDashboard, "no-dashboard", false, "plain line output instead of the live display")
 
-	fs.StringVar(&o.MCPHTTPAddr, "mcp-http-addr", "127.0.0.1:8080", "loopback HTTP MCP backend address")
-	fs.StringVar(&o.MCPHTTPResourceURI, "mcp-http-resource-uri", "", "canonical public HTTPS MCP resource URI")
-	fs.StringVar(&o.MCPHTTPAuthorizationServer, "mcp-http-authorization-server", "", "OAuth authorization-server issuer")
-	fs.StringVar(&o.MCPHTTPIntrospectionEndpoint, "mcp-http-introspection-endpoint", "", "OAuth token introspection endpoint")
-	fs.StringVar(&o.MCPHTTPIntrospectionClientID, "mcp-http-introspection-client-id", "", "OAuth resource-server introspection client id")
-	fs.StringVar(&o.MCPHTTPRequiredScope, "mcp-http-required-scope", "pocket-advisor:retrieve", "required OAuth retrieval scope")
-	fs.StringVar(&o.MCPHTTPAllowedOrigins, "mcp-http-allowed-origins", "", "comma-separated exact allowed browser origins")
-	fs.StringVar(&o.MCPHTTPAllowedHosts, "mcp-http-allowed-hosts", "", "comma-separated exact allowed public Host values")
-	fs.StringVar(&o.MCPHTTPTrustedProxyCIDRs, "mcp-http-trusted-proxy-cidrs", "127.0.0.0/8,::1/128", "comma-separated trusted proxy CIDRs")
-	fs.IntVar(&o.MCPHTTPMaxConcurrent, "mcp-http-max-concurrent", 8, "maximum concurrent authenticated HTTP MCP requests")
-
 	fs.DurationVar(&o.StaleAfter, "stale-after", 30*time.Minute, "PENDING age that counts as stalled")
 	fs.Uint64Var(&o.HighWater, "high-water", 10_000, "pause enqueueing above this many pending messages")
 	fs.Uint64Var(&o.LowWater, "low-water", 2_000, "resume enqueueing below this many pending messages")
@@ -245,8 +257,6 @@ func (o *Options) modes() []string {
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
 		{o.Query != "", "--query"},
-		{o.MCP, "--mcp"},
-		{o.MCPHTTP, "--mcp-http"},
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
 		{o.Evaluate, "--evaluate"},
@@ -259,11 +269,16 @@ func (o *Options) modes() []string {
 }
 
 func (o *Options) validate() error {
+	// Skip validation for subcommands
+	if o.SubCommand != "" {
+		return nil
+	}
+
 	modes := o.modes()
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --mcp, --mcp-http, --doctor, --recover, --evaluate, --delete-data, --forget (--help for details)")
+			"--query, --doctor, --recover, --evaluate, --delete-data, --forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -298,27 +313,41 @@ func (o *Options) Mode() string {
 // Run dispatches to the selected mode.
 func Run(o *Options) error {
 	cfg, err := config.Load(o.ConfigPath)
-	if err == nil {
-		// Reconcile the flag and the config onto one path, in both directions.
-		// The flag previously reached only the two modes that passed it to
-		// workspace.Load directly; anything resolving through cfg.Workspace
-		// kept the config's own value, so --workspace-config silently did
-		// nothing for most modes. That is invisible when the process runs from
-		// the repository root and fatal when it does not — which is exactly
-		// how an MCP client launches it.
-		//
-		// The flag is an override now rather than a necessity: config.Load
-		// anchors both workspace paths to the directory of the config file that
-		// named them, so --config alone locates the registry and the
-		// credentials file from any working directory (deviation 26).
-		if o.WorkspaceConfig != "" {
-			cfg.WorkspacesConfigPath = o.WorkspaceConfig
-		} else {
-			o.WorkspaceConfig = cfg.WorkspacesConfigPath
-		}
-	}
 	if err != nil {
 		return err
+	}
+
+	// Handle mcp subcommands
+	if o.SubCommand != "" {
+		switch o.SubCommand {
+		case "mcp stdio":
+			return mcpStdioCmd(cfg, o.SubArgs)
+		case "mcp start":
+			return mcpStartCmd(cfg, o.SubArgs)
+		case "mcp stop":
+			return mcpStopCmd(cfg, o.SubArgs)
+		case "mcp status":
+			return mcpStatusCmd(cfg, o.SubArgs)
+		default:
+			return fmt.Errorf("unknown subcommand: %s", o.SubCommand)
+		}
+	}
+
+	// Reconcile the flag and the config onto one path, in both directions.
+	// The flag previously reached only the two modes that passed it to
+	// workspace.Load directly; anything resolving through cfg.Workspace
+	// kept the config's own value, so --workspace-config silently did
+	// nothing for most modes. That is invisible when the process runs from
+	// the repository root and fatal when it does not.
+	//
+	// The flag is an override now rather than a necessity: config.Load
+	// anchors both workspace paths to the directory of the config file that
+	// named them, so --config alone locates the registry and the
+	// credentials file from any working directory (deviation 26).
+	if o.WorkspaceConfig != "" {
+		cfg.WorkspacesConfigPath = o.WorkspaceConfig
+	} else {
+		o.WorkspaceConfig = cfg.WorkspacesConfigPath
 	}
 	if o.LogDir != "" {
 		cfg.LogDir = o.LogDir
@@ -329,16 +358,15 @@ func Run(o *Options) error {
 
 	// The read path logs to stderr rather than to per-role files. Those files
 	// exist to separate five concurrent worker pools during an ingest; a query
-	// has no pools, and an MCP server's stderr is captured by the client that
-	// launched it, which is where anyone debugging a failed server looks.
-	//
-	// It also has to be this way: a client launches the server from a working
-	// directory it may not be able to write to, and creating a relative "logs"
-	// directory there fails outright — which is precisely how the first
-	// Claude Desktop attempt died, before the handshake and with the reason
-	// only visible in the client's own log.
+	// has no pools. (The mcp subcommands never reach this line at all — they
+	// return above and build their own stderr-only logs the same way, for the
+	// same reason: an MCP client launches the server from a working directory
+	// it may not be able to write to, and creating a relative "logs" directory
+	// there fails outright — which is precisely how the first Claude Desktop
+	// attempt died, before the handshake and with the reason only visible in
+	// the client's own log.)
 	var logs *telemetry.Logs
-	if o.MCP || o.MCPHTTP || o.Query != "" {
+	if o.Query != "" {
 		logs = telemetry.StderrLogs(cfg.LogLevel)
 	} else {
 		logs, err = telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
@@ -367,10 +395,6 @@ func Run(o *Options) error {
 		return runEvaluate(o, cfg, logs, eo)
 	case o.Query != "":
 		return runQuery(o, cfg, logs)
-	case o.MCP:
-		return runMCP(o, cfg, logs)
-	case o.MCPHTTP:
-		return runMCPHTTP(o, cfg, logs)
 	case o.Doctor:
 		return runDoctor(o, cfg, logs)
 	case o.Recover:

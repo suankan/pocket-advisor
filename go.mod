@@ -3,7 +3,9 @@ module github.com/suankan/pocket-advisor
 go 1.25.0
 
 require (
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/gabriel-vasile/mimetype v1.4.6
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/klippa-app/go-pdfium v1.19.4
 	github.com/minio/minio-go/v7 v7.0.90

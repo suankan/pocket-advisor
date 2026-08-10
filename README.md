@@ -1,6 +1,6 @@
 # Pocket Advisor Operator Guide
 
-Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion and direct local retrieval run as one Go binary on the host. Authenticated remote MCP runs as an optional fixed-workspace application workload in the local Kubernetes cluster. Both use the same three stores:
+Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion, direct local retrieval, and MCP (stdio and HTTP) all run as one Go binary on the host — none of it runs in Kubernetes. That binary uses three shared stores that do run in the local cluster:
 
 - RustFS is Tier 1 and the authoritative document store.
 - PostgreSQL is Tier 2 lineage and Tier 3 vector and lexical indexes.
@@ -19,7 +19,7 @@ pocket-advisor
   query preparation       -----------------> local model endpoint
 ```
 
-The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The separate `pocket-advisor-app` chart deploys one authenticated MCP workload per workspace when remote access is needed. Host CLI changes require rebuilding the binary; HTTP MCP changes require rebuilding the application image and rolling only the corresponding application release.
+The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The MCP server is built into the `pocket-advisor` binary and runs locally via `mcp stdio` or `mcp start` (HTTP).
 
 ## 1. Concepts
 
@@ -47,7 +47,7 @@ The authoritative designs are:
 - Tesseract and the required language packs for scanned PDFs and images.
 - A local OpenAI-compatible model endpoint serving the embedding, reranking, and query-preparation models named in `config.yaml`.
 - Helm, `kubectl`, Docker, `psql`, `aws-cli`, RustFS `rc`, `natscli`, `yq`, and `envsubst`.
-- For authenticated HTTP MCP: an operator-managed Keycloak realm, a public DNS name, a TLS certificate Secret, and network-policy CIDRs for the client, PostgreSQL, local model endpoints, and Keycloak.
+- For authenticated HTTP MCP: an OAuth 2.0 Client ID registered in Google Cloud Console (see [MCP server design](docs/mcp.md#google-oauth-client-configuration)).
 
 On macOS:
 
@@ -245,12 +245,12 @@ Zero packets is a valid result when nothing relevant exists in the workspace.
 
 ### MCP
 
-The MCP server exposes retrieval evidence through stdio (local) and authenticated Streamable HTTP (remote). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
+The MCP server exposes retrieval evidence through stdio and Streamable HTTP, both run locally by the same binary. HTTP authentication is optional (§ [HTTP MCP](#http-mcp) below). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
 
 Run one stdio MCP server per workspace:
 
 ```sh
-./bin/pocket-advisor --mcp --workspace-id example
+./bin/pocket-advisor mcp stdio --workspace-id test
 ```
 
 A project-scoped MCP entry can use paths relative to the repository root:
@@ -258,9 +258,9 @@ A project-scoped MCP entry can use paths relative to the repository root:
 ```json
 {
   "mcpServers": {
-    "example-documents": {
+    "test-documents": {
       "command": "./bin/pocket-advisor",
-      "args": ["--mcp", "--workspace-id", "example"]
+      "args": ["mcp", "stdio", "--workspace-id", "test"]
     }
   }
 }
@@ -272,77 +272,109 @@ The MCP tools return source evidence. The client or agent generates prose and sh
 
 The synthetic fixture at `internal/mcp/testdata/synthetic_server` exercises client behavior without loading workspace configuration or private content. Repeat the populated, paginated-large, empty, and cancellation synthetic cases when upgrading an intended client. Do not use a real workspace for compatibility testing.
 
-### Authenticated HTTP MCP
+### HTTP MCP
 
-The remote adapter serves the same tools at one canonical HTTPS `/mcp` resource. The Go process listens on `127.0.0.1:8080` inside the pod; the Caddy sidecar terminates TLS on the only Service port and forwards over pod loopback. Authorization and Keycloak client configuration are described in [MCP server design](docs/mcp.md#authentication-and-authorization).
+The HTTP adapter serves the same tools over Streamable HTTP, bound to loopback by default. Authentication is optional and, when enabled, supports Google as the sole identity provider: every bearer token is verified as a Google-issued ID token against Google's published JWKS, then checked against an operator-maintained email allowlist. Authorization and client configuration are described in [MCP server design](docs/mcp.md#authentication-and-authorization).
 
-Build the application image:
-
-```sh
-./pocket-advisor.sh docker-build-app
-```
-
-Create an operator-only configuration Secret for exactly one workspace. The registry and values files must be reduced to that workspace; never mount the shared multi-workspace values file into an application pod. Supply an expanded configuration file whose model and PostgreSQL endpoints are reachable under the chart's egress policy.
+`config.yaml`'s committed `mcp:` section already points `resource_uri` and `mcp.tls` at a self-signed loopback certificate, so the server always serves real HTTPS on `127.0.0.1:8080` — authenticated or not. Generate that certificate once (it's gitignored under `workspaces/`, so every clone needs its own):
 
 ```sh
-kubectl create secret generic <release>-configuration \
-  --from-file=config.yaml=<expanded-config> \
-  --from-file=workspace-config.yaml=<single-workspace-registry> \
-  --from-file=workspace-values.yaml=<single-workspace-values>
-
-kubectl create secret generic <release>-oauth \
-  --from-literal=introspection-client-secret='<secret>'
-
-kubectl create secret tls <release>-tls \
-  --cert=<certificate-chain> \
-  --key=<private-key>
+mkdir -p workspaces/mcp-tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout workspaces/mcp-tls/key.pem -out workspaces/mcp-tls/cert.pem \
+  -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
 ```
 
-Keep the release values under the gitignored `workspaces/` boundary. For a local OrbStack cluster, the `publicURI` and `allowedHosts` use the OrbStack-resolved cluster DNS name. The `authorizationServer` and `introspectionEndpoint` point to the in-cluster Keycloak service. A minimal shape is:
+Both modes are started the same way:
+
+```sh
+./bin/pocket-advisor mcp start --workspace-id test
+```
+
+Optional CLI overrides for either mode:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--addr` | From config | Listen address |
+| `--resource-uri` | From config | Public MCP resource URI |
+| `--google-client-id` | From config | Google OAuth client ID |
+| `--allowed-emails` | From config | Comma-separated allowed Google account emails |
+| `--cert-file` | From config | TLS certificate file |
+| `--key-file` | From config | TLS key file |
+| `--allowed-origins` | none | Comma-separated exact allowed browser origins |
+| `--allowed-hosts` | resource URI host | Comma-separated exact allowed public Host values |
+| `--trusted-proxy-cidrs` | none | Comma-separated trusted proxy CIDRs |
+| `--max-concurrent` | From config | Maximum concurrent HTTP requests |
+
+Check on or stop a running server (works the same for either mode):
+
+```sh
+./bin/pocket-advisor mcp status --workspace-id test
+./bin/pocket-advisor mcp stop --workspace-id test
+```
+
+#### Unauthenticated (local development)
+
+The committed `mcp:` config as-is — `oauth.google_client_id` and `allowed_emails` are both empty, which is what runs the server without authentication:
 
 ```yaml
-workspace:
-  id: example
-  configurationSecret: example-mcp-configuration
-
 mcp:
-  # OrbStack resolves *.pocket-advisor.svc.cluster.local from macOS
-  publicURI: https://pocket-advisor-app.pocket-advisor.svc.cluster.local/mcp
-  allowedHosts: pocket-advisor-app.pocket-advisor.svc.cluster.local
-  allowedOrigins: ""
-
-oauth:
-  # In-cluster Keycloak service
-  authorizationServer: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor
-  introspectionEndpoint: https://keycloak.pocket-advisor.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect
-  introspectionClientID: pocket-advisor-resource-server
-  secretName: example-mcp-oauth
-
-tls:
-  secretName: example-mcp-tls
-
-service:
-  # ClusterIP for local; use LoadBalancer with source ranges for remote
-  type: ClusterIP
-
-# For local OrbStack: disable NetworkPolicy (all traffic is trusted)
-# For remote: enable with explicit ingress/egress CIDRs
-networkPolicy:
-  enabled: false
+  http:
+    addr: "127.0.0.1:8080"
+    endpoint: "/mcp"
+    resource_uri: "https://127.0.0.1:8080/mcp"
+    max_concurrent: 8
+  oauth:
+    google_client_id: ""
+    allowed_emails: []
+  tls:
+    cert_file: "workspaces/mcp-tls/cert.pem"
+    key_file: "workspaces/mcp-tls/key.pem"
 ```
-
-Install one release per workspace:
 
 ```sh
-helm upgrade --install <release> charts/pocket-advisor-app \
-  --namespace pocket-advisor --create-namespace \
-  -f workspaces/<release>-mcp.yaml
-kubectl rollout status deployment/<release> -n pocket-advisor --timeout=5m
+./bin/pocket-advisor mcp start --workspace-id test
+curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/readyz
+# {"status":"ok"}
 ```
 
-The TLS Secret is lifecycle-managed outside this chart. After replacing its certificate or key, restart and verify the release so Caddy loads the new material: `kubectl rollout restart deployment/<release> -n pocket-advisor`, followed by the rollout-status command above and a certificate check against the public address.
+Any bearer token, or none at all, is accepted. This mode is for the local machine only — do not expose port 8080 beyond loopback without turning on authentication.
 
-For OpenCode 1.18.15 on the local Mac, register the public client with the OrbStack-resolved cluster URL. OrbStack resolves `*.svc.cluster.local` DNS from macOS, so the MCP endpoint is the internal cluster service URL (such as `https://<release>.pocket-advisor.svc.cluster.local/mcp`). The `allowedHosts` in the Helm values must match this hostname. The OAuth callback listener runs on the Mac host at `127.0.0.1:19876`.
+#### Authenticated (Google)
+
+Fill in `oauth.google_client_id` and `allowed_emails` — everything else is already the config above. `google_client_id` is the OAuth 2.0 Client ID registered in Google Cloud Console (see [Prerequisites](#2-prerequisites)); `allowed_emails` must be non-empty or the server refuses to start:
+
+```yaml
+mcp:
+  oauth:
+    google_client_id: "1234567890-abc.apps.googleusercontent.com"
+    allowed_emails:
+      - "you@example.com"
+```
+
+Or leave `config.yaml` unauthenticated and pass both on the command line instead, which overrides it for that run only:
+
+```sh
+./bin/pocket-advisor mcp start --workspace-id test \
+  --google-client-id "1234567890-abc.apps.googleusercontent.com" \
+  --allowed-emails "you@example.com"
+```
+
+`resource_uri: https://127.0.0.1:8080/mcp` genuinely matches what's served — no reverse proxy, DNS name, or `Host` header override needed. Verify it locally without a real Google token (a real client authenticates through the browser flow in [MCP client configuration](#mcp-client-configuration) below, not a hand-crafted bearer token):
+
+```sh
+curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/mcp
+# 401 Unauthorized: no bearer token
+
+curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/.well-known/oauth-protected-resource/mcp
+# {"resource":"https://127.0.0.1:8080/mcp","authorization_servers":["https://accounts.google.com"],...}
+```
+
+For a real remote deployment, `resource_uri` and `mcp.tls`/reverse proxy need a hostname other clients can actually reach — see [MCP server design](docs/mcp.md#tls-optional).
+
+### MCP client configuration
+
+For OpenCode on macOS, using Google as the identity provider, matching the loopback setup above:
 
 ```json
 {
@@ -350,11 +382,11 @@ For OpenCode 1.18.15 on the local Mac, register the public client with the OrbSt
   "mcp": {
     "pocket-advisor": {
       "type": "remote",
-      "url": "https://pocket-advisor-app.pocket-advisor.svc.cluster.local/mcp",
+      "url": "https://127.0.0.1:8080/mcp",
       "enabled": true,
       "oauth": {
-        "clientId": "pocket-advisor-opencode",
-        "scope": "pocket-advisor:retrieve",
+        "clientId": "1234567890-abc.apps.googleusercontent.com",
+        "scope": "openid email",
         "callbackPort": 19876,
         "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
       }
@@ -363,9 +395,7 @@ For OpenCode 1.18.15 on the local Mac, register the public client with the OrbSt
 }
 ```
 
-The `redirectUri` `http://127.0.0.1:19876/mcp/oauth/callback` is the Mac-local listener where OpenCode receives the OAuth redirect from Keycloak. This is not inside the cluster. Replace the release name in the URL if your deployment uses a different release.
-
-Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`. Do not set `oauth: false`, inject a static bearer header, increase the client's tool-output limit, expose backend port 8080, or permit wildcard redirect URIs. A release is not ready for remote use until the populated, paginated-large, empty, disconnect, token-renewal, and token-revocation synthetic checks pass through its public TLS address.
+`workspaces/mcp-tls/cert.pem` is self-signed, so the client also needs to trust it (or the equivalent for a real deployment's own certificate) — consult OpenCode's own docs for how it trusts a custom CA. Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`.
 
 ## 8. Evaluate retrieval quality
 

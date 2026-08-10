@@ -131,3 +131,47 @@ workspaces:
   # about a password. Gitignored; the shape is documented in
   # charts/pocket-advisor-infra/values.yaml.
   values: workspaces/pocket-advisor-infra.yaml
+
+# ============================================================================
+# MCP Server Configuration
+#
+# The MCP server runs locally on the host, not in Kubernetes.
+# Configuration here is used by both stdio and HTTP transports.
+# ============================================================================
+mcp:
+  http:
+    # Local listen address for the MCP HTTP server.
+    addr: "127.0.0.1:8080"
+    # HTTP endpoint path (must start with /)
+    endpoint: "/mcp"
+    # The public MCP URL. Only actually required (and validated as HTTPS)
+    # once oauth.google_client_id below is set, but harmless to leave set
+    # otherwise. https://127.0.0.1:8080/mcp matches this server's own
+    # loopback address and the self-signed cert below, so the client dials
+    # 127.0.0.1 directly — no reverse proxy or DNS name needed.
+    resource_uri: "https://127.0.0.1:8080/mcp"
+    # Maximum concurrent in-flight requests
+    max_concurrent: 8
+
+  # Google OAuth settings (optional - only needed for authenticated HTTP
+  # mode). Leave both fields below empty to run without authentication.
+  # Google is the sole supported identity provider; no client secret is
+  # needed here, since ID-token verification is a public-key operation.
+  oauth:
+    # OAuth 2.0 Client ID registered in Google Cloud Console for this MCP
+    # server's client (the audience every ID token is checked against).
+    google_client_id: ""
+    # Google account emails allowed to authenticate. Required and must be
+    # non-empty whenever google_client_id is set.
+    allowed_emails: []
+
+  # TLS: self-signed cert for 127.0.0.1, gitignored under workspaces/. The
+  # server always serves real HTTPS on loopback this way, authenticated or
+  # not. Regenerate if missing or expired:
+  #   mkdir -p workspaces/mcp-tls
+  #   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  #     -keyout workspaces/mcp-tls/key.pem -out workspaces/mcp-tls/cert.pem \
+  #     -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
+  tls:
+    cert_file: "workspaces/mcp-tls/cert.pem"
+    key_file: "workspaces/mcp-tls/key.pem"

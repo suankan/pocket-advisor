@@ -9,11 +9,11 @@ The retrieval package remains transport-independent; both MCP adapters are thin 
 Pocket Advisor exposes retrieval evidence through two MCP transports:
 
 - a workspace-bound stdio MCP server over newline-delimited JSON-RPC; and
-- an authenticated, workspace-bound Streamable HTTP MCP resource server behind a TLS sidecar gateway.
+- a workspace-bound Streamable HTTP MCP resource server, running as a local process, optionally authenticated against Google.
 
 Both transports expose the same typed JSON Schema 2020-12 compact-search and cursor-based evidence-page results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
 
-The stdio adapter is the default local integration. The authenticated HTTP adapter serves remote, browser, and hosted agent clients through a Caddy TLS sidecar that terminates TLS and forwards only to a Go backend bound to pod loopback. The Go process is the OAuth resource server: it introspects every bearer token with an operator-managed Keycloak realm, validates active state, exact issuer, canonical resource audience, expiry, maximum lifetime, and the `pocket-advisor:retrieve` scope, then keys continuation state by issuer and subject. RFC 9728 protected-resource metadata advertises the issuer and least-privilege scope. There is no token-result cache, so authorization revocation takes effect on the next request.
+The stdio adapter is the default local integration, started with `mcp stdio`. The HTTP adapter, started with `mcp start`, runs as a local process bound to loopback by default and serves remote, browser, and hosted agent clients directly or behind an operator-supplied reverse proxy. Authentication is optional; when enabled, Google is the sole supported identity provider. The Go process is the resource server: it verifies every bearer token as a Google-issued OIDC ID token against Google's published JWKS (signature, issuer, audience, expiry), checks the verified `email`/`email_verified` claims against an operator-maintained allowlist, then keys continuation state by issuer and subject. RFC 9728 protected-resource metadata advertises the Google issuer. There is no token-result cache, so an ID token remains valid for its own natural (Google-issued) lifetime — revoking a caller means removing their email from the allowlist and restarting the server.
 
 ## Tool contract
 
@@ -115,19 +115,19 @@ Separate protocol errors from tool execution errors according to MCP semantics. 
 
 ### stdio MCP
 
-`./bin/pocket-advisor --mcp --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes generated search and evidence-reading tools.
+`./bin/pocket-advisor mcp stdio --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes generated search and evidence-reading tools.
 
 Stdio implements the final MCP revisions from 2024-11-05 through 2025-11-25, negotiates only those revisions, enforces initialize/initialized lifecycle order, supports ping and cancellation, and does not open a network listener. The direct protocol implementation remains smaller than introducing an SDK for this bounded method set; every advertised revision and method is covered by protocol tests.
 
 Stdio snapshots are connection-local and share the same memory and eviction limits as HTTP: at most eight snapshots, 2 MiB of encoded snapshot data, and a ten-minute access expiry. The adapter directly implements its small connection-oriented method set.
 
-### Authenticated Streamable HTTP MCP
+### Streamable HTTP MCP
 
-`./bin/pocket-advisor --mcp-http --workspace-id <id> ...` serves the same two tools through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
+`./bin/pocket-advisor mcp start --workspace-id <id> ...` serves the same two tools through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
 
 The HTTP endpoint is `/mcp`. MCP 2026-07-28 is stateless: each POST carries protocol version, client information, capabilities, method, and tool name in the normative body and mirrored headers, which the SDK compares before dispatch. The compatibility handler is also stateless and issues no legacy transport session identifier; a client-supplied session header cannot select identity or evidence state. JSON responses are selected; request-scoped SSE remains client-supported but is not needed because these tools send no progress notifications or server requests. HTTP disconnect cancels current-protocol retrieval. Legacy 2025-11-25 clients may initialize through the same endpoint; standalone GET is not offered.
 
-The SDK's own loopback DNS-rebinding guard is disabled: the Caddy sidecar forwards the public Host to the loopback backend, so the guard would refuse every real request, and `secureEnvelope` already owns Host and forwarded-header validation against an explicit allowlist and trusted-proxy set.
+The SDK's own loopback DNS-rebinding guard is disabled: `secureEnvelope` already owns Host and forwarded-header validation against an explicit allowlist and trusted-proxy set, and a reverse proxy in front of this server (if any) forwards the public Host, which the SDK's own guard would otherwise refuse.
 
 HTTP snapshots are isolated by OAuth issuer and subject, permitting token rotation by the same caller without permitting cross-caller continuation.
 
@@ -139,7 +139,7 @@ Cancellation uses `notifications/cancelled` with the original request ID. Closin
 
 ### Binding and origin security
 
-Local development defaults to an explicit loopback address. Binding to all interfaces is rejected unless authenticated gateway mode is configured.
+The server must bind to an explicit loopback address; binding to all interfaces is rejected unconditionally, whether or not Google auth is configured. Remote access goes through SSH tunneling or an operator-supplied reverse proxy, not a non-loopback bind.
 
 The `Origin` header is validated on every relevant request before reading or acting on the MCP payload. An explicit allowlist is maintained and the specification-required forbidden response is returned for an invalid origin. Missing, null, malformed, deceptive, and DNS-rebinding origins are tested.
 
@@ -147,139 +147,140 @@ Host and forwarded headers are validated only through a trusted proxy configurat
 
 ## Authentication and authorization
 
-Pocket Advisor is an OAuth 2.1 resource server. It publishes RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource/mcp`, identifies the operator-managed Keycloak issuer, and introspects every request without following redirects or caching active status, so revocation affects the next request. Keycloak is a separate authorization server; the application chart does not deploy or administer it.
+Authentication is optional. With no `mcp.oauth` configured, the HTTP server runs unauthenticated on loopback — for local development only. Setting `google_client_id` and `allowed_emails` turns it into a resource server that trusts Google as the sole identity provider: it publishes RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource/mcp` identifying `https://accounts.google.com` as the issuer, verifies every bearer token as a Google-issued OIDC ID token against Google's published JWKS (signature, issuer, audience, expiry — fetched and cached locally by the verifier, not looked up per request against a confidential endpoint), and checks the verified `email`/`email_verified` claims against the configured allowlist. There is no secret on the resource-server side: ID-token verification is a public-key operation, so there is nothing equivalent to a Keycloak introspection client credential to provision or rotate.
 
 ### Authentication flow
 
-The following diagram shows the end-to-end OAuth 2.1 authorization-code flow with PKCE when an MCP client (such as OpenCode on a local Mac) connects to the authenticated MCP server running in a local OrbStack Kubernetes cluster:
+The following diagram shows the end-to-end flow when an MCP client (such as OpenCode on a local Mac) connects to a Google-authenticated MCP server running locally:
 
 ```mermaid
 sequenceDiagram
     participant Mac as Mac Host (OpenCode)
     participant Browser as Browser
-    participant KC as Keycloak (in-cluster)
-    participant MCP as MCP Server (in-cluster)
+    participant Google as Google (accounts.google.com)
+    participant MCP as MCP Server (local process)
 
     Note over Mac: 1. Start local callback listener on 127.0.0.1:19876
 
-    Note over Mac,Browser: 2. Open authorization URL in browser
+    Note over Mac,Browser: 2. Open Google authorization URL in browser
 
-    Browser->>KC: 3. User logs in at Keycloak
-    KC-->>Browser: 4. Redirect to Mac-local callback with code
+    Browser->>Google: 3. User signs in and consents
+    Google-->>Browser: 4. Redirect to Mac-local callback with code
 
     Browser->>Mac: 5. Authorization code received at local listener
 
     Note over Mac: 6. Exchange code for tokens (code_verifier sent)
 
-    Mac->>KC: 7. POST token endpoint with code + code_verifier
+    Mac->>Google: 7. POST token endpoint with code + code_verifier
 
-    KC-->>Mac: 8. Access token + refresh token
+    Google-->>Mac: 8. ID token (+ access token)
 
-    Note over Mac,MCP: 9. Call MCP with Bearer token
+    Note over Mac,MCP: 9. Call MCP with the ID token as Bearer
 
     Mac->>MCP: 10. POST /mcp with Authorization header
 
-    Note over MCP: 11. Introspect token against Keycloak
+    Note over MCP: 11. Verify signature against Google's JWKS (cached)
 
-    MCP->>KC: 12. POST introspect with token + client credentials
+    Note over MCP: 12. Check iss, aud, exp, email_verified, and the email allowlist
 
-    KC-->>MCP: 13. Token claims (active, sub, scope, aud)
-
-    Note over MCP: 14. Validate audience, scope, expiry
-
-    MCP-->>Mac: 15. MCP response (evidence packets)
+    MCP-->>Mac: 13. MCP response (evidence packets)
 ```
 
 **Flow summary:**
 
 1. The client starts a local HTTP listener on the Mac at `127.0.0.1:19876` to receive the OAuth callback.
-2. The client opens the Keycloak authorization URL in the user's browser. The URL includes the PKCE code challenge, the redirect URI pointing to the Mac-local listener, and the required scope.
-3. The user logs in at Keycloak (in-cluster, reached via OrbStack DNS from macOS).
-4. Keycloak redirects the browser back to the Mac-local callback with an authorization code.
+2. The client opens Google's authorization URL in the user's browser, requesting the `openid email` scope with the PKCE code challenge and the redirect URI pointing to the Mac-local listener.
+3. The user signs in with their Google account and consents.
+4. Google redirects the browser back to the Mac-local callback with an authorization code.
 5. The local listener receives the code.
-6. The client prepares to exchange the code for tokens by calling Keycloak's token endpoint, including the PKCE code verifier.
-7. The client sends the token request to Keycloak.
-8. Keycloak returns an access token and refresh token.
-9. The client prepares to call the MCP server with the access token in the `Authorization: Bearer` header.
-10. The client sends the MCP request to the server (reached via OrbStack DNS from macOS).
-11. The MCP server introspects the token against Keycloak using its confidential client credentials.
-12. The client credentials and token are sent to Keycloak's introspection endpoint.
-13. Keycloak confirms the token is active and returns subject, scope, and audience claims.
-14. The MCP server validates that the audience matches the MCP resource URI and the scope includes `pocket-advisor:retrieve`.
-15. The MCP server returns the MCP response (evidence packets).
+6. The client exchanges the code for tokens at Google's token endpoint, including the PKCE code verifier.
+7. The client sends the token request to Google.
+8. Google returns an ID token (a signed JWT carrying the user's `sub` and, with the `email` scope, `email`/`email_verified` claims).
+9. The client prepares to call the MCP server with the ID token in the `Authorization: Bearer` header.
+10. The client sends the MCP request to the server.
+11. The MCP server verifies the ID token's signature against Google's published JWKS (`https://www.googleapis.com/oauth2/v3/certs`, fetched once and cached).
+12. The MCP server checks the issuer is Google, the audience matches the configured Google OAuth client ID, the token is unexpired, `email_verified` is true, and the email is on the configured allowlist.
+13. The MCP server returns the MCP response (evidence packets).
 
 **Key points:**
 
-- The `127.0.0.1` in the redirect URI is the Mac host's loopback, not inside the cluster.
-- OrbStack resolves `*.svc.cluster.local` DNS from macOS, so both Keycloak and the MCP server are reached via their internal cluster DNS names.
-- The MCP server never sees the user's credentials; it only receives and introspects the access token.
-- Token introspection uses a separate confidential client with its own credentials, mounted as a Kubernetes Secret.
+- The `127.0.0.1` in the redirect URI is the Mac host's own loopback; it is where the client, not the server, receives the OAuth callback.
+- The MCP server never sees the user's Google credentials, only the resulting ID token.
+- There is no revocation check: an ID token remains verifiable for its own (Google-issued, typically short) lifetime. Removing someone's access means removing their email from the allowlist and restarting the server, not revoking a token.
 
-### Keycloak client configuration
+### Google OAuth client configuration
 
-The selected authorization design uses an operator-managed Keycloak realm. Configure two clients:
+Google does not support dynamic client registration, so the operator registers one OAuth 2.0 Client ID in Google Cloud Console (APIs & Services → Credentials), of the application type that supports a loopback redirect URI (a Desktop app client, per RFC 8252). Configure:
 
-- A public OpenCode client with authorization-code flow, PKCE `S256`, refresh-token rotation, and the single exact redirect URI (such as `http://127.0.0.1:19876/mcp/oauth/callback`). Do not configure a client secret. Issue five-minute access tokens and revoke refresh-token families on reuse.
-- A confidential resource-server client allowed only to call token introspection. Its secret is mounted separately. Configure token audiences so introspection returns both the canonical MCP resource URI and the introspection client ID, and configure the `pocket-advisor:retrieve` scope. The introspection response must include `iss`, `sub`, `aud`, `scope`, `iat`, and `exp`.
+- the client ID in `config.yaml`'s `mcp.oauth.google_client_id` — this is the audience the server checks every ID token against; it is not a secret;
+- the exact loopback redirect URI the MCP client uses (such as `http://127.0.0.1:19876/mcp/oauth/callback`) in the client's registered redirect URIs; and
+- the allowed caller emails in `mcp.oauth.allowed_emails`.
 
-Disable Keycloak dynamic client registration for this realm. The public client has no wildcard redirect. Keep Keycloak and the public MCP resource on HTTPS; the registered loopback callback is the OAuth native-client exception. Pocket Advisor accepts a maximum 15-minute token lifetime.
+The client the operator registers is a public/native client: whatever client secret Google issues for it belongs to the MCP client's OAuth flow, never to this server, and is not configured here.
 
 ### Design requirements
 
 The design requires:
 
-- TLS for every authorization endpoint and remote MCP request;
-- strict redirect URI validation;
-- bounded token lifetime and rotation policy;
-- audience and resource validation;
-- least-privilege scopes for retrieval;
-- clear 401 and 403 behavior that does not reveal workspace existence;
-- revocation and operator recovery behavior; and
-- secret storage outside committed configuration.
+- TLS for the public MCP resource URI whenever Google auth is enabled (enforced by `internal/mcp.normalizeHTTPOptions`);
+- strict redirect URI validation, owned by the registered Google OAuth client, not this server;
+- audience and issuer validation against Google's fixed, non-configurable issuer;
+- an explicit, non-empty email allowlist — a Google-authenticated server refuses to start without one;
+- clear 401 behavior that does not reveal workspace existence; and
+- no committed secret, because none is required.
 
 If the selected client cannot implement the required authorization flow, the incompatibility is resolved rather than adding a shared static fallback credential for remote access.
 
 ## Workspace isolation
 
-The application release and OAuth client registrations fix one public resource URI to one workspace workload. A workspace ID in a URL, request body, OAuth claim, MCP argument, mirrored header, or tool name cannot change that workload's configured database or credentials.
+Each `mcp start`/`mcp stdio` process is fixed to one workspace at startup, via `--workspace-id`. A workspace ID in a URL, request body, OAuth claim, MCP argument, mirrored header, or tool name cannot change that process's configured database or credentials.
 
-Both MCP transports follow the same rule: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name, public route, OAuth audience, and subject are routing and authorization inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
+Both MCP transports follow the same rule: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name, public route, and Google-verified subject are routing and authorization inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
 
-Authenticated HTTP MCP runs one `pocket-advisor-app` release per workspace. The operator-created configuration Secret mounted into that release contains a registry and values file reduced to the selected workspace; mounting the shared multi-workspace values file is forbidden because it would give the pod credentials it does not need. The pod receives no RustFS, NATS, provisioning, Kubernetes API, or shared PostgreSQL administrative credential. Its service account token is disabled.
+Serving more than one workspace over HTTP means running one `mcp start --workspace-id <id>` process per workspace, each on its own address (`--addr`); nothing multiplexes several workspaces' credentials inside one process. Each process receives no RustFS, NATS, provisioning, or shared PostgreSQL administrative credential — only what `WorkspacePostgresDSN` resolves for its own workspace.
 
-The Go process validates every request independently of Caddy. It requires an active OAuth token from the configured issuer with the exact public MCP URI in its audience and the retrieval scope. Token introspection uses a separate confidential client Secret and is not cached. Continuation snapshots are partitioned by issuer and subject, so renewing a token does not lose a result and another authenticated caller cannot acquire it.
-
-Future non-MCP gateway routes must preserve the implemented pattern: authenticate the caller, authorize one workspace, and route to a workload whose deployment and credentials already fix that workspace. Downstream services must trust only that deployment boundary, never an unverified workspace value from a request.
+The Go process validates every request itself. When Google auth is enabled it requires a Google ID token whose audience matches the configured client ID and whose verified email is on the allowlist; there is no separate gateway performing authentication on its behalf. Continuation snapshots are partitioned by issuer and subject, so renewing a token does not lose a result and another authenticated caller cannot acquire it.
 
 ## Deployment
 
-### Application chart
+### Local execution
 
-Authenticated HTTP MCP runs as one long-running `pocket-advisor-app` Deployment and Service per workspace. The pod contains the retrieval process and Caddy TLS sidecar. Caddy is the only pod port exposed by the Service; the retrieval backend binds `127.0.0.1`, so direct network access cannot bypass OAuth.
+The MCP server is built into the `pocket-advisor` binary and runs as a local process — there is no Kubernetes deployment for it. Start it with:
 
-The Deployment mounts:
+```sh
+./bin/pocket-advisor mcp start --workspace-id <workspace>
+```
 
-- an operator-created configuration Secret containing only the selected workspace's registry and retrieval values;
-- an independent Secret containing the introspection client credential; and
-- a `kubernetes.io/tls` Secret whose lifecycle is external to the chart.
+Configuration is in `config.yaml` under the `mcp:` section:
 
-The pod has no service-account token, shared storage administration credential, or ingestion credential.
+```yaml
+mcp:
+  http:
+    addr: "127.0.0.1:8080"
+    endpoint: "/mcp"
+    resource_uri: "https://mcp.example.test/mcp"
+  # Omit this whole oauth: block to run unauthenticated on loopback (local
+  # development). Set both fields to require Google sign-in.
+  oauth:
+    google_client_id: "1234567890-abc.apps.googleusercontent.com"
+    allowed_emails:
+      - "you@example.com"
+```
 
-### Gateway configuration
+The server binds to loopback by default (`127.0.0.1:8080`), so it is only accessible from the local machine. For remote access, use SSH tunneling or deploy a reverse proxy.
 
-The Caddy sidecar terminates TLS and forwards only to the Go backend. It is the pod's only network listener and TLS boundary. The fixed-workspace Go resource server listens only on pod loopback. A remote release uses an explicitly source-restricted `LoadBalancer` Service, while the chart remains safe by default with `ClusterIP`.
+### TLS (optional)
 
-The gateway requires:
+The server can terminate TLS itself. Provide a certificate and key in `config.yaml`:
 
-- TLS termination and certificate lifecycle;
-- authentication middleware or authorization-server integration;
-- trusted proxy boundaries;
-- request rate, concurrency, body-size, response-size, and timeout limits;
-- network policy between gateway, MCP service, PostgreSQL, and model endpoints;
-- safe access logs without questions, evidence, tokens, paths, or workspace names; and
-- health checks and rollout behavior.
+```yaml
+mcp:
+  tls:
+    cert_file: "/path/to/cert.pem"
+    key_file: "/path/to/key.pem"
+```
 
-The Caddy container requires the `NET_BIND_SERVICE` capability (while keeping `drop: ["ALL"]`). The Caddy Alpine image ships `/usr/bin/caddy` with the file capability `cap_net_bind_service=ep`; with an empty bounding set the kernel refuses execve.
+Both fields are required together; setting one without the other is a startup error. Google auth additionally requires `resource_uri` to be `https://…` — TLS (self-terminated here, or via a reverse proxy) is a prerequisite for enabling it, not a separate concern. Without a cert/key pair the server serves plain HTTP, which is fine behind a reverse proxy (Caddy, nginx) that terminates TLS instead.
 
 ## Testing
 
@@ -305,28 +306,19 @@ The committed synthetic suite covers:
 
 ### Authentication and authorization tests
 
-- unauthenticated, expired, wrong-audience, wrong-resource, and insufficient-scope tokens;
-- invalid Origin, Host, forwarded headers, redirect URIs, and non-authoritative session identifiers;
+`internal/mcp/http_test.go` runs the real Google verifier against a fake OIDC provider (a locally-signed JWKS and issuer serving `/.well-known/openid-configuration`), so these are integration tests of the actual production code path, not mocks of it:
+
+- unauthenticated, malformed, expired, wrong-audience, wrong-issuer, unverified-email, and non-allowlisted-email tokens;
+- invalid Origin, Host, forwarded headers, and non-authoritative session identifiers;
 - DNS rebinding attempts;
 - request smuggling and oversized JSON or SSE traffic;
 - attempts to establish or fix a transport session on the stateless endpoint;
 - cross-caller and cross-workspace continuation cursor use, expiry, caller-state and snapshot eviction, and idempotent retry, including attempts to override caller identity with a legacy session header;
 - disconnect and cancellation resource cleanup;
-- direct backend access around the gateway; and
+- startup validation (non-loopback bind, insecure resource URI with Google auth on, missing allowlist, cert-without-key, invalid proxy CIDRs/hosts); and
 - attempts to select another workspace by every transport field.
 
-### Cluster end-to-end test
-
-`TestClusterE2E` (`internal/mcp/cluster_e2e_test.go`) exercises the complete authenticated HTTP path:
-
-1. Keycloak PKCE login (browser-based or scripted);
-2. Token exchange and introspection;
-3. MCP `initialize` and `tools/list` through the Caddy gateway;
-4. `tools/call search_test` returning paginated evidence;
-5. `tools/call read_test_evidence` returning text segments; and
-6. Multi-page continuation until `complete=true`.
-
-The test runs against an in-cluster Keycloak, Caddy gateway, and ingestion workspace with real document data. It opens a browser for the operator to complete login as `e2e-user` / `e2e-password` and waits up to 5 minutes for the OAuth callback redirect.
+There is no cluster or real-Google end-to-end test: authenticated HTTP MCP is a local process now, and Google itself is not something this repository stands up a fake of beyond the JWKS/discovery double above.
 
 ### Client compatibility
 
@@ -353,10 +345,9 @@ Use only synthetic MCP requests and evidence in committed fixtures. Confirm prot
 
 ## Operational pitfalls
 
-- **Certificate staleness**: Keycloak reads TLS certificates only at startup. After regenerating the TLS secret, always restart both Keycloak and the app to avoid silent introspection failures. Symptom: 401 "invalid token" with no app log lines. Verify with certificate fingerprint comparison.
-- **Keycloak realm import**: The realm import accepts `serviceAccountsEnabled` but silently ignores service-account role assignments. The `realm-management` client's `token-introspection` role must be granted post-start via the admin REST API.
-- **Caddy capabilities**: Do not drop ALL capabilities on the gateway container without re-adding `NET_BIND_SERVICE`.
-- **E2E test requires a human**: The cluster end-to-end test opens a browser for operator login. The test process must stay alive through the callback redirect.
+- **Allowlist changes need a restart**: `allowed_emails` is read once at `mcp start`. Adding or removing an email does not take effect until the server is restarted (`mcp stop` then `mcp start`).
+- **No revocation**: a Google ID token is valid until it naturally expires; there is no introspection call to make it stop working early. Removing an email from the allowlist prevents a *new* token for that address from being accepted after restart, but does not invalidate one already in flight.
+- **`mcp start` fails fast on a stale PID file only if the process is actually dead**: if a previous server was killed with `-9` and its PID has since been reused by an unrelated process, `mcp status`/`mcp start` cannot distinguish that from the original server still running. This is inherent to PID-based liveness checks; prefer `mcp stop` over killing the process directly.
 
 ## Non-goals
 
@@ -366,7 +357,7 @@ Use only synthetic MCP requests and evidence in committed fixtures. Confirm prot
 - Do not multiplex many workspace credentials inside one MCP process.
 - Do not weaken stdio support.
 - Do not implement obsolete HTTP+SSE transport when intended clients support final Streamable HTTP.
-- Do not claim remote support before the complete gateway and authorization path is tested.
+- Do not claim remote support before the complete authentication path is tested.
 - Do not advertise experimental MCP capabilities that are not required by supported clients.
 - Do not log protocol payloads containing questions or evidence.
 

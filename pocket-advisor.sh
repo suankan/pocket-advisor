@@ -29,7 +29,6 @@ BIN=./bin/pocket-advisor
 PKG=./cmd/pocket-advisor
 RELEASE=pocket-advisor
 CHART=./charts/pocket-advisor-infra
-APP_CHART=./charts/pocket-advisor-app
 
 TMPFS=$(mktemp -d)
 trap 'rm -rf "$TMPFS"' EXIT
@@ -101,7 +100,6 @@ usage: ./pocket-advisor.sh <command> [args]
   lint                      fmt, vet, helm lint, chart-render assertion
   install-hooks             enable this clone's versioned Git hooks
   docker-build-postgres     build the local Postgres image
-  docker-build-app          build the application image used by authenticated MCP
   deploy-infra              helm install/upgrade the three shared stores
   destroy-infra             helm uninstall (PVCs retained)
   destroy-state             delete every PVC in $POCKET_ADVISOR_NAMESPACE (irreversible)
@@ -109,10 +107,6 @@ usage: ./pocket-advisor.sh <command> [args]
   destroy-metrics-server    helm uninstall metrics-server
   deploy-workspace <id>     provision one workspace's database/bucket/streams
   destroy-workspace <id>    tear down one workspace's database/bucket/streams
-  e2e-keycloak-up          bring up a test Keycloak for the real-cluster e2e
-  e2e-app-up <id>           deploy the app chart against that Keycloak (NetworkPolicy off)
-  e2e-mcp                  run the gated TestClusterE2E against the deployed gateway
-  e2e-down                 uninstall the e2e app release and Keycloak
   clean                     rm -rf bin
 EOF
 }
@@ -141,33 +135,6 @@ cmd_lint() {
   cmd_fmt || exit 1
   cmd_vet || exit 1
   helm lint "$CHART" || exit 1
-  helm lint "$APP_CHART" \
-    --set workspace.id=synthetic \
-    --set workspace.configurationSecret=synthetic-config \
-    --set mcp.publicURI=https://mcp.example.test/mcp \
-    --set mcp.allowedHosts=mcp.example.test \
-    --set oauth.authorizationServer=https://auth.example.test/realms/pocket-advisor \
-    --set oauth.introspectionEndpoint=https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect \
-    --set oauth.introspectionClientID=resource-server \
-    --set oauth.secretName=oauth-secret \
-    --set tls.secretName=tls-secret || exit 1
-  helm template synthetic "$APP_CHART" \
-    --set workspace.id=synthetic \
-    --set workspace.configurationSecret=synthetic-config \
-    --set mcp.publicURI=https://mcp.example.test/mcp \
-    --set mcp.allowedHosts=mcp.example.test \
-    --set oauth.authorizationServer=https://auth.example.test/realms/pocket-advisor \
-    --set oauth.introspectionEndpoint=https://auth.example.test/realms/pocket-advisor/protocol/openid-connect/token/introspect \
-    --set oauth.introspectionClientID=resource-server \
-    --set oauth.secretName=oauth-secret \
-    --set tls.secretName=tls-secret \
-    --set 'networkPolicy.egress[0].cidr=192.0.2.10/32' \
-    --set 'networkPolicy.egress[0].ports[0]=5432' > "$TMPFS/app-lint.yaml" \
-    && grep -q 'reverse_proxy 127.0.0.1:8080' "$TMPFS/app-lint.yaml" \
-    && grep -q 'port: 5432' "$TMPFS/app-lint.yaml" \
-    && [ "$(grep -c 'kind: Deployment' "$TMPFS/app-lint.yaml")" = "1" ] \
-    && echo "ok: authenticated MCP chart renders one loopback-backed deployment" \
-    || { echo "FAIL: rendered authenticated MCP chart is incomplete"; exit 1; }
   # No more per-workspace rendering to assert on — deviation 39 removed
   # the last workspace-scoped template (Streams). What is left to check is
   # that the chart still renders at all with zero dependencies and that
@@ -186,11 +153,6 @@ cmd_lint() {
     && [ "$(grep -c 'kind: StatefulSet' "$TMPFS/infra-lint.yaml")" = "3" ] \
     && echo "ok: chart renders three StatefulSets and the workspace's notify block" \
     || { echo "FAIL: rendered chart is incomplete"; exit 1; }
-}
-
-cmd_docker_build_app() {
-  docker build --platform linux/arm64 \
-    -t "pocket-advisor:local" -f docker-images/app/Dockerfile .
 }
 
 cmd_install_hooks() {
@@ -504,160 +466,6 @@ cmd_clean() {
   rm -rf bin
 }
 
-# F1-b real-cluster end-to-end: bring up a test Keycloak (H2 dev, start-dev
-# TLS) and the app chart, then run the gated TestClusterE2E against the
-# deployed gateway. The app image must be built first (docker-build-app) and
-# reachable by the cluster. The NetworkPolicy is disabled for this trusted
-# local, single-user OrbStack cluster so the app pod can reach PostgreSQL,
-# the model endpoints, and Keycloak without enumerating source or
-# destination IPs; it stays on by default for real deployments. Workspace
-# config, TLS, and the OAuth secret are operator-provided so no private
-# material enters version control.
-E2E_NS="$POCKET_ADVISOR_NAMESPACE"
-E2E_RELEASE="pocket-advisor-e2e"
-
-cmd_e2e_keycloak_up() {
-  # Self-signed certificate for the Keycloak HTTPS listener. The e2e client
-  # skips verification (PA_E2E_INSECURE) and the app pod trusts it via
-  # SSL_CERT_FILE, so neither the CN nor the CA chain matters.
-  local certkey certcrt certcfg
-  certkey="$(mktemp)"
-  certcrt="$(mktemp)"
-  certcfg="$(mktemp)"
-  cat > "$certcfg" <<EOF
-[req]
-distinguished_name = dn
-prompt = no
-[dn]
-CN = keycloak.$E2E_NS.svc.cluster.local
-[ext]
-subjectAltName = DNS:keycloak.$E2E_NS.svc.cluster.local
-EOF
-  openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-    -keyout "$certkey" -out "$certcrt" \
-    -config "$certcfg" -extensions ext >/dev/null 2>&1 || exit 1
-  kubectl create secret tls pocket-advisor-e2e-keycloak-tls \
-    --cert="$certcrt" --key="$certkey" \
-    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
-  rm -f "$certkey" "$certcrt" "$certcfg"
-  kubectl apply -f test/e2e/keycloak/keycloak.yaml -n "$E2E_NS" || exit 1
-  # The TLS secret above is re-created on every run, but the deployment spec
-  # does not change, so without a restart Keycloak keeps serving the previous
-  # certificate while the app pod (which mounts the same secret) trusts the
-  # new one. Restart so both pods always use the same, current certificate.
-  kubectl rollout restart deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" || exit 1
-  kubectl rollout status deployment/pocket-advisor-e2e-keycloak -n "$E2E_NS" --timeout=5m || exit 1
-  # Keycloak's realm import accepts serviceAccountsEnabled but not a service
-  # account role assignment, and a minimal realm import leaves the
-  # realm-management client without its default token-introspection role, so
-  # create the role and grant it to the resource-server client's service
-  # account through the admin REST API after startup. Each step is checked
-  # and idempotent.
-  local base adm tok sa_uid rm_id role_id
-  base="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms"
-  adm="https://keycloak.$E2E_NS.svc.cluster.local:8443/admin/realms/pocket-advisor"
-  tok="$(curl -sk --max-time 20 -X POST "$base/master/protocol/openid-connect/token" \
-    -d client_id=admin-cli -d username=admin -d password=admin -d grant_type=password | jq -r .access_token)" || exit 1
-  rm_id="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/clients?clientId=realm-management" | jq -r '.[0].id')" || exit 1
-  if ! curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/clients/$rm_id/roles/token-introspection" \
-    | jq -e . >/dev/null 2>&1; then
-    curl -sk --max-time 20 -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
-      -d '{"name":"token-introspection"}' "$adm/clients/$rm_id/roles" >/dev/null 2>&1 || exit 1
-  fi
-  sa_uid="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" \
-    "$adm/users?username=service-account-pocket-advisor-resource-server&exact=true" | jq -r '.[0].id')" || exit 1
-  if ! curl -sk --max-time 20 -H "Authorization: Bearer $tok" "$adm/users/$sa_uid/role-mappings/clients/$rm_id" \
-    | jq -e '.[] | select(.name == "token-introspection")' >/dev/null 2>&1; then
-    role_id="$(curl -sk --max-time 20 -H "Authorization: Bearer $tok" \
-      "$adm/clients/$rm_id/roles/token-introspection" | jq -r .id)" || exit 1
-    curl -sk --max-time 20 -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
-      -d "{\"id\":\"$role_id\",\"name\":\"token-introspection\"}" \
-      "$adm/users/$sa_uid/role-mappings/clients/$rm_id" >/dev/null 2>&1 || exit 1
-  fi
-  echo "keycloak ready at https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor"
-}
-
-cmd_e2e_app_up() {
-  local ws="${1:-e2e}"
-  cmd_docker_build_app || exit 1
-  # The deployed pod runs in the cluster, so localhost means the pod, not the
-  # Mac host where the model server listens. OrbStack pods reach the host at
-  # host.internal, so rewrite any localhost endpoint in the config to that
-  # before creating the Secret. The operator's workspaces/ files are untouched.
-  # The chart's configuration Secret carries three keys: the app config
-  # (config.yaml), the workspace registry (workspace-config.yaml), and the
-  # private infra/credentials override (workspace-values.yaml). The infra file
-  # uses ${VAR} placeholders resolved from the operator's environment (the
-  # binary expands them at runtime, but the pod has no such environment), so
-  # expand them before the Secret is created; values may contain characters
-  # that break YAML quoting, so every quoted scalar is re-escaped and the
-  # result validated before it is stored.
-  local tmpcfg tmpvals
-  tmpcfg="$(mktemp)"
-  tmpvals="$(mktemp)"
-  yq '(.. | select(tag == "!!str" and test("localhost"))) |= sub("localhost", "host.internal")' \
-    config.yaml > "$tmpcfg" || exit 1
-  perl -pe 'if (/^(\s*[\w.-]+:\s*)"\$\{(\w+)\}"\s*$/) { my ($k, $n) = ($1, $2); my $v=$ENV{$n}; $v =~ s/\\/\\\\/g; $v =~ s/"/\\"/g; $_ = "$k\"$v\"\n"; }' \
-    workspaces/pocket-advisor-infra.yaml > "$tmpvals" || exit 1
-  yq e '.' "$tmpvals" >/dev/null || { echo "workspace values expansion produced invalid YAML"; exit 1; }
-  kubectl create secret generic "$E2E_RELEASE-config" \
-    --from-file=config.yaml="$tmpcfg" \
-    --from-file=workspace-config.yaml="workspaces/workspace-config.yaml" \
-    --from-file=workspace-values.yaml="$tmpvals" \
-    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
-  rm -f "$tmpcfg" "$tmpvals"
-  kubectl create secret generic "$E2E_RELEASE-oauth" \
-    --from-literal=introspection-client-secret='e2e-introspection-secret' \
-    -n "$E2E_NS" --dry-run=client -o yaml | kubectl apply -f - || exit 1
-  # Auto-generate the self-signed TLS Secret for mcp.example.test if missing;
-  # the e2e client skips verification (PA_E2E_INSECURE), so the CN mismatch
-  # with the Service DNS does not matter.
-  if ! kubectl get secret "$E2E_RELEASE-tls" -n "$E2E_NS" >/dev/null 2>&1; then
-    echo "generating self-signed TLS secret $E2E_RELEASE-tls for mcp.example.test"
-    openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout /tmp/"$E2E_RELEASE"-key.pem -out /tmp/"$E2E_RELEASE"-cert.pem \
-      -days 1 -subj /CN=mcp.example.test >/dev/null 2>&1 || exit 1
-    kubectl create secret tls "$E2E_RELEASE-tls" \
-      --cert=/tmp/"$E2E_RELEASE"-cert.pem --key=/tmp/"$E2E_RELEASE"-key.pem \
-      -n "$E2E_NS" || exit 1
-  fi
-  # Trusted local single-user OrbStack cluster: turn the NetworkPolicy off so
-  # the app pod can reach PostgreSQL, the model endpoints, and Keycloak
-  # without enumerating source or destination IPs. It stays enabled by default
-  # for real deployments.
-  helm upgrade --install "$E2E_RELEASE" "$APP_CHART" -n "$E2E_NS" --create-namespace \
-    -f test/e2e/app-values.yaml \
-    --set workspace.id="$ws" \
-    --set oauth.authorizationServer="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
-    --set oauth.introspectionEndpoint="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor/protocol/openid-connect/token/introspect" \
-    --set-json 'extraEnv=[{"name":"SSL_CERT_FILE","value":"/etc/keycloak-ca/tls.crt"}]' \
-    --set-json 'extraVolumeMounts=[{"name":"keycloak-ca","mountPath":"/etc/keycloak-ca"}]' \
-    --set-json 'extraVolumes=[{"name":"keycloak-ca","secretName":"pocket-advisor-e2e-keycloak-tls"}]' \
-    --set networkPolicy.enabled=false \
-    || exit 1
-  # The configuration Secret is mounted via subPath, which does not pick up
-  # content changes without a pod restart.
-  kubectl rollout restart deployment/"$E2E_RELEASE" -n "$E2E_NS" || exit 1
-  kubectl rollout status deployment/"$E2E_RELEASE" -n "$E2E_NS" --timeout=5m || exit 1
-}
-
-cmd_e2e_mcp() {
-  PA_K8S_E2E=1 \
-  PA_E2E_MCP_URL="https://$E2E_RELEASE.$E2E_NS.svc.cluster.local/mcp" \
-  PA_E2E_HOST="mcp.example.test" \
-  PA_E2E_KEYCLOAK_URL="https://keycloak.$E2E_NS.svc.cluster.local:8443/realms/pocket-advisor" \
-  PA_E2E_CLIENT_ID="pocket-advisor-opencode" \
-  PA_E2E_REDIRECT_URI="http://127.0.0.1:19876/mcp/oauth/callback" \
-  PA_E2E_USER="e2e-user" \
-  PA_E2E_PASSWORD="e2e-password" \
-  PA_E2E_INSECURE=1 \
-  go test ./internal/mcp/ -run TestClusterE2E -v
-}
-
-cmd_e2e_down() {
-  helm uninstall "$E2E_RELEASE" -n "$E2E_NS" 2>/dev/null || true
-}
-
 cmd=${1:-}
 if [ $# -gt 0 ]; then
   shift
@@ -675,11 +483,6 @@ case "$cmd" in
   lint) cmd_lint ;;
   install-hooks) cmd_install_hooks ;;
   docker-build-postgres) cmd_docker_build_postgres ;;
-  docker-build-app) cmd_docker_build_app ;;
-  e2e-keycloak-up) cmd_e2e_keycloak_up ;;
-  e2e-app-up) cmd_e2e_app_up "${1:-}" ;;
-  e2e-mcp) cmd_e2e_mcp ;;
-  e2e-down) cmd_e2e_down ;;
   deploy-infra) cmd_deploy_infra ;;
   destroy-infra) cmd_destroy_infra ;;
   destroy-state) cmd_destroy_state ;;

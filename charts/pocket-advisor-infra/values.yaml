@@ -42,36 +42,22 @@ rustfs:
   apiPort: 9000
   consolePort: 9001
 
-  # The only administrative credential in the system, and the only one that is
-  # cluster-wide rather than per-workspace: the operator uses it to create each
-  # tenant's bucket and identity. Nothing reads or writes documents as it — that
-  # is always a workspace's own identity, whose secret is per-workspace under
-  # `workspaces:` in the values file.
-  #
-  # Empty here on purpose — supply it in workspaces/pocket-advisor-infra.yaml.
-  # The templates `required` it, so a deploy without that file fails loudly
-  # rather than falling back to a default password.
-  #
-  # There used to be three identities: this one plus a global `pa-uploader`
-  # and `pa-worker` pair, whose policies enforced the raw/-vs-extracted/ write
-  # split on a single shared bucket. Per-workspace isolation replaced both —
-  # each workspace has its own bucket and identity, and the write split is
-  # enforced by Vault.role in application code (workspace-isolation.md §9).
-  # Neither key was referenced by any Go code; they and the setup Job that
-  # created them were deleted (ingestion-design.md deviation 19).
-  adminRustFSUser: rustfsadmin
-  adminRustFSPassword: adminrustfspassword
+  # RustFS's own container requires an access/secret key to boot at all, and
+  # creating a workspace's bucket and public policy still needs an identity
+  # to do it with, so this is the one RustFS credential that cannot go away.
+  # Hardcoded to admin/admin, not a generated secret: this is a fully local,
+  # single-operator system, and nothing reads or writes documents as this
+  # identity — that happens anonymously against a workspace's own bucket,
+  # scoped by its public policy (`./pocket-advisor.sh deploy-workspace`), not
+  # by an identity (workspace-isolation.md §2.2, §9).
+  adminRustFSUser: admin
+  adminRustFSPassword: admin
 
   # Bucket notifications. There is no enable flag: every workspace's target
-  # identity is rendered into its own Secret by templates/rustfs.yaml, which
-  # already holds every workspace's NATS password, so "configured" and
-  # "enabled" are the same fact (§5.2). Only the shape lives here — subject
-  # and stream name are safe to share across every workspace's target block
-  # despite being the same literal string, because NATS accounts make that
-  # string a different subject space per workspace (workspace-isolation.md
-  # §2.3). Which bucket publishes to which target is still the one piece the
-  # CRD cannot express — `./pocket-advisor.sh deploy-workspace` sets it now
-  # via aws-cli, not --ingest-all (deviation 35).
+  # is configured the moment it appears in `workspaces:` below (§5.2). Only
+  # the shape lives here — subject and stream name are namespaced per
+  # workspace in the template (the same convention internal/bus/bus.go uses
+  # Go-side), so the literal values here are just the un-namespaced base.
   notify:
     subject: rustfs.events.raw
     jetstreamStreamName: RUSTFS_EVENTS
@@ -111,10 +97,9 @@ rustfs:
 # Pipeline Bus: NATS JetStream
 # ============================================================================
 nats:
-  # No credentials block here, unlike RustFS. NATS accounts are configuration
-  # this chart renders rather than resources an operator creates, so nothing
-  # ever authenticates to it as an administrator — every password is a
-  # workspace's own, under `workspaces:` in the values file.
+  # No credentials block at all, unlike RustFS — not even an admin one.
+  # Nothing authenticates to NATS any more; isolation between workspaces is
+  # subject/stream naming (internal/bus/bus.go), not an account boundary.
 
   # RUSTFS_EVENTS' duplicate window. Must exceed RustFS's retry lifetime —
   # live-verified against beta.12, which refused to publish into a stream
@@ -153,15 +138,16 @@ postgres:
 
   port: 5432
 
-  # The admin/superuser this StatefulSet creates on first boot. Real and
-  # ongoing now, unlike the CNPG-era bootstrap placeholder nothing ever
-  # connected to: removing CloudNativePG means nothing reconciles a
-  # Database/DatabaseRole any more, so ./pocket-advisor.sh deploy-workspace
-  # uses this credential directly — psql, CREATE DATABASE/CREATE ROLE/GRANT —
-  # the same operation an operator would have made, run once by a human
-  # instead of continuously by a controller (deviation 39).
-  adminPostgresUser: postgres
-  adminPostgresPassword: postgrespassword
+  # No admin credential field here: the superuser is hardcoded to the
+  # out-of-the-box default name (`postgres`) directly in
+  # templates/postgres.yaml, and every connection — admin and per-workspace
+  # role alike — is `trust` authenticated (no password, ever). Real and
+  # ongoing, unlike the CNPG-era bootstrap placeholder nothing ever connected
+  # to: removing CloudNativePG means nothing reconciles a Database/
+  # DatabaseRole any more, so ./pocket-advisor.sh deploy-workspace connects
+  # as `postgres` directly — psql, CREATE DATABASE/CREATE ROLE/GRANT — the
+  # same operation an operator would have made, run once by a human instead
+  # of continuously by a controller (deviation 39).
 
   storage:
     # Shared across every workspace now, not one volume each. Steady state
@@ -186,33 +172,27 @@ postgres:
 # ============================================================================
 # Workspaces
 #
-# The one list this chart is driven by, and the only place anything private
-# belongs. Empty here on purpose: this file is committed, and the real list
-# lives in the gitignored workspaces/pocket-advisor-infra.yaml that
-# `./pocket-advisor.sh deploy-infra` passes with -f. Every secret in it is
-# `required` in the templates, so a deploy that forgets -f fails loudly
-# rather than falling back to a published default.
+# The one list this chart is driven by. Empty here on purpose: this file is
+# committed, and the real list is `./pocket-advisor.sh deploy-infra`'s own
+# `--set workspaces[N].id=<id>` args, generated from the authoritative
+# registry (workspaces/workspace-config.yaml's own `.workspaces[].id` —
+# there is no second, credentials-only registry any more).
 #
-# This chart itself renders nothing per workspace — deviation 39 removed the
-# last thing that was (each workspace's namespace and three Stream CRDs).
-# What is left here is credentials only, read by
-# `./pocket-advisor.sh deploy-workspace`/`destroy-workspace` (not by any
-# template), to create or drop that workspace's slice of the three shared
-# StatefulSets over psql/rc/aws-cli/natscli:
+# Each entry is only ever `{id: <id>}` now — no nested rustfs/nats/postgres
+# objects, because nothing per-workspace is stored anywhere. RustFS and NATS
+# templates use `.id` directly to derive every resource name and, where one
+# is still needed (RustFS's bucket-notify subject/stream), the namespaced
+# form of it:
 #
 #   workspaces:
 #     - id: test
-#       rustfs:
-#         password: <generate>
-#       nats:
-#         password: <generate>
-#       postgres:
-#         password: <generate>
 #
-# `id` names everything now — there is no longer a constant resource name
-# left to fall back on, because nothing is alone in its own namespace any
-# more. It is the NATS account and user name, the Postgres database name
-# and, as `<id>_user`, the role name, and the RustFS bucket, policy and
-# identity name alike.
+# `id` still names everything: the RustFS bucket (identity-free, isolated by
+# a public policy scoped to the bucket instead), and — namespaced — the NATS
+# subjects and stream names a workspace's commands and RustFS notify target
+# use (internal/bus/bus.go applies the identical transform Go-side). Only
+# Postgres keeps a real per-workspace *role*, also named `<id>`, because
+# that is the one boundary `trust` auth does not also remove (see
+# templates/postgres.yaml).
 # ============================================================================
 workspaces: []

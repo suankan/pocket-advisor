@@ -3,25 +3,36 @@
 # cluster. No operators, no CRDs (deviation 39): the chart renders plain
 # Deployments/StatefulSets for the three shared stores, and everything
 # workspace-specific — a database, a bucket, a set of streams — is
-# provisioned by `./pocket-advisor.sh deploy-workspace <id>`, calling
-# psql/rc/aws-cli/natscli directly, the same operation an operator would
-# have made but run once by a human instead of continuously by a controller.
+# provisioned by `./pocket-advisor.sh deploy-workspaces`, calling
+# psql/rc/aws-cli/natscli directly once per workspace listed in
+# workspaces/workspace-config.yaml, the same operation an operator would
+# have made but run once by a human instead of continuously by a
+# controller. `deploy-infra` runs it automatically after the shared stores
+# come up, so a stock `deploy-infra` alone leaves nothing unprovisioned.
 #
 # Replaces the Makefile entirely, in plain POSIX sh — no GNU Make
-# extensions, and no WORKSPACE_ID=<id> variable-override syntax:
-# deploy-workspace/destroy-workspace take the workspace id as a plain
-# positional argument instead. Make's own MAKECMDGOALS trick for that
-# collides with any workspace id that also happens to name a real target —
-# this repo's own "test" workspace, for instance, would silently also run
-# the Go test suite (the make target that happens to be spelled the same).
-# A plain positional argument to a shell script has no such collision.
+# extensions. destroy-workspace still takes a single workspace id as a
+# plain positional argument (it is deliberately scoped to one workspace,
+# never "all" — see cmd_destroy_workspace). Make's own MAKECMDGOALS trick
+# for that collides with any workspace id that also happens to name a real
+# target — this repo's own "test" workspace, for instance, would silently
+# also run the Go test suite (the make target that happens to be spelled
+# the same). A plain positional argument to a shell script has no such
+# collision.
 #
-# config.yaml and workspaces/pocket-advisor-infra.yaml are committed/
-# gitignored *templates* holding ${VAR} placeholders, never literal values;
-# every real value lives in .envrc (direnv-loaded, gitignored) and is
-# expanded into a throwaway copy at the point of use, by envsubst_workspaces
-# and resolve_infra below — one place defines a secret, everything else
-# reads it from there.
+# config.yaml is a committed *template* holding ${VAR} placeholders for the
+# handful of infra fields that still use them (none of them credentials any
+# more — see below), expanded into a throwaway copy at the point of use, by
+# resolve_infra below.
+#
+# There is no credentials file and no direnv. This is a fully local,
+# single-operator system: administrative credentials for Postgres/RustFS are
+# the fixed literal admin/admin (Postgres also drops the password check
+# entirely — trust auth, see charts/pocket-advisor-infra/templates/
+# postgres.yaml), and every per-workspace name and credential — Postgres
+# role, RustFS bucket, NATS subjects/streams — is simply the workspace id
+# itself, computed here and in internal/config wherever it's needed, never
+# stored anywhere.
 
 set -u
 
@@ -33,17 +44,12 @@ CHART=./charts/pocket-advisor-infra
 TMPFS=$(mktemp -d)
 trap 'rm -rf "$TMPFS"' EXIT
 
-# config.yaml and workspaces/pocket-advisor-infra.yaml are templates now,
-# not literal values: every secret lives in .envrc (direnv-loaded into the
-# environment), and both committed/gitignored files carry only ${VAR}
-# placeholders naming which one. Neither is expanded here at the top level —
-# only deploy-infra, deploy-workspace and destroy-workspace ever touch
-# Postgres/RustFS/NATS, so nothing else (build, test, lint, …) should have
-# to find envsubst, yq, a valid .envrc or a valid config.yaml just to run.
-# envsubst_workspaces and resolve_infra below do this lazily, into $TMPFS,
-# which the EXIT trap removes — there is nothing sensitive in the *template*
-# files themselves to protect, only in the expanded copies, and those never
-# outlive the process.
+# config.yaml is a template only for the ${VAR} placeholders that remain
+# (none are credentials any more). Not expanded here at the top level — only
+# deploy-infra, deploy-workspaces and destroy-workspace ever touch Postgres/
+# RustFS/NATS, so nothing else (build, test, lint, …) should have to find
+# envsubst, yq, or a valid config.yaml just to run. resolve_infra below does
+# this lazily, into $TMPFS, which the EXIT trap removes.
 
 # metrics-server is not a dependency of $CHART — it never needed anything
 # the removed operators provided, so its lifecycle stays independent,
@@ -54,14 +60,6 @@ trap 'rm -rf "$TMPFS"' EXIT
 # the rest of the release there too means everything metrics-server owns is
 # in one namespace instead of split across two.
 METRICS_SERVER_NAMESPACE="kube-system"
-
-# workspaces/pocket-advisor-infra.yaml is the private per-workspace
-# template: names and credentials (as ${VAR} placeholders, expanded from
-# .envrc) for each workspace's database, bucket and NATS account, plus the
-# three admin credentials (Postgres, RustFS, NATS) deploy-workspace/
-# destroy-workspace authenticate as. Gitignored, and the same file the
-# binary reads (config.yaml's workspaces.values), so Helm and the CLI
-# cannot disagree about a password.
 
 # One release, one namespace, holding all three shared stores and every
 # workspace's data inside them. Nothing is namespaced per workspace any
@@ -100,12 +98,12 @@ usage: ./pocket-advisor.sh <command> [args]
   lint                      fmt, vet, helm lint, chart-render assertion
   install-hooks             enable this clone's versioned Git hooks
   docker-build-postgres     build the local Postgres image
-  deploy-infra              helm install/upgrade the three shared stores
+  deploy-infra              helm install/upgrade the three shared stores, then deploy-workspaces
   destroy-infra             helm uninstall (PVCs retained)
   destroy-state             delete every PVC in $POCKET_ADVISOR_NAMESPACE (irreversible)
   deploy-metrics-server     helm install metrics-server into $METRICS_SERVER_NAMESPACE
   destroy-metrics-server    helm uninstall metrics-server
-  deploy-workspace <id>     provision one workspace's database/bucket/streams
+  deploy-workspaces         provision every workspace in workspaces/workspace-config.yaml
   destroy-workspace <id>    tear down one workspace's database/bucket/streams
   clean                     rm -rf bin
 EOF
@@ -141,14 +139,7 @@ cmd_lint() {
   # RustFS's per-workspace notify env vars — the one place a workspace id
   # still reaches a template — actually appear.
   helm template "$RELEASE" "$CHART" \
-    --set rustfs.adminRustFSUser=lint \
-    --set rustfs.adminRustFSPassword=lint \
-    --set postgres.adminPostgresUser=lint \
-    --set postgres.adminPostgresPassword=lint \
-    --set workspaces[0].id=lintws \
-    --set workspaces[0].rustfs.password=lint \
-    --set workspaces[0].nats.password=lint \
-    --set workspaces[0].postgres.password=lint > "$TMPFS/infra-lint.yaml" \
+    --set workspaces[0].id=lintws > "$TMPFS/infra-lint.yaml" \
     && grep -q 'RUSTFS_NOTIFY_NATS_ENABLE_LINTWS' "$TMPFS/infra-lint.yaml" \
     && [ "$(grep -c 'kind: StatefulSet' "$TMPFS/infra-lint.yaml")" = "3" ] \
     && echo "ok: chart renders three StatefulSets and the workspace's notify block" \
@@ -160,40 +151,14 @@ cmd_install_hooks() {
   echo "Git hooks enabled from .githooks"
 }
 
-# Expands ${VAR} scalars in the private values template into a throwaway copy
-# under $TMPFS. This deliberately uses yq rather than envsubst: passwords can
-# contain quotes, colons or comment markers, which textual substitution can
-# turn into invalid YAML (or a different value). yq parses the placeholders
-# first, substitutes the environment value as a string, then serialises safe
-# YAML. Needed by deploy-infra (passed to helm with -f) and by
-# deploy-workspace/destroy-workspace; nothing else touches it.
-envsubst_workspaces() {
-  POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED=$TMPFS/pocket-advisor-infra.yaml
-  expression='.'
-  for name in $(rg -o '\$\{[A-Za-z_][A-Za-z0-9_]*\}' workspaces/pocket-advisor-infra.yaml | sed 's/.*${//; s/}//' | sort -u); do
-    if ! printenv "$name" >/dev/null; then
-      echo "unset environment variable $name required by workspaces/pocket-advisor-infra.yaml" >&2
-      exit 1
-    fi
-    expression="$expression | (.. | select(tag == \"!!str\" and . == \"\${$name}\")) = strenv($name)"
-  done
-  yq "$expression" workspaces/pocket-advisor-infra.yaml > "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED"
-}
-
-# Resolves POSTGRES_HOST, POSTGRES_PORT, RUSTFS_ENDPOINT_URL, NATS_HOST and
-# POSTGRES_ADMIN_USER — the first four from config.yaml's own infra:
-# section, the same file internal/config reads, so this script and the Go
-# binary read one address for each store, not two that could quietly
-# disagree (deviation 41); POSTGRES_ADMIN_USER from
-# $POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED instead, deliberately not from
-# charts/pocket-advisor-infra/values.yaml's own committed default — the
-# values file's default is what applies only when workspaces/
-# pocket-advisor-infra.yaml doesn't override it, and it does, so reading
-# the chart's own default here could name a role that was never actually
-# created if the two ever drifted. Called lazily, only by deploy-workspace/
-# destroy-workspace, the only commands that touch Postgres/RustFS/NATS
-# directly — callers must run envsubst_workspaces first, since this reads
-# its output.
+# Resolves POSTGRES_HOST, POSTGRES_PORT, RUSTFS_ENDPOINT_URL and NATS_HOST
+# from config.yaml's own infra: section, the same file internal/config
+# reads, so this script and the Go binary read one address for each store,
+# not two that could quietly disagree (deviation 41). POSTGRES_ADMIN_USER
+# and the RustFS root credential are the fixed convention (postgres/admin/
+# admin — see charts/pocket-advisor-infra/values.yaml), not read from
+# anywhere. Called lazily, only by deploy-workspaces/destroy-workspace, the
+# only commands that touch Postgres/RustFS/NATS directly.
 resolve_infra() {
   CONFIG_ENVSUBSTED=$TMPFS/config.yaml
   envsubst < config.yaml > "$CONFIG_ENVSUBSTED"
@@ -209,12 +174,12 @@ resolve_infra() {
   fi
   # infra.nats.url carries the nats:// scheme (internal/config uses it
   # whole); this script only ever needs host:port to build its own
-  # nats://<workspace>:<password>@host:port URLs below, so the scheme is
-  # stripped once here rather than repeated at every call site.
+  # nats://host:port URLs below, so the scheme is stripped once here rather
+  # than repeated at every call site.
   NUTS_URL=$(yq '.infra.nats.url' "$CONFIG_ENVSUBSTED")
   NATS_HOST=${NATS_HOST:-${NUTS_URL#nats://}}
 
-  POSTGRES_ADMIN_USER=$(yq '.postgres.adminPostgresUser' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
+  POSTGRES_ADMIN_USER=postgres
 
   if [ -z "$POSTGRES_HOST" ] || [ "$POSTGRES_HOST" = null ]; then
     echo "missing infra.postgres.host in $CONFIG_ENVSUBSTED" >&2; exit 1
@@ -227,9 +192,6 @@ resolve_infra() {
   fi
   if [ -z "$NUTS_URL" ] || [ "$NUTS_URL" = null ]; then
     echo "missing infra.nats.url in $CONFIG_ENVSUBSTED" >&2; exit 1
-  fi
-  if [ -z "$POSTGRES_ADMIN_USER" ] || [ "$POSTGRES_ADMIN_USER" = null ]; then
-    echo "missing postgres.adminPostgresUser in $POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED" >&2; exit 1
   fi
 }
 
@@ -248,23 +210,30 @@ cmd_docker_build_postgres() {
 # gone with the operators (deviation 39).
 cmd_deploy_infra() {
   cmd_docker_build_postgres || exit 1
-  if [ ! -f workspaces/pocket-advisor-infra.yaml ]; then
-    echo "missing workspaces/pocket-advisor-infra.yaml" >&2
+  if [ ! -f workspaces/workspace-config.yaml ]; then
+    echo "missing workspaces/workspace-config.yaml" >&2
     exit 1
   fi
-  envsubst_workspaces
+  # The chart's workspaces: list only needs an id per entry now (no
+  # credentials survive anywhere) — derived straight from the one
+  # authoritative registry, not a second credentials-only file.
+  set --
+  i=0
+  for id in $(yq '.workspaces[].id' workspaces/workspace-config.yaml); do
+    set -- "$@" --set "workspaces[$i].id=$id"
+    i=$((i + 1))
+  done
   helm upgrade --install "$RELEASE" "$CHART" --namespace "$POCKET_ADVISOR_NAMESPACE" --create-namespace \
-    -f "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED" || exit 1
+    "$@" || exit 1
   for sts in postgres rustfs nats; do
     kubectl rollout status statefulset/"$sts" -n "$POCKET_ADVISOR_NAMESPACE" --timeout=5m || exit 1
   done
   echo
-  echo "shared stores ready. next:"
-  echo "  ./pocket-advisor.sh deploy-workspace <id>"
-  echo "  ./pocket-advisor.sh build && ./$BIN --ingest-all --workspace-id <id>"
+  echo "shared stores ready. provisioning every workspace in workspaces/workspace-config.yaml..."
+  cmd_deploy_workspaces
   echo
-  echo "deploy-infra only brings up Postgres, RustFS and NATS themselves —"
-  echo "nothing workspace-specific exists until deploy-workspace runs."
+  echo "deploy-infra brought up Postgres, RustFS, NATS, and every registered workspace. next:"
+  echo "  ./pocket-advisor.sh build && ./$BIN --ingest-all --workspace-id <id>"
 }
 
 # No PVC workaround needed any more, unlike the CloudNativePG era this
@@ -310,108 +279,109 @@ cmd_destroy_metrics_server() {
 
 # The whole of what an operator used to reconcile for one workspace, run
 # once instead of continuously: a Postgres database and role, a RustFS
-# bucket/identity/policy, and three JetStream streams. Idempotent throughout
-# — re-running against an already-provisioned workspace skips what exists
-# rather than failing on it, since adding a workspace back after editing
-# $POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED should not require remembering what already ran.
+# bucket and its public policy, and three JetStream streams. Idempotent
+# throughout — re-running against an already-provisioned workspace skips or
+# safely repeats what exists rather than failing on it (the Postgres role
+# step is a single DO block covering fresh, already-migrated, and
+# pre-convention workspaces alike; put-bucket-policy overwrites cleanly on a
+# second run). Takes one workspace id and assumes resolve_infra has already
+# run — cmd_deploy_workspaces below is the only caller, looping this over
+# every id in the registry.
 #
-# rc for identity and policy, aws-cli for the bucket and the notification
-# binding — not an arbitrary split. Checked directly: `aws s3api
-# put-bucket-policy` rejects the same policy document `rc admin policy
-# create` accepts, because bucket resource policies (aws-cli's mechanism)
-# and IAM canned policies (rc's, the same one the old Tenant CRD used) are
-# different mechanisms with different required shapes. Bucket creation and
-# notification binding are S3 data-plane operations aws-cli's own surface
-# covers completely; identity and policy creation are RustFS's own
-# MinIO-shaped admin API, which aws-cli cannot reach at all, on RustFS or
-# real AWS either.
-cmd_deploy_workspace() {
-  id=${1:-}
-  if [ -z "$id" ]; then
-    echo "usage: ./pocket-advisor.sh deploy-workspace <workspace_id>" >&2
-    exit 1
-  fi
-  if [ ! -f workspaces/pocket-advisor-infra.yaml ]; then
-    echo "missing workspaces/pocket-advisor-infra.yaml" >&2
-    exit 1
-  fi
-  envsubst_workspaces
-  resolve_infra
+# aws-cli for everything RustFS-side now (bucket, its public policy, the
+# notification binding) — the per-workspace identity/IAM-policy layer `rc
+# admin user`/`rc admin policy` used to own is gone entirely.
+provision_workspace() {
+  id=$1
 
-  pg_pass=$(yq ".workspaces[] | select(.id == \"$id\") | .postgres.password" "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  rustfs_secret=$(yq ".workspaces[] | select(.id == \"$id\") | .rustfs.password" "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  nats_pass=$(yq ".workspaces[] | select(.id == \"$id\") | .nats.password" "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  admin_pass=$(yq '.postgres.adminPostgresPassword' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  root_user=$(yq '.rustfs.adminRustFSUser' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  root_pass=$(yq '.rustfs.adminRustFSPassword' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  for value in "$pg_pass" "$rustfs_secret" "$nats_pass" "$admin_pass" "$root_user" "$root_pass"; do
-    if [ -z "$value" ] || [ "$value" = "null" ]; then
-      echo "workspace \"$id\" is missing a required credential in $POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED" >&2
-      exit 1
-    fi
-  done
-
-  echo "--- postgres: role (idempotent via its own DO block) ---"
-  PGPASSWORD=$admin_pass psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN CREATE ROLE \"${id}_user\" LOGIN PASSWORD '$pg_pass'; EXCEPTION WHEN duplicate_object THEN RAISE NOTICE 'role exists, skipping'; END \$\$;" \
+  echo "--- postgres: role (idempotent — handles a fresh workspace, one already under this convention, and one still under the pre-convention <id>_user name alike) ---"
+  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$id') THEN
+            IF EXISTS (SELECT FROM pg_roles WHERE rolname = '${id}_user') THEN
+              ALTER ROLE \"${id}_user\" RENAME TO \"$id\";
+            ELSE
+              CREATE ROLE \"$id\" LOGIN;
+            END IF;
+          END IF;
+        END \$\$;" \
     || exit 1
 
-  echo "--- postgres: database (CREATE DATABASE has no IF NOT EXISTS; tolerated here the same way bucket/policy/user creation below is) ---"
-  PGPASSWORD=$admin_pass psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres \
-    -c "CREATE DATABASE \"$id\" OWNER \"${id}_user\";" \
+  echo "--- postgres: database (CREATE DATABASE has no IF NOT EXISTS; tolerated here the same way bucket/policy creation below is) ---"
+  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres \
+    -c "CREATE DATABASE \"$id\" OWNER \"$id\";" \
     >/dev/null 2>&1 || echo "  database $id already exists, skipping"
 
   echo "--- postgres: extensions (needs the admin's superuser rights — the workspace's own role never has them, deviation 20/39) ---"
-  PGPASSWORD=$admin_pass psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d "$id" -v ON_ERROR_STOP=1 \
+  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d "$id" -v ON_ERROR_STOP=1 \
     -c "CREATE EXTENSION IF NOT EXISTS vector;" \
     -c "CREATE EXTENSION IF NOT EXISTS pg_textsearch;" \
     || exit 1
 
-  echo "--- rustfs: bucket, identity, policy ---"
-  rc alias set pa-admin "$RUSTFS_ENDPOINT_URL" "$root_user" "$root_pass" >/dev/null
-  AWS_ACCESS_KEY_ID=$root_user AWS_SECRET_ACCESS_KEY=$root_pass \
+  echo "--- rustfs: bucket with a public policy (no per-workspace identity any more — isolation is the bucket name, verified live: an unpolicied bucket still refuses anonymous access) ---"
+  rc alias set pa-admin "$RUSTFS_ENDPOINT_URL" admin admin >/dev/null
+  AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=admin \
     aws s3api create-bucket --bucket "$id" --endpoint-url "$RUSTFS_ENDPOINT_URL" --region us-east-1 >/dev/null 2>&1 || true
   policy_file=$(mktemp)
-  printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"]}]}' "$id" "$id" > "$policy_file"
-  rc admin policy create pa-admin "$id" "$policy_file" >/dev/null 2>&1 || true
+  printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:ListBucketMultipartUploads","s3:AbortMultipartUpload"],"Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"]}]}' "$id" "$id" > "$policy_file"
+  AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=admin \
+    aws s3api put-bucket-policy --bucket "$id" --policy "file://$policy_file" --endpoint-url "$RUSTFS_ENDPOINT_URL" --region us-east-1 \
+    || exit 1
   rm -f "$policy_file"
-  rc admin user add pa-admin "$id" "$rustfs_secret" >/dev/null 2>&1 || true
-  rc admin policy attach pa-admin "$id" --user "$id" >/dev/null 2>&1 || true
 
-  echo "--- rustfs: bucket notification binding (raw/ only — extracted/ children are worker output, re-ingesting them would loop) ---"
+  echo "--- rustfs: bucket notification binding (raw/ only — extracted/ children are worker output, re-ingesting them would loop; admin-authenticated, bucket administration is deliberately not part of the public policy above) ---"
   arn="arn:rustfs:sqs::$(echo "$id" | tr '-' '_'):nats"
-  AWS_ACCESS_KEY_ID=$id AWS_SECRET_ACCESS_KEY=$rustfs_secret \
+  AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=admin \
     aws s3api put-bucket-notification-configuration \
       --endpoint-url "$RUSTFS_ENDPOINT_URL" --region us-east-1 --bucket "$id" \
       --notification-configuration \
         '{"QueueConfigurations":[{"QueueArn":"'"$arn"'","Events":["s3:ObjectCreated:*"],"Filter":{"Key":{"FilterRules":[{"Name":"prefix","Value":"raw/"}]}}}]}' \
     || exit 1
 
-  echo "--- nats: streams ---"
-  nats stream add INGESTION -s "nats://$NATS_HOST" --user "$id" --password "$nats_pass" \
-    --subjects="ingest.emails.raw,ingest.pdfs.raw,ingest.docx.raw,ingest.images.raw,ingest.text.embed" \
+  echo "--- nats: streams (anonymous — no NATS credential exists any more; subjects and stream names are namespaced by workspace id, matching internal/bus/bus.go's identical transform exactly) ---"
+  suffix=$(echo "$id" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+  nats stream add "INGESTION_$suffix" -s "nats://$NATS_HOST" \
+    --subjects="$id.ingest.emails.raw,$id.ingest.pdfs.raw,$id.ingest.docx.raw,$id.ingest.images.raw,$id.ingest.text.embed" \
     --retention=work --storage=file --discard=new --max-msgs=1000000 \
     --max-msgs-per-subject=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 \
     --dupe-window=2m --no-allow-rollup --deny-delete --no-deny-purge --replicas=1 \
-    >/dev/null 2>&1 || echo "  INGESTION already exists, skipping"
-  nats stream add INGESTION_DLQ -s "nats://$NATS_HOST" --user "$id" --password "$nats_pass" \
-    --subjects="ingest.dlq" \
+    >/dev/null 2>&1 || echo "  INGESTION_$suffix already exists, skipping"
+  nats stream add "INGESTION_DLQ_$suffix" -s "nats://$NATS_HOST" \
+    --subjects="$id.ingest.dlq" \
     --retention=limits --storage=file --discard=new --max-age=720h \
     --max-msgs=-1 --max-msgs-per-subject=-1 --max-bytes=-1 --max-msg-size=-1 \
     --dupe-window=2m --no-allow-rollup --deny-delete --no-deny-purge --replicas=1 \
-    >/dev/null 2>&1 || echo "  INGESTION_DLQ already exists, skipping"
-  nats stream add RUSTFS_EVENTS -s "nats://$NATS_HOST" --user "$id" --password "$nats_pass" \
-    --subjects="rustfs.events.raw" \
+    >/dev/null 2>&1 || echo "  INGESTION_DLQ_$suffix already exists, skipping"
+  nats stream add "RUSTFS_EVENTS_$suffix" -s "nats://$NATS_HOST" \
+    --subjects="$id.rustfs.events.raw" \
     --retention=work --storage=file --discard=new --max-msgs=1000000 \
     --max-msgs-per-subject=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 \
     --dupe-window=10m --no-allow-rollup --deny-delete --no-deny-purge --replicas=1 \
-    >/dev/null 2>&1 || echo "  RUSTFS_EVENTS already exists, skipping"
+    >/dev/null 2>&1 || echo "  RUSTFS_EVENTS_$suffix already exists, skipping"
 
   echo
   echo "workspace \"$id\" provisioned."
 }
 
-# The inverse of deploy-workspace, and — unlike destroy-infra/destroy-state —
+# Provisions every workspace listed in workspaces/workspace-config.yaml —
+# the one authoritative registry, same list deploy-infra already reads to
+# populate the chart's workspaces: values. Run standalone to (re-)provision
+# after editing the registry, or automatically at the end of deploy-infra.
+cmd_deploy_workspaces() {
+  if [ ! -f workspaces/workspace-config.yaml ]; then
+    echo "missing workspaces/workspace-config.yaml" >&2
+    exit 1
+  fi
+  resolve_infra
+  for id in $(yq '.workspaces[].id' workspaces/workspace-config.yaml); do
+    echo
+    echo "=== workspace: $id ==="
+    provision_workspace "$id"
+  done
+}
+
+# The inverse of provision_workspace, scoped to one workspace rather than
+# every registered one, and — unlike destroy-infra/destroy-state —
 # a genuinely data-destroying operation scoped to one workspace: drops its
 # Postgres database (and everything in it), its RustFS bucket (and every
 # object in it), its identity and policy, and its NATS streams. This is the
@@ -424,42 +394,29 @@ cmd_destroy_workspace() {
     echo "usage: ./pocket-advisor.sh destroy-workspace <workspace_id>" >&2
     exit 1
   fi
-  if [ ! -f workspaces/pocket-advisor-infra.yaml ]; then
-    echo "missing workspaces/pocket-advisor-infra.yaml" >&2
-    exit 1
-  fi
-  envsubst_workspaces
   resolve_infra
 
-  admin_pass=$(yq '.postgres.adminPostgresPassword' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  root_user=$(yq '.rustfs.adminRustFSUser' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  root_pass=$(yq '.rustfs.adminRustFSPassword' "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-
-  echo "--- postgres: dropping database and role ---"
-  PGPASSWORD=$admin_pass psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 \
+  echo "--- postgres: dropping database and role (both possible role names — \"\$id\" under the current convention and the pre-convention \"\${id}_user\" — so this cleans up regardless of which one a workspace happens to be under) ---"
+  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 \
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$id';" \
     -c "DROP DATABASE IF EXISTS \"$id\";" \
+    -c "DROP ROLE IF EXISTS \"$id\";" \
     -c "DROP ROLE IF EXISTS \"${id}_user\";" \
     || exit 1
 
-  echo "--- rustfs: removing identity, policy, bucket ---"
-  rc alias set pa-admin "$RUSTFS_ENDPOINT_URL" "$root_user" "$root_pass" >/dev/null
-  rc admin policy detach pa-admin "$id" --user "$id" >/dev/null 2>&1 || true
-  rc admin user rm pa-admin "$id" >/dev/null 2>&1 || true
-  rc admin policy rm pa-admin "$id" >/dev/null 2>&1 || true
-  AWS_ACCESS_KEY_ID=$root_user AWS_SECRET_ACCESS_KEY=$root_pass \
+  echo "--- rustfs: removing bucket (no per-workspace identity or policy object to remove separately any more — the policy lives on the bucket itself) ---"
+  rc alias set pa-admin "$RUSTFS_ENDPOINT_URL" admin admin >/dev/null
+  AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=admin \
     aws s3 rb "s3://$id" --force --endpoint-url "$RUSTFS_ENDPOINT_URL" --region us-east-1 >/dev/null 2>&1 || true
 
-  echo "--- nats: removing streams (as the workspace's own account — it owns nothing to remove if the account itself is already gone) ---"
-  nats_pass=$(yq ".workspaces[] | select(.id == \"$id\") | .nats.password" "$POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED")
-  if [ "$nats_pass" != "null" ]; then
-    for s in INGESTION INGESTION_DLQ RUSTFS_EVENTS; do
-      nats stream rm "$s" -s "nats://$NATS_HOST" --user "$id" --password "$nats_pass" --force >/dev/null 2>&1 || true
-    done
-  fi
+  echo "--- nats: removing streams (anonymous, namespaced names matching provision_workspace) ---"
+  suffix=$(echo "$id" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+  for s in INGESTION INGESTION_DLQ RUSTFS_EVENTS; do
+    nats stream rm "${s}_$suffix" -s "nats://$NATS_HOST" --force >/dev/null 2>&1 || true
+  done
 
   echo
-  echo "workspace \"$id\" torn down. Remove its entry from $POCKET_ADVISOR_HELM_VALUES_ENVSUBSTED by hand."
+  echo "workspace \"$id\" torn down. Remove its entry from workspaces/workspace-config.yaml by hand."
 }
 
 cmd_clean() {
@@ -488,7 +445,7 @@ case "$cmd" in
   destroy-state) cmd_destroy_state ;;
   deploy-metrics-server) cmd_deploy_metrics_server ;;
   destroy-metrics-server) cmd_destroy_metrics_server ;;
-  deploy-workspace) cmd_deploy_workspace "${1:-}" ;;
+  deploy-workspaces) cmd_deploy_workspaces ;;
   destroy-workspace) cmd_destroy_workspace "${1:-}" ;;
   clean) cmd_clean ;;
   *)

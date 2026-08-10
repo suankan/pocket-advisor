@@ -181,20 +181,27 @@ type Vault struct {
 	role   Role
 }
 
-// NewForWorkspaceAt returns a client bound to one workspace's scoped identity
-// and bucket (workspace-isolation.md §2.2), with role enforced in application
-// code rather than by RustFS policy (§9).
+// NewForWorkspaceAt returns a client bound to one workspace's bucket
+// (workspace-isolation.md §2.2), with role enforced in application code
+// rather than by RustFS policy (§9).
+//
+// No credentials: `./pocket-advisor.sh deploy-workspaces` gives the bucket a
+// public policy scoped to itself at provisioning time, so the application
+// connects anonymously — isolation is the bucket name, not an identity.
 //
 // It takes the endpoint directly rather than a config.RustFS, because the
 // endpoint is now per-workspace: each workspace has its own RustFS tenant in a
 // namespace of its own, and config only holds the template (deviation 21).
-func NewForWorkspaceAt(endpoint string, useSSL bool, bucket, accessKey, secretKey string, role Role) (*Vault, error) {
-	return newVault(endpoint, bucket, accessKey, secretKey, useSSL, role)
+func NewForWorkspaceAt(endpoint string, useSSL bool, bucket string, role Role) (*Vault, error) {
+	return newVault(endpoint, bucket, useSSL, role)
 }
 
-func newVault(endpoint, bucket, accessKey, secretKey string, useSSL bool, role Role) (*Vault, error) {
+func newVault(endpoint, bucket string, useSSL bool, role Role) (*Vault, error) {
 	c, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		// Empty access key is minio-go's own documented anonymous-request
+		// signal (credentials.Static.Retrieve returns SignatureAnonymous
+		// whenever AccessKeyID is ""), not a placeholder for a real one.
+		Creds:  credentials.NewStaticV4("", "", ""),
 		Secure: useSSL,
 	})
 	if err != nil {

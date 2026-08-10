@@ -112,7 +112,7 @@ func connectNATS(ctx context.Context, cfg *config.Config, wsID string, log *slog
 	if err != nil {
 		return false, nil
 	}
-	b, err := bus.Connect(ctx, w.NATSURL, w.NATSUser, w.NATSPassword)
+	b, err := bus.Connect(ctx, w.NATSURL, wsID)
 	if err != nil {
 		log.Debug("nats unreachable", "error", err)
 		return false, nil
@@ -127,16 +127,13 @@ func checkRustFS(ctx context.Context, cfg *config.Config, wsID string, log *slog
 	if err != nil {
 		return false
 	}
-	// Just verify we can construct a vault. A full reachability check
-	// would require the rustfs client to exist, which needs app.New.
-	// For doctor mode, checking that the workspace credentials resolve
-	// is sufficient — the actual bucket check happens when app.New
-	// calls EnsureBucket.
-	_ = w
-	// We rely on the credential resolution succeeding. A full check
-	// would require importing rustfs, which we avoid to keep doctor
-	// mode lightweight. The critical checks are PG and NATS.
-	return w.RustFSEndpoint != "" && w.RustFSAccessKey != "" && w.RustFSSecretKey != ""
+	// Just verify the workspace resolves to an endpoint and bucket name. A
+	// full reachability check would require the rustfs client to exist,
+	// which needs app.New — we avoid importing rustfs here to keep doctor
+	// mode lightweight. The critical checks are PG and NATS; the actual
+	// bucket check happens when app.New calls EnsureBucket. There is no
+	// credential to resolve any more (the application connects anonymously).
+	return w.RustFSEndpoint != "" && w.BucketName != ""
 }
 
 // fillSchemaChecks queries schema objects and embedding metadata.
@@ -212,23 +209,20 @@ func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Che
 	}
 }
 
-// fillJetStreamChecks inspects stream and consumer state.
+// fillJetStreamChecks inspects stream and consumer state. Stream names go
+// through b.StreamInfo rather than b.JS() directly so this stays agnostic
+// to the workspace-namespaced names internal/bus/bus.go actually uses.
 func fillJetStreamChecks(ctx context.Context, b *bus.Bus, checks *doctor.Checks, log *slog.Logger) {
-	js := b.JS()
-	for _, name := range []string{"INGESTION", "INGESTION_DLQ"} {
-		s, err := js.Stream(ctx, name)
-		if err != nil {
-			continue
-		}
-		info, err := s.Info(ctx)
+	for _, name := range []string{bus.StreamName, bus.StreamDLQ} {
+		info, err := b.StreamInfo(ctx, name)
 		if err != nil {
 			continue
 		}
 		checks.StreamsOK = true
 		switch name {
-		case "INGESTION":
+		case bus.StreamName:
 			checks.IngestionMsgs = info.State.Msgs
-		case "INGESTION_DLQ":
+		case bus.StreamDLQ:
 			checks.DLQMsgs = info.State.Msgs
 		}
 	}

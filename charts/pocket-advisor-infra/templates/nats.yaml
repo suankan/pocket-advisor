@@ -1,21 +1,27 @@
 {{/*
-One NATS server for the whole cluster, with an account per workspace.
+One NATS server for the whole cluster, fully open: no accounts, no users, no
+password — the same bare-flags-equivalent state NATS started in before this
+file existed, restored deliberately rather than by omission.
 
-Like Postgres and RustFS, NATS is one shared process. Accounts are NATS's own
-tenancy boundary, so a workspace still gets an isolated JetStream store and a
-user that can see nothing else (workspace-isolation.md §2.3).
+This is a fully local, single-operator system. Isolation moved from NATS
+accounts (a hard partition, and real protection against another tenant on
+the same server) to subject and stream naming instead: every subject and
+stream name internal/bus/bus.go uses is namespaced by workspace id
+(`<id>.ingest.emails.raw`, `INGESTION_<SUFFIX>`, ...), which keeps
+workspaces from colliding with each other but — unlike accounts — is
+convention, not an enforced boundary; there is no threat model here that
+needs one.
 
 Rendered once, into the release namespace, rather than once per workspace.
-Streams are data inside the account, created by deploy-workspace over natscli.
+Streams are data on the (single, global) account, created by
+deploy-workspace over natscli — nothing about them lives in this static
+config, so unlike before, adding or removing a workspace changes nothing
+here and needs no pod restart.
 
 Named plainly `nats`, without the release prefix. It is the only NATS in the
 cluster and its namespace holds nothing else of its kind, so the prefix added
 length without distinguishing anything — the same reasoning that names the
 operator subcharts after themselves.
-
-This is authentication, not an upgrade of it: before this file existed, NATS
-ran on bare CLI flags with no config, no accounts, no users — anyone who could
-reach the ClusterIP had full access to everything.
 */}}
 ---
 apiVersion: v1
@@ -24,7 +30,7 @@ metadata:
   name: nats-config
   labels:
     {{- include "pa.labels" (dict "ctx" $ "component" "message-bus") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS server config; one account block per workspace, rendered from the values file") }}
+  {{- with include "pa.annotations" (dict "ctx" $ "description" "NATS server config") }}
   annotations:
     {{- . | nindent 4 }}
   {{- end }}
@@ -35,22 +41,6 @@ data:
 
     jetstream {
       store_dir: /data
-    }
-
-    # This workspace's account, with its own JetStream store and its own user
-    # (workspace-isolation.md §2.3, §8).
-    # One account per workspace, each named for its workspace. The account IS
-    # the isolation boundary here: its own JetStream store, its own user, no
-    # visibility into any other.
-    accounts {
-    {{- range $.Values.workspaces }}
-      {{ .id | quote }}: {
-        jetstream: enabled
-        users: [
-          { user: {{ .id | quote }}, password: {{ required (printf "workspaces[%s].nats.password is required" .id) .nats.password | quote }} }
-        ]
-      }
-    {{- end }}
     }
 ---
 apiVersion: apps/v1
@@ -73,12 +63,6 @@ spec:
     metadata:
       labels:
         app: nats
-      annotations:
-        # ConfigMap volumes update on disk, but nats-server does not reload
-        # its account definitions just because the file changed. Rolling the
-        # pod when the workspace list changes makes deploy-infra sufficient
-        # when an operator adds or removes an account.
-        checksum/nats-accounts: {{ toYaml $.Values.workspaces | sha256sum }}
     spec:
       containers:
         - name: nats

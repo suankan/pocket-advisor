@@ -31,10 +31,12 @@ infra:
     endpoint: rustfs.pocket-advisor.svc.cluster.local:9000
     use_ssl: false
     # No admin credential here, deliberately — see postgres.host's comment
-    # below for the same reasoning. RustFS's root user/password live only
-    # in workspaces/pocket-advisor-infra.yaml, read only by
-    # ./pocket-advisor.sh deploy-workspace/destroy-workspace; internal/config
-    # has no field for them and never will (deviation 39).
+    # below for the same reasoning. RustFS's root identity is the fixed
+    # literal admin/admin (charts/pocket-advisor-infra/values.yaml), used
+    # only by ./pocket-advisor.sh deploy-workspace/destroy-workspace;
+    # internal/config has no field for it and never will (deviation 39). The
+    # application itself never authenticates to RustFS at all — a
+    # workspace's bucket carries a public policy scoped to itself.
 
   nats:
     # REQUIRED.
@@ -110,12 +112,14 @@ infra:
 # ============================================================================
 # Workspace registry (workspace-isolation.md)
 #
-# A workspace is described by two gitignored files, joined on id: one for what
-# it holds (collections, paths, bank details) and one for how to reach it
-# (credentials). Neither lives here — this file stays committed and
-# secret-free, matching the header above.
+# A workspace is described by one gitignored file: what it holds (collections,
+# paths, bank details). There is no separate credentials file any more —
+# every workspace's Postgres role, RustFS bucket, and NATS subjects/streams
+# are simply its own id, or derived from it by fixed convention (this is a
+# fully local, single-operator system), computed wherever needed rather than
+# stored anywhere.
 #
-# Both paths below are resolved relative to THIS FILE, not to the working
+# The path below is resolved relative to THIS FILE, not to the working
 # directory of whatever ran the binary. That is what lets `--config <abs path>`
 # be enough on its own for an MCP client, which launches the server from a
 # directory of its own choosing. An absolute path here is left as written.
@@ -124,13 +128,6 @@ workspaces:
   # REQUIRED. What each workspace holds: its collections and where they live
   # on disk.
   config: workspaces/workspace-config.yaml
-  # REQUIRED. Its infrastructure credentials — and only credentials; every
-  # resource name for a workspace is its own id, or derived from it. One
-  # file for every workspace, the same one `./pocket-advisor.sh deploy-infra`
-  # passes to helm with -f, so the chart and this binary cannot disagree
-  # about a password. Gitignored; the shape is documented in
-  # charts/pocket-advisor-infra/values.yaml.
-  values: workspaces/pocket-advisor-infra.yaml
 
 # ============================================================================
 # MCP Server Configuration

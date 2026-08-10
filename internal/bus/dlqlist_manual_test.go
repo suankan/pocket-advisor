@@ -32,16 +32,16 @@ func TestListDLQ(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	b, err := Connect(ctx, w.NATSURL, w.NATSUser, w.NATSPassword)
+	b, err := Connect(ctx, w.NATSURL, ws)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
 
-	cons, err := b.js.CreateConsumer(ctx, StreamDLQ, jetstream.ConsumerConfig{
+	cons, err := b.js.CreateConsumer(ctx, b.stream(StreamDLQ), jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckNonePolicy,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
-		FilterSubject: SubjectDLQ,
+		FilterSubject: b.subject(SubjectDLQ),
 	})
 	if err != nil {
 		t.Fatal(err)

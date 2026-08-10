@@ -28,8 +28,7 @@ func TestDumpObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName,
-		w.RustFSAccessKey, w.RustFSSecretKey, RoleWorker)
+	v, err := NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, RoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}

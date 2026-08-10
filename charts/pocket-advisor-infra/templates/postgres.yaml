@@ -20,23 +20,16 @@ been easy to get wrong and ship anyway:
     the cluster network — which is every real connection this server will
     ever receive — would be refused with no pg_hba entry to match at all,
     not a permission error pointing at the cause.
+
+No credential at all, deliberately: this is a fully local, single-operator
+system, so the superuser is the out-of-the-box default name (`postgres`) and
+every connection — admin and per-workspace role alike — is `trust`
+authenticated. `trust` skips the password check, not Postgres's own
+privilege checks, so a per-workspace role owning only its own database
+(`./pocket-advisor.sh deploy-workspace`) is still an enforced boundary; the
+`postgres` superuser itself has none, same as before, just without a
+password guarding it.
 */}}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  namespace: {{ $.Values.global.namespace }}
-  name: postgres-admin
-  labels:
-    {{- include "pa.labels" (dict "ctx" $ "component" "database") | nindent 4 }}
-  {{- with include "pa.annotations" (dict "ctx" $ "description" "Postgres admin credentials — ./pocket-advisor.sh deploy-workspace uses these to provision each workspace") }}
-  annotations:
-    {{- . | nindent 4 }}
-  {{- end }}
-type: Opaque
-stringData:
-  username: {{ required "postgres.adminPostgresUser is required" $.Values.postgres.adminPostgresUser | quote }}
-  password: {{ required "postgres.adminPostgresPassword is required" $.Values.postgres.adminPostgresPassword | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -53,15 +46,13 @@ data:
     if [ ! -s "$PGDATA/PG_VERSION" ]; then
       echo "initializing database at $PGDATA"
       mkdir -p "$PGDATA"
-      echo -n "$POSTGRES_PASSWORD" > /tmp/pwfile
-      initdb -D "$PGDATA" -U "$POSTGRES_USER" --pwfile=/tmp/pwfile \
+      initdb -D "$PGDATA" -U "$POSTGRES_USER" \
         --encoding=UTF8 --locale=C.utf8 \
-        --auth-host=scram-sha-256 --auth-local=trust
-      rm -f /tmp/pwfile
+        --auth-host=trust --auth-local=trust
       echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
       echo "shared_preload_libraries = 'pg_textsearch'" >> "$PGDATA/postgresql.conf"
-      echo "host all all 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
-      echo "host all all ::/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+      echo "host all all 0.0.0.0/0 trust" >> "$PGDATA/pg_hba.conf"
+      echo "host all all ::/0 trust" >> "$PGDATA/pg_hba.conf"
     else
       echo "database already initialized, skipping initdb"
     fi
@@ -95,15 +86,7 @@ spec:
           command: ["bash", "/scripts/entrypoint.sh"]
           env:
             - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-admin
-                  key: username
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-admin
-                  key: password
+              value: postgres
           ports:
             - containerPort: {{ $.Values.postgres.port }}
           # No resources block, deliberately — see global.resourcePolicy.

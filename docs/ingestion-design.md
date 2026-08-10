@@ -129,7 +129,7 @@ The uploader and worker clients use the same workspace RustFS identity. `rustfs.
 
 ### 3.3 Live notification path
 
-The chart configures one RustFS NATS notification target per workspace. `deploy-workspace` binds that workspace’s bucket to its target for `s3:ObjectCreated:*` events under `raw/` only. Each target authenticates as the workspace’s own NATS user and publishes `rustfs.events.raw` into that workspace’s `RUSTFS_EVENTS` stream.
+The chart configures one RustFS NATS notification target per workspace. `deploy-workspaces` binds that workspace’s bucket to its target for `s3:ObjectCreated:*` events under `raw/` only. Each target connects anonymously (NATS has no accounts, users, or passwords) and publishes into that workspace’s namespaced `RUSTFS_EVENTS_<SUFFIX>` stream.
 
 The discovery event worker:
 
@@ -223,7 +223,7 @@ The workspace has three streams:
 - `INGESTION_DLQ`: limits retention for terminal failures; and
 - `RUSTFS_EVENTS`: work-queue retention for native RustFS events, with a 10-minute duplicate window.
 
-Streams are created by `./pocket-advisor.sh deploy-workspace`, not by the Go process.
+Streams are created by `./pocket-advisor.sh deploy-workspaces`, not by the Go process.
 
 ## 6. Idempotency and failure handling
 
@@ -338,7 +338,7 @@ During ingestion, the terminal dashboard owns stdout and shows uploader progress
 
 ## 12. Deployment boundary
 
-The `pocket-advisor-infra` chart deploys one shared StatefulSet and Service for each store. The private values file supplies store administrator credentials, NATS accounts, and RustFS notification target credentials. `./pocket-advisor.sh deploy-workspace <id>` creates the per-workspace database, role, extensions, bucket, identity, policy, notification binding, and streams.
+The `pocket-advisor-infra` chart deploys one shared StatefulSet and Service for each store. Store administrator identities (`postgres`, RustFS `admin`/`admin`) are hardcoded literals in the chart; there is no private values file and no per-workspace credential of any kind. `./pocket-advisor.sh deploy-workspaces` creates, for every registered workspace, its database, role, extensions, bucket, public policy, notification binding, and streams.
 
 The binary never holds store administrator credentials. It connects as the selected workspace and applies only the dimension-dependent application schema.
 

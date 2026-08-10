@@ -75,16 +75,18 @@ const (
 )
 
 type Bus struct {
-	nc *nats.Conn
-	js jetstream.JetStream
+	nc          *nats.Conn
+	js          jetstream.JetStream
+	workspaceID string
 }
 
-// Connect authenticates as one workspace's NATS user (workspace-isolation.md
-// §2.3) — every account is a fully separate subject space, so this is what
-// scopes a connection to its own workspace's streams and nothing else's.
-func Connect(ctx context.Context, url, natsUser, natsPassword string) (*Bus, error) {
+// Connect opens an anonymous NATS connection scoped to one workspace.
+// There is no NATS account, user, or password any more — isolation moves to
+// subject and stream naming instead, namespaced by workspaceID and applied
+// internally by every method below, so no other package needs to know the
+// namespacing scheme exists (workspace-isolation.md §2.3).
+func Connect(ctx context.Context, url, workspaceID string) (*Bus, error) {
 	nc, err := nats.Connect(url,
-		nats.UserInfo(natsUser, natsPassword),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
 	)
@@ -96,12 +98,28 @@ func Connect(ctx context.Context, url, natsUser, natsPassword string) (*Bus, err
 		nc.Close()
 		return nil, fmt.Errorf("jetstream: %w", err)
 	}
-	return &Bus{nc: nc, js: js}, nil
+	return &Bus{nc: nc, js: js, workspaceID: workspaceID}, nil
+}
+
+// subject namespaces a bare subject constant to this connection's workspace.
+// Dots are NATS's own subject hierarchy separator, and no workspace id
+// contains one, so a plain prefix is unambiguous.
+func (b *Bus) subject(bare string) string {
+	return b.workspaceID + "." + bare
+}
+
+// stream namespaces a bare stream-name constant to this connection's
+// workspace. Stream names, unlike subjects, disallow dots — this reuses the
+// same hyphen-to-underscore, uppercased suffix transform
+// charts/pocket-advisor-infra/templates/rustfs.yaml already applies to
+// workspace ids for its per-workspace notify env var names, so the two stay
+// visually consistent even though nothing enforces they must.
+func (b *Bus) stream(bare string) string {
+	suffix := strings.ToUpper(strings.ReplaceAll(b.workspaceID, "-", "_"))
+	return bare + "_" + suffix
 }
 
 func (b *Bus) Close() { b.nc.Close() }
-
-func (b *Bus) JS() jetstream.JetStream { return b.js }
 
 // PurgeQueues empties this workspace's streams.
 //
@@ -121,7 +139,7 @@ func (b *Bus) JS() jetstream.JetStream { return b.js }
 // half-purged one is no worse than the state this started from.
 func (b *Bus) PurgeQueues(ctx context.Context) error {
 	var failed []string
-	for _, name := range []string{StreamName, StreamDLQ, StreamRustFSEvents} {
+	for _, name := range []string{b.stream(StreamName), b.stream(StreamDLQ), b.stream(StreamRustFSEvents)} {
 		s, err := b.js.Stream(ctx, name)
 		if err != nil {
 			// A stream that does not exist is already as empty as it can be.
@@ -145,8 +163,8 @@ func (b *Bus) PurgeQueues(ctx context.Context) error {
 // binary can call it at startup.
 func (b *Bus) EnsureStreams(ctx context.Context) error {
 	_, err := b.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     StreamName,
-		Subjects: []string{SubjectEmails, SubjectPDFs, SubjectDocx, SubjectImages, SubjectEmbed},
+		Name:     b.stream(StreamName),
+		Subjects: []string{b.subject(SubjectEmails), b.subject(SubjectPDFs), b.subject(SubjectDocx), b.subject(SubjectImages), b.subject(SubjectEmbed)},
 		// WorkQueue: a message is deleted once acked, so the stream holds
 		// backlog rather than history. Sizing follows from that (§6.3).
 		Retention: jetstream.WorkQueuePolicy,
@@ -155,28 +173,28 @@ func (b *Bus) EnsureStreams(ctx context.Context) error {
 		MaxMsgs:   1_000_000,
 	})
 	if err != nil {
-		return fmt.Errorf("create stream %s: %w", StreamName, err)
+		return fmt.Errorf("create stream %s: %w", b.stream(StreamName), err)
 	}
 
 	// The DLQ is a separate stream with limits retention: its whole purpose is
 	// to retain messages for inspection after they stop being work.
 	_, err = b.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamDLQ,
-		Subjects:  []string{SubjectDLQ},
+		Name:      b.stream(StreamDLQ),
+		Subjects:  []string{b.subject(SubjectDLQ)},
 		Retention: jetstream.LimitsPolicy,
 		Storage:   jetstream.FileStorage,
 		MaxAge:    30 * 24 * time.Hour,
 	})
 	if err != nil {
-		return fmt.Errorf("create stream %s: %w", StreamDLQ, err)
+		return fmt.Errorf("create stream %s: %w", b.stream(StreamDLQ), err)
 	}
 
 	// RustFS's live event feed (§5.2) — WorkQueue like StreamName, for the
 	// same reason (a durable pull consumer drains it), but its own stream so
 	// its wider dedup window doesn't apply to the typed-command traffic.
 	_, err = b.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:       StreamRustFSEvents,
-		Subjects:   []string{SubjectRustFSEvents},
+		Name:       b.stream(StreamRustFSEvents),
+		Subjects:   []string{b.subject(SubjectRustFSEvents)},
 		Retention:  jetstream.WorkQueuePolicy,
 		Storage:    jetstream.FileStorage,
 		Discard:    jetstream.DiscardNew,
@@ -184,16 +202,21 @@ func (b *Bus) EnsureStreams(ctx context.Context) error {
 		Duplicates: RustFSEventsDedupWindow,
 	})
 	if err != nil {
-		return fmt.Errorf("create stream %s: %w", StreamRustFSEvents, err)
+		return fmt.Errorf("create stream %s: %w", b.stream(StreamRustFSEvents), err)
 	}
 	return nil
 }
 
 // Publish sends a protobuf command and waits for the PubAck.
 //
+// subject is the bare package constant (e.g. SubjectEmails) — Publish
+// namespaces it to this connection's workspace internally, so callers never
+// handle the namespaced form themselves.
+//
 // Never fire-and-forget: the write-then-publish gap (§2.2) is only survivable
 // if a failed publish is actually observed.
 func (b *Bus) Publish(ctx context.Context, subject string, msg proto.Message, traceparent string) error {
+	subject = b.subject(subject)
 	payload, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", subject, err)
@@ -230,14 +253,14 @@ func (b *Bus) Publish(ctx context.Context, subject string, msg proto.Message, tr
 // necessity (§2.5).
 func (b *Bus) ToDLQ(ctx context.Context, origSubject, worker, reason, traceparent string, deliveries uint64, payload []byte) error {
 	m := &nats.Msg{
-		Subject: SubjectDLQ,
+		Subject: b.subject(SubjectDLQ),
 		Data:    payload,
 		Header:  nats.Header{},
 	}
 	m.Header.Set(HdrFailureReason, reason)
 	m.Header.Set(HdrFailureWorker, worker)
 	m.Header.Set(HdrDeliveryCount, fmt.Sprintf("%d", deliveries))
-	m.Header.Set(HdrOrigSubject, origSubject)
+	m.Header.Set(HdrOrigSubject, b.subject(origSubject))
 	if traceparent != "" {
 		m.Header.Set(HdrTraceparent, traceparent)
 	}
@@ -248,7 +271,10 @@ func (b *Bus) ToDLQ(ctx context.Context, origSubject, worker, reason, traceparen
 }
 
 // PullConsumer creates a durable pull consumer for one subject on stream.
+// stream and subject are the bare package constants — namespaced internally,
+// same as Publish.
 func (b *Bus) PullConsumer(ctx context.Context, stream, durable, subject string) (jetstream.Consumer, error) {
+	stream, subject = b.stream(stream), b.subject(subject)
 	c, err := b.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
 		Durable:       durable,
 		FilterSubject: subject,
@@ -265,7 +291,7 @@ func (b *Bus) PullConsumer(ctx context.Context, stream, durable, subject string)
 // Pending reports queued messages for a subject. The scan uses this to avoid
 // outrunning the pipeline (§5.2).
 func (b *Bus) Pending(ctx context.Context) (uint64, error) {
-	s, err := b.js.Stream(ctx, StreamName)
+	s, err := b.js.Stream(ctx, b.stream(StreamName))
 	if err != nil {
 		return 0, err
 	}
@@ -274,4 +300,18 @@ func (b *Bus) Pending(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return info.State.Msgs, nil
+}
+
+// StreamInfo reports info for a bare stream-name constant (e.g. StreamName,
+// StreamDLQ), namespaced to this connection's workspace internally — same
+// as Publish, callers never handle the namespaced form themselves. Doctor
+// checks are the reason this is exported: they inspect more than one
+// stream's message counts directly, unlike the pipeline which only ever
+// needs PullConsumer/Publish.
+func (b *Bus) StreamInfo(ctx context.Context, bareName string) (*jetstream.StreamInfo, error) {
+	s, err := b.js.Stream(ctx, b.stream(bareName))
+	if err != nil {
+		return nil, err
+	}
+	return s.Info(ctx)
 }

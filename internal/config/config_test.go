@@ -28,11 +28,11 @@ infra:
     model: test-llm-model
 `
 
-// The workspace paths are the only configuration that names another file, so
-// they are the only configuration whose meaning depends on where it is read
-// from. Every case below is about that anchor, because getting it wrong is
-// silent from the repository root and fatal anywhere else — which is how an MCP
-// client runs this binary.
+// The workspace registry path is the only configuration that names another
+// file, so it is the only configuration whose meaning depends on where it is
+// read from. Every case below is about that anchor, because getting it wrong
+// is silent from the repository root and fatal anywhere else — which is how
+// an MCP client runs this binary.
 
 func writeConfig(t *testing.T, dir, body string) string {
 	t.Helper()
@@ -51,7 +51,6 @@ func TestWorkspacePathsResolveAgainstTheConfigFile(t *testing.T) {
 	path := writeConfig(t, tmp, validInfra+`
 workspaces:
   config: workspaces/workspace-config.yaml
-  values: workspaces/pocket-advisor-infra.yaml
 `)
 
 	c, err := Load(path)
@@ -60,28 +59,8 @@ workspaces:
 	}
 
 	wantConfig := filepath.Join(tmp, "workspaces/workspace-config.yaml")
-	wantValues := filepath.Join(tmp, "workspaces/pocket-advisor-infra.yaml")
 	if c.WorkspacesConfigPath != wantConfig {
 		t.Errorf("registry path = %q, want %q", c.WorkspacesConfigPath, wantConfig)
-	}
-	if c.WorkspacesValuesPath != wantValues {
-		t.Errorf("values path = %q, want %q", c.WorkspacesValuesPath, wantValues)
-	}
-}
-
-func TestMissingWorkspacesValuesIsAConfigurationError(t *testing.T) {
-	// workspaces.values has no Go-side default any more (deviation 41) —
-	// config.yaml is the only place left that can supply it, so omitting it
-	// must fail loudly rather than silently resolving to nothing.
-	tmp := t.TempDir()
-	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n")
-
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("want an error for missing workspaces.values, got nil")
-	}
-	if !strings.Contains(err.Error(), "workspaces.values") {
-		t.Errorf("error = %q, want it to name workspaces.values", err.Error())
 	}
 }
 
@@ -91,7 +70,7 @@ func TestAbsoluteWorkspacePathsAreLeftAlone(t *testing.T) {
 	tmp := t.TempDir()
 	elsewhere := t.TempDir()
 	abs := filepath.Join(elsewhere, "registry.yaml")
-	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: "+abs+"\n  values: workspaces/pocket-advisor-infra.yaml\n")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: "+abs+"\n")
 
 	c, err := Load(path)
 	if err != nil {
@@ -106,15 +85,15 @@ func TestEnvironmentOverrideIsTakenLiterally(t *testing.T) {
 	// The environment is set by whoever launches the process, in their own
 	// working directory, so it wins over the file and is not re-anchored to it.
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n  values: workspaces/pocket-advisor-infra.yaml\n")
-	t.Setenv("WORKSPACES_VALUES", "some/other/values.yaml")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n")
+	t.Setenv("WORKSPACES_CONFIG", "some/other/registry.yaml")
 
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.WorkspacesValuesPath != "some/other/values.yaml" {
-		t.Errorf("values path = %q, want the environment's value verbatim", c.WorkspacesValuesPath)
+	if c.WorkspacesConfigPath != "some/other/registry.yaml" {
+		t.Errorf("registry path = %q, want the environment's value verbatim", c.WorkspacesConfigPath)
 	}
 }
 
@@ -134,7 +113,6 @@ func TestConfigExpandsRequiredEnvironmentPlaceholders(t *testing.T) {
 	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${TEST_RUSTFS_ENDPOINT}", 1)+`
 workspaces:
   config: workspaces/workspace-config.yaml
-  values: workspaces/pocket-advisor-infra.yaml
 `)
 	t.Setenv("TEST_RUSTFS_ENDPOINT", "rustfs.from-env:9000")
 
@@ -161,7 +139,7 @@ func TestBareConfigNameKeepsPathsUnchanged(t *testing.T) {
 	// filepath.Dir("config.yaml") is ".", and joining against it must be a
 	// no-op — this is the path every command run from the repository root
 	// takes, and it has to behave exactly as it did before anchoring existed.
-	if got := resolveAgainst(".", "workspaces/pocket-advisor-infra.yaml"); got != "workspaces/pocket-advisor-infra.yaml" {
+	if got := resolveAgainst(".", "workspaces/workspace-config.yaml"); got != "workspaces/workspace-config.yaml" {
 		t.Errorf("resolveAgainst(\".\", …) = %q, want it unchanged", got)
 	}
 }

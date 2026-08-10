@@ -24,13 +24,13 @@ func TestPurgeQueues(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	b, err := Connect(ctx, w.NATSURL, w.NATSUser, w.NATSPassword)
+	b, err := Connect(ctx, w.NATSURL, ws)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
 
-	for _, n := range []string{StreamName, StreamDLQ, StreamRustFSEvents} {
+	for _, n := range []string{b.stream(StreamName), b.stream(StreamDLQ), b.stream(StreamRustFSEvents)} {
 		s, err := b.js.Stream(ctx, n)
 		if err != nil {
 			t.Logf("%-16s (absent)", n)
@@ -42,7 +42,7 @@ func TestPurgeQueues(t *testing.T) {
 	if err := b.PurgeQueues(ctx); err != nil {
 		t.Fatalf("PurgeQueues: %v", err)
 	}
-	for _, n := range []string{StreamName, StreamDLQ, StreamRustFSEvents} {
+	for _, n := range []string{b.stream(StreamName), b.stream(StreamDLQ), b.stream(StreamRustFSEvents)} {
 		s, err := b.js.Stream(ctx, n)
 		if err != nil {
 			continue

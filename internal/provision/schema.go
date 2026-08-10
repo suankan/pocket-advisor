@@ -29,9 +29,10 @@ func ensureSchema(ctx context.Context, cfg *config.Config, id string, info embed
 	db, err := postgres.Connect(ctx, dsn, 2)
 	if err != nil {
 		return fmt.Errorf("connect workspace database: %w\n"+
-			"  `./pocket-advisor.sh deploy-workspace %s` creates this workspace's "+
-			"database and role — has it been run since %s last changed?",
-			err, id, cfg.WorkspacesValuesPath)
+			"  `./pocket-advisor.sh deploy-workspaces` creates every registered "+
+			"workspace's database and role — is %q in workspaces/workspace-config.yaml, "+
+			"and has deploy-workspaces (or deploy-infra) been run since it was added?",
+			err, id)
 	}
 	defer db.Close()
 

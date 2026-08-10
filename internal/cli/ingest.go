@@ -58,7 +58,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	// which was convenient and widened the most commonly run command to require
 	// shared root credentials (deviation 10 recorded that as a real cost at the
 	// time). There is no provisioning left to widen it: workspace creation is
-	// `./pocket-advisor.sh deploy-workspace`, run once by a human (deviation
+	// `./pocket-advisor.sh deploy-workspaces`, run once by a human (deviation
 	// 39), and every mode — ingest, query, mcp — connects with one
 	// workspace's own credentials and nothing more (deviation 24).
 	// --scan needs the uploader role as much as --ingest-all does: it triggers
@@ -73,7 +73,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 	defer a.Close()
 
-	// The one thing `./pocket-advisor.sh deploy-workspace` cannot do — the
+	// The one thing `./pocket-advisor.sh deploy-workspaces` cannot do — the
 	// schema, since its vector width needs the embedding endpoint, reachable
 	// only from this host (§4.4). Idempotent and cheap, so it runs on every
 	// ingest rather than needing a separate provisioning command (deviation

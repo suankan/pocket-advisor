@@ -29,17 +29,17 @@ type Checks struct {
 	CredsOK    bool // credential values match workspace
 
 	// Store reachability
-	PGRaw       bool // PostgreSQL ping succeeded
-	RustFSRaw   bool // RustFS bucket reachable
-	NATSRaw     bool // NATS connection alive
+	PGRaw     bool // PostgreSQL ping succeeded
+	RustFSRaw bool // RustFS bucket reachable
+	NATSRaw   bool // NATS connection alive
 
 	// Embedding
-	EmbedModelOK   bool   // model matches schema_metadata
-	EmbedDimOK     bool   // dimension matches schema_metadata
-	EmbedModel     string // configured model
-	SchemaModel    string // recorded model
-	SchemaDim      int    // recorded dimension
-	EmbedDim       int    // configured dimension
+	EmbedModelOK bool   // model matches schema_metadata
+	EmbedDimOK   bool   // dimension matches schema_metadata
+	EmbedModel   string // configured model
+	SchemaModel  string // recorded model
+	SchemaDim    int    // recorded dimension
+	EmbedDim     int    // configured dimension
 
 	// Schema objects
 	PGVectorExtOK bool // vector extension present
@@ -91,12 +91,12 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	if !d.checks.RegistryOK {
 		addFinding(&findings, "REGISTRY_MISSING", SeverityCritical, 1,
 			"workspace not found in registry",
-			"add the workspace to workspaces/workspace-config.yaml and re-run deploy-workspace")
+			"add the workspace to workspaces/workspace-config.yaml and re-run deploy-workspaces")
 	}
 	if !d.checks.CredsOK {
 		addFinding(&findings, "CREDS_INCONSISTENT", SeverityCritical, 1,
-			"workspace credentials do not match registry entry",
-			"verify workspaces/pocket-advisor-infra.yaml matches workspace-config.yaml")
+			"could not resolve workspace infrastructure identity",
+			"pass a non-empty --workspace-id")
 	}
 
 	// 2. Store reachability
@@ -134,7 +134,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	if !d.checks.PGVectorExtOK {
 		addFinding(&findings, "PG_VECTOR_EXT_MISSING", SeverityCritical, 1,
 			"pgvector extension not installed",
-			"run ./pocket-advisor.sh deploy-workspace to install extensions")
+			"run ./pocket-advisor.sh deploy-workspaces to install extensions")
 	}
 	if !d.checks.PGSchemaOK {
 		addFinding(&findings, "PG_SCHEMA_MISSING", SeverityCritical, 1,
@@ -186,7 +186,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	if !d.checks.StreamsOK {
 		addFinding(&findings, "JS_STREAMS_MISSING", SeverityCritical, 1,
 			"one or more JetStream streams missing",
-			"run ./pocket-advisor.sh deploy-workspace to create streams")
+			"run ./pocket-advisor.sh deploy-workspaces to create streams")
 	}
 	addFinding(&findings, "JS_DLQ_DEPTH", SeverityInfo, int(d.checks.DLQMsgs),
 		"messages in the dead letter queue",

@@ -1,7 +1,7 @@
 // Package provision prepares the one thing a workspace needs that no
 // pocket-advisor.sh command already covers.
 //
-// Everything else lives in `./pocket-advisor.sh deploy-workspace` now, not
+// Everything else lives in `./pocket-advisor.sh deploy-workspaces` now, not
 // here and not in a CRD an operator reconciles — deviation 39 removed
 // CloudNativePG, the RustFS operator and NACK entirely, on the view that
 // reconciling drift against a desired state, continuously, unattended,

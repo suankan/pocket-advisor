@@ -24,7 +24,7 @@ The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The 
 ## 1. Concepts
 
 - Every command is scoped to one workspace with `--workspace-id`.
-- The stores are shared processes, but each workspace has its own PostgreSQL database and role, RustFS bucket and identity, and NATS account and user.
+- The stores are shared processes, but each workspace has its own PostgreSQL database and role, RustFS bucket, and NATS subject/stream namespace — no per-workspace identity in RustFS or NATS, isolation is naming, not a credential (see [§3](#3-configuration)).
 - RustFS is the source of truth. Local collection paths are staging inputs used only by the uploader.
 - Ingestion is reconciled. Re-running it skips objects already present, finds Tier 1 objects without Tier 2 rows, and drains durable queued work.
 - PostgreSQL is derived state. If a workspace database is lost, its schema and index can be rebuilt from Tier 1 by ingesting again.
@@ -77,14 +77,13 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 
 ## 3. Configuration
 
-`config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and paths to the two private workspace files. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
+`config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
 
-Workspace information is split by purpose and joined on `id`:
+`workspaces/workspace-config.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's collections and local staging paths. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
-- `workspaces/workspace-config.yaml` describes collections and local staging paths.
-- `workspaces/pocket-advisor-infra.yaml` contains administrative and per-workspace credentials. The deployment script also passes it to Helm as the private values override.
-
-Both files are gitignored. Keep actual secrets in `.envrc` and use `${NAME}` placeholders in the private values file.
+- **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
+- **RustFS**: the root identity is the literal `admin`/`admin` (used only by `./pocket-advisor.sh deploy-workspaces` to provision buckets). The application itself connects anonymously — a workspace's bucket carries a public policy scoped to itself, so isolation is the bucket name, not a credential.
+- **NATS**: no accounts, no users, no passwords at all. A workspace's subjects and stream names are namespaced by its id instead (`internal/bus/bus.go`).
 
 Example registry:
 
@@ -104,62 +103,42 @@ workspaces:
       - id: example-documents
 ```
 
-Example infrastructure values:
-
-```yaml
-rustfs:
-  adminRustFSUser: ${PA_RUSTFS_ADMIN_USER}
-  adminRustFSPassword: ${PA_RUSTFS_ADMIN_PASSWORD}
-
-postgres:
-  adminPostgresUser: postgres
-  adminPostgresPassword: ${PA_POSTGRES_ADMIN_PASSWORD}
-
-workspaces:
-  - id: example
-    rustfs:
-      password: ${PA_EXAMPLE_RUSTFS_PASSWORD}
-    postgres:
-      password: ${PA_EXAMPLE_POSTGRES_PASSWORD}
-    nats:
-      password: ${PA_EXAMPLE_NATS_PASSWORD}
-```
+Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database, RustFS bucket/policy, and NATS streams from its id alone — nothing else to configure.
 
 The full values shape is documented in [`charts/pocket-advisor-infra/values.yaml`](charts/pocket-advisor-infra/values.yaml).
 
 ## 4. Install and provision
 
-Bring up the shared stores and build the host binary:
+Bring up the shared stores and provision every registered workspace, then build the host binary:
 
 ```sh
 ./pocket-advisor.sh deploy-infra
 ./pocket-advisor.sh build
 ```
 
-`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, and waits for the PostgreSQL, RustFS, and NATS StatefulSets. The private values file supplies the NATS account configuration and RustFS notification targets for every listed workspace.
+`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for the PostgreSQL, RustFS, and NATS StatefulSets to roll out, and then runs `deploy-workspaces` automatically — every workspace in `workspaces/workspace-config.yaml` is provisioned before `deploy-infra` returns. The chart itself needs only each workspace's `id` to render its RustFS notification target.
 
-Provision each workspace after the stores are ready:
+Re-run provisioning on its own after editing the registry, without touching the shared stores:
 
 ```sh
-./pocket-advisor.sh deploy-workspace example
+./pocket-advisor.sh deploy-workspaces
 ```
 
-This command creates, idempotently:
+This command creates, idempotently, for every registered workspace:
 
 | Store | Workspace resources |
 | --- | --- |
-| PostgreSQL | database `example`, role `example_user`, `vector` and `pg_textsearch` extensions |
-| RustFS | bucket, identity, IAM policy, and `raw/` notification binding |
-| NATS | `INGESTION`, `INGESTION_DLQ`, and `RUSTFS_EVENTS` streams inside the workspace account |
+| PostgreSQL | database `<id>`, role `<id>`, `vector` and `pg_textsearch` extensions |
+| RustFS | bucket and its public policy, plus a `raw/` notification binding |
+| NATS | `INGESTION_<SUFFIX>`, `INGESTION_DLQ_<SUFFIX>`, and `RUSTFS_EVENTS_<SUFFIX>` streams, namespaced by workspace id |
 
 The application applies the Tier 2/3 schema on the first ingest because the `halfvec` width comes from probing the host-local embedding endpoint.
 
 ### Add another workspace
 
-1. Add it to both private workspace files.
-2. Run `./pocket-advisor.sh deploy-infra` so the chart renders its NATS account and RustFS notification target.
-3. Run `./pocket-advisor.sh deploy-workspace <id>` to create its database, bucket, identity, binding, and streams.
-4. Run an ingest to apply its schema and load content.
+1. Add it to `workspaces/workspace-config.yaml`.
+2. Run `./pocket-advisor.sh deploy-infra` (renders its RustFS notification target and provisions it, along with every other registered workspace) — or, if the shared stores are already up, just `./pocket-advisor.sh deploy-workspaces`.
+3. Run an ingest to apply its schema and load content.
 
 ## 5. Ingest a workspace
 
@@ -210,7 +189,7 @@ kubectl exec nats-0 -n pocket-advisor -- \
   wget -qO- 'http://localhost:8222/jsz?accounts=true&streams=true'
 
 kubectl exec postgres-0 -n pocket-advisor -- \
-  psql -U <admin-user> -d example -c \
+  psql -U postgres -d example -c \
   'select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;'
 ```
 
@@ -511,13 +490,13 @@ Delete all content while leaving the workspace infrastructure ready for reuse:
 
 Both commands prompt unless `--yes` is supplied. `--forget` deletes matching document rows and their database descendants, then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. Extracted child objects with different hashes are not traversed and may remain in Tier 1. `--delete-data` removes all Tier 1 and PostgreSQL state and also purges all three workspace streams. Store changes are ordered rather than transactional; after a partial failure, rerun the same command to converge.
 
-Destroy the workspace infrastructure itself while its credentials are still present:
+Destroy the workspace infrastructure itself:
 
 ```sh
 ./pocket-advisor.sh destroy-workspace example
 ```
 
-Then remove its entries from both private workspace files and run `./pocket-advisor.sh deploy-infra` so the chart removes its NATS account and RustFS notification environment.
+Then remove its entry from `workspaces/workspace-config.yaml` and run `./pocket-advisor.sh deploy-infra` so the chart stops rendering its RustFS notification target (and `deploy-workspaces` re-provisions every workspace still listed).
 
 ## 10. Verification
 
@@ -543,7 +522,7 @@ Upgrade the shared-store release with the supported wrapper:
 ./pocket-advisor.sh deploy-infra
 ```
 
-Do not omit the private values file by invoking Helm manually without `-f`; the NATS accounts and RustFS notification targets come from it.
+Always use the wrapper rather than invoking Helm directly: it derives the chart's `workspaces:` list, and provisions every workspace via `deploy-workspaces`, straight from `workspaces/workspace-config.yaml` — a bare `helm upgrade` would do neither.
 
 StatefulSet volume claim templates are immutable. Changing a configured storage size requires deliberately recreating the relevant StatefulSet and claim. A PostgreSQL major-version change also requires a new data volume and re-ingestion.
 

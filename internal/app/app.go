@@ -88,7 +88,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.RustFS {
-		v, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleWorker)
+		v, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, rustfs.RoleWorker)
 		if err != nil {
 			return nil, err
 		}
@@ -96,11 +96,11 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.Uploader {
-		u, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, w.RustFSAccessKey, w.RustFSSecretKey, rustfs.RoleUploader)
+		u, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, rustfs.RoleUploader)
 		if err != nil {
 			return nil, err
 		}
-		// deploy-workspace creates the bucket; this is a harmless, idempotent
+		// deploy-workspaces creates the bucket; this is a harmless, idempotent
 		// safety net, not the primary creation path.
 		if err := u.EnsureBucket(ctx); err != nil {
 			return nil, err
@@ -124,11 +124,11 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 	}
 
 	if needs.NATS {
-		b, err := bus.Connect(ctx, w.NATSURL, w.NATSUser, w.NATSPassword)
+		b, err := bus.Connect(ctx, w.NATSURL, workspaceID)
 		if err != nil {
 			return nil, err
 		}
-		// Deliberately does not create streams. deploy-workspace owns that
+		// Deliberately does not create streams. deploy-workspaces owns that
 		// lifecycle through natscli, and creating them here too would make Go
 		// a second writer. A missing stream means that command has not run for
 		// this workspace, which the pipeline reports when it attaches a

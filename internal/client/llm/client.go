@@ -20,6 +20,12 @@ import (
 	"github.com/suankan/pocket-advisor/internal/config"
 )
 
+// Completer is the narrow stateless completion boundary used by local structured-model adapters.
+// Client implements it, while tests can supply a deterministic fake.
+type Completer interface {
+	Complete(context.Context, string, int) (string, error)
+}
+
 type Client struct {
 	endpoint string
 	apiKey   string

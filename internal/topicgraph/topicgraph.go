@@ -1,7 +1,7 @@
 // Package topicgraph owns the transport-independent write contract for the
-// replaceable, source-backed email topic graph. It deliberately contains no
-// extraction, model, relation, or retrieval code: callers supply annotations
-// and this package makes their evidence and lifecycle constraints explicit.
+// replaceable, source-backed email topic graph. It validates evidence and
+// lifecycle constraints, and contains only the bounded structured local-model
+// adapter for topic mentions; it has no persistence, relation, or retrieval code.
 package topicgraph
 
 import (

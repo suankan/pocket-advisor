@@ -7,7 +7,7 @@ reasoning_effort: high
 
 ## Outcome
 
-The index stores each distinct passage once, and no result set spends more than one slot on the same text — without losing the cross-boundary context that chunk overlap currently provides.
+The index stores each distinct passage once, and no result set spends more than one slot on the same text.
 
 ## Why this task is needed
 
@@ -46,15 +46,15 @@ The authoritative designs remain [`docs/ingestion-design.md`](../ingestion-desig
 
 ## The overlap constraint
 
-Chunk overlap and cross-document deduplication are structurally opposed, and this is the fact that shapes the whole task.
+Chunk overlap and cross-document deduplication are structurally opposed. This was expected to be the fact that shaped the whole task; measurement showed otherwise, and the correction is recorded below because the reasoning is sound and would otherwise be rediscovered.
 
 Overlap bakes preceding text into a chunk's payload. A paragraph `P` preceded by paragraph `A` in one document and by paragraph `B` in another produces `[A + P]` and `[B + P]` — two texts, two hashes, two embeddings. Deduplication cannot match them.
 
-Critically, **boundary alignment does not fix this**. Snapping chunk starts to clean structural boundaries removes mid-word fragments, but an aligned overlapping chunk is still `[preceding paragraph + P]`, which still varies by document. Alignment reduces incidental variance; it does not make the key deterministic. Only removing overlap does that.
+Critically, **boundary alignment does not fix this**. Snapping chunk starts to clean structural boundaries removes mid-word fragments, but an aligned overlapping chunk is still `[preceding paragraph + P]`, which still varies by document. Alignment reduces incidental variance; it does not make the key deterministic.
 
-Overlap exists to preserve context across boundaries. That purpose can be served at retrieval time instead, by fetching a hit chunk's neighbours within the document that matched. Doing so decouples semantic indexing from context assembly and is compatible with deduplication, because neighbour lookup is per-document placement rather than baked-in text.
+**The reasoning above is correct but its practical significance was measured and found to be small.** Phase 2 re-chunked two real corpora and compared. Removing overlap did not raise the deduplication rate: it fell slightly on the larger workspace and rose by under a point on the smaller one. The argument holds in principle — overlap does bind a passage to its predecessor — but packing several paragraphs into one chunk turns out to dominate, because `[P + Q]` and `[P + R]` differ whether or not overlap is involved. Overlap is not what suppresses deduplication. See [Spike result](#spike-result).
 
-This substitution is sound in principle but carries a real risk, stated under [Risks this task must retire](#risks-this-task-must-retire). The task is sequenced to measure that risk before committing to it.
+Overlap exists to preserve context across boundaries. That purpose could be served at retrieval time instead, by fetching a hit chunk's neighbours within the document that matched, which decouples semantic indexing from context assembly. That substitution remains available but is no longer required by this task, since deduplication turned out not to need it; it is deferred with its unretired recall risk under [Deferred](#deferred-canonical-chunking-and-neighbour-expansion).
 
 ## Current behaviour worth knowing before starting
 
@@ -74,9 +74,9 @@ The phases do not share a priority, and sizing them alike would be a mistake.
 
 Phase 1 is a small, bounded, query-time change with no migration. It is worth doing on its own terms, but the measured headroom is roughly 12% of the candidate budget on ordinary queries, so it should be scoped as an afternoon's work and judged against that expectation rather than the adversarial figure.
 
-Phase 2 is a disposable measurement whose only output is a decision. It carries more weight now than when this brief was drafted: with the quality case reduced to a modest gain, the spike is what establishes whether the Phase 3 migration is worth its cost at all.
+Phase 2 is a disposable measurement whose only output is a decision. It has been run, and it returned a negative result on its main hypothesis, which removed both the largest cost and the largest risk from Phase 3. See [Spike result](#spike-result).
 
-Phase 3 changes stored state, requires a full re-index, and is gated on Phase 2. Its justification is primarily efficiency — about one in six embeddings and stored chunks eliminated — with a secondary ranking benefit. It competes with other work on that basis and is not a P0 quality fix.
+Phase 3 is a schema migration that collapses duplicate rows onto shared identities. Because the spike showed deduplication does not depend on re-chunking, it needs no re-chunk and no re-embed, and carries no recall risk: existing embeddings stay valid. Its justification is efficiency — about one in six stored chunks eliminated — with a secondary ranking benefit. It competes with other work on that basis and is not a P0 quality fix.
 
 Every phase is gated on the evaluation suite from [`p0-3-retrieval-quality-gate.md`](p0-3-retrieval-quality-gate.md), which is the only mechanism that can show whether a change helped.
 
@@ -106,7 +106,7 @@ Procedure:
 3. Re-index it with zero overlap and atomic, boundary-aligned chunks.
 4. Measure both indexes with the same evaluation case set.
 
-**Pin the case set.** The fixture generator samples the corpus randomly, so regenerating fixtures between the two runs would compare different questions and produce a meaningless delta. Generate once, reuse for both arms.
+**Pin the case set.** The fixture generator samples the corpus randomly, so regenerating fixtures between the two runs would compare different questions and produce a meaningless delta. Generate once, reuse for both arms. (This applies to the recall arm, which the result below made unnecessary.)
 
 Measure, for each arm:
 
@@ -127,11 +127,33 @@ Proceed to Phase 3 only if all of the following hold:
 
 If recall regresses beyond that tolerance, record the result and stop. A partial fallback remains available — deduplicate only chunks that are whole documents or whole structural blocks, where overlap is not involved — and should be proposed as its own task rather than smuggled into this one.
 
-### Phase 3 — Canonical chunks, deduplication, and neighbour expansion
+### Spike result
 
-Gated on Phase 2. These three changes ship together because they are mutually dependent: zero overlap without expansion loses context, and expansion needs the per-document ordinals that the deduplication schema introduces.
+Run against two real corpora by re-chunking stored `normalized_text`, which is sound because chunking is a pure function of that text. The cheap arms were measured first, deliberately: if removing overlap did not raise the deduplication rate, the expensive recall arm — needing a disposable workspace and a full re-embed — would be answering a question that no longer mattered. It did not, so that arm was never built.
 
-**Canonical chunking.** Chunk on clean structural boundaries with no overlap, so a given passage yields identical text regardless of what precedes it. Preserve the invariant that a chunk's recorded character range resolves to exactly its stored text, since citations depend on it, and guarantee forward progress so a boundary search cannot stall.
+Larger private workspace, 3,040 documents:
+
+| Strategy | Chunks | Distinct | Redundancy | Mean length |
+| --- | --- | --- | --- | --- |
+| Current, with overlap | 17,264 | 14,261 | 17.4% | 1,704 |
+| Zero overlap, packed to budget | 15,345 | 12,757 | 16.9% | 1,666 |
+| Atomic paragraphs | 34,445 | 24,937 | 27.6% | 715 |
+
+The `test` workspace shows the same shape: 2.5% redundancy currently, 3.5% with zero overlap, 16.4% atomic.
+
+Three conclusions, the first of which was not the expected one.
+
+**Removing overlap does not unlock deduplication.** The rate is flat — marginally lower on the larger corpus. The first go/no-go criterion therefore fails, and zero overlap must not be justified on deduplication grounds.
+
+**Atomicity is the actual driver, and it is self-defeating for storage.** One paragraph per chunk raises redundancy to 27.6%, but doubles chunk count. Distinct chunks stored would rise from 17,264 today to 24,937 — 44% more, not less. A higher deduplication *rate* bought with more chunks is not a saving.
+
+**Deduplication is independent of overlap, and cheaper than assumed.** 17.4% of chunks as they are indexed today are already exact duplicates once whitespace is normalised. Collapsing them needs no chunking change, carries no boundary-spanning recall risk, and would store 14,261 chunks instead of 17,264. Removing overlap separately reduces chunk count by 11%, giving 12,757 combined — but that reduction comes from fewer chunks, not better matching, and it still owes the untested recall risk.
+
+The brief's original framing — that overlap and deduplication are opposed, so overlap must go first — is therefore withdrawn. They are separable, and deduplication is the half with evidence behind it.
+
+### Phase 3 — Deduplication
+
+Revised by the spike. Deduplication no longer depends on removing overlap, so canonical chunking and neighbour expansion are **out of scope here** and recorded under deferred work below. What remains is a self-contained change to storage with no chunking change, no re-chunking, and therefore none of the boundary-spanning recall risk that motivated the original sequencing.
 
 **Identity and deduplication.** Establish identity by hashing normalised chunk text. Normalisation must collapse whitespace runs aggressively, because the dominant source of near-duplication in extracted PDF text is formatting variance rather than wording. Identical text is stored, embedded, and indexed once within a workspace.
 
@@ -145,17 +167,21 @@ The storage model becomes many-to-many. Placement is per-document and must not m
 | chunk text | ordinal position within that document |
 | embedding and model namespace | character offsets within that document |
 
-**Budget-aware neighbour expansion.** On a hit, fetch adjacent chunks by ordinal within the document that matched. Because a shared chunk has different neighbours in each document, expansion must read the placement rows for the matched document specifically.
-
-Expansion competes directly with source diversity for a budget that is already 87% consumed. It must therefore be budgeted explicitly rather than applied uniformly: prefer additional distinct sources over additional context for an existing source when the two compete, and report expansion bytes separately from source bytes so the trade is visible in evaluation output.
-
-Three consequences must be resolved as part of this phase rather than discovered during it.
+Two consequences must be resolved as part of this phase rather than discovered during it.
 
 **Citation provenance.** The product returns cited evidence keyed on a document and a character range. A shared chunk resolves to several documents, so retrieving one must produce a defined answer to which document is cited. For boilerplate the choice is immaterial; for genuinely shared content it is not. Decide the rule deliberately, record it in [`docs/retrieval-design.md`](../retrieval-design.md), and confirm the MCP evidence contract in [`docs/mcp.md`](../mcp.md) still holds.
 
 **Deletion.** Chunk rows are currently removed by cascade from their document. Shared chunks must survive deletion of one referencing document and disappear when the last reference goes. `--forget` and `--delete-data` must be verified against a corpus containing shared chunks, not only distinct ones.
 
-**Re-index.** Chunk identity changes for every existing workspace, so this is a full re-index, not a migration in place. Sequence it with the operator workflow rather than assuming it can run silently.
+**Migration.** Chunk text itself is unchanged, so this is a schema migration that collapses existing rows onto shared identities, not a re-chunk and not a re-embed. Existing embeddings remain valid, which is what makes this phase far cheaper than originally scoped.
+
+### Deferred: canonical chunking and neighbour expansion
+
+Removed from Phase 3 by the spike, and retained here so the reasoning is not lost.
+
+Chunking with no overlap reduces chunk count by roughly 11%, a real storage and embedding saving, but it does not improve deduplication and it still owes the untested boundary-spanning recall risk described under [Risks](#risks-this-task-must-retire). Atomic paragraph chunking raises the deduplication rate substantially but increases distinct stored chunks by 44%, so it must be justified on retrieval-quality grounds rather than efficiency ones — a different question, needing the recall arm this spike did not build.
+
+Either change requires neighbour expansion to replace the context overlap currently provides, and expansion competes for an evidence budget already 87% consumed: it would have to prefer additional distinct sources over more context for an existing source, and report expansion bytes separately so the trade stays visible. Propose these as their own task, measured on retrieval quality.
 
 ## Risks this task must retire
 
@@ -177,10 +203,10 @@ Three consequences must be resolved as part of this phase rather than discovered
 
 ## Acceptance criteria
 
-- No single chunk text can occupy more than one slot in a result set.
+- No single chunk text can occupy more than one slot in a result set. (Done, phase one.)
 - For the adversarial probe in which one chunk took 42 of 50 lexical candidate slots, that chunk occupies one slot and the remainder are distinct.
 - Mean distinct texts per lexical candidate pool across the evaluation suite rises from the recorded 44.0 of 50 toward 50, and the worst case rises from 33.
-- The spike's control and zero-overlap arms are measured with an identical, pinned case set, and its go/no-go criteria are reported explicitly, including a negative result if that is the outcome.
+- The spike's arms are measured on the same corpora and its go/no-go criteria reported explicitly, including a negative result if that is the outcome. (Done, phase two: the main hypothesis failed and is recorded above.)
 - Identical normalised chunk text is stored once, embedded once, and indexed once within a workspace.
 - A chunk shared by several documents cites a defined document, and that rule is documented.
 - Neighbour expansion resolves neighbours through the matched document's placement rows, and expansion bytes are reported separately from source bytes.

@@ -99,9 +99,14 @@ collections:
 workspaces:
   - id: example
     title: Example Workspace
+    # Optional private mailbox identities used only for email direction.
+    owner-identities:
+      - owner@example.test
     collections:
       - id: example-documents
 ```
+
+`owner-identities` is optional, private, and scoped to one workspace; it is distinct from a collection's financial `owners:` metadata. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
 
 Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database, RustFS bucket/policy, and NATS streams from its id alone — nothing else to configure.
 

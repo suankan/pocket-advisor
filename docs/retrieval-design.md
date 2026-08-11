@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor's read path. It describ
 
 ## Status
 
-The transport-independent Go retrieval package and host CLI query mode are current. The workspace-bound stdio MCP server and authenticated Streamable HTTP MCP adapter are described in [MCP server design](mcp.md). A general HTTP user API and an in-repository answer-generation service remain target state.
+The transport-independent Go retrieval package, exact mailbox browse package, and host CLI query mode are current. The workspace-bound stdio MCP server and authenticated Streamable HTTP MCP adapter are described in [MCP server design](mcp.md). A general HTTP user API and an in-repository answer-generation service remain target state.
 
 ## Principles
 
@@ -29,6 +29,17 @@ The transport-independent Go retrieval package and host CLI query mode are curre
 8. Return content packets, sub-queries, budget use, and structured warnings.
 
 The service owns warm model clients but no request state. PostgreSQL owns indexed and lineage state.
+
+
+## Exact email browse
+
+`internal/mailbox` is a transport-independent, fixed-workspace read service over durable email metadata. It lists messages by exact normalized sender or recipient (To, Cc, or Bcc), parsed-date bounds, and owner-relative inbound, outbound, or either direction. Newest-first is the default; oldest-first is its exact reverse. Pages default to 25 and are bounded at 200; conversation collapse returns one matched message with a bounded summary.
+
+Opaque cursors bind order and all filters to an `ingested_at` snapshot and a keyset position, so later ingestion cannot shift, repeat, or hide a page series. Date filters exclude undated messages and report that omission. A server-issued message or conversation reference fetches a deduplicated email-only conversation in stable chronological order, with relationship methods, bounded participants, warnings, and omission counts.
+
+Awaiting-reply candidates require configured owner identities and exact-reference conversations. A candidate is the latest relevant human inbound message with no later human owner-authored exact-reply descendant. Participant and date bounds select the inbound candidate but never hide later evidence; automated and third-party events remain labelled evidence. Subject grouping and similarity never prove a reply or close a candidate.
+
+The MCP tools in [MCP server design](mcp.md) adapt this service; semantic retrieval may remain independent of mailbox browse.
 
 ## Candidate generation
 

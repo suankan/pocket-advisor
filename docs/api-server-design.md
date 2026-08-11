@@ -11,7 +11,7 @@ Pocket Advisor currently runs as a host CLI process. `internal/cli` parses comma
 - bounded ingestion and maintenance commands;
 - an interactive ingestion listener;
 - a direct query command; and
-- MCP transports (stdio and authenticated Streamable HTTP) described in [MCP server design](mcp.md).
+- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence and fixed-workspace exact mailbox browse, described in [MCP server design](mcp.md).
 
 Answer generation is performed by the MCP client or another external consumer of evidence packets.
 
@@ -53,7 +53,7 @@ Local corpus paths and the current model endpoints exist on the host, so the fir
 
 ### User API
 
-The user surface exposes retrieval and, when implemented, optional cited generation. Retrieval's Go package remains transport-independent; HTTP handlers translate their requests to `retrieval.Request`, while MCP transports reuse the current tool definition, typed evidence adapter, safe error contract, and text fallback. Generation is a separate consumer of retrieval packets and never queries storage directly.
+The user surface exposes retrieval and, when implemented, optional cited generation. Retrieval and mailbox browse Go packages remain transport-independent; HTTP handlers translate their requests to `retrieval.Request` or the fixed-workspace mailbox request types, while MCP transports reuse the current typed adapters, safe error contract, and text fallback. Generation is a separate consumer of retrieval packets and never queries storage directly.
 
 The Web UI is a client of these APIs. It must not introduce a parallel backend or implement its own workspace authorization rules.
 

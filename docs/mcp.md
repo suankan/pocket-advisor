@@ -19,10 +19,13 @@ The stdio adapter is the default local integration, started with `mcp stdio`. Th
 
 ### Tools
 
-Each workspace-bound MCP server exposes two tools:
+Each workspace-bound MCP server exposes retrieval and deterministic mailbox tools:
 
 - `search_<workspace>` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_<workspace>_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
+- `list_messages_<workspace>` — lists exact email messages with bounded normalized sender, recipient, date, direction, order, collapse, and cursor filters.
+- `fetch_conversation_<workspace>` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
+- `awaiting_reply_candidates_<workspace>` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
 
 Neither tool accepts a workspace, result identifier, document identifier, source URI, credential, byte range, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
 

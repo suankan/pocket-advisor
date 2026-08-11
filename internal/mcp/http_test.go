@@ -234,8 +234,8 @@ func TestHTTPUnauthenticatedCurrentProtocolDiscoveryAndToolCall(t *testing.T) {
 	if discover.Code != http.StatusOK {
 		t.Fatalf("unauthenticated discover status = %d, body=%s", discover.Code, discover.Body.String())
 	}
-	call := mcpRequest(t, server, "not-a-token", "2026-07-28", "tools/call", "search_synthetic", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "synthetic"},
+	call := mcpRequest(t, server, "not-a-token", "2026-07-28", "tools/call", "search", map[string]any{
+		"name": "search", "arguments": map[string]any{"question": "synthetic"},
 	})
 	page, isError := decodeHTTPToolPage(t, call)
 	if isError || len(page.Packets) == 0 {
@@ -415,7 +415,7 @@ func TestHTTPCurrentProtocolListsSharedTools(t *testing.T) {
 	if list.Code != http.StatusOK {
 		t.Fatalf("tools/list status = %d, body=%s", list.Code, list.Body.String())
 	}
-	for _, name := range []string{"search_synthetic", "read_synthetic_evidence"} {
+	for _, name := range []string{"search", "read_evidence"} {
 		if !strings.Contains(list.Body.String(), name) {
 			t.Errorf("tools/list omitted %s: %s", name, list.Body.String())
 		}
@@ -450,7 +450,7 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 	fixation.Header.Set("Mcp-Session-Id", "attacker-selected-session")
 	fixationRecorder := httptest.NewRecorder()
 	server.httpServer.Handler.ServeHTTP(fixationRecorder, fixation)
-	if fixationRecorder.Code != http.StatusOK || !strings.Contains(fixationRecorder.Body.String(), "search_synthetic") {
+	if fixationRecorder.Code != http.StatusOK || !strings.Contains(fixationRecorder.Body.String(), "search") {
 		t.Fatalf("non-authoritative session header status = %d, body=%s", fixationRecorder.Code, fixationRecorder.Body.String())
 	}
 	notificationBody := `{"jsonrpc":"2.0","method":"notifications/initialized"}`
@@ -467,7 +467,7 @@ func TestHTTPLegacyOpenCodeProtocolNegotiates(t *testing.T) {
 	}
 
 	list := mcpRequest(t, server, valid, "2025-11-25", "tools/list", "", nil)
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "search_synthetic") {
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "search") {
 		t.Fatalf("legacy tools/list status = %d, body=%s", list.Code, list.Body.String())
 	}
 
@@ -485,8 +485,8 @@ func TestHTTPCurrentProtocolRejectsHeaderBodyMismatch(t *testing.T) {
 	google := newTestGoogleServer(t)
 	valid := google.issue("caller", "caller@example.test")
 	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
-	recorder := mcpRequest(t, server, valid, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "synthetic"},
+	recorder := mcpRequest(t, server, valid, "2026-07-28", "tools/call", "read_evidence", map[string]any{
+		"name": "search", "arguments": map[string]any{"question": "synthetic"},
 	})
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":-32020`) {
 		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
@@ -500,8 +500,8 @@ func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
 	callerB := google.issue("subject-b", "caller-b@example.test")
 	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticTextResult(strings.Repeat("large synthetic evidence 🙂\n", 5500))})
 
-	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search_synthetic", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "large synthetic evidence"},
+	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search", map[string]any{
+		"name": "search", "arguments": map[string]any{"question": "large synthetic evidence"},
 	})
 	page, isError := decodeHTTPToolPage(t, search)
 	if isError || page.Complete || page.NextCursor == nil {
@@ -511,8 +511,8 @@ func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
 		t.Fatalf("search response = %d bytes", search.Body.Len())
 	}
 
-	foreign := mcpRequest(t, server, callerB, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
-		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+	foreign := mcpRequest(t, server, callerB, "2026-07-28", "tools/call", "read_evidence", map[string]any{
+		"name": "read_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, foreignError := decodeHTTPToolPage(t, foreign)
 	if !foreignError {
@@ -521,8 +521,8 @@ func TestHTTPContinuationIsCallerBoundAndResponseBounded(t *testing.T) {
 
 	pages := 1
 	for !page.Complete {
-		response := mcpRequest(t, server, callerARenewed, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
-			"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+		response := mcpRequest(t, server, callerARenewed, "2026-07-28", "tools/call", "read_evidence", map[string]any{
+			"name": "read_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 		})
 		if response.Body.Len() > absoluteToolResponseBytes {
 			t.Fatalf("page %d response = %d bytes", pages+1, response.Body.Len())
@@ -549,8 +549,8 @@ func TestHTTPCallerStateEvictionInvalidatesContinuation(t *testing.T) {
 	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticTextResult(strings.Repeat("bounded evidence\n", 5500))})
 	server.opts.MaxCallerStates = 1
 
-	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search_synthetic", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "bounded evidence"},
+	search := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "search", map[string]any{
+		"name": "search", "arguments": map[string]any{"question": "bounded evidence"},
 	})
 	page, isError := decodeHTTPToolPage(t, search)
 	if isError || page.NextCursor == nil {
@@ -568,8 +568,8 @@ func TestHTTPCallerStateEvictionInvalidatesContinuation(t *testing.T) {
 		t.Fatalf("caller state count = %d, want 1", stateCount)
 	}
 
-	evicted := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "read_synthetic_evidence", map[string]any{
-		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+	evicted := mcpRequest(t, server, callerA, "2026-07-28", "tools/call", "read_evidence", map[string]any{
+		"name": "read_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, evictedError := decodeHTTPToolPage(t, evicted)
 	if !evictedError {
@@ -604,7 +604,7 @@ func TestHTTPRejectsOversizedBody(t *testing.T) {
 	google := newTestGoogleServer(t)
 	valid := google.issue("caller", "caller@example.test")
 	server := newHTTPTestServer(t, google, &stubRetriever{result: syntheticResult()})
-	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":%q}}}`, strings.Repeat("x", defaultHTTPMaxRequestBytes))
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"question":%q}}}`, strings.Repeat("x", defaultHTTPMaxRequestBytes))
 	req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(body))
 	req.Host = "mcp.example.test"
 	req.Header.Set("Authorization", "Bearer "+valid)
@@ -625,7 +625,7 @@ func TestHTTPDisconnectCancelsCurrentProtocolToolCall(t *testing.T) {
 	server := newHTTPTestServer(t, google, retriever)
 
 	params := map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "cancel me"},
+		"name": "search", "arguments": map[string]any{"question": "cancel me"},
 		"_meta": map[string]any{
 			"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
 			"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "synthetic-client", "version": "1"},
@@ -644,7 +644,7 @@ func TestHTTPDisconnectCancelsCurrentProtocolToolCall(t *testing.T) {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
 	req.Header.Set("Mcp-Method", "tools/call")
-	req.Header.Set("Mcp-Name", "search_synthetic")
+	req.Header.Set("Mcp-Name", "search")
 
 	done := make(chan struct{})
 	go func() {
@@ -687,7 +687,7 @@ func TestHTTPConcurrencyBoundsToolCalls(t *testing.T) {
 
 	params := func(question string) map[string]any {
 		return map[string]any{
-			"name": "search_synthetic", "arguments": map[string]any{"question": question},
+			"name": "search", "arguments": map[string]any{"question": question},
 			"_meta": map[string]any{
 				"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
 				"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "synthetic-client", "version": "1"},
@@ -707,7 +707,7 @@ func TestHTTPConcurrencyBoundsToolCalls(t *testing.T) {
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("MCP-Protocol-Version", "2026-07-28")
 		req.Header.Set("Mcp-Method", "tools/call")
-		req.Header.Set("Mcp-Name", "search_synthetic")
+		req.Header.Set("Mcp-Name", "search")
 		return req
 	}
 

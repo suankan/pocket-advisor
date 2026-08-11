@@ -118,7 +118,7 @@ func TestSuccessfulSearchReturnsCompactSchemaValidIndex(t *testing.T) {
 	stub := &stubRetriever{result: syntheticResult()}
 	tool := &QueryTool{Service: stub, Workspace: "synthetic"}
 	result, err := tool.Call(context.Background(), json.RawMessage(
-		`{"name":"search_synthetic","arguments":{"question":"  What does the synthetic evidence say?  ","top_k":3}}`,
+		`{"name":"search","arguments":{"question":"  What does the synthetic evidence say?  ","top_k":3}}`,
 	))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -455,14 +455,10 @@ func TestFixedWorkspaceCannotBeSelectedOrCrossed(t *testing.T) {
 	two := &stubRetriever{result: syntheticTextResult("other workspace")}
 	toolOne := &QueryTool{Service: one, Workspace: "one"}
 	toolTwo := &QueryTool{Service: two, Workspace: "two"}
-	for _, raw := range []json.RawMessage{
-		json.RawMessage(`{"name":"search_one","arguments":{"question":"synthetic","workspace":"two"}}`),
-		json.RawMessage(`{"name":"search_two","arguments":{"question":"synthetic"}}`),
-	} {
-		_, err := toolOne.Call(context.Background(), raw)
-		if err == nil {
-			t.Fatalf("cross-workspace call accepted: %s", raw)
-		}
+	_, err := toolOne.Call(context.Background(),
+		json.RawMessage(`{"name":"search","arguments":{"question":"synthetic","workspace":"two"}}`))
+	if err == nil {
+		t.Fatal("request-selected workspace was accepted")
 	}
 	if one.got.Question != "" || two.got.Question != "" {
 		t.Fatalf("cross-workspace retrieval ran: one=%+v two=%+v", one.got, two.got)
@@ -474,9 +470,9 @@ func TestInvalidArgumentsAndFailuresAreSafe(t *testing.T) {
 	stub := &stubRetriever{result: syntheticResult()}
 	tool := &QueryTool{Service: stub, Workspace: "synthetic"}
 	for _, raw := range []json.RawMessage{
-		json.RawMessage(`{"name":"search_synthetic","arguments":{}}`),
-		json.RawMessage(`{"name":"search_synthetic","arguments":{"question":"ok","top_k":0}}`),
-		json.RawMessage(`{"name":"read_synthetic_evidence","arguments":{"cursor":"x","start":1}}`),
+		json.RawMessage(`{"name":"search","arguments":{}}`),
+		json.RawMessage(`{"name":"search","arguments":{"question":"ok","top_k":0}}`),
+		json.RawMessage(`{"name":"read_evidence","arguments":{"cursor":"x","start":1}}`),
 	} {
 		_, err := tool.Call(context.Background(), raw)
 		var invalid *argumentError
@@ -492,7 +488,7 @@ func TestInvalidArgumentsAndFailuresAreSafe(t *testing.T) {
 
 	sensitive := "dial private.example.test:5432: SQL SELECT secret"
 	failing := &QueryTool{Service: &stubRetriever{err: errors.New(sensitive)}, Workspace: "synthetic"}
-	_, err = failing.Call(context.Background(), json.RawMessage(`{"name":"search_synthetic","arguments":{"question":"synthetic"}}`))
+	_, err = failing.Call(context.Background(), json.RawMessage(`{"name":"search","arguments":{"question":"synthetic"}}`))
 	safe := errorResult(err)
 	if !safe.IsError || strings.Contains(safe.Content[0].Text, sensitive) || strings.Contains(safe.Content[0].Text, "SELECT") {
 		t.Errorf("client error leaked detail: %q", safe.Content[0].Text)

@@ -27,14 +27,10 @@ type AnalysisTool struct {
 }
 
 // AnalysisToolName returns the name of the topic analysis tool.
-func (t *AnalysisTool) AnalysisToolName() string {
-	return "analyze_topic_" + t.normalizedWorkspace()
-}
+func (t *AnalysisTool) AnalysisToolName() string { return "analyze_topic" }
 
 // ReviewToolName returns the name of the review awaiting-reply tool.
-func (t *AnalysisTool) ReviewToolName() string {
-	return "review_awaiting_reply_" + t.normalizedWorkspace()
-}
+func (t *AnalysisTool) ReviewToolName() string { return "review_awaiting_reply" }
 
 // DescribeAnalysis returns the topic analysis tool definition.
 func (t *AnalysisTool) DescribeAnalysis() ToolDefinition {
@@ -413,20 +409,20 @@ func analyzeInputSchema() map[string]any {
 			},
 			"participants": map[string]any{
 				"type": "array", "items": map[string]any{"type": "string"},
-				"maxItems": analysis.MaxParticipants,
+				"maxItems":    analysis.MaxParticipants,
 				"description": "Optional list of mailbox addresses or display names to focus on.",
 			},
 			"after": map[string]any{
-				"type": []string{"string", "null"},
+				"type":        []string{"string", "null"},
 				"description": "Restrict to messages on or after this date (RFC 3339 or YYYY-MM-DD).",
 			},
 			"before": map[string]any{
-				"type": []string{"string", "null"},
+				"type":        []string{"string", "null"},
 				"description": "Restrict to messages on or before this date (RFC 3339 or YYYY-MM-DD).",
 			},
 			"conversations": map[string]any{
 				"type": "array", "items": map[string]any{"type": "string"},
-				"maxItems": analysis.MaxConversations,
+				"maxItems":    analysis.MaxConversations,
 				"description": "Optional list of conversation or thread IDs to include.",
 			},
 			"evidence_budget": map[string]any{
@@ -449,7 +445,7 @@ func reviewInputSchema() map[string]any {
 		"properties": map[string]any{
 			"candidate_ids": map[string]any{
 				"type": "array", "items": map[string]any{"type": "string"},
-				"maxItems": analysis.MaxConversations,
+				"maxItems":    analysis.MaxConversations,
 				"description": "Optional list of specific conversation IDs to review.",
 			},
 			"max_items": map[string]any{

@@ -136,7 +136,7 @@ func TestToolsListDescribesTypedReadOnlyTools(t *testing.T) {
 	if len(tools) != 2 {
 		t.Fatalf("got %d tools, want 2", len(tools))
 	}
-	for index, toolName := range []string{"search_synthetic", "read_synthetic_evidence"} {
+	for index, toolName := range []string{"search", "read_evidence"} {
 		tool := tools[index].(map[string]any)
 		if tool["name"] != toolName || tool["title"] == "" {
 			t.Errorf("unexpected identity: name=%v title=%v", tool["name"], tool["title"])
@@ -178,7 +178,7 @@ func TestToolsCallReturnsStructuredContentOverProtocol(t *testing.T) {
 	server, output := protocolServer(stub)
 	server.accept(context.Background(), []byte(initializeMessage(1, protocolVersion)))
 	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
-	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":"synthetic question"}}}`))
+	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"question":"synthetic question"}}}`))
 	server.activeWG.Wait()
 
 	messages := decodeMessages(t, output.String())
@@ -205,7 +205,7 @@ func TestInvalidToolArgumentsReturnToolError(t *testing.T) {
 	server, output := protocolServer(&stubRetriever{result: syntheticResult()})
 	server.accept(context.Background(), []byte(initializeMessage(1, protocolVersion)))
 	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
-	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":""}}}`))
+	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"question":""}}}`))
 	server.activeWG.Wait()
 
 	messages := decodeMessages(t, output.String())
@@ -269,7 +269,7 @@ func TestToolCallCanBeCancelledWithoutResponse(t *testing.T) {
 
 	writeLine(t, writer, initializeMessage(1, protocolVersion))
 	writeLine(t, writer, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-	writeLine(t, writer, `{"jsonrpc":"2.0","id":"query-1","method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":"synthetic question"}}}`)
+	writeLine(t, writer, `{"jsonrpc":"2.0","id":"query-1","method":"tools/call","params":{"name":"search","arguments":{"question":"synthetic question"}}}`)
 	select {
 	case <-retriever.started:
 	case <-time.After(2 * time.Second):
@@ -334,7 +334,7 @@ func TestLargeToolResponseStaysBelowAbsoluteClientLimit(t *testing.T) {
 	server, output := protocolServer(stub)
 	server.accept(context.Background(), []byte(initializeMessage(1, protocolVersion)))
 	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
-	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_synthetic","arguments":{"question":"large"}}}`))
+	server.accept(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"question":"large"}}}`))
 	server.activeWG.Wait()
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
 	if len(lines) != 2 {

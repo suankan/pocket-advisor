@@ -140,22 +140,22 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 	initialize.Body.Close()
 
 	list := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/list", "", nil)
-	if list.StatusCode != http.StatusOK || !contains(list, "search_synthetic") {
+	if list.StatusCode != http.StatusOK || !contains(list, "search") {
 		body, _ := io.ReadAll(list.Body)
 		t.Fatalf("legacy tools/list status = %d, body=%s", list.StatusCode, body)
 	}
 	list.Body.Close()
 
-	search := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "search_synthetic", map[string]any{
-		"name": "search_synthetic", "arguments": map[string]any{"question": "large synthetic evidence"},
+	search := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "search", map[string]any{
+		"name": "search", "arguments": map[string]any{"question": "large synthetic evidence"},
 	})
 	page, isError := decodeGatewayPage(t, search)
 	if isError || page.Complete || page.NextCursor == nil {
 		t.Fatalf("first page complete=%v cursor=%v isError=%v", page.Complete, page.NextCursor, isError)
 	}
 
-	foreign := gatewayPost(t, proxy, callerB, "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
-		"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+	foreign := gatewayPost(t, proxy, callerB, "2025-11-25", "tools/call", "read_evidence", map[string]any{
+		"name": "read_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 	})
 	_, foreignError := decodeGatewayPage(t, foreign)
 	if !foreignError {
@@ -164,8 +164,8 @@ func TestHTTPGatewayMirrorsCaddyForLegacyClient(t *testing.T) {
 
 	pages := 1
 	for !page.Complete {
-		response := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "read_synthetic_evidence", map[string]any{
-			"name": "read_synthetic_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
+		response := gatewayPost(t, proxy, callerA, "2025-11-25", "tools/call", "read_evidence", map[string]any{
+			"name": "read_evidence", "arguments": map[string]any{"cursor": *page.NextCursor},
 		})
 		raw, err := io.ReadAll(response.Body)
 		if err != nil {

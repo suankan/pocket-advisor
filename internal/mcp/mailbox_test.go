@@ -92,7 +92,7 @@ func TestMailboxToolsExposeTypedFixedWorkspaceResults(t *testing.T) {
 	tool := syntheticMailboxTool(t, []string{"owner@example.test"})
 	wrapped := &QueryTool{Workspace: "synthetic", Mailbox: tool}
 	definitions := wrapped.DescribeAll()
-	if len(definitions) != 5 || definitions[2].Name != "list_messages_synthetic" || definitions[3].Name != "fetch_conversation_synthetic" || definitions[4].Name != "awaiting_reply_candidates_synthetic" {
+	if len(definitions) != 5 || definitions[2].Name != "list_messages" || definitions[3].Name != "fetch_conversation" || definitions[4].Name != "awaiting_reply_candidates" {
 		t.Fatalf("definitions = %+v", definitions)
 	}
 
@@ -133,14 +133,14 @@ func TestMailboxToolRejectsScopeAndRequiresOwners(t *testing.T) {
 	if err := schema.Validate(map[string]any{"workspace": "other"}); err == nil {
 		t.Fatal("workspace selector passed closed schema")
 	}
-	raw := json.RawMessage(`{"name":"list_messages_synthetic","arguments":{"workspace":"other"}}`)
+	raw := json.RawMessage(`{"name":"list_messages","arguments":{"workspace":"other"}}`)
 	_, err := tool.Call(context.Background(), raw)
 	var invalid *argumentError
 	if !errors.As(err, &invalid) {
 		t.Fatalf("scope error = %T %v", err, err)
 	}
 
-	_, err = tool.Call(context.Background(), json.RawMessage(`{"name":"awaiting_reply_candidates_synthetic","arguments":{}}`))
+	_, err = tool.Call(context.Background(), json.RawMessage(`{"name":"awaiting_reply_candidates","arguments":{}}`))
 	if !errors.As(err, &invalid) || !strings.Contains(err.Error(), "owner identities") {
 		t.Fatalf("owner configuration error = %T %v", err, err)
 	}

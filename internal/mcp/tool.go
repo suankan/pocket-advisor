@@ -102,16 +102,12 @@ func (t *QueryTool) normalizedWorkspace() string {
 	}, t.Workspace)
 }
 
-// Name is unique per workspace for client-side disambiguation. The fixed
-// service credentials and database remain the security boundary.
-func (t *QueryTool) Name() string {
-	return "search_" + t.normalizedWorkspace()
-}
+// Name is transport-stable. The process has one fixed workspace, so a tool
+// name need not disclose or select that workspace.
+func (t *QueryTool) Name() string { return "search" }
 
 // ReadName is the companion tool for following opaque continuation cursors.
-func (t *QueryTool) ReadName() string {
-	return "read_" + t.normalizedWorkspace() + "_evidence"
-}
+func (t *QueryTool) ReadName() string { return "read_evidence" }
 
 func readOnlyAnnotations() ToolAnnotations {
 	return ToolAnnotations{

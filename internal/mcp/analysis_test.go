@@ -43,22 +43,22 @@ func analysisSyntheticResult() *retrieval.Result {
 		SubQueries: []string{"budget review"},
 		Packets: []retrieval.Packet{{
 			Document: retrieval.Document{
-				DocID:    "doc-11111111-1111-1111-1111-111111111111",
-				DocType:  "email",
-				Title:    "Budget Update",
-				From:     "alice@test.com",
-				Date:     &date,
-				SHA256:   sha,
-				RawURI:   "s3://test/raw/doc1",
+				DocID:     "doc-11111111-1111-1111-1111-111111111111",
+				DocType:   "email",
+				Title:     "Budget Update",
+				From:      "alice@test.com",
+				Date:      &date,
+				SHA256:    sha,
+				RawURI:    "s3://test/raw/doc1",
 				CharCount: 50,
 			},
 			Match: retrieval.Match{
-				ChunkID:  "chunk-11111111-1111-1111-1111-111111111111",
+				ChunkID:   "chunk-11111111-1111-1111-1111-111111111111",
 				StartByte: 0,
-				EndByte:  50,
-				Score:    0.8,
-				Legs:     "both",
-				Snippet:  "The budget review is progressing well",
+				EndByte:   50,
+				Score:     0.8,
+				Legs:      "both",
+				Snippet:   "The budget review is progressing well",
 			},
 			Text: "The budget review is progressing well and all milestones are on track.",
 		}},
@@ -87,7 +87,7 @@ func TestAnalyzeTopicToolName(t *testing.T) {
 	stub := &analysisStubRetriever{}
 	tool := newAnalysisTool(stub)
 	name := tool.AnalysisToolName()
-	if name != "analyze_topic_test" {
+	if name != "analyze_topic" {
 		t.Errorf("unexpected tool name: %s", name)
 	}
 }
@@ -96,7 +96,7 @@ func TestReviewToolName(t *testing.T) {
 	stub := &analysisStubRetriever{}
 	tool := newAnalysisTool(stub)
 	name := tool.ReviewToolName()
-	if name != "review_awaiting_reply_test" {
+	if name != "review_awaiting_reply" {
 		t.Errorf("unexpected tool name: %s", name)
 	}
 }
@@ -105,7 +105,7 @@ func TestDescribeAnalysis(t *testing.T) {
 	stub := &analysisStubRetriever{}
 	tool := newAnalysisTool(stub)
 	def := tool.DescribeAnalysis()
-	if def.Name != "analyze_topic_test" {
+	if def.Name != "analyze_topic" {
 		t.Errorf("unexpected tool name: %s", def.Name)
 	}
 	if def.InputSchema == nil {
@@ -123,7 +123,7 @@ func TestDescribeReview(t *testing.T) {
 	stub := &analysisStubRetriever{}
 	tool := newAnalysisTool(stub)
 	def := tool.DescribeReview()
-	if def.Name != "review_awaiting_reply_test" {
+	if def.Name != "review_awaiting_reply" {
 		t.Errorf("unexpected tool name: %s", def.Name)
 	}
 }
@@ -140,16 +140,16 @@ func TestDescribeAllAnalysis(t *testing.T) {
 	for _, d := range defs {
 		names[d.Name] = true
 	}
-	if !names["search_test"] {
+	if !names["search"] {
 		t.Error("missing search tool")
 	}
-	if !names["read_test_evidence"] {
+	if !names["read_evidence"] {
 		t.Error("missing read tool")
 	}
-	if !names["analyze_topic_test"] {
+	if !names["analyze_topic"] {
 		t.Error("missing analyze_topic tool")
 	}
-	if !names["review_awaiting_reply_test"] {
+	if !names["review_awaiting_reply"] {
 		t.Error("missing review_awaiting_reply tool")
 	}
 }

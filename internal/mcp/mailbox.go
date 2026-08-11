@@ -41,13 +41,9 @@ func (t *MailboxTool) normalizedWorkspace() string {
 	}, t.Workspace)
 }
 
-func (t *MailboxTool) ListName() string { return "list_messages_" + t.normalizedWorkspace() }
-func (t *MailboxTool) ConversationName() string {
-	return "fetch_conversation_" + t.normalizedWorkspace()
-}
-func (t *MailboxTool) AwaitingReplyName() string {
-	return "awaiting_reply_candidates_" + t.normalizedWorkspace()
-}
+func (t *MailboxTool) ListName() string          { return "list_messages" }
+func (t *MailboxTool) ConversationName() string  { return "fetch_conversation" }
+func (t *MailboxTool) AwaitingReplyName() string { return "awaiting_reply_candidates" }
 
 func (t *MailboxTool) DescribeAll() []ToolDefinition {
 	title := t.Title

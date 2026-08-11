@@ -19,12 +19,13 @@ import (
 
 // Evaluator runs evaluation cases against a workspace's retrieval path.
 type Evaluator struct {
-	DB       *postgres.DB
-	Embedder *embedding.Client
-	Reranker *reranking.Client
-	LLM      *llm.Client
-	Config   config.Query
-	Log      *slog.Logger
+	DB              *postgres.DB
+	Embedder        *embedding.Client
+	Reranker        *reranking.Client
+	LLM             *llm.Client
+	Config          config.Query
+	Log             *slog.Logger
+	TopicGraphStore TopicGraphEvaluationStore
 }
 
 // NewEvaluator creates an evaluator from infrastructure components.
@@ -38,7 +39,7 @@ func NewEvaluator(
 ) *Evaluator {
 	return &Evaluator{
 		DB: db, Embedder: emb, Reranker: rr, LLM: l,
-		Config: cfg, Log: log,
+		Config: cfg, Log: log, TopicGraphStore: postgres.NewTopicGraphEvaluationStore(db),
 	}
 }
 
@@ -127,6 +128,21 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		} else {
 			report.ExactVsHNSW = hnswReport
 			applyHNSWThreshold(&report.Summary, hnswReport, thresholdsFor(evalCfg))
+		}
+	}
+
+	// A graph is evaluated only when the workspace has an active version. The
+	// private store keeps all graph identifiers inside this call; the report is
+	// aggregate-only. A missing graph is still represented when graph gates are
+	// configured, so a mandatory active-graph requirement cannot be bypassed.
+	if e.TopicGraphStore != nil {
+		graph, err := EvaluateTopicGraph(ctx, e.TopicGraphStore, evalCfg.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("evaluate topic graph: %w", err)
+		}
+		if graph.ActiveVersion || thresholdsFor(evalCfg).TopicGraph != nil {
+			report.TopicGraph = graph
+			applyTopicGraphThresholds(&report.Summary, graph, thresholdsFor(evalCfg))
 		}
 	}
 

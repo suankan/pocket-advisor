@@ -184,7 +184,7 @@ Evaluate options:
   --eval-hnsw                run exact vs HNSW dense search comparison
   --eval-ef-search N         HNSW ef_search for comparison (default 40)
   --eval-readiness           check readiness without running queries
-  --eval-thresholds <path>   thresholds JSON (default: built-in thresholds)
+  --eval-thresholds <path>   thresholds JSON (default: built-in thresholds; optional topic_graph gates)
 
 Options:
   --yes                     skip destructive confirmation prompts

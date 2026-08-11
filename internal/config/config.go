@@ -262,6 +262,17 @@ type Query struct {
 	MaxSubQueries        int
 	PoolFloorDenseOnly   int
 	PoolFloorPerSubQuery int
+
+	// TopicGraphExpansionEnabled permits the optional, source-backed graph
+	// supplement after ordinary packet construction. It is disabled by default
+	// so ordinary retrieval never depends on derived graph data.
+	TopicGraphExpansionEnabled bool
+	TopicGraphMinConfidence    float64
+	TopicGraphBackwardDepth    int
+	TopicGraphForwardDepth     int
+	TopicGraphMaxNodes         int
+	TopicGraphMaxBytes         int
+	TopicGraphMaxSeeds         int
 }
 
 type Config struct {
@@ -343,6 +354,15 @@ type file struct {
 			RelationMaxCandidates   int     `yaml:"relation_max_candidates"`
 			RelationMinConfidence   float64 `yaml:"relation_min_confidence"`
 		} `yaml:"topic_graph"`
+		Query struct {
+			TopicGraphExpansionEnabled bool    `yaml:"topic_graph_expansion_enabled"`
+			TopicGraphMinConfidence    float64 `yaml:"topic_graph_min_confidence"`
+			TopicGraphBackwardDepth    int     `yaml:"topic_graph_backward_depth"`
+			TopicGraphForwardDepth     int     `yaml:"topic_graph_forward_depth"`
+			TopicGraphMaxNodes         int     `yaml:"topic_graph_max_nodes"`
+			TopicGraphMaxBytes         int     `yaml:"topic_graph_max_bytes"`
+			TopicGraphMaxSeeds         int     `yaml:"topic_graph_max_seeds"`
+		} `yaml:"query"`
 		Observability struct {
 			MetricsPort int    `yaml:"metrics_port"`
 			LogLevel    string `yaml:"log_level"`
@@ -457,19 +477,26 @@ func defaults() *Config {
 			MaxMentionsPerDoc: 64, MaxSpansPerMention: 8, MaxDisplayLabelBytes: 256,
 		},
 		Query: Query{
-			VecCandidates:        50,
-			FTSCandidates:        50,
-			RRFK:                 60,
-			DefaultTopK:          15,
-			RerankEnabled:        true,
-			RerankCandidates:     24,
-			MinRelevanceScore:    0.0,
-			MaxPerThread:         3,
-			AnswerContextBytes:   120000,
-			DecomposeEnabled:     true,
-			MaxSubQueries:        4,
-			PoolFloorDenseOnly:   6,
-			PoolFloorPerSubQuery: 4,
+			VecCandidates:              50,
+			FTSCandidates:              50,
+			RRFK:                       60,
+			DefaultTopK:                15,
+			RerankEnabled:              true,
+			RerankCandidates:           24,
+			MinRelevanceScore:          0.0,
+			MaxPerThread:               3,
+			AnswerContextBytes:         120000,
+			DecomposeEnabled:           true,
+			MaxSubQueries:              4,
+			PoolFloorDenseOnly:         6,
+			PoolFloorPerSubQuery:       4,
+			TopicGraphExpansionEnabled: false,
+			TopicGraphMinConfidence:    0.85,
+			TopicGraphBackwardDepth:    2,
+			TopicGraphForwardDepth:     2,
+			TopicGraphMaxNodes:         16,
+			TopicGraphMaxBytes:         16 << 10,
+			TopicGraphMaxSeeds:         8,
 		},
 		MetricsPort: 9090,
 		LogLevel:    "info",
@@ -632,6 +659,26 @@ func applyFile(c *Config, path string) error {
 		c.TopicGraph.RelationMinConfidence = in.TopicGraph.RelationMinConfidence
 	}
 
+	c.Query.TopicGraphExpansionEnabled = in.Query.TopicGraphExpansionEnabled
+	if in.Query.TopicGraphMinConfidence > 0 {
+		c.Query.TopicGraphMinConfidence = in.Query.TopicGraphMinConfidence
+	}
+	if in.Query.TopicGraphBackwardDepth > 0 {
+		c.Query.TopicGraphBackwardDepth = in.Query.TopicGraphBackwardDepth
+	}
+	if in.Query.TopicGraphForwardDepth > 0 {
+		c.Query.TopicGraphForwardDepth = in.Query.TopicGraphForwardDepth
+	}
+	if in.Query.TopicGraphMaxNodes > 0 {
+		c.Query.TopicGraphMaxNodes = in.Query.TopicGraphMaxNodes
+	}
+	if in.Query.TopicGraphMaxBytes > 0 {
+		c.Query.TopicGraphMaxBytes = in.Query.TopicGraphMaxBytes
+	}
+	if in.Query.TopicGraphMaxSeeds > 0 {
+		c.Query.TopicGraphMaxSeeds = in.Query.TopicGraphMaxSeeds
+	}
+
 	if in.Observability.MetricsPort > 0 {
 		c.MetricsPort = in.Observability.MetricsPort
 	}
@@ -666,6 +713,8 @@ func applyEnv(c *Config) {
 	c.Embedding.Model = env("EMBEDDING_MODEL", c.Embedding.Model)
 	c.Embedding.Timeout = envDuration("EMBEDDING_TIMEOUT", c.Embedding.Timeout)
 	c.Embedding.Concurrency = envInt("EMBEDDING_CONCURRENCY", c.Embedding.Concurrency)
+
+	c.Query.TopicGraphExpansionEnabled = envBool("TOPIC_GRAPH_EXPANSION_ENABLED", c.Query.TopicGraphExpansionEnabled)
 
 	c.MetricsPort = envInt("METRICS_PORT", c.MetricsPort)
 	c.LogLevel = env("LOG_LEVEL", c.LogLevel)

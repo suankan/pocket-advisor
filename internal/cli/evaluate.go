@@ -91,6 +91,9 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return fmt.Errorf("parse thresholds %s: %w", eo.Thresholds, err)
 		}
+		if err := eval.ValidateTopicGraphThresholds(t.TopicGraph); err != nil {
+			return fmt.Errorf("validate topic graph thresholds: %w", err)
+		}
 		thresholds = &t
 	}
 
@@ -225,5 +228,15 @@ func renderEvalReport(r *eval.Report) {
 		fmt.Printf("HNSW comparison: %d cases, mean recall=%.3f, min recall=%.3f, ef_search=%d\n",
 			r.ExactVsHNSW.CasesCompared, r.ExactVsHNSW.MeanRecall,
 			r.ExactVsHNSW.MinRecall, r.ExactVsHNSW.EfSearch)
+	}
+	if graph := r.TopicGraph; graph != nil {
+		fmt.Println()
+		fmt.Printf("Topic graph: active=%v mention coverage=%.3f edge coverage=%.3f episode coverage=%.3f\n",
+			graph.ActiveVersion, graph.Mentions.Rate, graph.Edges.Rate, graph.Episodes.Rate)
+		fmt.Printf("  Timelines: %d/%d valid, omitted=%d, budget truncations=%d\n",
+			graph.Timelines.Valid, graph.Timelines.Attempted, graph.Timelines.OmittedNodes, graph.Timelines.BudgetTruncated)
+		if graph.Gates.Configured {
+			fmt.Printf("  Gates: %s%s\n", map[bool]string{true: "PASSED", false: "FAILED"}[graph.Gates.Passed], map[bool]string{true: " (mandatory)", false: ""}[graph.Gates.Mandatory])
+		}
 	}
 }

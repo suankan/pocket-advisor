@@ -180,6 +180,8 @@ func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, erro
 	if err != nil {
 		return nil, err
 	}
+	_, graphWarnings := sub.expandTopicGraph(ctx, sel.Picked, budget)
+	warn.addAll(graphWarnings)
 	if budget.truncated {
 		warn.add(WarnBudgetTruncated)
 	}

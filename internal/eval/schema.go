@@ -202,26 +202,27 @@ func toSet(ss []string) map[string]struct{} {
 
 // Report is the machine-readable output of an evaluation run.
 type Report struct {
-	RunID         string           `json:"run_id"`
-	SetID         string           `json:"set_id"`
-	SetVersion    int              `json:"set_version"`
-	CaseSetSHA256 string           `json:"case_set_sha256"`
-	WorkspaceID   string           `json:"workspace_id"`
-	Timestamp     time.Time        `json:"timestamp"`
-	CommitSHA     string           `json:"commit_sha"`
-	EmbedModel    string           `json:"embed_model"`
-	EmbedDim      int              `json:"embed_dim"`
-	RerankModel   string           `json:"rerank_model"`
-	VecCandidates int              `json:"vec_candidates"`
-	FTSCandidates int              `json:"fts_candidates"`
-	RRFK          int              `json:"rrf_k"`
-	RerankEnabled bool             `json:"rerank_enabled"`
-	TopK          int              `json:"top_k"`
-	Cases         []CaseReport     `json:"cases"`
-	Summary       Summary          `json:"summary"`
-	Latency       LatencyReport    `json:"latency"`
-	ExactVsHNSW   *HNSWReport      `json:"exact_vs_hnsw,omitempty"`
-	Readiness     *ReadinessReport `json:"readiness,omitempty"`
+	RunID         string            `json:"run_id"`
+	SetID         string            `json:"set_id"`
+	SetVersion    int               `json:"set_version"`
+	CaseSetSHA256 string            `json:"case_set_sha256"`
+	WorkspaceID   string            `json:"workspace_id"`
+	Timestamp     time.Time         `json:"timestamp"`
+	CommitSHA     string            `json:"commit_sha"`
+	EmbedModel    string            `json:"embed_model"`
+	EmbedDim      int               `json:"embed_dim"`
+	RerankModel   string            `json:"rerank_model"`
+	VecCandidates int               `json:"vec_candidates"`
+	FTSCandidates int               `json:"fts_candidates"`
+	RRFK          int               `json:"rrf_k"`
+	RerankEnabled bool              `json:"rerank_enabled"`
+	TopK          int               `json:"top_k"`
+	Cases         []CaseReport      `json:"cases"`
+	Summary       Summary           `json:"summary"`
+	Latency       LatencyReport     `json:"latency"`
+	ExactVsHNSW   *HNSWReport       `json:"exact_vs_hnsw,omitempty"`
+	Readiness     *ReadinessReport  `json:"readiness,omitempty"`
+	TopicGraph    *TopicGraphReport `json:"topic_graph,omitempty"`
 }
 
 // CaseReport is the result for one evaluation case.
@@ -336,6 +337,9 @@ type ThresholdsConfig struct {
 	MaxForbiddenHits int     `json:"max_forbidden_hits"`
 	MinEmptyPassRate float64 `json:"min_empty_pass_rate"`
 	MinApproxRecall  float64 `json:"min_approximate_recall"`
+	// TopicGraph is opt-in. When Mandatory is true, failed graph gates make
+	// --evaluate return non-zero; otherwise its graph measurements are informational.
+	TopicGraph *TopicGraphThresholds `json:"topic_graph,omitempty"`
 }
 
 // DefaultThresholds returns the mandatory thresholds for the

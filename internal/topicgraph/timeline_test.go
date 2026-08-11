@@ -39,16 +39,18 @@ func (s *fakeTimelineStore) BeginTimeline(_ context.Context, workspace string) (
 }
 
 type fakeTimelineReader struct {
-	snapshot TimelineSnapshot
-	seeds    []TimelineRecord
-	steps    map[string][]TimelineStep
-	omitted  map[string]int
-	block    bool
+	snapshot     TimelineSnapshot
+	seeds        []TimelineRecord
+	steps        map[string][]TimelineStep
+	omitted      map[string]int
+	block        bool
+	resolveCalls int
 }
 
 func (r *fakeTimelineReader) Snapshot() TimelineSnapshot  { return r.snapshot }
 func (r *fakeTimelineReader) Close(context.Context) error { return nil }
 func (r *fakeTimelineReader) ResolveTimelineReference(_ context.Context, ref TimelineReference) ([]TimelineRecord, error) {
+	r.resolveCalls++
 	if ref.VersionID != r.snapshot.VersionID || ref.Kind != TimelineMentionRef {
 		return nil, ErrUnknownTimelineReference
 	}
@@ -74,11 +76,34 @@ func TestTimelineReferenceIsClosedAndDocumentReferencesAreOutputOnly(t *testing.
 	if err != nil || got.Kind != TimelineMentionRef || got.VersionID != timelineVersion || got.ID != timelineA {
 		t.Fatalf("decode = %#v, %v", got, err)
 	}
-	if _, err := DecodeTimelineReference(encodeDocumentReference(timelineDocA)); !errors.Is(err, ErrUnknownTimelineReference) {
+	encodedDocument := encodeDocumentReference(timelineDocA)
+	if _, err := DecodeTimelineReference(encodedDocument); !errors.Is(err, ErrUnknownTimelineReference) {
 		t.Fatalf("document seed = %v", err)
+	}
+	if got, err := DocumentIDFromCitation(encodedDocument); err != nil || got != timelineDocA {
+		t.Fatalf("citation document = %q, %v", got, err)
 	}
 	if _, err := DecodeTimelineReference(EncodeMentionReference(timelineVersion, "not-a-uuid")); !errors.Is(err, ErrUnknownTimelineReference) {
 		t.Fatalf("invalid encoded reference = %v", err)
+	}
+}
+
+func TestTimelineCombinesIssuedSeedsUnderOneBudget(t *testing.T) {
+	at := time.Now().UTC()
+	reader := &fakeTimelineReader{snapshot: TimelineSnapshot{VersionID: timelineVersion, At: at}, seeds: []TimelineRecord{timelineRecord(timelineA, timelineDocA, "one", at)}}
+	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader}, "fixed")
+	out, err := service.Timeline(context.Background(), TimelineRequest{References: []string{
+		EncodeMentionReference(timelineVersion, timelineA),
+		EncodeMentionReference(timelineVersion, timelineB),
+	}, Limits: TimelineLimits{MaxNodes: 4, MaxBytes: 16, MaxLatency: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.resolveCalls != 2 || len(out.Nodes) != 1 || out.Budget.NodesUsed != 1 {
+		t.Fatalf("combined seed traversal = calls %d, result %+v", reader.resolveCalls, out)
+	}
+	if _, err := service.Timeline(context.Background(), TimelineRequest{Reference: EncodeMentionReference(timelineVersion, timelineA), References: []string{EncodeMentionReference(timelineVersion, timelineB)}}); !errors.Is(err, ErrInvalidTimelineRequest) {
+		t.Fatalf("mixed seed forms = %v", err)
 	}
 }
 

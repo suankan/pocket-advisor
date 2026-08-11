@@ -435,6 +435,7 @@ Run evaluation using the convention-based case path (no `--eval-cases` needed):
 ```
 
 The evaluator looks for cases at `workspaces/evaluation/<workspace>/cases.json` by default. It prints a human-readable summary and exits with status 0 when all thresholds pass.
+If the workspace has an active topic graph, the run also reports aggregate graph coverage, relation confidence and warning counts, and bounded timeline validity, budget, and omission metrics. These graph fields contain no source content, labels, graph or document references, paths, or workspace identity. A private thresholds JSON file may contain a `topic_graph` object with `mandatory: true` and coverage, confidence, timeline, omission, or warning limits; failing a mandatory graph gate makes the command exit nonzero.
 
 ### Readiness check
 

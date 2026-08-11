@@ -166,3 +166,29 @@ workspaces:
 		t.Fatalf("relation topic graph config = %#v", c.TopicGraph)
 	}
 }
+
+func TestTopicGraphExpansionDefaultsOffAndLoadsExplicitGate(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+  query:
+    topic_graph_expansion_enabled: true
+    topic_graph_min_confidence: 0.91
+    topic_graph_backward_depth: 3
+    topic_graph_forward_depth: 4
+    topic_graph_max_nodes: 9
+    topic_graph_max_bytes: 1024
+    topic_graph_max_seeds: 2
+workspaces:
+  config: registry.yaml
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Query.TopicGraphExpansionEnabled || c.Query.TopicGraphMinConfidence != .91 || c.Query.TopicGraphBackwardDepth != 3 || c.Query.TopicGraphForwardDepth != 4 || c.Query.TopicGraphMaxNodes != 9 || c.Query.TopicGraphMaxBytes != 1024 || c.Query.TopicGraphMaxSeeds != 2 {
+		t.Fatalf("topic graph expansion config = %#v", c.Query)
+	}
+	if defaults().Query.TopicGraphExpansionEnabled {
+		t.Fatal("graph expansion must remain disabled by default")
+	}
+}

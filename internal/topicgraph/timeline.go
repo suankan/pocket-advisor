@@ -52,6 +52,22 @@ func encodeDocumentReference(docID string) string {
 	return encodeTimelineRef(timelineDocumentRef, "", docID)
 }
 
+// DocumentIDFromCitation decodes the output-only document reference carried by
+// a source citation. It does not resolve a document, and cannot be used as a
+// traversal seed; a fixed-scope caller must still independently authorize any
+// source lookup.
+func DocumentIDFromCitation(value string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return "", ErrUnknownTimelineReference
+	}
+	text := string(raw)
+	if len(text) != 38 || text[:2] != timelineRefVersion+string(timelineDocumentRef) || !validUUID(text[2:]) {
+		return "", ErrUnknownTimelineReference
+	}
+	return text[2:], nil
+}
+
 func encodeTimelineRef(kind TimelineRefKind, versionID, id string) string {
 	// This is intentionally total for trusted server-side IDs. Invalid input
 	// cannot result from a store row and returns no reference rather than a
@@ -190,8 +206,13 @@ type TimelineStep struct {
 }
 
 type TimelineRequest struct {
-	Reference string
-	Limits    TimelineLimits
+	// Reference remains the single-seed request form. References permits a
+	// trusted fixed-scope caller to combine several issued mention/episode
+	// references under one aggregate traversal budget. Exactly one form is
+	// accepted.
+	Reference  string
+	References []string
+	Limits     TimelineLimits
 }
 
 type Citation struct {
@@ -244,7 +265,7 @@ func NewTimelineService(store TimelineStore, workspaceID string) (*TimelineServi
 func (s *TimelineService) Workspace() string { return s.workspace }
 
 func (s *TimelineService) Timeline(ctx context.Context, request TimelineRequest) (*TimelineResult, error) {
-	ref, err := DecodeTimelineReference(request.Reference)
+	refs, err := decodeTimelineReferences(request)
 	if err != nil {
 		return nil, err
 	}
@@ -263,12 +284,16 @@ func (s *TimelineService) Timeline(ctx context.Context, request TimelineRequest)
 	if snapshot.VersionID == "" {
 		return nil, ErrNoActiveTimeline
 	}
-	if ref.VersionID != snapshot.VersionID {
-		return nil, ErrUnknownTimelineReference
-	}
-	seeds, err := reader.ResolveTimelineReference(ctx, ref)
-	if err != nil {
-		return nil, timelineContextError(ctx, err)
+	var seeds []TimelineRecord
+	for _, ref := range refs {
+		if ref.VersionID != snapshot.VersionID {
+			return nil, ErrUnknownTimelineReference
+		}
+		resolved, err := reader.ResolveTimelineReference(ctx, ref)
+		if err != nil {
+			return nil, timelineContextError(ctx, err)
+		}
+		seeds = append(seeds, resolved...)
 	}
 	result, err := walkTimeline(ctx, reader, snapshot, seeds, limits)
 	if err != nil {
@@ -276,6 +301,37 @@ func (s *TimelineService) Timeline(ctx context.Context, request TimelineRequest)
 	}
 	return result, nil
 }
+func decodeTimelineReferences(request TimelineRequest) ([]TimelineReference, error) {
+	if request.Reference != "" && len(request.References) > 0 {
+		return nil, ErrInvalidTimelineRequest
+	}
+	values := request.References
+	if request.Reference != "" {
+		values = []string{request.Reference}
+	}
+	if len(values) == 0 {
+		return nil, ErrUnknownTimelineReference
+	}
+	refs := make([]TimelineReference, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		ref, err := DecodeTimelineReference(value)
+		if err != nil {
+			return nil, err
+		}
+		key := string(ref.Kind) + "\x00" + ref.VersionID + "\x00" + ref.ID
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return nil, ErrUnknownTimelineReference
+	}
+	return refs, nil
+}
+
 func timelineContextError(ctx context.Context, err error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return ErrTimelineDeadline

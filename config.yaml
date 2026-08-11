@@ -127,6 +127,17 @@ infra:
     relation_max_candidates: 512
     relation_min_confidence: 0.80
 
+  # Optional graph expansion is deliberately off: normal source-first retrieval
+  # does not read derived graph data unless an operator enables this gate.
+  query:
+    topic_graph_expansion_enabled: false
+    topic_graph_min_confidence: 0.85
+    topic_graph_backward_depth: 2
+    topic_graph_forward_depth: 2
+    topic_graph_max_nodes: 16
+    topic_graph_max_bytes: 16384
+    topic_graph_max_seeds: 8
+
   observability:
     metrics_port: 9090
     log_level: info

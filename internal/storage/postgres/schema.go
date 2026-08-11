@@ -253,9 +253,9 @@ CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
     ON email_identifier_nodes(doc_id) WHERE doc_id IS NOT NULL;
 `
 
-// topicGraphSchemaSQL is the replaceable, source-backed topic mention layer.
-// It deliberately has no episode or relation tables: this first substrate only
-// records validated evidence annotations and their explicit build lifecycle.
+// topicGraphSchemaSQL is the replaceable, source-backed topic graph layer. It
+// records validated mentions plus explicit deterministic relation candidates,
+// supported edges, and their derived episode memberships.
 const topicGraphSchemaSQL = `
 CREATE TABLE IF NOT EXISTS topic_graph_versions (
     version_id              UUID PRIMARY KEY,
@@ -314,6 +314,126 @@ CREATE TABLE IF NOT EXISTS topic_mention_spans (
 CREATE INDEX IF NOT EXISTS topic_mention_spans_source_idx
     ON topic_mention_spans(workspace_id, doc_id, start_byte, end_byte);
 
+-- Existing workspaces may have received topic_mentions before the version
+-- scoped key above existed. The key makes every relation foreign key prove its
+-- endpoints are in this exact replaceable graph version, not merely a global
+-- mention UUID.
+DO $$ BEGIN
+    ALTER TABLE topic_mentions
+        ADD CONSTRAINT topic_mentions_version_scope_key
+        UNIQUE (mention_id, version_id, workspace_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Relation candidates are explicitly supplied by a trusted deterministic
+-- writer. They preserve even unsupported assessments for evaluation, while
+-- topic_relation_edges contains only the candidates admitted as supported.
+-- No label, embedding, or similarity value participates in this schema.
+CREATE TABLE IF NOT EXISTS topic_relation_candidates (
+    candidate_id       UUID PRIMARY KEY,
+    version_id         UUID NOT NULL,
+    workspace_id       VARCHAR NOT NULL,
+    earlier_mention_id UUID NOT NULL,
+    later_mention_id   UUID NOT NULL,
+    relation_type      VARCHAR NOT NULL CHECK (relation_type IN
+                           ('addresses','continues','elaborates','contradicts',
+                            'states_resolution','possibly_related')),
+    confidence         DOUBLE PRECISION NOT NULL CHECK
+                           (confidence >= 0 AND confidence <= 1
+                            AND confidence <> 'NaN'::double precision),
+    method             VARCHAR NOT NULL CHECK (octet_length(method) BETWEEN 1 AND 128),
+    method_version     VARCHAR NOT NULL CHECK (octet_length(method_version) BETWEEN 1 AND 128),
+    supported          BOOLEAN NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (candidate_id, version_id, workspace_id),
+    FOREIGN KEY (version_id, workspace_id)
+        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (earlier_mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (later_mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    CHECK (earlier_mention_id <> later_mention_id)
+);
+
+CREATE INDEX IF NOT EXISTS topic_relation_candidates_version_idx
+    ON topic_relation_candidates(workspace_id, version_id, candidate_id);
+CREATE INDEX IF NOT EXISTS topic_relation_candidates_mentions_idx
+    ON topic_relation_candidates(workspace_id, version_id, earlier_mention_id, later_mention_id);
+
+-- Supporting mention IDs are normalized so they receive the same strict graph
+-- version foreign key as edge endpoints and can be inspected without storing
+-- source text or prompt transcripts.
+CREATE TABLE IF NOT EXISTS topic_relation_candidate_supports (
+    candidate_id          UUID NOT NULL,
+    version_id            UUID NOT NULL,
+    workspace_id          VARCHAR NOT NULL,
+    supporting_mention_id UUID NOT NULL,
+    PRIMARY KEY (candidate_id, supporting_mention_id),
+    FOREIGN KEY (candidate_id, version_id, workspace_id)
+        REFERENCES topic_relation_candidates(candidate_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (supporting_mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS topic_relation_candidate_supports_mention_idx
+    ON topic_relation_candidate_supports(workspace_id, version_id, supporting_mention_id);
+
+-- An edge is an immutable projection of one supported candidate in a BUILDING
+-- version. Duplicating its traversal fields avoids joining candidates on every
+-- bounded traversal while preserving the candidate as its explanation.
+CREATE TABLE IF NOT EXISTS topic_relation_edges (
+    candidate_id       UUID PRIMARY KEY,
+    version_id         UUID NOT NULL,
+    workspace_id       VARCHAR NOT NULL,
+    earlier_mention_id UUID NOT NULL,
+    later_mention_id   UUID NOT NULL,
+    relation_type      VARCHAR NOT NULL CHECK (relation_type IN
+                           ('addresses','continues','elaborates','contradicts',
+                            'states_resolution','possibly_related')),
+    confidence         DOUBLE PRECISION NOT NULL CHECK
+                           (confidence >= 0 AND confidence <= 1
+                            AND confidence <> 'NaN'::double precision),
+    UNIQUE (candidate_id, version_id, workspace_id),
+    FOREIGN KEY (candidate_id, version_id, workspace_id)
+        REFERENCES topic_relation_candidates(candidate_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (earlier_mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (later_mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    CHECK (earlier_mention_id <> later_mention_id)
+);
+CREATE INDEX IF NOT EXISTS topic_relation_edges_forward_idx
+    ON topic_relation_edges(workspace_id, version_id, earlier_mention_id, later_mention_id);
+CREATE INDEX IF NOT EXISTS topic_relation_edges_reverse_idx
+    ON topic_relation_edges(workspace_id, version_id, later_mention_id, earlier_mention_id);
+
+-- Episodes are not classifier output. The repository recreates these rows as
+-- the undirected connected components of supported edges; unconnected and
+-- merely similar mentions have no episode membership.
+CREATE TABLE IF NOT EXISTS topic_episodes (
+    episode_id   UUID PRIMARY KEY,
+    version_id   UUID NOT NULL,
+    workspace_id VARCHAR NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (episode_id, version_id, workspace_id),
+    FOREIGN KEY (version_id, workspace_id)
+        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS topic_episodes_version_idx
+    ON topic_episodes(workspace_id, version_id, episode_id);
+
+CREATE TABLE IF NOT EXISTS topic_episode_memberships (
+    episode_id   UUID NOT NULL,
+    mention_id   UUID NOT NULL,
+    version_id   UUID NOT NULL,
+    workspace_id VARCHAR NOT NULL,
+    PRIMARY KEY (episode_id, mention_id),
+    FOREIGN KEY (episode_id, version_id, workspace_id)
+        REFERENCES topic_episodes(episode_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (mention_id, version_id, workspace_id)
+        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS topic_episode_memberships_mention_idx
+    ON topic_episode_memberships(workspace_id, version_id, mention_id, episode_id);
+
 -- Configuration and extraction metadata identify the evaluated build and are
 -- immutable. Only the closed lifecycle transitions below may update a version.
 CREATE OR REPLACE FUNCTION topic_graph_version_guard() RETURNS trigger AS $$
@@ -371,6 +491,103 @@ DROP TRIGGER IF EXISTS topic_graph_mentions_building_guard_trigger ON topic_ment
 CREATE TRIGGER topic_graph_mentions_building_guard_trigger
     BEFORE INSERT OR UPDATE OR DELETE ON topic_mentions
     FOR EACH ROW EXECUTE FUNCTION topic_graph_mentions_building_guard();
+
+-- Candidates, supported edges, and component memberships are all replaceable
+-- derived state. The guard gives them the same BUILDING-only lifecycle as
+-- mention replacement and permits cascade deletion only during explicit graph
+-- removal.
+CREATE OR REPLACE FUNCTION topic_graph_derived_building_guard() RETURNS trigger AS $$
+DECLARE
+    graph_status VARCHAR;
+    graph_version UUID;
+    graph_workspace VARCHAR;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        graph_version := OLD.version_id;
+        graph_workspace := OLD.workspace_id;
+    ELSE
+        graph_version := NEW.version_id;
+        graph_workspace := NEW.workspace_id;
+    END IF;
+    SELECT status INTO graph_status FROM topic_graph_versions
+    WHERE version_id = graph_version AND workspace_id = graph_workspace;
+    IF graph_status IS DISTINCT FROM 'BUILDING'
+       AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
+        RAISE EXCEPTION 'topic graph derived state is mutable only while graph version is BUILDING';
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS topic_relation_candidates_building_guard_trigger ON topic_relation_candidates;
+CREATE TRIGGER topic_relation_candidates_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_candidates
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
+DROP TRIGGER IF EXISTS topic_relation_candidate_supports_building_guard_trigger ON topic_relation_candidate_supports;
+CREATE TRIGGER topic_relation_candidate_supports_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_candidate_supports
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
+DROP TRIGGER IF EXISTS topic_relation_edges_building_guard_trigger ON topic_relation_edges;
+CREATE TRIGGER topic_relation_edges_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_edges
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
+DROP TRIGGER IF EXISTS topic_episodes_building_guard_trigger ON topic_episodes;
+CREATE TRIGGER topic_episodes_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_episodes
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
+DROP TRIGGER IF EXISTS topic_episode_memberships_building_guard_trigger ON topic_episode_memberships;
+CREATE TRIGGER topic_episode_memberships_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_episode_memberships
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
+
+-- Repository validation is the normal write path, but the edge guard repeats
+-- its two safety invariants for a stray SQL writer: exact email chronology and
+-- an acyclic directed edge set. NULL sent_at values sort after dated messages,
+-- then doc_id is the immutable tie-breaker.
+CREATE OR REPLACE FUNCTION topic_relation_edge_chronology_cycle_guard() RETURNS trigger AS $$
+DECLARE
+    earlier_sent TIMESTAMPTZ;
+    later_sent TIMESTAMPTZ;
+    earlier_doc UUID;
+    later_doc UUID;
+    cycle_found BOOLEAN;
+BEGIN
+    SELECT em.sent_at, tm.doc_id INTO earlier_sent, earlier_doc
+    FROM topic_mentions tm JOIN email_messages em
+      ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
+    WHERE tm.mention_id = NEW.earlier_mention_id
+      AND tm.version_id = NEW.version_id AND tm.workspace_id = NEW.workspace_id;
+    SELECT em.sent_at, tm.doc_id INTO later_sent, later_doc
+    FROM topic_mentions tm JOIN email_messages em
+      ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
+    WHERE tm.mention_id = NEW.later_mention_id
+      AND tm.version_id = NEW.version_id AND tm.workspace_id = NEW.workspace_id;
+    IF (earlier_sent IS NULL AND (later_sent IS NOT NULL OR earlier_doc >= later_doc))
+       OR (earlier_sent IS NOT NULL AND later_sent IS NOT NULL
+           AND (earlier_sent > later_sent OR (earlier_sent = later_sent AND earlier_doc >= later_doc))) THEN
+        RAISE EXCEPTION 'topic relation edge violates sent_at/doc_id chronology';
+    END IF;
+    WITH RECURSIVE reachable(mention_id) AS (
+        SELECT NEW.later_mention_id
+        UNION
+        SELECT e.later_mention_id
+        FROM topic_relation_edges e JOIN reachable r ON e.earlier_mention_id = r.mention_id
+        WHERE e.version_id = NEW.version_id AND e.workspace_id = NEW.workspace_id
+    )
+    SELECT EXISTS (SELECT 1 FROM reachable WHERE mention_id = NEW.earlier_mention_id)
+      INTO cycle_found;
+    IF cycle_found THEN
+        RAISE EXCEPTION 'topic relation edge creates a cycle';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS topic_relation_edges_chronology_cycle_guard_trigger ON topic_relation_edges;
+CREATE TRIGGER topic_relation_edges_chronology_cycle_guard_trigger
+    BEFORE INSERT OR UPDATE ON topic_relation_edges
+    FOR EACH ROW EXECUTE FUNCTION topic_relation_edge_chronology_cycle_guard();
 `
 
 // searchIndexName is the lexical leg's BM25 index. Named, not anonymous,

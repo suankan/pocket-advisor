@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -123,6 +124,16 @@ func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string
 	}
 	if err := topicgraph.ValidateReplacement(spec, request, texts); err != nil {
 		return err
+	}
+
+	// A mention replacement changes the evidence set on which every relation
+	// and component depends. Conservatively discard the entire relation layer;
+	// a trusted deterministic writer must replace it again after mention build.
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+		return fmt.Errorf("clear topic episodes before mention replacement: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+		return fmt.Errorf("clear topic relations before mention replacement: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -345,4 +356,227 @@ func loadTopicSourceTexts(ctx context.Context, tx pgx.Tx, workspaceID string, do
 		return nil, topicgraph.ErrInvalidRequest
 	}
 	return texts, nil
+}
+
+// ReplaceRelationCandidates persists only caller-supplied deterministic
+// candidates. It deliberately has no LLM, vector, label, retrieval, or MCP
+// dependency. Supported candidates project to chronological edges, and the
+// resulting undirected edge components are the only source of episodes.
+func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspaceID string, request topicgraph.ReplaceRelationCandidatesRequest) error {
+	if workspaceID == "" {
+		return topicgraph.ErrInvalidRequest
+	}
+	if err := topicgraph.ValidateRelationCandidates(request); err != nil {
+		return err
+	}
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin topic relation replacement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, request.VersionID, true)
+	if err != nil {
+		return err
+	}
+	if status != topicgraph.StatusBuilding {
+		return topicgraph.ErrNotBuilding
+	}
+	mentions, err := loadTopicRelationMentions(ctx, tx, workspaceID, request)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range request.Candidates {
+		if !chronologicallyBefore(mentions[candidate.EarlierMentionID], mentions[candidate.LaterMentionID]) {
+			return topicgraph.ErrRelationChronology
+		}
+	}
+
+	// Clear the derived projection before the candidates. Both deletes are
+	// BUILDING-only database operations, so a stray writer cannot mutate an
+	// evaluated graph behind this deterministic replacement API.
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+		return fmt.Errorf("clear topic episodes: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+		return fmt.Errorf("clear topic relation candidates: %w", err)
+	}
+
+	components := newTopicComponents()
+	for _, candidate := range request.Candidates {
+		candidateID := topicgraph.RelationCandidateID(request.VersionID, candidate)
+		if _, err := tx.Exec(ctx, `
+            INSERT INTO topic_relation_candidates
+                (candidate_id, version_id, workspace_id, earlier_mention_id,
+                 later_mention_id, relation_type, confidence, method,
+                 method_version, supported)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			candidateID, request.VersionID, workspaceID, candidate.EarlierMentionID,
+			candidate.LaterMentionID, candidate.Type, candidate.Confidence,
+			candidate.Method, candidate.MethodVersion, candidate.Supported); err != nil {
+			return fmt.Errorf("insert topic relation candidate: %w", err)
+		}
+		supporting := append([]string(nil), candidate.SupportingMentionIDs...)
+		sort.Strings(supporting)
+		for _, mentionID := range supporting {
+			if _, err := tx.Exec(ctx, `
+                INSERT INTO topic_relation_candidate_supports
+                    (candidate_id, version_id, workspace_id, supporting_mention_id)
+                VALUES ($1, $2, $3, $4)`, candidateID, request.VersionID, workspaceID, mentionID); err != nil {
+				return fmt.Errorf("insert topic relation support: %w", err)
+			}
+		}
+		if !candidate.Supported {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+            INSERT INTO topic_relation_edges
+                (candidate_id, version_id, workspace_id, earlier_mention_id,
+                 later_mention_id, relation_type, confidence)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			candidateID, request.VersionID, workspaceID, candidate.EarlierMentionID,
+			candidate.LaterMentionID, candidate.Type, candidate.Confidence); err != nil {
+			return fmt.Errorf("insert topic relation edge: %w", err)
+		}
+		components.union(candidate.EarlierMentionID, candidate.LaterMentionID)
+	}
+	for _, memberIDs := range components.groups() {
+		episodeID := topicgraph.EpisodeID(request.VersionID, memberIDs)
+		if _, err := tx.Exec(ctx, `
+            INSERT INTO topic_episodes (episode_id, version_id, workspace_id)
+            VALUES ($1, $2, $3)`, episodeID, request.VersionID, workspaceID); err != nil {
+			return fmt.Errorf("insert topic episode: %w", err)
+		}
+		for _, mentionID := range memberIDs {
+			if _, err := tx.Exec(ctx, `
+                INSERT INTO topic_episode_memberships
+                    (episode_id, mention_id, version_id, workspace_id)
+                VALUES ($1, $2, $3, $4)`, episodeID, mentionID, request.VersionID, workspaceID); err != nil {
+				return fmt.Errorf("insert topic episode membership: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit topic relation replacement: %w", err)
+	}
+	return nil
+}
+
+type topicRelationMention struct {
+	docID  string
+	sentAt *time.Time
+}
+
+// loadTopicRelationMentions proves every endpoint and source mention belongs
+// to the requested graph version and fixed workspace. Chronology comes from
+// exact email metadata, never a generated label or candidate confidence.
+func loadTopicRelationMentions(ctx context.Context, tx pgx.Tx, workspaceID string, request topicgraph.ReplaceRelationCandidatesRequest) (map[string]topicRelationMention, error) {
+	ids := make([]string, 0, len(request.Candidates)*3)
+	seen := make(map[string]struct{}, len(request.Candidates)*3)
+	for _, candidate := range request.Candidates {
+		for _, id := range append([]string{candidate.EarlierMentionID, candidate.LaterMentionID}, candidate.SupportingMentionIDs...) {
+			if _, exists := seen[id]; !exists {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return map[string]topicRelationMention{}, nil
+	}
+	rows, err := tx.Query(ctx, `
+        SELECT tm.mention_id::text, tm.doc_id::text, em.sent_at
+        FROM topic_mentions tm
+        JOIN email_messages em ON em.doc_id = tm.doc_id
+                            AND em.workspace_id = tm.workspace_id
+        WHERE tm.workspace_id = $1 AND tm.version_id = $2
+          AND tm.mention_id = ANY($3::uuid[])`, workspaceID, request.VersionID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load topic relation mentions: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]topicRelationMention, len(ids))
+	for rows.Next() {
+		var id string
+		var mention topicRelationMention
+		if err := rows.Scan(&id, &mention.docID, &mention.sentAt); err != nil {
+			return nil, fmt.Errorf("scan topic relation mention: %w", err)
+		}
+		result[id] = mention
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load topic relation mentions: %w", err)
+	}
+	if len(result) != len(ids) {
+		return nil, topicgraph.ErrInvalidRelation
+	}
+	return result, nil
+}
+
+// chronologicallyBefore implements the graph's only ordering rule: sent_at
+// ascending, then immutable doc_id ascending. Undated messages sort after
+// dated messages and use doc_id amongst themselves, matching the explicit
+// NULLS LAST policy rather than inventing an ingestion-time chronology.
+func chronologicallyBefore(a, b topicRelationMention) bool {
+	if a.sentAt == nil {
+		if b.sentAt != nil {
+			return false
+		}
+		return a.docID < b.docID
+	}
+	if b.sentAt == nil {
+		return true
+	}
+	if a.sentAt.Equal(*b.sentAt) {
+		return a.docID < b.docID
+	}
+	return a.sentAt.Before(*b.sentAt)
+}
+
+type topicComponents struct {
+	parent map[string]string
+}
+
+func newTopicComponents() *topicComponents { return &topicComponents{parent: make(map[string]string)} }
+
+func (c *topicComponents) find(id string) string {
+	parent, exists := c.parent[id]
+	if !exists {
+		c.parent[id] = id
+		return id
+	}
+	if parent == id {
+		return id
+	}
+	root := c.find(parent)
+	c.parent[id] = root
+	return root
+}
+
+func (c *topicComponents) union(a, b string) {
+	a, b = c.find(a), c.find(b)
+	if a == b {
+		return
+	}
+	// Deterministic roots make grouping independent of candidate input order.
+	if a < b {
+		c.parent[b] = a
+	} else {
+		c.parent[a] = b
+	}
+}
+
+func (c *topicComponents) groups() [][]string {
+	groups := make(map[string][]string)
+	for id := range c.parent {
+		root := c.find(id)
+		groups[root] = append(groups[root], id)
+	}
+	out := make([][]string, 0, len(groups))
+	for _, members := range groups {
+		sort.Strings(members)
+		out = append(out, members)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }

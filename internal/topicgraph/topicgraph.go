@@ -109,6 +109,7 @@ type ReplaceRequest struct {
 type Store interface {
 	CreateBuilding(context.Context, string, VersionSpec) error
 	ReplaceMentions(context.Context, string, ReplaceRequest) error
+	ReplaceRelationCandidates(context.Context, string, ReplaceRelationCandidatesRequest) error
 	Finalize(context.Context, string, string) error
 	Promote(context.Context, string, string) error
 	Retire(context.Context, string, string) error
@@ -138,6 +139,12 @@ func (s *Service) CreateBuilding(ctx context.Context, spec VersionSpec) error {
 }
 func (s *Service) ReplaceMentions(ctx context.Context, request ReplaceRequest) error {
 	return s.store.ReplaceMentions(ctx, s.workspace, request)
+}
+
+// ReplaceRelationCandidates accepts only explicit deterministic inputs. No
+// local LLM or retrieval path is wired to this relation write boundary.
+func (s *Service) ReplaceRelationCandidates(ctx context.Context, request ReplaceRelationCandidatesRequest) error {
+	return s.store.ReplaceRelationCandidates(ctx, s.workspace, request)
 }
 func (s *Service) Finalize(ctx context.Context, versionID string) error {
 	return s.store.Finalize(ctx, s.workspace, versionID)
@@ -250,12 +257,16 @@ func MentionID(versionID string, mention Mention) string {
 		fmt.Fprintf(&b, "\x00%s\x00%d\x00%d\x00%s\x00%s", span.DocID, span.StartByte, span.EndByte,
 			span.NormalizedTextSHA256, span.SliceSHA256)
 	}
-	// UUIDv5 formatting with a fixed namespace, implemented locally to avoid
-	// making graph identity depend on a transport or database extension.
+	return stableUUID(b.String())
+}
+
+// stableUUID implements UUIDv5 identity with a fixed namespace without making
+// a derived graph identifier depend on a database extension or transport.
+func stableUUID(value string) string {
 	namespace := [16]byte{0x6b, 0xa7, 0xb8, 0x12, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8}
 	h := sha1.New()
 	h.Write(namespace[:])
-	h.Write([]byte(b.String()))
+	h.Write([]byte(value))
 	sum := h.Sum(nil)
 	sum[6] = (sum[6] & 0x0f) | 0x50
 	sum[8] = (sum[8] & 0x3f) | 0x80

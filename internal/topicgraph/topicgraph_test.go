@@ -110,8 +110,9 @@ func TestMentionIDIsStableAndSeparatesEvidence(t *testing.T) {
 }
 
 type recordingStore struct {
-	workspace string
-	request   ReplaceRequest
+	workspace       string
+	request         ReplaceRequest
+	relationRequest ReplaceRelationCandidatesRequest
 }
 
 func (s *recordingStore) CreateBuilding(_ context.Context, workspace string, _ VersionSpec) error {
@@ -120,6 +121,10 @@ func (s *recordingStore) CreateBuilding(_ context.Context, workspace string, _ V
 }
 func (s *recordingStore) ReplaceMentions(_ context.Context, workspace string, request ReplaceRequest) error {
 	s.workspace, s.request = workspace, request
+	return nil
+}
+func (s *recordingStore) ReplaceRelationCandidates(_ context.Context, workspace string, request ReplaceRelationCandidatesRequest) error {
+	s.workspace, s.relationRequest = workspace, request
 	return nil
 }
 func (s *recordingStore) Finalize(_ context.Context, workspace, _ string) error {
@@ -152,6 +157,12 @@ func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	if store.workspace != "workspace-a" || store.request.VersionID != testVersionID {
 		t.Fatalf("store received workspace=%q request=%+v", store.workspace, store.request)
 	}
+	if err := service.ReplaceRelationCandidates(context.Background(), ReplaceRelationCandidatesRequest{VersionID: testVersionID}); err != nil {
+		t.Fatal(err)
+	}
+	if store.workspace != "workspace-a" || store.relationRequest.VersionID != testVersionID {
+		t.Fatalf("relation write escaped workspace: workspace=%q request=%+v", store.workspace, store.relationRequest)
+	}
 	if err := service.Retire(context.Background(), testVersionID); err != nil {
 		t.Fatal(err)
 	}
@@ -166,5 +177,64 @@ func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	}
 	if _, err := New(store, ""); err == nil {
 		t.Fatal("empty workspace accepted")
+	}
+}
+
+const (
+	testMentionA = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	testMentionB = "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	testMentionC = "cccccccc-cccc-5ccc-8ccc-cccccccccccc"
+)
+
+func testRelation(earlier, later string) RelationCandidate {
+	return RelationCandidate{
+		EarlierMentionID: earlier, LaterMentionID: later, Type: RelationContinues,
+		Confidence: .75, SupportingMentionIDs: []string{earlier, later},
+		Method: "exact-reference-v1", MethodVersion: "v1", Supported: true,
+	}
+}
+
+func TestRelationCandidateValidationIsClosedAndBounded(t *testing.T) {
+	candidate := testRelation(testMentionA, testMentionB)
+	request := ReplaceRelationCandidatesRequest{VersionID: testVersionID, Candidates: []RelationCandidate{candidate}}
+	if err := ValidateRelationCandidates(request); err != nil {
+		t.Fatalf("valid deterministic relation rejected: %v", err)
+	}
+	candidate.Type = "resolves"
+	request.Candidates = []RelationCandidate{candidate}
+	if err := ValidateRelationCandidates(request); !errors.Is(err, ErrInvalidRelation) {
+		t.Fatalf("unqualified resolves = %v, want ErrInvalidRelation", err)
+	}
+	candidate = testRelation(testMentionA, testMentionB)
+	candidate.Confidence = 1.01
+	request.Candidates = []RelationCandidate{candidate}
+	if err := ValidateRelationCandidates(request); !errors.Is(err, ErrInvalidRelation) {
+		t.Fatalf("unbounded confidence = %v, want ErrInvalidRelation", err)
+	}
+	candidate = testRelation(testMentionA, testMentionB)
+	candidate.SupportingMentionIDs = []string{testMentionA, testMentionA}
+	request.Candidates = []RelationCandidate{candidate}
+	if err := ValidateRelationCandidates(request); !errors.Is(err, ErrInvalidRelation) {
+		t.Fatalf("duplicate support = %v, want ErrInvalidRelation", err)
+	}
+}
+
+func TestRelationCandidatesRejectSupportedCyclesAndHaveStableIDs(t *testing.T) {
+	forward := testRelation(testMentionA, testMentionB)
+	backward := testRelation(testMentionB, testMentionA)
+	request := ReplaceRelationCandidatesRequest{VersionID: testVersionID, Candidates: []RelationCandidate{forward, backward}}
+	if err := ValidateRelationCandidates(request); !errors.Is(err, ErrRelationCycle) {
+		t.Fatalf("cycle = %v, want ErrRelationCycle", err)
+	}
+	forward.SupportingMentionIDs = []string{testMentionB, testMentionA}
+	if RelationCandidateID(testVersionID, forward) != RelationCandidateID(testVersionID, testRelation(testMentionA, testMentionB)) {
+		t.Fatal("support mention order changed deterministic candidate ID")
+	}
+	first := EpisodeID(testVersionID, []string{testMentionB, testMentionA})
+	if first != EpisodeID(testVersionID, []string{testMentionA, testMentionB}) {
+		t.Fatal("episode identity depends on caller member order")
+	}
+	if first == EpisodeID(testVersionID, []string{testMentionA, testMentionC}) {
+		t.Fatal("different supported component reused episode identity")
 	}
 }

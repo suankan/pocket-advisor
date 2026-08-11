@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/topicgraph"
@@ -41,12 +42,12 @@ func TestTopicGraphSchemaFreshAndUpgrade(t *testing.T) {
 			if err := db.ApplySchema(ctx, stageBMeta()); err != nil {
 				t.Fatalf("apply schema: %v", err)
 			}
-			for _, table := range []string{"topic_graph_versions", "topic_mentions", "topic_mention_spans"} {
+			for _, table := range []string{"topic_graph_versions", "topic_mentions", "topic_mention_spans", "topic_relation_candidates", "topic_relation_candidate_supports", "topic_relation_edges", "topic_episodes", "topic_episode_memberships"} {
 				if !relationExists(t, db, schema, table) {
 					t.Errorf("table %s missing", table)
 				}
 			}
-			for _, index := range []string{"topic_graph_versions_one_active_idx", "topic_mentions_source_idx", "topic_mention_spans_source_idx"} {
+			for _, index := range []string{"topic_graph_versions_one_active_idx", "topic_mentions_source_idx", "topic_mention_spans_source_idx", "topic_relation_candidates_mentions_idx", "topic_relation_edges_forward_idx", "topic_episode_memberships_mention_idx"} {
 				if !indexExists(t, db, schema, index) {
 					t.Errorf("index %s missing", index)
 				}
@@ -182,5 +183,81 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 	}
 	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, childRequest); !errors.Is(err, topicgraph.ErrInvalidRequest) {
 		t.Fatalf("child source replacement = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
+	db, _ := scratch(t, "topicrelations")
+	ctx := context.Background()
+	if err := db.ApplySchema(ctx, stageBMeta()); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewTopicGraphRepo(db)
+	emailRepo := NewEmailRepo(db)
+	versionID := "44444444-4444-5444-8444-444444444444"
+	if err := repo.CreateBuilding(ctx, stageBWorkspace, topicSpec(versionID)); err != nil {
+		t.Fatal(err)
+	}
+
+	text := "café topic"
+	docIDs := []string{
+		document(t, db, strings.Repeat("1", 64)),
+		document(t, db, strings.Repeat("2", 64)),
+		document(t, db, strings.Repeat("3", 64)),
+	}
+	mentions := make([]topicgraph.Mention, 0, len(docIDs))
+	for i, docID := range docIDs {
+		if _, err := db.Pool.Exec(ctx, `UPDATE documents SET normalized_text = $1 WHERE doc_id = $2`, text, docID); err != nil {
+			t.Fatal(err)
+		}
+		m := message(docID, fmt.Sprintf("topic-%d@mail.example.test", i), "Topic", "")
+		m.SentAt = time.Date(2026, 1, 7+i, 8, 12, 30, 0, time.UTC)
+		if _, err := emailRepo.SaveEmailMessage(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+		mentions = append(mentions, topicMention(docID, text))
+		if err := repo.ReplaceMentions(ctx, stageBWorkspace, topicgraph.ReplaceRequest{
+			VersionID: versionID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{mentions[i]},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mentionIDs := []string{
+		topicgraph.MentionID(versionID, mentions[0]),
+		topicgraph.MentionID(versionID, mentions[1]),
+		topicgraph.MentionID(versionID, mentions[2]),
+	}
+	request := topicgraph.ReplaceRelationCandidatesRequest{VersionID: versionID, Candidates: []topicgraph.RelationCandidate{
+		{EarlierMentionID: mentionIDs[0], LaterMentionID: mentionIDs[1], Type: topicgraph.RelationAddresses,
+			Confidence: .9, SupportingMentionIDs: []string{mentionIDs[0], mentionIDs[1]}, Method: "exact-reference", MethodVersion: "v1", Supported: true},
+		{EarlierMentionID: mentionIDs[1], LaterMentionID: mentionIDs[2], Type: topicgraph.RelationPossiblyRelated,
+			Confidence: .2, SupportingMentionIDs: []string{mentionIDs[1], mentionIDs[2]}, Method: "exact-reference", MethodVersion: "v1", Supported: false},
+	}}
+	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, request); err != nil {
+		t.Fatalf("persist relations: %v", err)
+	}
+	var candidates, edges, episodes, memberships, supports int
+	if err := db.Pool.QueryRow(ctx, `
+        SELECT (SELECT count(*) FROM topic_relation_candidates),
+               (SELECT count(*) FROM topic_relation_edges),
+               (SELECT count(*) FROM topic_episodes),
+               (SELECT count(*) FROM topic_episode_memberships),
+               (SELECT count(*) FROM topic_relation_candidate_supports)`).
+		Scan(&candidates, &edges, &episodes, &memberships, &supports); err != nil {
+		t.Fatal(err)
+	}
+	if candidates != 2 || edges != 1 || episodes != 1 || memberships != 2 || supports != 4 {
+		t.Fatalf("candidates=%d edges=%d episodes=%d memberships=%d supports=%d, want 2/1/1/2/4", candidates, edges, episodes, memberships, supports)
+	}
+
+	// Reversing the exact sent_at order is rejected before it can clear the
+	// existing component or create a backward edge.
+	request.Candidates = []topicgraph.RelationCandidate{request.Candidates[0]}
+	request.Candidates[0].EarlierMentionID, request.Candidates[0].LaterMentionID = mentionIDs[1], mentionIDs[0]
+	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, request); !errors.Is(err, topicgraph.ErrRelationChronology) {
+		t.Fatalf("backward chronology = %v, want ErrRelationChronology", err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM topic_relation_edges`).Scan(&edges); err != nil || edges != 1 {
+		t.Fatalf("failed replacement changed edges=%d: %v", edges, err)
 	}
 }

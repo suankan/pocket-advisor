@@ -19,7 +19,7 @@ The authoritative ingestion, retrieval, MCP, and public-interface behavior remai
 
 ## Priority and dependencies
 
-This task follows [email browse and conversation model](p1-1-email-browse-and-thread-model.md). It requires that task's durable canonical Message-ID/reference model, normalized mailbox identities, exact reply relationships, source-message distinction, owner configuration, and deterministic browse cursor semantics.
+This task requires the implemented durable email model: canonical Message-ID/reference metadata and conversations in [ingestion design](../ingestion-design.md), exact browse and cursor semantics in [retrieval design](../retrieval-design.md), and the fixed-workspace mailbox interface in [MCP server design](../mcp.md).
 
 The graph must build on the existing workspace PostgreSQL/pgvector deployment. Do not introduce Neo4j, Memgraph, Apache AGE, or another graph datastore in this task. [Evidence-backed email and topic analysis](p1-2-evidence-backed-email-analysis.md) may consume the graph after its retrieval and evidence semantics are stable.
 

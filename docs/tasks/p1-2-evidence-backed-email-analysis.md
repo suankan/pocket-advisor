@@ -19,7 +19,7 @@ The authoritative retrieval design remains [`docs/retrieval-design.md`](../retri
 
 ## Priority and dependencies
 
-This is a P1 end-user capability immediately after [`p1-1-email-browse-and-thread-model.md`](p1-1-email-browse-and-thread-model.md). It also depends on the implemented [MCP evidence interface](../mcp.md). Implement and tune it with the [supported retrieval-evaluation workflow](../../README.md#8-evaluate-retrieval-quality).
+This P1 end-user capability builds on the implemented [email conversation and exact-browse model](../retrieval-design.md#exact-email-browse). It also depends on the implemented [MCP evidence interface](../mcp.md). Implement and tune it with the [supported retrieval-evaluation workflow](../../README.md#8-evaluate-retrieval-quality).
 
 The first supported experience may use an external MCP agent for final prose. Native generation remains a separate future concern.
 

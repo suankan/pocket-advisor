@@ -41,6 +41,18 @@ Tool descriptions instruct the MCP agent that the tool returns workspace evidenc
 
 The continuation description instructs the agent to accept only the opaque cursor returned by search or by this tool, to not construct a cursor or request a byte range, document, result, or workspace directly, to cite complete result-scoped references on the page, and to call the tool again with `next_cursor` when `complete=false`.
 
+## Exact mailbox tools
+
+The fixed-workspace mailbox tools provide deterministic email evidence alongside semantic retrieval. They never accept a workspace, owner identity, SQL expression, document path, credential, or client-constructed reference.
+
+`list_messages` accepts bounded exact normalized sender and recipient filters, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, optional conversation collapse, and an opaque cursor. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
+
+`fetch_conversation` accepts exactly one server-issued message or conversation reference. It returns the complete bounded email-only conversation in stable chronological order. Each relationship is labelled `in_reply_to`, `references_recovery`, `root`, or `unresolved`; duplicate, ambiguous, missing, and malformed linkage remains visible as a warning rather than becoming an arbitrary edge.
+
+`awaiting_reply_candidates` accepts bounded participant and date filters and requires configured owner identities. It returns candidates whose latest relevant human inbound message has no later human owner-authored exact-reply descendant. A candidate is evidence for review, not a conclusion that action is required. Subject grouping, semantic similarity, and an unlinked outbound message never prove that a reply occurred. Automated, list, delivery, and third-party events remain labelled context rather than silently closing a candidate.
+
+Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
+
 ## Evidence interface
 
 ### Evidence page structure

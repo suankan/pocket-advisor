@@ -104,7 +104,7 @@ func TestMailboxManualFiltersOrderingAndStablePagination(t *testing.T) {
 	ctx := context.Background()
 	old := manualMessage(t, db, 1, "ada@example.test", time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC))
 	middle := manualMessage(t, db, 2, "ada@example.test", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC))
-	other := manualMessage(t, db, 3, "bob@example.test", time.Date(2026, 1, 3, 9, 0, 0, 0, time.UTC))
+	other := manualMessage(t, db, 3, "bob@other.example.test", time.Date(2026, 1, 3, 9, 0, 0, 0, time.UTC))
 	// Exact recipient matching covers every recipient header, not only To.
 	other.Addresses[1].Kind = domain.EmailAddressCc
 	undated := manualMessage(t, db, 4, "ada@example.test", time.Time{})
@@ -145,6 +145,20 @@ func TestMailboxManualFiltersOrderingAndStablePagination(t *testing.T) {
 	}
 	if len(fresh.Messages) != 4 || fresh.Messages[1].DocID != backfill.DocID {
 		t.Fatalf("fresh browse = %#v", fresh.Messages)
+	}
+	// A domain is exact, not a suffix: the related subdomain sender above is
+	// excluded while every exact example.test sender remains.
+	domain, err := s.ListMessages(ctx, ListRequest{Sender: "EXAMPLE.TEST", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain.Filters.SenderDomain != "example.test" || len(domain.Messages) != 4 {
+		t.Fatalf("domain browse = %#v", domain)
+	}
+	for _, message := range domain.Messages {
+		if message.DocID == other.DocID {
+			t.Fatalf("suffix sender appeared in exact domain browse: %#v", domain.Messages)
+		}
 	}
 	recipients, err := s.ListMessages(ctx, ListRequest{Recipient: "owner@example.test", Limit: 10})
 	if err != nil {

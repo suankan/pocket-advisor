@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/workspace"
@@ -25,11 +26,16 @@ func (d Direction) valid() bool {
 }
 
 // Filters is the complete browse predicate. Every field is a value, never an
-// expression: exact normalized mailboxes, half-open date bounds, and a flag.
+// expression: exact normalized mailboxes or a normalized sender domain,
+// half-open date bounds, and a flag.
 type Filters struct {
 	// Sender matches the message's From mailboxes exactly, after
 	// normalization. A display name is not an identity and is not matched.
 	Sender string
+	// SenderDomain matches the domain portion of a valid From mailbox exactly.
+	// It is distinct from Sender so a domain cannot be mistaken for a local
+	// part and pagination binds the selected matching rule.
+	SenderDomain string
 	// Recipient matches To, Cc, or Bcc. One field rather than three because
 	// "was this person written to" does not usually distinguish the header
 	// they were written to in; the distinction survives in the returned rows.
@@ -70,12 +76,13 @@ type ListRequest struct {
 // that sent "Ada Adviser <ADA@Example.test>" needs to see the mailbox that was
 // matched, or an empty result is unexplainable.
 type AppliedFilters struct {
-	Sender    string     `json:"sender,omitempty"`
-	Recipient string     `json:"recipient,omitempty"`
-	After     *time.Time `json:"after,omitempty"`
-	Before    *time.Time `json:"before,omitempty"`
-	Collapse  bool       `json:"collapse_conversations"`
-	Direction Direction  `json:"direction,omitempty"`
+	Sender       string     `json:"sender,omitempty"`
+	SenderDomain string     `json:"sender_domain,omitempty"`
+	Recipient    string     `json:"recipient,omitempty"`
+	After        *time.Time `json:"after,omitempty"`
+	Before       *time.Time `json:"before,omitempty"`
+	Collapse     bool       `json:"collapse_conversations"`
+	Direction    Direction  `json:"direction,omitempty"`
 }
 
 // Page is the pagination state of one result.
@@ -308,11 +315,12 @@ func (s *Service) normalize(req ListRequest) (Filters, Order, error) {
 	}
 
 	if req.Sender != "" {
-		addr, err := workspace.NormalizeMailbox(req.Sender)
+		address, domain, err := normalizeSenderFilter(req.Sender)
 		if err != nil {
-			return Filters{}, "", errors.New("sender filter is not a single valid mailbox")
+			return Filters{}, "", errors.New("sender filter is not a single valid mailbox or domain")
 		}
-		f.Sender = addr
+		f.Sender = address
+		f.SenderDomain = domain
 	}
 	if req.Recipient != "" {
 		addr, err := workspace.NormalizeMailbox(req.Recipient)
@@ -322,6 +330,42 @@ func (s *Service) normalize(req ListRequest) (Filters, Order, error) {
 		f.Recipient = addr
 	}
 	return f, order, nil
+}
+
+// normalizeSenderFilter accepts either one canonical mailbox or a bare ASCII
+// domain. Domain matching is deliberately restricted to the sender side: it
+// answers "mail from this organization" without broadening recipient matching
+// into a less obvious query.
+func normalizeSenderFilter(value string) (address, domain string, err error) {
+	if address, err = workspace.NormalizeMailbox(value); err == nil {
+		return address, "", nil
+	}
+	domain, err = normalizeMailboxDomain(value)
+	if err != nil {
+		return "", "", err
+	}
+	return "", domain, nil
+}
+
+// normalizeMailboxDomain accepts the ASCII and Punycode form stored by the
+// email parser. It does not accept a suffix or wildcard: every label must be
+// present, so example.test does not also match not-example.test.
+func normalizeMailboxDomain(value string) (string, error) {
+	domain := strings.ToLower(strings.TrimSpace(value))
+	if domain == "" || len(domain) > 253 {
+		return "", errors.New("domain is empty or too long")
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("domain has an invalid label")
+		}
+		for _, char := range label {
+			if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-') {
+				return "", errors.New("domain is not ASCII or Punycode")
+			}
+		}
+	}
+	return domain, nil
 }
 
 // verifyPage refuses a page that is not strictly ordered and strictly after the
@@ -344,7 +388,7 @@ func verifyPage(rows []Message, order Order, after *key) error {
 }
 
 func appliedFilters(f Filters) AppliedFilters {
-	a := AppliedFilters{Sender: f.Sender, Recipient: f.Recipient, Collapse: f.Collapse, Direction: f.Direction}
+	a := AppliedFilters{Sender: f.Sender, SenderDomain: f.SenderDomain, Recipient: f.Recipient, Collapse: f.Collapse, Direction: f.Direction}
 	if !f.After.IsZero() {
 		after := f.After.UTC()
 		a.After = &after

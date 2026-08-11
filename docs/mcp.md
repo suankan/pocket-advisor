@@ -23,7 +23,7 @@ Each workspace-bound MCP server exposes retrieval, deterministic mailbox, and to
 
 - `search` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
-- `list_messages` — lists exact email messages with bounded normalized sender, recipient, date, direction, order, collapse, and cursor filters.
+- `list_messages` — lists exact email messages with a bounded normalized sender mailbox or sender-domain filter, recipient, date, direction, order, collapse, and cursor filters.
 - `fetch_conversation` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
 - `awaiting_reply_candidates` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
 - `topic_timeline` — accepts only a server-issued topic mention or episode reference and bounded traversal direction, depth, node, and source-span byte limits. It returns the active graph version's cited chronological subgraph, derived relations, warnings, omissions, and budgets.
@@ -46,7 +46,7 @@ The continuation description instructs the agent to accept only the opaque curso
 
 The fixed-workspace mailbox tools provide deterministic email evidence alongside semantic retrieval. They never accept a workspace, owner identity, SQL expression, document path, credential, or client-constructed reference.
 
-`list_messages` accepts bounded exact normalized sender and recipient filters, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, optional conversation collapse, and an opaque cursor. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
+`list_messages` accepts one bounded exact normalized sender mailbox or bare sender domain, a bounded exact normalized recipient mailbox, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, optional conversation collapse, and an opaque cursor. A domain is an exact domain match, not a suffix or wildcard match. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
 
 `fetch_conversation` accepts exactly one server-issued message or conversation reference. It returns the complete bounded email-only conversation in stable chronological order. Each relationship is labelled `in_reply_to`, `references_recovery`, `root`, or `unresolved`; duplicate, ambiguous, missing, and malformed linkage remains visible as a warning rather than becoming an arbitrary edge.
 

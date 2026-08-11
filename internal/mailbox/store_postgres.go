@@ -71,6 +71,18 @@ func (p *PostgresStore) ListMessages(ctx context.Context, q PageQuery) ([]Messag
                     WHERE a.doc_id = m.doc_id AND a.kind = 'from'
                       AND a.valid AND a.address = $%d)`, len(args))
 	}
+	if q.Filters.SenderDomain != "" {
+		args = append(args, q.Filters.SenderDomain)
+		// The stored address is normalized but may have a quoted local part.
+		// Splitting the reversed value finds the domain after its final @ rather
+		// than assuming every local part is simple. The matching expression has
+		// a partial index in the schema for bounded organization browsing.
+		fmt.Fprintf(&where, `
+        AND EXISTS (SELECT 1 FROM email_addresses a
+                    WHERE a.doc_id = m.doc_id AND a.kind = 'from'
+                      AND a.valid
+                      AND reverse(split_part(reverse(a.address), '@', 1)) = $%d)`, len(args))
+	}
 	if q.Filters.Recipient != "" {
 		// One predicate over the three recipient headers: a person written to
 		// on Cc was still written to, and a caller asking "did I hear from

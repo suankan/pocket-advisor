@@ -3,6 +3,7 @@ package mailbox
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -87,6 +88,12 @@ func (f *fakeStore) ListMessages(_ context.Context, q PageQuery) ([]Message, err
 func matches(m Message, f Filters) bool {
 	if f.Sender != "" && m.Sender != f.Sender {
 		return false
+	}
+	if f.SenderDomain != "" {
+		at := strings.LastIndex(m.Sender, "@")
+		if at < 0 || m.Sender[at+1:] != f.SenderDomain {
+			return false
+		}
 	}
 	if f.Recipient != "" {
 		found := false

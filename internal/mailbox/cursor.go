@@ -30,7 +30,7 @@ import (
 // cursorVersion is the encoding version. It is checked rather than guessed at:
 // a cursor from an older build describes a page layout this one may no longer
 // produce, and silently reinterpreting it would repeat or skip messages.
-const cursorVersion = 1
+const cursorVersion = 2
 
 // cursorState is what a cursor encodes. Field names are short because the
 // encoded form travels through every transport above this package.
@@ -144,6 +144,7 @@ func (f Filters) fingerprint() string {
 	}
 	write("v" + strconv.Itoa(cursorVersion))
 	write(f.Sender)
+	write(f.SenderDomain)
 	write(f.Recipient)
 	write(string(f.Direction))
 	write(timeFingerprint(f.After))

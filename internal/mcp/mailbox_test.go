@@ -127,6 +127,23 @@ func TestMailboxToolsExposeTypedFixedWorkspaceResults(t *testing.T) {
 	assertMailboxBound(t, candidates)
 }
 
+func TestMailboxToolAcceptsSenderDomain(t *testing.T) {
+	tool := syntheticMailboxTool(t, []string{"owner@example.test"})
+	result := mailboxCall(t, tool, tool.ListName(), map[string]any{"sender": "EXAMPLE.TEST", "limit": 1})
+	page := result.StructuredContent.(*mailboxResult)
+	listed := page.Result.(*mailbox.ListResult)
+	if listed.Filters.Sender != "" || listed.Filters.SenderDomain != "example.test" {
+		t.Fatalf("applied filters = %#v", listed.Filters)
+	}
+	validateMailboxResultSchema(t, mailboxListOutputSchema(), page)
+
+	_, err := tool.Call(context.Background(), json.RawMessage(`{"name":"list_messages","arguments":{"sender":"bad_domain"}}`))
+	var invalid *argumentError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("invalid domain error = %T %v", err, err)
+	}
+}
+
 func TestMailboxToolRejectsScopeAndRequiresOwners(t *testing.T) {
 	tool := syntheticMailboxTool(t, nil)
 	schema := compileJSONSchema(t, "mailbox-list.schema.json", mailboxListInputSchema())

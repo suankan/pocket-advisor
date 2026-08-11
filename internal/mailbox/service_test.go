@@ -62,6 +62,34 @@ func TestListMessagesFiltersAndOrder(t *testing.T) {
 	}
 }
 
+func TestListMessagesSenderDomain(t *testing.T) {
+	store := newFakeStore(testWorkspace)
+	first := synthetic(1, 1, "ada@advisers.example.test", at(1, 9))
+	second := synthetic(2, 2, "tanya@advisers.example.test", at(2, 9))
+	other := synthetic(3, 3, "other@example.test", at(3, 9))
+	store.ingest(first)
+	store.ingest(second)
+	store.ingest(other)
+	s := testService(t, store)
+
+	result, err := s.ListMessages(context.Background(), ListRequest{Sender: "ADVISERS.EXAMPLE.TEST", Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Filters.Sender != "" || result.Filters.SenderDomain != "advisers.example.test" {
+		t.Fatalf("applied filters = %#v", result.Filters)
+	}
+	if len(result.Messages) != 2 || result.Messages[0].DocID != second.DocID || result.Messages[1].DocID != first.DocID {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+
+	for _, invalid := range []string{"advisers.example.test.", "advisers_example.test", "@advisers.example.test"} {
+		if _, err := s.ListMessages(context.Background(), ListRequest{Sender: invalid}); err == nil {
+			t.Errorf("sender %q was accepted", invalid)
+		}
+	}
+}
+
 func TestListMessagesDateBoundsExcludeUndatedWithWarning(t *testing.T) {
 	store := newFakeStore(testWorkspace)
 	inside := synthetic(1, 1, "ada@example.test", at(2, 9))

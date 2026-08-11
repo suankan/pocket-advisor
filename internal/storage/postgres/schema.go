@@ -213,6 +213,10 @@ CREATE TABLE IF NOT EXISTS email_addresses (
 CREATE INDEX IF NOT EXISTS email_addresses_lookup_idx
     ON email_addresses(address, kind) WHERE address <> '';
 
+CREATE INDEX IF NOT EXISTS email_addresses_sender_domain_idx
+    ON email_addresses ((reverse(split_part(reverse(address), '@', 1))))
+    WHERE kind = 'from' AND valid AND address <> '';
+
 -- In-Reply-To and References as stored, in header order. Kept as written even
 -- though the identifier graph below is what conversations are read from: the
 -- graph loses which header an edge came from, and only In-Reply-To is an exact

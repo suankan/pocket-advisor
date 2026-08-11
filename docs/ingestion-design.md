@@ -85,17 +85,11 @@ Email headers are not embedded into body text. `normalized_text` contains body p
 
 ### 2.3 Tier 3: PostgreSQL chunks
 
-`document_chunks` holds one row per atomic passage:
+A workspace stores each exact normalised passage once in `chunks`, keyed by its embedding model and a SHA-256 of whitespace-collapsed text. That row owns `chunk_text`, its `halfvec(N)` embedding, the HNSW cosine index, and the BM25 lexical index. Similar text is never merged: identity is exact after whitespace normalisation only.
 
-- deterministic `chunk_id`;
-- `doc_id` and workspace id;
-- chunk index;
-- start and end byte offsets into `normalized_text`;
-- exact `chunk_text`;
-- embedding model id; and
-- a `halfvec(N)` embedding with an HNSW cosine index.
+`document_chunks` is the placement relation. It holds a deterministic `chunk_id`, `doc_id`, shared passage `content_id`, workspace id, chunk index, and the start and end byte offsets into that document's `normalized_text`. Retrieval searches shared passages, joins placements to recover document-specific provenance, and cites the matched placement rather than an arbitrary document sharing the same text. Replacing a document's chunks atomically creates or reuses passage rows, replaces its placements, and removes passages with no remaining placement.
 
-The BM25 lexical index is a `pg_textsearch` index over `chunk_text` using the `simple` text configuration. It is not part of the base DDL. A full ingest drops it before streaming chunk writes and rebuilds it after the queues drain. Small scan and reconciliation runs leave it in place.
+The BM25 lexical index is a `pg_textsearch` index over `chunks.chunk_text` using the `simple` text configuration. It is not part of the base DDL. A full ingest drops it before streaming chunk writes and rebuilds it after the queues drain. Small scan and reconciliation runs leave it in place.
 
 ### 2.4 Schema bootstrap
 
@@ -305,9 +299,9 @@ Resume state is composed from Tier 1 objects, Tier 2 rows, and durable JetStream
 
 ## 10. Reset semantics
 
-`--forget <sha256>` deletes matching document rows; foreign-key cascades remove their database descendants and chunks. It then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. It does not traverse descendant rows to delete extracted child objects with different hashes, so those objects may remain in Tier 1 until a workspace-wide delete.
+`--forget <sha256>` deletes matching document rows; foreign-key cascades remove their document-specific descendants and chunk placements. It then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. It does not traverse descendant rows to delete extracted child objects with different hashes, so those objects may remain in Tier 1 until a workspace-wide delete. Shared passage rows that have no remaining placement are currently retained until an explicit storage cleanup is introduced.
 
-`--delete-data` removes all objects and PostgreSQL rows for the workspace and purges `INGESTION`, `INGESTION_DLQ`, and `RUSTFS_EVENTS`. It requires all three stores to be reachable before beginning and prompts unless `--yes` is supplied. Reset operations update PostgreSQL, RustFS, and NATS in a defined order but are not transactional across stores; rerunning after a partial failure converges the remaining work.
+`--delete-data` removes all objects and document-related PostgreSQL rows for the workspace and purges `INGESTION`, `INGESTION_DLQ`, and `RUSTFS_EVENTS`. Like `--forget`, it currently retains shared passage rows released by the operation until an explicit storage cleanup is introduced. It requires all three stores to be reachable before beginning and prompts unless `--yes` is supplied. Reset operations update PostgreSQL, RustFS, and NATS in a defined order but are not transactional across stores; rerunning after a partial failure converges the remaining work.
 
 The uploader never treats absence from a later local scan as deletion.
 

@@ -140,6 +140,19 @@ func newHTTPTestServer(t *testing.T, google *testGoogleServer, retriever Retriev
 	return server
 }
 
+func newUnauthenticatedHTTPTestServer(t *testing.T, retriever Retriever) *HTTPServer {
+	t.Helper()
+	server, err := NewHTTPServer(context.Background(), &QueryTool{Service: retriever, Workspace: "synthetic"}, HTTPOptions{
+		AllowedHosts: []string{"mcp.example.test"}, AllowedOrigins: []string{"https://app.example.test"},
+		TrustedProxyCIDRs: []string{"127.0.0.0/8"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.closeStates)
+	return server
+}
+
 // testGoogleHTTPOptions layers the fake-provider test hooks (issuer override,
 // http client, client ID, allowlist) onto whatever the caller already set.
 // http_test.go is part of package mcp, so it can reach the unexported
@@ -211,6 +224,65 @@ func TestHTTPRejectsUnauthenticatedTokens(t *testing.T) {
 	malformed := mcpRequest(t, server, "not-a-jwt", "2026-07-28", "server/discover", "", nil)
 	if malformed.Code != http.StatusUnauthorized {
 		t.Fatalf("malformed token status = %d, body=%s", malformed.Code, malformed.Body.String())
+	}
+}
+
+func TestHTTPUnauthenticatedCurrentProtocolDiscoveryAndToolCall(t *testing.T) {
+	server := newUnauthenticatedHTTPTestServer(t, &stubRetriever{result: syntheticResult()})
+
+	discover := mcpRequest(t, server, "", "2026-07-28", "server/discover", "", nil)
+	if discover.Code != http.StatusOK {
+		t.Fatalf("unauthenticated discover status = %d, body=%s", discover.Code, discover.Body.String())
+	}
+	call := mcpRequest(t, server, "not-a-token", "2026-07-28", "tools/call", "search_synthetic", map[string]any{
+		"name": "search_synthetic", "arguments": map[string]any{"question": "synthetic"},
+	})
+	page, isError := decodeHTTPToolPage(t, call)
+	if isError || len(page.Packets) == 0 {
+		t.Fatalf("unauthenticated tool result isError=%v packets=%d", isError, len(page.Packets))
+	}
+
+	server.statesMu.Lock()
+	_, hasAnonymousState := server.states[anonymousCallerID]
+	stateCount := len(server.states)
+	server.statesMu.Unlock()
+	if !hasAnonymousState || stateCount != 1 {
+		t.Fatalf("anonymous caller states = %d, has anonymous = %v", stateCount, hasAnonymousState)
+	}
+}
+
+func TestHTTPUnauthenticatedModeRetainsBoundaryChecks(t *testing.T) {
+	base := &QueryTool{Service: &stubRetriever{result: syntheticResult()}, Workspace: "synthetic"}
+	if _, err := NewHTTPServer(context.Background(), base, HTTPOptions{Address: "0.0.0.0:8080"}); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("unauthenticated non-loopback error = %v", err)
+	}
+
+	server := newUnauthenticatedHTTPTestServer(t, base.Service)
+	newRequest := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "http://backend/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}`))
+		req.Host = "mcp.example.test"
+		return req
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{"wrong host", func(r *http.Request) { r.Host = "mcp.example.test.evil.test" }},
+		{"wrong origin", func(r *http.Request) { r.Header.Set("Origin", "https://app.example.test.evil.test") }},
+		{"untrusted forwarded header", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Host", "mcp.example.test")
+			r.RemoteAddr = "192.0.2.10:1234"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := newRequest()
+			test.mutate(req)
+			recorder := httptest.NewRecorder()
+			server.httpServer.Handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusForbidden, recorder.Body.String())
+			}
+		})
 	}
 }
 

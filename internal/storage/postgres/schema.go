@@ -97,11 +97,8 @@ CREATE INDEX IF NOT EXISTS documents_email_date_idx
 --
 -- Identity is scoped by embed_model as well as workspace: a re-embed writes a
 -- new model namespace, and collapsing across namespaces would serve a vector
--- from the wrong model. Equality only — never a similarity threshold. Measured
--- on this corpus, chunks naming different monthly statement periods sit at
--- cosine 0.991 to 0.993, so any threshold loose enough to merge reformatted
--- text also merges statements that must stay distinct
--- (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
+-- from the wrong model. Equality only — never a similarity threshold — because
+-- passages that differ only in dates or amounts must remain distinct.
 CREATE TABLE IF NOT EXISTS chunks (
     content_id   UUID PRIMARY KEY,
     workspace_id VARCHAR NOT NULL,

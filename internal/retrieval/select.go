@@ -18,14 +18,9 @@ import (
 //
 // So floors are reserved first, then the remainder fills by score.
 //
-// Duplicate passages are deliberately NOT filtered here. Doing so was measured
-// and made ranking worse: dropping copies frees pool slots, which admit
-// lower-scored candidates, and the reranker sometimes prefers one of those to
-// the answer that previously ranked first. Five cases fell from first place to
-// second that way, costing 0.10 MRR, while recall did not improve. The pool
-// exists to give the reranker a stable window; deduplication belongs at
-// selection, where it changes what is returned without changing what is
-// scored (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
+// Duplicate passages remain in the pool so the reranker receives a stable
+// window. Exact duplicate filtering happens during selection, after scoring,
+// so it changes returned coverage without changing what the reranker scores.
 func (s *Service) poolCandidates(groups [][]candidate, limit int) (pooled []candidate, floored bool) {
 	seen := make(map[string]struct{})
 	take := func(c candidate) bool {
@@ -92,15 +87,9 @@ func (s *Service) poolCandidates(groups [][]candidate, limit int) (pooled []cand
 
 // contentKey identifies a passage by its text, ignoring whitespace.
 //
-// Equality, not a similarity threshold. The duplication actually present is
-// exact once whitespace is normalised — extraction reflows the same paragraph
-// differently per document, which is why the raw text can differ while the
-// content does not. A tuned similarity threshold would buy nothing here and
-// would risk collapsing passages that genuinely differ: this corpus holds runs
-// of near-identical statements and invoices separated only by dates and
-// amounts, which are exactly the distinctions retrieval must keep. Merging by
-// similarity is deferred to the deduplication task, where it can be measured
-// rather than assumed (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
+// Equality, not a similarity threshold. Whitespace normalisation handles
+// extraction reflow while retaining passages that differ in dates, amounts, or
+// other evidence-bearing details.
 func contentKey(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }

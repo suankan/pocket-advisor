@@ -24,6 +24,7 @@ import (
 const (
 	defaultHTTPAddress          = "127.0.0.1:8080"
 	defaultHTTPEndpoint         = "/mcp"
+	anonymousCallerID           = "loopback-anonymous"
 	defaultHTTPMaxRequestBytes  = 1 << 20
 	defaultHTTPMaxConcurrent    = 8
 	defaultHTTPRequestTimeout   = 2 * time.Minute
@@ -254,8 +255,8 @@ func normalizeHTTPOptions(opts *HTTPOptions) error {
 }
 
 func (s *HTTPServer) serverForRequest(r *http.Request) *sdkmcp.Server {
-	info := mcpauth.TokenInfoFromContext(r.Context())
-	if info == nil || info.UserID == "" {
+	callerID := s.callerID(r)
+	if callerID == "" {
 		return nil
 	}
 	now := time.Now()
@@ -267,7 +268,7 @@ func (s *HTTPServer) serverForRequest(r *http.Request) *sdkmcp.Server {
 			delete(s.states, id)
 		}
 	}
-	state := s.states[info.UserID]
+	state := s.states[callerID]
 	if state == nil {
 		if len(s.states) >= s.opts.MaxCallerStates {
 			var oldestID string
@@ -282,10 +283,24 @@ func (s *HTTPServer) serverForRequest(r *http.Request) *sdkmcp.Server {
 		}
 		tool := s.base.forCaller()
 		state = &callerState{tool: tool, server: newSDKServer(tool)}
-		s.states[info.UserID] = state
+		s.states[callerID] = state
 	}
 	state.lastUsed = now
 	return state.server
+}
+
+// callerID returns the authenticated subject when authentication is enabled.
+// In unauthenticated mode the loopback-only server deliberately has one shared
+// anonymous principal, so rate limiting and result snapshots remain bounded.
+func (s *HTTPServer) callerID(r *http.Request) string {
+	info := mcpauth.TokenInfoFromContext(r.Context())
+	if info != nil && info.UserID != "" {
+		return info.UserID
+	}
+	if s.opts.GoogleClientID == "" {
+		return anonymousCallerID
+	}
+	return ""
 }
 
 func newSDKServer(tool *QueryTool) *sdkmcp.Server {
@@ -559,14 +574,14 @@ func (s *HTTPServer) limitRate(next http.Handler) http.Handler {
 	var mu sync.Mutex
 	windows := make(map[string]window)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		info := mcpauth.TokenInfoFromContext(r.Context())
-		if info == nil || info.UserID == "" {
+		callerID := s.callerID(r)
+		if callerID == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		now := time.Now()
 		mu.Lock()
-		current, exists := windows[info.UserID]
+		current, exists := windows[callerID]
 		if !exists && len(windows) >= s.opts.MaxCallerStates {
 			var oldestID string
 			var oldestTime time.Time
@@ -581,7 +596,7 @@ func (s *HTTPServer) limitRate(next http.Handler) http.Handler {
 			current = window{start: now}
 		}
 		current.count++
-		windows[info.UserID] = current
+		windows[callerID] = current
 		allowed := current.count <= 120
 		mu.Unlock()
 		if !allowed {

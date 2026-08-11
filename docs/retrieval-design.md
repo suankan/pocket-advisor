@@ -34,13 +34,13 @@ The service owns warm model clients but no request state. PostgreSQL owns indexe
 
 ### Dense leg
 
-The dense leg performs cosine-distance search over the HNSW index on `document_chunks.embedding`. It filters on the embed-model namespace and takes up to 50 candidates by default. The query vector comes from the same configured embedding model that names the indexed namespace.
+The dense leg performs cosine-distance search over the HNSW index on shared `chunks.embedding`, joins the resulting passage to its `document_chunks` placements, and takes up to 50 candidates by default. The query vector comes from the same configured embedding model that names the indexed namespace. A placement remains the retrieval candidate and citation identity, so one shared passage can still be cited in the document where it was matched.
 
 `internal/storage/postgres.ApplySchema` rejects an existing vector column whose dimension differs from the configured embedding dimension. Ingestion and listener startup also verify that stored chunks do not use a different model or dimension. Retrieval startup currently asserts workspace scope but does not repeat the schema-metadata check; it filters candidates to the query embedder's model namespace. A different embedding model therefore requires the explicit re-embedding workflow described in [ingestion design](ingestion-design.md); changing configuration alone is not an upgrade path.
 
 ### Lexical leg
 
-The lexical leg uses the `pg_textsearch` BM25 index `chunks_bm25_idx` and takes up to 50 candidates by default. `to_bm25query` tokenizes the raw sub-query against the index's `simple` text configuration. The query filters on the same embed-model namespace as dense search so an index containing two embedding namespaces cannot surface the same source chunk twice.
+The lexical leg uses the `pg_textsearch` BM25 index `chunks_bm25_idx` on shared `chunks.chunk_text`, joins matching passages to their `document_chunks` placements, and takes up to 50 candidates by default. `to_bm25query` tokenizes the raw sub-query against the index's `simple` text configuration. The query filters on the same embed-model namespace as dense search so an index containing two embedding namespaces cannot surface the same source chunk twice.
 
 ### Reciprocal-rank fusion
 
@@ -72,8 +72,9 @@ The compiled defaults are 15 returned matches, a reranker relevance floor of `0.
 
 1. remove candidates below the relevance floor;
 2. keep only the highest-ranked chunk for each document;
-3. enforce the per-thread cap; and
-4. stop at the requested result count.
+3. keep only the highest-ranked candidate for each exact whitespace-normalised passage text across documents;
+4. enforce the per-thread cap; and
+5. stop at the requested result count.
 
 An empty `thread_id` denotes a standalone document and is not capped as a shared conversation. A below-floor candidate is never restored merely to fill the requested count.
 

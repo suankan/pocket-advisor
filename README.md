@@ -398,13 +398,13 @@ The evaluator looks for cases at `workspaces/evaluation/<workspace>/cases.json` 
 
 ### Readiness check
 
-Before running queries, verify that the embedding endpoint, model, dimension, and indexes are compatible:
+Run the optional preflight to report embedding and index readiness before an evaluation:
 
 ```sh
 ./bin/pocket-advisor --evaluate --eval-readiness --workspace-id test
 ```
 
-This checks that the configured embedding endpoint is reachable, the endpoint model and dimension match `schema_metadata`, stored chunks do not contain an incompatible active namespace, and the HNSW and BM25 indexes exist.
+It probes the configured embedding endpoint, reports its model and dimension alongside `schema_metadata`, and checks that the HNSW and BM25 index names exist. It is an operator-invoked diagnostic; direct queries and MCP startup perform their own scope and dependency checks.
 
 ### Filter by category or case ID
 
@@ -415,18 +415,18 @@ Run only specific cases or categories:
 ./bin/pocket-advisor --evaluate --eval-filter-cats paraphrase --workspace-id test
 
 # Run specific cases by ID
-./bin/pocket-advisor --evaluate --eval-filter-ids gen-0001,gen-0002 --workspace-id test
+./bin/pocket-advisor --evaluate --eval-filter-ids case-001,case-002 --workspace-id test
 ```
 
-### HNSW vs exact search comparison
+### HNSW comparison
 
-Compare approximate HNSW results with exact dense search to measure recall:
+Compare the reference dense-search and HNSW paths to inspect the reported document overlap:
 
 ```sh
 ./bin/pocket-advisor --evaluate --eval-hnsw --eval-ef-search 40 --workspace-id test
 ```
 
-The `--eval-ef-search` flag sets the HNSW `ef_search` parameter for comparison (default 40). The report shows approximate recall for each case and aggregate statistics.
+The `--eval-ef-search` flag sets the HNSW `ef_search` parameter for comparison (default 40). The report includes per-case and aggregate overlap statistics; use it to inform, rather than replace, retrieval-quality evaluation.
 
 ### Machine-readable output
 
@@ -461,7 +461,7 @@ The evaluation reports:
 - **nDCG**: normalized discounted cumulative gain using expected-document grades
 - **Forbidden hits**: unexpected documents that indicate false positives
 - **Empty pass rate**: off-domain queries correctly returning no results
-- **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select)
+- **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select, expand)
 
 ### Interpretation
 
@@ -483,7 +483,7 @@ Delete all content while leaving the workspace infrastructure ready for reuse:
 ./bin/pocket-advisor --delete-data --workspace-id example
 ```
 
-Both commands prompt unless `--yes` is supplied. `--forget` deletes matching document rows and their database descendants, then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. Extracted child objects with different hashes are not traversed and may remain in Tier 1. `--delete-data` removes all Tier 1 and PostgreSQL state and also purges all three workspace streams. Store changes are ordered rather than transactional; after a partial failure, rerun the same command to converge.
+Both commands prompt unless `--yes` is supplied. `--forget` deletes matching document rows and their document-specific descendants, then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. Extracted child objects with different hashes are not traversed and may remain in Tier 1. `--delete-data` removes Tier 1 objects, document-related PostgreSQL rows, and all three workspace streams. Shared passage rows released by either operation are currently retained until an explicit storage cleanup is introduced. Store changes are ordered rather than transactional; after a partial failure, rerun the same command to converge.
 
 Destroy the workspace infrastructure itself:
 

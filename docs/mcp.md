@@ -30,7 +30,7 @@ Both tools advertise closed inputs, one JSON Schema 2020-12 evidence-page output
 
 ### Input bounds
 
-Valid request frames are limited to 8 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors are limited to 256 bytes. `top_k` is limited to 50.
+Stdio JSON-RPC frames are limited to 8 MiB. HTTP request bodies default to 1 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors are limited to 256 bytes. `top_k` is limited to 50.
 
 ### Tool metadata and description
 
@@ -129,7 +129,9 @@ The HTTP endpoint is `/mcp`. MCP 2026-07-28 is stateless: each POST carries prot
 
 The SDK's own loopback DNS-rebinding guard is disabled: `secureEnvelope` already owns Host and forwarded-header validation against an explicit allowlist and trusted-proxy set, and a reverse proxy in front of this server (if any) forwards the public Host, which the SDK's own guard would otherwise refuse.
 
-HTTP snapshots are isolated by OAuth issuer and subject, permitting token rotation by the same caller without permitting cross-caller continuation.
+By default, HTTP admits eight concurrent requests, limits each caller to 120 requests per minute, times out a request after two minutes, reads headers for at most five seconds, and closes an idle connection after two minutes. Caller state and snapshots expire after 15 minutes of inactivity; at most 128 caller states are retained. Shutdown allows 30 seconds. `max_concurrent` is configurable; the other defaults are fixed resource bounds.
+
+HTTP snapshots are isolated by OAuth issuer and subject, permitting token rotation by the same caller without permitting cross-caller continuation. Unauthenticated loopback development uses one fixed anonymous caller identity, so its snapshots cannot be selected by a request field.
 
 ### Transport parity
 
@@ -141,7 +143,7 @@ Cancellation uses `notifications/cancelled` with the original request ID. Closin
 
 The server must bind to an explicit loopback address; binding to all interfaces is rejected unconditionally, whether or not Google auth is configured. Remote access goes through SSH tunneling or an operator-supplied reverse proxy, not a non-loopback bind.
 
-The `Origin` header is validated on every relevant request before reading or acting on the MCP payload. An explicit allowlist is maintained and the specification-required forbidden response is returned for an invalid origin. Missing, null, malformed, deceptive, and DNS-rebinding origins are tested.
+A non-browser request with no `Origin` header is accepted. When an `Origin` header is supplied outside unauthenticated loopback development, it must appear exactly once and match an explicit allowed origin or the server returns forbidden. Unauthenticated loopback development with no configured origin allowlist accepts no-origin and origin-bearing local requests; setting an allowlist enables exact matching. Host and forwarded-header checks remain in the outer envelope before MCP payload handling.
 
 Host and forwarded headers are validated only through a trusted proxy configuration. Authority or workspace is not inferred from untrusted forwarding headers.
 
@@ -308,10 +310,10 @@ The committed synthetic suite covers:
 
 `internal/mcp/http_test.go` runs the real Google verifier against a fake OIDC provider (a locally-signed JWKS and issuer serving `/.well-known/openid-configuration`), so these are integration tests of the actual production code path, not mocks of it:
 
-- unauthenticated, malformed, expired, wrong-audience, wrong-issuer, unverified-email, and non-allowlisted-email tokens;
+- unauthenticated loopback discovery and tool calls, plus malformed, expired, wrong-audience, wrong-issuer, unverified-email, and non-allowlisted-email bearer tokens;
 - invalid Origin, Host, forwarded headers, and non-authoritative session identifiers;
 - DNS rebinding attempts;
-- request smuggling and oversized JSON or SSE traffic;
+- request smuggling, ambiguous framing, and oversized JSON bodies;
 - attempts to establish or fix a transport session on the stateless endpoint;
 - cross-caller and cross-workspace continuation cursor use, expiry, caller-state and snapshot eviction, and idempotent retry, including attempts to override caller identity with a legacy session header;
 - disconnect and cancellation resource cleanup;

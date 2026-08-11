@@ -19,7 +19,7 @@ The authoritative ingestion behavior remains [`docs/ingestion-design.md`](../ing
 
 ## Priority and dependencies
 
-This is the first P1 end-user workflow task after the P0 MCP access milestone. Its schema and query package can be developed in parallel with HTTP transport, but its MCP tools depend on [`p0-1-mcp-evidence-interface.md`](p0-1-mcp-evidence-interface.md).
+This is the first P1 end-user workflow task after the MCP access milestone. Its schema and query package can be developed in parallel with HTTP transport, but its MCP tools depend on the implemented [MCP evidence interface](../mcp.md).
 
 The broader analysis task in [`p1-2-evidence-backed-email-analysis.md`](p1-2-evidence-backed-email-analysis.md) depends on the deterministic message, thread, and reply-candidate primitives defined here.
 

@@ -1,6 +1,6 @@
 # API Server Design
 
-This document is the design authority for Pocket Advisor's public and control-plane APIs, service boundaries, interface adapters, and CLI coupling. The fixed-workspace authenticated HTTP MCP resource server and its application chart are implemented. The general administrative API, broader control plane, Web UI, and host agent remain target state.
+This document is the design authority for Pocket Advisor's public and control-plane APIs, service boundaries, interface adapters, and CLI coupling. The fixed-workspace HTTP MCP resource server is implemented as a local process. The general administrative API, broader control plane, Web UI, and host agent remain target state.
 
 [Ingestion design](ingestion-design.md), [retrieval design](retrieval-design.md), [generation design](generation-design.md), and [workspace isolation](workspace-isolation.md) remain authoritative for their own mechanics.
 
@@ -73,7 +73,7 @@ The target general control plane is a separate long-running workload — unlike 
 
 Kubernetes provides scheduling, service discovery, health checks, rollout control, and network policy. It does not supply protocol authorization. Initial development access may be cluster-internal or through port forwarding; remote ingress requires TLS, authentication, authorization, request limits, and audit policy first.
 
-Whatever chart eventually deploys the control plane must be a separate chart and release from `pocket-advisor-infra`, so infrastructure changes do not implicitly roll it, following the same `ClusterIP`-by-default, explicitly-source-restricted-`LoadBalancer`-for-remote-exposure pattern MCP's own now-retired chart established.
+Whatever chart eventually deploys the control plane must be a separate chart and release from `pocket-advisor-infra`, so infrastructure changes do not implicitly roll it. Its exposure policy must default to `ClusterIP` and require explicit source restriction before any remote `LoadBalancer` use.
 
 ## Package boundary and CLI migration
 

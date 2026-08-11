@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/worker"
 )
@@ -45,6 +47,21 @@ func runReprocessEmail(o *Options, cfg *config.Config, logs *telemetry.Logs) err
 		return err
 	}
 	defer a.Close()
+
+	// Existing workspaces need the additive email tables before the metadata
+	// walk can select or populate them. Like ingestion, apply the idempotent
+	// schema upgrade using the live embedding dimension; deploy-workspaces
+	// cannot know that dimension.
+	if err := cfg.RequireEmbedding(); err != nil {
+		return err
+	}
+	info, err := embedding.New(cfg.Embedding).Probe(ctx)
+	if err != nil {
+		return fmt.Errorf("embedding endpoint %s: %w", cfg.Embedding.Endpoint, err)
+	}
+	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
+		return err
+	}
 
 	log := a.Logger(telemetry.RoleEmail)
 	r := &worker.EmailMetadataReprocessor{

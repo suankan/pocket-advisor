@@ -39,6 +39,12 @@ type Parsed struct {
 	InReplyTo  string
 	References []string
 	Children   []Child
+	// Headers is the structured header model: canonical identifiers, parsed
+	// mailboxes, automated-traffic classification and typed parse warnings.
+	// The flat fields above stay as they were — they are the display form the
+	// existing columns are written from — while Headers carries what browse
+	// and conversation reconstruction need (ingestion-design.md §4.1).
+	Headers Headers
 }
 
 // Child is an attachment or archive member extracted to Tier 1.
@@ -60,6 +66,7 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		To:        decodeHeader(msg.Header.Get("To")),
 		MessageID: strings.Trim(msg.Header.Get("Message-ID"), "<> "),
 		InReplyTo: strings.Trim(msg.Header.Get("In-Reply-To"), "<> "),
+		Headers:   ParseHeaders(msg.Header),
 	}
 	if d, err := msg.Header.Date(); err == nil {
 		p.Date = d

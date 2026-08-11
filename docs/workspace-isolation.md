@@ -33,6 +33,8 @@ There is no per-workspace Kubernetes namespace or per-workspace storage server i
 
 One gitignored file describes local workspaces: `workspaces/workspace-config.yaml` contains workspace IDs, collections, and local corpus paths. There is no separate credentials file — every per-workspace resource name and (for PostgreSQL) role is the workspace id itself, or derived from it by fixed convention, computed wherever it's needed rather than stored.
 
+A workspace entry may also carry `owner-identities:`, the list of mailboxes the workspace owner writes from. It is optional, workspace-scoped, and distinct from a collection's `owners:` financial metadata; `internal/workspace` lowercases each entry, strips display names and angle brackets, rejects a syntactically invalid or repeated mailbox, and exposes the result as `Resolved.OwnerIdentities` with an `IsOwnerIdentity` membership test. The identities exist to classify message direction inside one workspace and nothing else: they are never echoed in errors, health output, or logs, no request may supply or replace them, and an address configured for one workspace has no meaning in another.
+
 Committed `config.yaml` points to that file but contains no workspace content. Real names, paths, identifiers, and endpoints must not be copied out of `workspaces/`.
 
 The binary resolves the configured workspace and constructs clients from its id alone — there is nothing left to verify against a separate credentials entry. Missing workspace configuration (the registry itself, or an unreachable store) is still a startup error.

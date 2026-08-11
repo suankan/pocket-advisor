@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/suankan/pocket-advisor/internal/client/llm"
@@ -20,7 +21,7 @@ import (
 type sampledDoc struct {
 	DocID    string
 	Filename string // source_filename, used as fixture_id
-	Snippet  string // first 500 chars of normalized text
+	Snippet  string // a window of normalized text, see SnippetChars
 	ThreadID string
 	Source   string // collection / source type
 }
@@ -50,7 +51,21 @@ func NewGenerator(
 
 // SampleSize controls how many documents the generator samples.
 // Exported so tests can override it.
-var SampleSize = 30
+//
+// Raised once verification landed: most proposals are now rejected, so the
+// sample has to be larger to yield a usable suite. Measured on a real corpus,
+// roughly one proposal in three survives grounding and discrimination checks.
+var SampleSize = 60
+
+// SnippetChars is how much of each document the generator shows the model.
+//
+// Deliberately large, and deliberately not taken from the start. Extracted
+// PDFs open with letterhead: measured on a real corpus, the first 300
+// characters of a payslip were "PAID BY <company> Pty Ltd" and nothing else,
+// so a generator reading only the opening could ask about nothing but company
+// names and registration numbers — facts every document in a series repeats.
+// That is where identifier-heavy, unanswerable fixtures came from.
+var SnippetChars = 1200
 
 // Generate samples documents from the workspace, generates evaluation
 // questions via the LLM, and writes the resulting CaseSet to outputPath.
@@ -111,17 +126,23 @@ func (g *Generator) Generate(ctx context.Context, outputPath string) error {
 // by content alone — real workspaces can hold long threads of dozens of
 // short, topically identical messages, and a source that thin cannot ground
 // a fair fixture regardless of retrieval quality.
+//
+// Long documents are sampled from a quarter of the way in rather than from
+// the top, to get past letterhead and into what the document actually says.
+// Short ones are shown whole, since there is no header to skip.
 func (g *Generator) sampleDocuments(ctx context.Context) ([]sampledDoc, error) {
 	rows, err := g.DB.Pool.Query(ctx, `
 SELECT doc_id::text, COALESCE(NULLIF(source_filename, ''), ''),
-       LEFT(normalized_text, 500) as snippet,
+       CASE WHEN LENGTH(normalized_text) > $2 * 2
+            THEN SUBSTRING(normalized_text FROM (LENGTH(normalized_text) / 4) FOR $2)
+            ELSE LEFT(normalized_text, $2) END AS snippet,
        COALESCE(thread_id, ''), COALESCE(collection_id, '')
 FROM documents
 WHERE processing_status = 'COMPLETED'
   AND normalized_text IS NOT NULL
   AND LENGTH(normalized_text) > 300
 ORDER BY RANDOM()
-LIMIT $1`, SampleSize)
+LIMIT $1`, SampleSize, SnippetChars)
 	if err != nil {
 		return nil, err
 	}
@@ -138,31 +159,164 @@ LIMIT $1`, SampleSize)
 	return docs, rows.Err()
 }
 
-// generateCases sends document snippets to the LLM and parses structured
-// case output.
+// generateCases sends document snippets to the LLM, verifies what comes back
+// against the corpus, and returns only the cases that survive.
+//
+// Yield is reported rather than left silent. Thirty documents at two or three
+// questions each should propose sixty to ninety; runs producing a fraction of
+// that used to look identical to healthy ones, because failed batches were
+// skipped with nothing surfaced to the operator.
 func (g *Generator) generateCases(ctx context.Context, docs []sampledDoc) ([]Case, error) {
-	var allCases []Case
-	caseNum := 0
+	var proposed []candidateCase
+	var batches, failed int
 
-	// Process documents in batches to avoid overwhelming the LLM.
 	const batchSize = 5
 	for i := 0; i < len(docs); i += batchSize {
 		end := i + batchSize
 		if end > len(docs) {
 			end = len(docs)
 		}
-		batch := docs[i:end]
-
-		batchCases, err := g.generateBatch(ctx, batch, caseNum)
+		batches++
+		batchCases, err := g.generateBatch(ctx, docs[i:end])
 		if err != nil {
+			failed++
 			g.Log.Warn("batch generation failed, skipping", "batch", i/batchSize, "error", err)
 			continue
 		}
-		allCases = append(allCases, batchCases...)
-		caseNum += len(batchCases)
+		proposed = append(proposed, batchCases...)
 	}
 
-	return allCases, nil
+	kept, stats := g.verify(ctx, proposed)
+	g.Log.Info("fixture generation yield",
+		"batches", batches, "batches_failed", failed,
+		"proposed", len(proposed), "kept", len(kept),
+		"dropped_unverifiable", stats.unverifiable,
+		"dropped_not_grounded", stats.notGrounded,
+		"dropped_ambiguous", stats.ambiguous,
+		"dropped_duplicate", stats.duplicate,
+		"expanded_to_multi_source", stats.expanded)
+
+	for i := range kept {
+		kept[i].ID = fmt.Sprintf("gen-%04d", i+1)
+	}
+	return kept, nil
+}
+
+// dropStats counts why candidates were rejected, so a thin case set is
+// explainable rather than mysterious.
+type dropStats struct {
+	unverifiable, notGrounded, ambiguous, duplicate, expanded int
+}
+
+// AmbiguityCap is how many documents may share an answer before a question is
+// considered unanswerable rather than merely multi-source.
+//
+// Quoted replies and near-identical documents mean a correct answer often
+// appears in a handful of places. Naming one of them arbitrarily is a coin
+// flip, but the question itself is fine — so up to this many, every document
+// holding the answer is recorded as acceptable. Beyond it the fact is
+// boilerplate and identifies nothing.
+var AmbiguityCap = 4
+
+// verifiableAnswer normalises a claimed answer and reports whether it is
+// substantial enough to check. A bare year or a single word occurs throughout
+// a corpus, so finding it proves nothing about where the answer lives.
+func verifiableAnswer(raw string) (string, bool) {
+	a := strings.Join(strings.Fields(raw), " ")
+	return a, len(a) >= 12
+}
+
+// verify keeps only questions the corpus can actually settle.
+//
+// Two checks, both against corpus statistics and neither against the retrieval
+// pipeline. Filtering by "can retrieval find this?" would keep only questions
+// the system already answers and turn the suite into a tautology, so the
+// answer span is checked against stored text directly.
+//
+// Grounded: the span the model quoted must really appear in the document it
+// named. That rejects a question about correspondence answered by a cost
+// agreement — a real case this suite once graded.
+//
+// Discriminating: the span must not appear in more documents than the case
+// names as sources. An employer's registration number printed on all
+// twenty-nine payslips identifies none of them, and a fixture naming one
+// arbitrarily is decided by luck rather than retrieval quality. The same suite
+// once asked one such question twice and scored it both right and wrong.
+func (g *Generator) verify(ctx context.Context, cands []candidateCase) ([]Case, dropStats) {
+	var (
+		kept  []Case
+		stats dropStats
+		seen  = make(map[string]struct{}, len(cands))
+	)
+	for _, c := range cands {
+		answer, ok := verifiableAnswer(c.Answer)
+		if !ok {
+			stats.unverifiable++
+			continue
+		}
+		qkey := strings.ToLower(strings.Join(strings.Fields(c.Question), " "))
+		if _, dup := seen[qkey]; dup {
+			stats.duplicate++
+			continue
+		}
+
+		rows, err := g.DB.Pool.Query(ctx, `
+            SELECT doc_id::text, COALESCE(NULLIF(source_filename, ''), '')
+            FROM documents
+            WHERE normalized_text IS NOT NULL
+              AND position($1 in regexp_replace(normalized_text, '\s+', ' ', 'g')) > 0
+            LIMIT $2`, answer, AmbiguityCap+1)
+		if err != nil {
+			g.Log.Warn("verify failed, dropping candidate", "error", err)
+			stats.unverifiable++
+			continue
+		}
+		holders := map[string]string{}
+		for rows.Next() {
+			var id, filename string
+			if err := rows.Scan(&id, &filename); err != nil {
+				break
+			}
+			holders[id] = fixtureIDFromFilename(filename)
+		}
+		rows.Close()
+
+		named := false
+		for _, id := range c.DocIDs {
+			if _, ok := holders[id]; ok {
+				named = true
+				break
+			}
+		}
+		if !named {
+			stats.notGrounded++
+			continue
+		}
+		if len(holders) > AmbiguityCap {
+			stats.ambiguous++
+			continue
+		}
+
+		// Every document holding the answer is an acceptable source. Naming
+		// only the one the model happened to be shown would mark a correct
+		// retrieval wrong whenever a sibling surfaced first.
+		if len(holders) > len(c.ExpectedSources) {
+			grade := c.ExpectedSources[0].Grade
+			c.ExpectedSources = c.ExpectedSources[:0]
+			for _, fid := range holders {
+				c.ExpectedSources = append(c.ExpectedSources,
+					ExpectedSource{FixtureID: fid, Grade: grade})
+			}
+			sort.Slice(c.ExpectedSources, func(i, j int) bool {
+				return c.ExpectedSources[i].FixtureID < c.ExpectedSources[j].FixtureID
+			})
+			stats.expanded++
+		}
+
+		seen[qkey] = struct{}{}
+		kept = append(kept, c.Case)
+	}
+	return kept, stats
 }
 
 // llmQuestion is the JSON structure the LLM is expected to return per document.
@@ -170,6 +324,16 @@ type llmQuestion struct {
 	Question  string   `json:"question"`
 	Category  string   `json:"category"`
 	DocLabels []string `json:"doc_labels"` // opaque per-batch labels, e.g. "DOC0"
+	Answer    string   `json:"answer"`     // verbatim span the question is answered by
+}
+
+// candidateCase is a question the model proposed, still carrying the answer it
+// claimed, so the claim can be checked against the corpus before the case is
+// written. Nothing reaches a case set until that check passes.
+type candidateCase struct {
+	Case
+	Answer string
+	DocIDs []string // documents behind ExpectedSources, in the same order
 }
 
 // llmBatchResponse is the top-level structure from the LLM for a batch.
@@ -188,19 +352,21 @@ type llmBatchResponse struct {
 // retrieval quality could ever satisfy. Labels are mapped back to real
 // fixture_ids after the LLM responds, and any label it invents that wasn't
 // actually offered in this batch is dropped rather than trusted.
-func (g *Generator) generateBatch(ctx context.Context, docs []sampledDoc, startNum int) ([]Case, error) {
+func (g *Generator) generateBatch(ctx context.Context, docs []sampledDoc) ([]candidateCase, error) {
 	labelToFixtureID := make(map[string]string, len(docs))
+	labelToDocID := make(map[string]string, len(docs))
 	var docEntries strings.Builder
 	for i, d := range docs {
 		label := fmt.Sprintf("DOC%d", i)
 		labelToFixtureID[label] = fixtureIDFromFilename(d.Filename)
+		labelToDocID[label] = d.DocID
 		hasThread := "no"
 		if d.ThreadID != "" {
 			hasThread = "yes"
 		}
 		docEntries.WriteString(fmt.Sprintf(
 			"[%s] source=%q has_thread=%s snippet=%s\n",
-			label, d.Source, hasThread, truncate(d.Snippet, 300)))
+			label, d.Source, hasThread, truncate(d.Snippet, SnippetChars)))
 	}
 
 	prompt := fmt.Sprintf(`You are generating evaluation questions for a retrieval system that
@@ -231,9 +397,17 @@ RULES:
 - Reference documents only by the label shown in brackets (e.g. DOC0).
   Never invent a label that is not listed below.
 
+- Include the answer: copy the exact words from the snippet that answer the
+  question. Copy them verbatim, do not paraphrase or summarise. If no span of
+  the snippet answers the question, do not write the question at all.
+- Prefer facts specific to this document over ones any similar document would
+  repeat. A company name, registration number, address or phone number printed
+  on every document in a series identifies none of them; a date, amount, name
+  or statement particular to this one does.
+
 Return ONLY valid JSON with this structure:
 {"questions": [
-  {"question": "...", "category": "...", "doc_labels": ["DOC0"]}
+  {"question": "...", "category": "...", "doc_labels": ["DOC0"], "answer": "..."}
 ]}
 
 Valid categories: exact-identifier, paraphrase, multi-topic, thread.
@@ -241,7 +415,9 @@ Valid categories: exact-identifier, paraphrase, multi-topic, thread.
 Documents:
 %s`, docEntries.String())
 
-	maxTokens := 2048
+	// Answer spans made every response longer; at the old budget the JSON was
+	// being truncated mid-array and whole batches were lost to a parse error.
+	maxTokens := 4096
 	resp, err := g.LLM.Complete(ctx, prompt, maxTokens)
 	if err != nil {
 		return nil, fmt.Errorf("LLM complete: %w", err)
@@ -252,10 +428,9 @@ Documents:
 		return nil, fmt.Errorf("parse LLM response: %w", err)
 	}
 
-	var cases []Case
-	batchCaseNum := 0
+	var out []candidateCase
 	for _, q := range questions {
-		if q.Question == "" {
+		if q.Question == "" || q.Answer == "" {
 			continue
 		}
 		cat := normalizeCategory(q.Category)
@@ -266,7 +441,7 @@ Documents:
 		// Resolve labels to real fixture_ids, dropping any label the LLM
 		// invented that was never offered in this batch — a case grounded
 		// in nothing real is worse than no case at all.
-		var fixtureIDs []string
+		var fixtureIDs, docIDs []string
 		seen := make(map[string]struct{}, len(q.DocLabels))
 		for _, label := range q.DocLabels {
 			fid, ok := labelToFixtureID[label]
@@ -278,21 +453,19 @@ Documents:
 			}
 			seen[fid] = struct{}{}
 			fixtureIDs = append(fixtureIDs, fid)
+			docIDs = append(docIDs, labelToDocID[label])
 		}
 		if len(fixtureIDs) == 0 {
 			continue
 		}
 
-		batchCaseNum++
-		c := Case{
-			ID:       fmt.Sprintf("gen-%04d", startNum+batchCaseNum),
-			Category: cat,
-			Question: q.Question,
+		c := candidateCase{
+			Case:   Case{Category: cat, Question: q.Question},
+			Answer: q.Answer,
+			DocIDs: docIDs,
 		}
 		for _, fid := range fixtureIDs {
-			c.ExpectedSources = append(c.ExpectedSources, ExpectedSource{
-				FixtureID: fid,
-			})
+			c.ExpectedSources = append(c.ExpectedSources, ExpectedSource{FixtureID: fid})
 		}
 
 		// Assign grades for multi-topic cases.
@@ -306,10 +479,10 @@ Documents:
 			}
 		}
 
-		cases = append(cases, c)
+		out = append(out, c)
 	}
 
-	return cases, nil
+	return out, nil
 }
 
 // parseLLMQuestions extracts JSON from the LLM response, tolerating markdown

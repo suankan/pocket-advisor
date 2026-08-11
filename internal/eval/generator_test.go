@@ -66,18 +66,18 @@ func TestParseLLMQuestions(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "clean JSON",
-			raw:  `{"questions": [{"question": "What is X?", "category": "paraphrase", "fixture_ids": ["doc-a"]}]}`,
+			name:  "clean JSON",
+			raw:   `{"questions": [{"question": "What is X?", "category": "paraphrase", "fixture_ids": ["doc-a"]}]}`,
 			wantN: 1,
 		},
 		{
-			name: "JSON with markdown fences",
-			raw:  "```json\n{\"questions\": [{\"question\": \"What is X?\", \"category\": \"exact-identifier\", \"fixture_ids\": [\"doc-a\"]}]}\n```",
+			name:  "JSON with markdown fences",
+			raw:   "```json\n{\"questions\": [{\"question\": \"What is X?\", \"category\": \"exact-identifier\", \"fixture_ids\": [\"doc-a\"]}]}\n```",
 			wantN: 1,
 		},
 		{
-			name: "JSON array fallback",
-			raw:  `[{"question": "What is Y?", "category": "multi-topic", "fixture_ids": ["doc-a", "doc-b"]}]`,
+			name:  "JSON array fallback",
+			raw:   `[{"question": "What is Y?", "category": "multi-topic", "fixture_ids": ["doc-a", "doc-b"]}]`,
 			wantN: 1,
 		},
 		{
@@ -187,5 +187,49 @@ func TestGeneratorProducesValidCaseSet(t *testing.T) {
 	}
 	if len(loaded.Cases) != 3 {
 		t.Errorf("loaded %d cases, want 3", len(loaded.Cases))
+	}
+}
+
+// The model is asked for the answer verbatim, so a response carrying one must
+// parse. Without it there is nothing to check a question against.
+func TestParseLLMQuestionsKeepsAnswerSpan(t *testing.T) {
+	got, err := parseLLMQuestions(
+		`{"questions":[{"question":"What is the total?","category":"exact-identifier",` +
+			`"doc_labels":["DOC0"],"answer":"Total: $5,940.00"}]}`)
+	if err != nil {
+		t.Fatalf("parseLLMQuestions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d questions, want 1", len(got))
+	}
+	if got[0].Answer != "Total: $5,940.00" {
+		t.Errorf("answer = %q, want the verbatim span", got[0].Answer)
+	}
+}
+
+// A claimed answer is only worth checking if it is substantial. Whitespace is
+// collapsed first, because extraction reflows text and the stored copy will
+// not match the model's spacing.
+func TestVerifiableAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+		ok   bool
+	}{
+		{"substantial span", "Total: $5,940.00 incl GST", "Total: $5,940.00 incl GST", true},
+		{"reflowed span", "Licence   No.\n 335666C", "Licence No. 335666C", true},
+		{"bare year", "2026", "2026", false},
+		{"single word", "Westpac", "Westpac", false},
+		{"empty", "   ", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := verifiableAnswer(tt.raw)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("verifiableAnswer(%q) = (%q, %v), want (%q, %v)",
+					tt.raw, got, ok, tt.want, tt.ok)
+			}
+		})
 	}
 }

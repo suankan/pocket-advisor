@@ -7,7 +7,7 @@ reasoning_effort: high
 
 ## Outcome
 
-Retrieval spends its candidate budget on distinct content. Text that repeats across many documents occupies one place in the index and one slot in a result set, instead of crowding out the evidence a query actually needs — and it does so without losing the cross-boundary context that chunk overlap currently provides.
+The index stores each distinct passage once, and no result set spends more than one slot on the same text — without losing the cross-boundary context that chunk overlap currently provides.
 
 ## Why this task is needed
 
@@ -19,13 +19,28 @@ Measured against a private workspace of roughly 3,000 documents, indexed as 17,2
 | Chunks participating in a duplicate group | 5,034 |
 | Largest duplicate group | one 1,571-character legal disclaimer, 43 identical copies across 43 documents |
 | Other duplicate groups | 27 copies of a 242-character template, 10 copies of a 1,434-character notice, 10 copies of a 162-character receipt stub |
-| Lexical candidate slots consumed by a single duplicated chunk, for one representative query | 42 of the top 50 |
 
-The last row is the operative harm. The lexical leg is configured for 50 candidates; one paragraph carrying no document-specific information took 42 of them, leaving 8 for every distinct chunk in the corpus. Fusion then truncates to 24 candidates before reranking, so genuinely relevant chunks compete for a badly depleted pool.
+Index redundancy is therefore real and substantial: one in six stored chunks is a copy of another, each carrying its own embedding, its own index entries, and its own embedding-time cost.
 
-This is not hypothetical. A retrieval failure observed in the evaluation suite traced to exactly this: the correct document was found by the lexical leg at rank 37 of 50, scored as a single-leg hit, and fell outside the 24-candidate fusion cap before reranking ever saw it.
+### Index redundancy is not the same as candidate pollution
 
-A second, distinct effect is present in the same corpus and must not be conflated with the first. A contractor's letterhead block is injected mid-content as a page-break artifact, so its identifying terms appear in many otherwise-distinct chunks: one identifier appears in 109 documents, another in 18. Those chunks are not duplicates, and deduplication will not merge them. What that pattern breaks is the assumption that such a term identifies one document — a corpus property that evaluation fixtures must respect, not a retrieval defect.
+These must not be conflated, and an early draft of this brief did conflate them.
+
+A query written deliberately to match the largest duplicate group's own subject matter consumed 42 of the 50 lexical candidate slots with copies of a single paragraph. That figure is an adversarial probe, not a representative workload, and it should not be read as a typical result. A query whose semantics genuinely match boilerplate will retrieve boilerplate, which is defensible behaviour.
+
+Measured instead across the twenty questions of the private evaluation suite, the lexical leg returns a mean of **44.0 distinct texts out of 50** — roughly 12% of the candidate budget lost to duplication, with a worst case of 33 of 50 and typical duplicate groups of two to six copies.
+
+So the honest position is narrower than the raw redundancy figure suggests:
+
+- duplication wastes a modest, consistent slice of the candidate budget on ordinary queries, with a tail where it costs a third of the pool;
+- it does not, on realistic queries, starve retrieval of distinct content; and
+- the strongest case for deduplication is storage and ingestion cost — one in six embeddings need never be computed or stored — rather than ranking quality.
+
+The one retrieval failure traced in detail is not evidence for this task. The correct document was found by the lexical leg at rank 37 of 50 and fell outside the 24-candidate fusion cap before reranking saw it. That is a consequence of the fusion cap being small relative to the candidate legs feeding it; deduplication would have recovered roughly six slots there, nowhere near enough to change the outcome. Candidate-count and cap tuning is a separate trade-off, noted under non-goals.
+
+### A distinct effect that deduplication will not fix
+
+A contractor's letterhead block is injected mid-content as a page-break artifact, so its identifying terms appear in many otherwise-distinct chunks: one identifier appears in 109 documents, another in 18. Those chunks are not duplicates, and deduplication will not merge them. What that pattern breaks is the assumption that such a term identifies one document — a corpus property that evaluation fixtures must respect, not a retrieval defect.
 
 The authoritative designs remain [`docs/ingestion-design.md`](../ingestion-design.md) for chunking and [`docs/retrieval-design.md`](../retrieval-design.md) for the read path. This brief defines implementation work and must not become a second design for either.
 
@@ -55,7 +70,13 @@ The evidence budget is already saturated. Across the 20 cases of the private eva
 
 ## Priority and dependencies
 
-P0 for retrieval quality. Phase 1 has no dependency and no migration. Phase 2 is a disposable measurement whose only output is a decision. Phase 3 changes stored state and is gated on Phase 2's result.
+The phases do not share a priority, and sizing them alike would be a mistake.
+
+Phase 1 is a small, bounded, query-time change with no migration. It is worth doing on its own terms, but the measured headroom is roughly 12% of the candidate budget on ordinary queries, so it should be scoped as an afternoon's work and judged against that expectation rather than the adversarial figure.
+
+Phase 2 is a disposable measurement whose only output is a decision. It carries more weight now than when this brief was drafted: with the quality case reduced to a modest gain, the spike is what establishes whether the Phase 3 migration is worth its cost at all.
+
+Phase 3 changes stored state, requires a full re-index, and is gated on Phase 2. Its justification is primarily efficiency — about one in six embeddings and stored chunks eliminated — with a secondary ranking benefit. It competes with other work on that basis and is not a P0 quality fix.
 
 Every phase is gated on the evaluation suite from [`p0-3-retrieval-quality-gate.md`](p0-3-retrieval-quality-gate.md), which is the only mechanism that can show whether a change helped.
 
@@ -157,7 +178,8 @@ Three consequences must be resolved as part of this phase rather than discovered
 ## Acceptance criteria
 
 - No single chunk text can occupy more than one slot in a result set.
-- For the representative query in which one chunk took 42 of 50 lexical candidate slots, that chunk occupies one slot and the remainder are distinct.
+- For the adversarial probe in which one chunk took 42 of 50 lexical candidate slots, that chunk occupies one slot and the remainder are distinct.
+- Mean distinct texts per lexical candidate pool across the evaluation suite rises from the recorded 44.0 of 50 toward 50, and the worst case rises from 33.
 - The spike's control and zero-overlap arms are measured with an identical, pinned case set, and its go/no-go criteria are reported explicitly, including a negative result if that is the outcome.
 - Identical normalised chunk text is stored once, embedded once, and indexed once within a workspace.
 - A chunk shared by several documents cites a defined document, and that rule is documented.
@@ -175,6 +197,8 @@ Recorded so later phases compare against a fixed point rather than an impression
 | --- | --- | --- | --- | --- |
 | `test` workspace | 33 | 0.848 | 0.729 | 0.730 |
 | Larger private workspace | 20 | 0.750 | 0.608 | 0.644 |
+
+Candidate-pool distinctness on the same suite: mean 44.0 distinct texts per 50 lexical candidates, worst case 33. This is the figure Phase 1 moves, and the one to quote — not the adversarial 42-of-50 probe.
 
 End-to-end query latency on the private workspace at the committed configuration: mean 2.6s, p95 3.9s. Index size 17,264 chunks with 16.5% redundant copies. Evidence budget: 120,000 bytes, mean utilisation 87%, 17 of 20 cases truncated. Any phase that improves ranking while materially worsening latency or distinct-source coverage should be reported as a trade-off, not as an improvement.
 

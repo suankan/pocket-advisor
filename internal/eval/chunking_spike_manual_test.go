@@ -1,7 +1,6 @@
 //go:build manual
 
-// Disposable measurement for the deduplication task
-// (docs/tasks/p0-0-dilution-by-duplicated-chunks.md, phase two).
+// Disposable measurement of exact chunk redundancy and chunk shape.
 //
 // It answers the cheap half of the spike without provisioning anything or
 // embedding anything: chunking is a pure function of normalized_text, so the

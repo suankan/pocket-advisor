@@ -132,6 +132,14 @@ A run reports processed, updated, unreadable, and failed counts, with a closed s
 
 Reply edges are derived per conversation at read time: an unambiguous `In-Reply-To` owner is `in_reply_to`; otherwise the nearest resolvable `References` ancestor is `references_recovery`. Ambiguous, damaged, or unavailable linkage is `unresolved` with warnings, and a message with no parent evidence is `root`. Exact browse, conversation fetch, and awaiting-reply queries read these tables, using configured workspace owner identities for direction; their semantics are described in [retrieval design](retrieval-design.md).
 
+### 2.6 Replaceable email topic mentions
+
+A topic graph version is a replaceable Tier 2 derived layer over canonical root email `normalized_text`; it does not alter documents, chunks, email metadata, conversations, or exact reply relationships. A version begins `BUILDING` with immutable extraction/configuration versions and bounds, becomes `READY` only through explicit finalization, and becomes `ACTIVE` only through promotion. Promotion atomically retires the previous active version, so a build never changes active results. Operators may explicitly retire an active version, and may remove only `BUILDING` or `RETIRED` versions with their derived annotations.
+
+`--topic-graph-build` is the bounded fixed-workspace write path. It requires a new version UUID and a source-message cap, takes one PostgreSQL `ingested_at` watermark, and keyset-walks only root `documents` that are parsed email messages with nonempty persisted normalized text. Children and attachments, header-only messages, and messages arriving after the watermark are excluded. For each selected message, `topicgraph.LocalLLMExtractor` sends only the bounded canonical body to the configured local LLM endpoint, validates the returned UTF-8 source offsets and hashes, then replaces that document's mentions only in the `BUILDING` version. An empty extraction is a valid replacement. A failed extraction or replacement is reported as a closed aggregate reason and does not delete the target's existing annotations.
+
+The build's `--dry-run` makes the same bounded selection and local extraction calls but creates no version and writes no mention. Summaries and topic-build logs contain only aggregate counts and closed reason codes; they never contain source text, labels, prompts, completions, document identifiers, graph-version identifiers, email headers, or workspace names. Finalization, promotion, retirement, and removal are separate explicit CLI operations. This slice persists mentions and source spans only; topic episodes, relations, graph traversal, retrieval expansion, and MCP interfaces are not implemented.
+
 ## 3. Upload and discovery
 
 ### 3.1 Workspace resolution

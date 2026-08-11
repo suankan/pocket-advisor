@@ -130,6 +130,14 @@ func (s *recordingStore) Promote(_ context.Context, workspace, _ string) error {
 	s.workspace = workspace
 	return nil
 }
+func (s *recordingStore) Retire(_ context.Context, workspace, _ string) error {
+	s.workspace = workspace
+	return nil
+}
+func (s *recordingStore) Remove(_ context.Context, workspace, _ string) error {
+	s.workspace = workspace
+	return nil
+}
 
 func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	store := &recordingStore{}
@@ -143,6 +151,15 @@ func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	}
 	if store.workspace != "workspace-a" || store.request.VersionID != testVersionID {
 		t.Fatalf("store received workspace=%q request=%+v", store.workspace, store.request)
+	}
+	if err := service.Retire(context.Background(), testVersionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Remove(context.Background(), testVersionID); err != nil {
+		t.Fatal(err)
+	}
+	if store.workspace != "workspace-a" {
+		t.Fatalf("lifecycle escaped workspace: %q", store.workspace)
 	}
 	if _, err := New(nil, "workspace-a"); err == nil {
 		t.Fatal("unscoped store accepted")

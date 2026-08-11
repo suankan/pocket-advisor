@@ -1,5 +1,5 @@
-// Package llm is the HTTP client for the local chat model used in query
-// preparation (retrieval-design.md §3.6).
+// Package llm is the HTTP client for the local stateless chat model used in
+// query preparation (retrieval-design.md §3.6) and bounded topic extraction.
 //
 // It is deliberately narrow. This model splits a question into search
 // queries; it never generates answers. Answer generation happens outside this

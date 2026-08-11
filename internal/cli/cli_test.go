@@ -15,6 +15,8 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 		"recover":     {"--recover", "--workspace-id", "test"},
 		"reprocess-email-metadata": {
 			"--reprocess-email-metadata", "--workspace-id", "test"},
+		"topic-graph-build":    {"--topic-graph-build", "--workspace-id", "test", "--topic-graph-version", "11111111-1111-5111-8111-111111111111", "--topic-graph-limit", "10"},
+		"finalize-topic-graph": {"--finalize-topic-graph", "11111111-1111-5111-8111-111111111111", "--workspace-id", "test"},
 	}
 	for wantMode, args := range cases {
 		o, err := Parse(args)
@@ -60,7 +62,7 @@ func TestParseRequiresAMode(t *testing.T) {
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{
 		"--ingest-all", "--delete-data", "--scan", "--reconcile",
-		"--doctor", "--recover", "--reprocess-email-metadata",
+		"--doctor", "--recover", "--reprocess-email-metadata", "--topic-graph-build",
 	} {
 		if _, err := Parse([]string{mode}); err == nil {
 			t.Errorf("Parse(%s) accepted a missing --workspace-id", mode)
@@ -153,5 +155,34 @@ func TestReprocessIsExclusiveWithOtherModes(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Errorf("error %q does not explain the conflict", err)
+	}
+}
+
+func TestParseValidatesBoundedTopicGraphBuild(t *testing.T) {
+	version := "11111111-1111-5111-8111-111111111111"
+	o, err := Parse([]string{"--topic-graph-build", "--workspace-id", "test", "--topic-graph-version", version, "--topic-graph-limit", "500", "--dry-run", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.TopicGraphBuild || o.TopicGraphVersion != version || o.TopicGraphLimit != 500 || !o.DryRun || !o.JSON {
+		t.Fatalf("options = %+v", o)
+	}
+	for _, args := range [][]string{
+		{"--topic-graph-build", "--workspace-id", "test", "--topic-graph-limit", "1"},
+		{"--topic-graph-build", "--workspace-id", "test", "--topic-graph-version", version, "--topic-graph-limit", "0"},
+		{"--topic-graph-build", "--workspace-id", "test", "--topic-graph-version", version, "--topic-graph-limit", "10001"},
+		{"--finalize-topic-graph", "not-a-uuid", "--workspace-id", "test"},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Errorf("Parse(%v) accepted invalid topic graph operation", args)
+		}
+	}
+}
+
+func TestTopicGraphOperationsAreExclusive(t *testing.T) {
+	version := "11111111-1111-5111-8111-111111111111"
+	_, err := Parse([]string{"--topic-graph-build", "--topic-graph-version", version, "--topic-graph-limit", "1", "--finalize-topic-graph", version, "--workspace-id", "test"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v", err)
 	}
 }

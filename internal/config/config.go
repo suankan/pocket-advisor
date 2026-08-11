@@ -213,17 +213,30 @@ type Reranking struct {
 	Timeout  time.Duration
 }
 
-// LLM is for query preparation only — decomposition (retrieval-design.md
-// §3.6). It is never used for answer generation, which happens outside this
-// codebase entirely (§6.1). It is local, fast and already wired up, which is
-// exactly what makes that worth stating. Model is config.yaml's
-// infra.llm.model, the same non-obvious-but-not-enforced contract as
-// Reranking.Model above.
+// LLM is the local stateless completion endpoint for query preparation
+// (retrieval-design.md §3.6) and explicitly invoked bounded topic-mention
+// extraction. It is never used for answer generation, which happens outside
+// this codebase entirely (§6.1). Model is config.yaml's infra.llm.model.
 type LLM struct {
 	Endpoint string
 	APIKey   string
 	Model    string
 	Timeout  time.Duration
+}
+
+// TopicGraph fixes the bounded local-model extraction contract for one
+// replaceable graph version. Version values are operator-maintained opaque
+// identifiers: change them before a model, prompt, or bound changes.
+type TopicGraph struct {
+	ExtractionVersion    string
+	ConfigVersion        string
+	PromptVersion        string
+	MaxInputBytes        int
+	MaxOutputBytes       int
+	MaxOutputTokens      int
+	MaxMentionsPerDoc    int
+	MaxSpansPerMention   int
+	MaxDisplayLabelBytes int
 }
 
 // Query is the read-path tuning surface. None of it invalidates the index.
@@ -244,14 +257,15 @@ type Query struct {
 }
 
 type Config struct {
-	RustFS    RustFS
-	Postgres  Postgres
-	NATS      NATS
-	Embedding Embedding
-	Reranking Reranking
-	LLM       LLM
-	Query     Query
-	MCP       MCP
+	RustFS     RustFS
+	Postgres   Postgres
+	NATS       NATS
+	Embedding  Embedding
+	Reranking  Reranking
+	LLM        LLM
+	TopicGraph TopicGraph
+	Query      Query
+	MCP        MCP
 
 	// WorkspacesConfigPath points at the workspace registry
 	// (config.yaml's workspaces.config — required, no fallback) — the same
@@ -303,6 +317,17 @@ type file struct {
 			Model    string `yaml:"model"`
 			Timeout  string `yaml:"timeout"`
 		} `yaml:"llm"`
+		TopicGraph struct {
+			ExtractionVersion    string `yaml:"extraction_version"`
+			ConfigVersion        string `yaml:"config_version"`
+			PromptVersion        string `yaml:"prompt_version"`
+			MaxInputBytes        int    `yaml:"max_input_bytes"`
+			MaxOutputBytes       int    `yaml:"max_output_bytes"`
+			MaxOutputTokens      int    `yaml:"max_output_tokens"`
+			MaxMentionsPerDoc    int    `yaml:"max_mentions_per_doc"`
+			MaxSpansPerMention   int    `yaml:"max_spans_per_mention"`
+			MaxDisplayLabelBytes int    `yaml:"max_display_label_bytes"`
+		} `yaml:"topic_graph"`
 		Observability struct {
 			MetricsPort int    `yaml:"metrics_port"`
 			LogLevel    string `yaml:"log_level"`
@@ -411,6 +436,11 @@ func defaults() *Config {
 		},
 		Reranking: Reranking{Timeout: 60 * time.Second},
 		LLM:       LLM{Timeout: 30 * time.Second},
+		TopicGraph: TopicGraph{
+			ExtractionVersion: "topic-mentions-v1", ConfigVersion: "topic-mentions-config-v1", PromptVersion: "topic-mentions-prompt-v1",
+			MaxInputBytes: 262144, MaxOutputBytes: 65536, MaxOutputTokens: 1024,
+			MaxMentionsPerDoc: 64, MaxSpansPerMention: 8, MaxDisplayLabelBytes: 256,
+		},
 		Query: Query{
 			VecCandidates:        50,
 			FTSCandidates:        50,
@@ -546,6 +576,28 @@ func applyFile(c *Config, path string) error {
 			return fmt.Errorf("%s: infra.llm.timeout: %w", path, err)
 		}
 		c.LLM.Timeout = d
+	}
+
+	setStr(&c.TopicGraph.ExtractionVersion, in.TopicGraph.ExtractionVersion)
+	setStr(&c.TopicGraph.ConfigVersion, in.TopicGraph.ConfigVersion)
+	setStr(&c.TopicGraph.PromptVersion, in.TopicGraph.PromptVersion)
+	if in.TopicGraph.MaxInputBytes > 0 {
+		c.TopicGraph.MaxInputBytes = in.TopicGraph.MaxInputBytes
+	}
+	if in.TopicGraph.MaxOutputBytes > 0 {
+		c.TopicGraph.MaxOutputBytes = in.TopicGraph.MaxOutputBytes
+	}
+	if in.TopicGraph.MaxOutputTokens > 0 {
+		c.TopicGraph.MaxOutputTokens = in.TopicGraph.MaxOutputTokens
+	}
+	if in.TopicGraph.MaxMentionsPerDoc > 0 {
+		c.TopicGraph.MaxMentionsPerDoc = in.TopicGraph.MaxMentionsPerDoc
+	}
+	if in.TopicGraph.MaxSpansPerMention > 0 {
+		c.TopicGraph.MaxSpansPerMention = in.TopicGraph.MaxSpansPerMention
+	}
+	if in.TopicGraph.MaxDisplayLabelBytes > 0 {
+		c.TopicGraph.MaxDisplayLabelBytes = in.TopicGraph.MaxDisplayLabelBytes
 	}
 
 	if in.Observability.MetricsPort > 0 {

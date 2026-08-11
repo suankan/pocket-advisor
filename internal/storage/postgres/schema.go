@@ -356,7 +356,8 @@ BEGIN
         SELECT status INTO graph_status FROM topic_graph_versions
         WHERE version_id = NEW.version_id AND workspace_id = NEW.workspace_id;
     END IF;
-    IF graph_status IS DISTINCT FROM 'BUILDING' THEN
+    IF graph_status IS DISTINCT FROM 'BUILDING'
+       AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
         RAISE EXCEPTION 'topic mentions are mutable only while graph version is BUILDING';
     END IF;
     IF TG_OP = 'DELETE' THEN
@@ -493,6 +494,13 @@ func (d *DB) applyTopicGraphSchema(ctx context.Context) error {
 		return fmt.Errorf("apply topic graph schema: %w", err)
 	}
 	return nil
+}
+
+// ApplyTopicGraphSchema installs only the additive derived-graph tables. A
+// topic build does not need an embedding probe or permission to alter canonical
+// indexing state; it merely ensures its own committed substrate exists.
+func (d *DB) ApplyTopicGraphSchema(ctx context.Context) error {
+	return d.applyTopicGraphSchema(ctx)
 }
 
 // LoadSchemaMetadata reads what the index was built for. Every worker calls

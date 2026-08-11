@@ -141,7 +141,6 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
-		"workspace_id", workspaceID,
 		"rustfs", w.RustFSEndpoint,
 		"nats", w.NATSURL,
 		"metrics_port", cfg.MetricsPort)

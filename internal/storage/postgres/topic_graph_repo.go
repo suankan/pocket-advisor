@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,6 +18,56 @@ import (
 type TopicGraphRepo struct{ db *DB }
 
 func NewTopicGraphRepo(db *DB) *TopicGraphRepo { return &TopicGraphRepo{db: db} }
+
+// Snapshot returns the database clock used by email_messages.ingested_at.
+// One build holds this watermark for every keyset page, so later ingestion
+// cannot silently enter a version half way through its construction.
+func (r *TopicGraphRepo) Snapshot(ctx context.Context) (time.Time, error) {
+	var watermark time.Time
+	if err := r.db.Pool.QueryRow(ctx, `SELECT now()`).Scan(&watermark); err != nil {
+		return time.Time{}, fmt.Errorf("read topic graph build watermark: %w", err)
+	}
+	return watermark, nil
+}
+
+// CanonicalEmails returns a deterministic page of eligible topic sources. A
+// source must be a root, parsed email message with nonempty persisted body
+// text. Attachments, children, header-only messages, and late arrivals are
+// never admitted to an operator build.
+func (r *TopicGraphRepo) CanonicalEmails(ctx context.Context, workspaceID string, watermark time.Time, after string, limit int) ([]topicgraph.CanonicalEmail, error) {
+	if workspaceID == "" || watermark.IsZero() || limit <= 0 {
+		return nil, topicgraph.ErrInvalidRequest
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+        SELECT d.doc_id::text, d.normalized_text
+        FROM documents d
+        JOIN email_messages em ON em.doc_id = d.doc_id AND em.workspace_id = d.workspace_id
+        WHERE d.workspace_id = $1
+          AND d.parent_doc_id IS NULL
+          AND d.doc_type = 'email'
+          AND d.normalized_text IS NOT NULL
+          AND d.normalized_text <> ''
+          AND em.ingested_at <= $2
+          AND d.doc_id::text > $3
+        ORDER BY d.doc_id
+        LIMIT $4`, workspaceID, watermark, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select topic graph sources: %w", err)
+	}
+	defer rows.Close()
+	out := make([]topicgraph.CanonicalEmail, 0, limit)
+	for rows.Next() {
+		var email topicgraph.CanonicalEmail
+		if err := rows.Scan(&email.DocID, &email.NormalizedText); err != nil {
+			return nil, fmt.Errorf("scan topic graph source: %w", err)
+		}
+		out = append(out, email)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("select topic graph sources: %w", err)
+	}
+	return out, nil
+}
 
 // CreateBuilding records a new immutable build specification. A version always
 // begins BUILDING; callers cannot insert an already-ready or active graph.
@@ -177,6 +228,61 @@ func (r *TopicGraphRepo) Promote(ctx context.Context, workspaceID, versionID str
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit topic graph promotion: %w", err)
+	}
+	return nil
+}
+
+// Retire deactivates the active version without destroying its evidence
+// annotations. BUILDING versions are incomplete and READY versions remain
+// evaluation candidates, so neither can be retired.
+func (r *TopicGraphRepo) Retire(ctx context.Context, workspaceID, versionID string) error {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin topic graph retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	if err != nil {
+		return err
+	}
+	if status == topicgraph.StatusRetired {
+		return tx.Commit(ctx)
+	}
+	if status != topicgraph.StatusActive {
+		return topicgraph.ErrNotRetirable
+	}
+	if _, err := tx.Exec(ctx, `UPDATE topic_graph_versions SET status = 'RETIRED' WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+		return fmt.Errorf("retire topic graph version: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit topic graph retirement: %w", err)
+	}
+	return nil
+}
+
+// Remove deletes an inactive build and its derived annotations. An ACTIVE
+// version can only change through Promote or an explicit Retire first.
+func (r *TopicGraphRepo) Remove(ctx context.Context, workspaceID, versionID string) error {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin topic graph removal: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	if err != nil {
+		return err
+	}
+	if status == topicgraph.StatusReady || status == topicgraph.StatusActive {
+		return topicgraph.ErrNotRemovable
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('pocket_advisor.topic_graph_remove', 'on', true)`); err != nil {
+		return fmt.Errorf("authorize topic graph removal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_graph_versions WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+		return fmt.Errorf("remove topic graph version: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit topic graph removal: %w", err)
 	}
 	return nil
 }

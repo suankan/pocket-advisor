@@ -42,6 +42,8 @@ var (
 	ErrVersionExists  = errors.New("topic graph version already exists")
 	ErrNotBuilding    = errors.New("topic graph version is not building")
 	ErrNotReady       = errors.New("topic graph version is not ready")
+	ErrNotRetirable   = errors.New("topic graph version cannot be retired")
+	ErrNotRemovable   = errors.New("topic graph version cannot be removed")
 )
 
 // Limits are persisted with a graph version. Changing an extractor's bounds
@@ -109,6 +111,8 @@ type Store interface {
 	ReplaceMentions(context.Context, string, ReplaceRequest) error
 	Finalize(context.Context, string, string) error
 	Promote(context.Context, string, string) error
+	Retire(context.Context, string, string) error
+	Remove(context.Context, string, string) error
 }
 
 // Service exposes the graph write operations without choosing an HTTP, MCP,
@@ -140,6 +144,12 @@ func (s *Service) Finalize(ctx context.Context, versionID string) error {
 }
 func (s *Service) Promote(ctx context.Context, versionID string) error {
 	return s.store.Promote(ctx, s.workspace, versionID)
+}
+func (s *Service) Retire(ctx context.Context, versionID string) error {
+	return s.store.Retire(ctx, s.workspace, versionID)
+}
+func (s *Service) Remove(ctx context.Context, versionID string) error {
+	return s.store.Remove(ctx, s.workspace, versionID)
 }
 
 func ValidateVersionSpec(spec VersionSpec) error {

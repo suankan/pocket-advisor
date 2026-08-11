@@ -78,6 +78,7 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 ## 3. Configuration
 
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
+`infra.topic_graph` fixes the bounded local-LLM topic-mention extraction contract: opaque extraction, configuration, and prompt versions plus input, output, and mention limits. Change the version fields before changing the configured model, prompt, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
 
 `workspaces/workspace-config.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's collections and local staging paths. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
@@ -189,6 +190,27 @@ Useful modes:
 `--reprocess-email-metadata` walks only email message documents in the fixed workspace in deterministic order. It is idempotent and resumable: re-running it writes the same metadata through the live email worker's parser and transaction, does not duplicate rows or move `ingested_at`, and leaves documents, chunks, retrieval data, and legacy thread IDs untouched. `--reprocess-limit N` bounds a run (`0` is all messages); `--reprocess-missing-only` is useful after an interrupted pass. The summary reports processed, updated, unreadable, and failed counts. Unreadable Tier 1 bytes and parse/write failures cause a non-zero exit after the complete summary, rather than being silently skipped. `--json` produces the summary as JSON.
 
 The first interrupt stops fetching and drains in-flight handlers. A second interrupt aborts immediately. Queued and unacknowledged messages remain durable in JetStream, so the next run resumes them.
+
+### Build email topic mentions
+
+Topic mentions are replaceable derived annotations over canonical root email body text. They do not alter documents, chunks, email metadata, or the active graph until an operator promotes an evaluated version. Start with a bounded dry run; it calls the local model but creates no version and writes no mentions:
+
+```sh
+./bin/pocket-advisor --topic-graph-build --workspace-id example \
+  --topic-graph-version <uuid> --topic-graph-limit 500 --dry-run
+```
+
+Repeat without `--dry-run` to create a `BUILDING` version and replace mentions only in that version. The command selects messages against one database watermark in deterministic document order. Its summary contains aggregate processed, replaced, mention, and closed failure-reason counts only; it never prints or logs source text, labels, prompts, completions, or document/version identifiers. A failed extraction leaves that target's prior annotations untouched and ends the run non-zero, so finalize only a complete build.
+
+```sh
+./bin/pocket-advisor --topic-graph-build --workspace-id example \
+  --topic-graph-version <uuid> --topic-graph-limit 500
+./bin/pocket-advisor --finalize-topic-graph <uuid> --workspace-id example
+# Evaluate the sealed version through the approved operator process, then:
+./bin/pocket-advisor --promote-topic-graph <uuid> --workspace-id example
+```
+
+Promotion atomically retires the prior active version and activates the `READY` version. `--retire-topic-graph <uuid>` explicitly deactivates an active version while retaining its annotations; `--remove-topic-graph <uuid>` removes an incomplete `BUILDING` or inactive `RETIRED` version and its derived annotations after confirmation (or `--yes`). Neither command can remove an active version.
 
 ## 6. Observe ingestion
 

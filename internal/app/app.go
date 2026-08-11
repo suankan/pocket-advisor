@@ -35,6 +35,7 @@ type App struct {
 	DB     *postgres.DB
 	Docs   *postgres.DocumentRepo
 	Chunks *postgres.ChunkRepo
+	Emails *postgres.EmailRepo
 	Bus    *bus.Bus
 
 	// CPU is the single bound on genuinely CPU-bound work — rasterisation and
@@ -120,6 +121,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		a.DB = db
 		a.Docs = postgres.NewDocumentRepo(db)
 		a.Chunks = postgres.NewChunkRepo(db)
+		a.Emails = postgres.NewEmailRepo(db)
 		a.stopFns = append(a.stopFns, db.Close)
 	}
 

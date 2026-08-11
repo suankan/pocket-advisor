@@ -11,7 +11,16 @@ import (
 // schemaSQL is the Tier 2 + Tier 3 DDL. The vector dimension is interpolated
 // at bootstrap from a probe of the embedding endpoint — it is never a literal
 // in checked-in DDL (ingestion-design.md §4.4).
-const schemaSQL = `
+//
+// The email browse tables are spliced on rather than written inline: an
+// already-provisioned workspace never re-runs this DDL, so the same statements
+// have to be reachable as an upgrade (applyEmailSchema) as well as at
+// bootstrap. Every statement in that half is IF NOT EXISTS, so the two paths
+// are the same statements run under different circumstances rather than two
+// descriptions of one schema that could drift apart.
+const schemaSQL = coreSchemaSQL + emailSchemaSQL
+
+const coreSchemaSQL = `
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Postgres grants CONNECT to PUBLIC on every new database by default —
@@ -136,6 +145,114 @@ CREATE INDEX IF NOT EXISTS chunks_workspace_idx  ON document_chunks(workspace_id
 CREATE INDEX IF NOT EXISTS chunks_content_idx    ON document_chunks(content_id);
 `
 
+// emailSchemaSQL is the durable email browse and conversation model
+// (ingestion-design.md §2.5). It is structural only: no data is rewritten, so
+// it is safe on an existing workspace and a no-op on every run after the first.
+const emailSchemaSQL = `
+-- One row per email message document. documents keeps the display-form header
+-- values the retrieval path already renders; this table keeps the structured
+-- identities a browse query joins and sorts on, which is why sent_at exists
+-- alongside documents.email_date rather than replacing it.
+--
+-- sent_at is the message's own Date and is NULL when it was absent or
+-- unparsable; ingested_at is when this row was written. They are separate
+-- because a message with no date must still be reachable, and the snapshot
+-- watermark that keeps a paginated browse stable is an ingestion fact, not a
+-- claim the sender made.
+CREATE TABLE IF NOT EXISTS email_messages (
+    doc_id              UUID PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
+    workspace_id        VARCHAR     NOT NULL,
+    message_id          TEXT        NOT NULL DEFAULT '',
+    subject_raw         TEXT        NOT NULL DEFAULT '',
+    subject_normalized  TEXT        NOT NULL DEFAULT '',
+    sent_at             TIMESTAMPTZ,
+    ingested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- '' | 'list' | 'auto_submitted' | 'bounce'. A closed set derived from a
+    -- closed set of header rules; '' is ordinary human-authored mail.
+    automated_class     VARCHAR     NOT NULL DEFAULT '',
+    list_id             TEXT        NOT NULL DEFAULT '',
+    conversation_id     UUID        NOT NULL,
+    -- 'references' | 'subject_fallback' | 'isolated'. Stored, not inferred at
+    -- read time: a heuristic grouping must never be presented as an exact one.
+    conversation_method VARCHAR     NOT NULL,
+    parse_warnings      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    parse_version       INT         NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS email_messages_conversation_idx
+    ON email_messages(workspace_id, conversation_id);
+-- The browse keyset. Matches the read order exactly — sent_at DESC NULLS LAST,
+-- then doc_id DESC as the tiebreak — so a cursor page is an index range scan
+-- and undated messages sort last instead of dropping out.
+CREATE INDEX IF NOT EXISTS email_messages_keyset_idx
+    ON email_messages(workspace_id, sent_at DESC NULLS LAST, doc_id DESC);
+-- The snapshot watermark: a page taken after a cursor was issued must be able
+-- to exclude everything ingested since.
+CREATE INDEX IF NOT EXISTS email_messages_ingested_idx
+    ON email_messages(workspace_id, ingested_at);
+CREATE INDEX IF NOT EXISTS email_messages_message_id_idx
+    ON email_messages(workspace_id, message_id) WHERE message_id <> '';
+
+-- Parsed mailboxes, one row per header position. Ordinal preserves header
+-- order; a mailbox that could not be parsed keeps its raw text with an empty
+-- address rather than being dropped or guessed at.
+CREATE TABLE IF NOT EXISTS email_addresses (
+    doc_id       UUID    NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    kind         VARCHAR NOT NULL,
+    ordinal      INT     NOT NULL,
+    address      TEXT    NOT NULL DEFAULT '',
+    display_name TEXT    NOT NULL DEFAULT '',
+    raw          TEXT    NOT NULL DEFAULT '',
+    valid        BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (doc_id, kind, ordinal)
+);
+
+-- Exact sender and recipient filtering. Address first: the question is always
+-- "this mailbox, in this role", never "every from address in the corpus". The
+-- unparsable rows are excluded because no filter can ever match them.
+CREATE INDEX IF NOT EXISTS email_addresses_lookup_idx
+    ON email_addresses(address, kind) WHERE address <> '';
+
+-- In-Reply-To and References as stored, in header order. Kept as written even
+-- though the identifier graph below is what conversations are read from: the
+-- graph loses which header an edge came from, and only In-Reply-To is an exact
+-- parent claim.
+CREATE TABLE IF NOT EXISTS email_references (
+    doc_id     UUID    NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    kind       VARCHAR NOT NULL,
+    ordinal    INT     NOT NULL,
+    message_id TEXT    NOT NULL,
+    PRIMARY KEY (doc_id, kind, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS email_references_message_idx
+    ON email_references(message_id);
+
+-- The identifier graph: one node per identifier ever seen in a workspace,
+-- whether or not the message it names was ever ingested. An identifier
+-- mentioned only by a reply gets a placeholder node with a NULL doc_id — a
+-- conversation must survive a missing ancestor, and no document row is ever
+-- fabricated to stand in for one.
+--
+-- component_id is the connected component the identifier belongs to, which is
+-- the conversation. Merges rewrite it to the lexicographically smallest of the
+-- merged ids, so the outcome depends on the set of messages ingested and not on
+-- the order they arrived in.
+CREATE TABLE IF NOT EXISTS email_identifier_nodes (
+    workspace_id VARCHAR NOT NULL,
+    message_id   TEXT    NOT NULL,
+    doc_id       UUID REFERENCES documents(doc_id) ON DELETE SET NULL,
+    component_id UUID    NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+);
+
+-- Drives the merge rewrite, which is by component rather than by identifier.
+CREATE INDEX IF NOT EXISTS email_identifier_nodes_component_idx
+    ON email_identifier_nodes(workspace_id, component_id);
+CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
+    ON email_identifier_nodes(doc_id) WHERE doc_id IS NOT NULL;
+`
+
 // searchIndexName is the lexical leg's BM25 index. Named, not anonymous,
 // because to_bm25query's two-argument form (BuildSearchIndex, fuse.go) must
 // name the index it scores against.
@@ -201,7 +318,10 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		}
 		// An already-provisioned workspace never re-runs the DDL above, so
 		// structural changes reach it here or not at all.
-		return d.migrateChunkContent(ctx, existing.EmbedDim)
+		if err := d.migrateChunkContent(ctx, existing.EmbedDim); err != nil {
+			return err
+		}
+		return d.applyEmailSchema(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) && !isUndefinedTable(err) {
 		return err
 	}
@@ -217,6 +337,25 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		meta.EmbedModel, meta.EmbedDim, meta.TruncatedDim)
 	if err != nil {
 		return fmt.Errorf("record schema metadata: %w", err)
+	}
+
+	// A no-op here — schemaSQL already carried these statements — and run
+	// anyway, so every bootstrap proves the upgrade path is idempotent instead
+	// of leaving that only to workspaces old enough to need it.
+	return d.applyEmailSchema(ctx)
+}
+
+// applyEmailSchema creates the email browse and conversation tables on a
+// workspace that was provisioned before they existed.
+//
+// Purely structural: it adds tables and indexes and rewrites nothing, so there
+// is no partial state to guard against and no backfill to sequence. Existing
+// rows gain email metadata when their messages are re-ingested from Tier 1,
+// which is the supported reprocessing path — this migration deliberately does
+// not synthesise metadata for documents whose bytes it has not read.
+func (d *DB) applyEmailSchema(ctx context.Context) error {
+	if _, err := d.Pool.Exec(ctx, emailSchemaSQL); err != nil {
+		return fmt.Errorf("apply email schema: %w", err)
 	}
 	return nil
 }

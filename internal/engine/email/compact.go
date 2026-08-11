@@ -182,6 +182,15 @@ func Compact(s string) string {
 // ThreadKey builds the fallback thread identity for messages whose headers
 // lack In-Reply-To/References: normalised subject plus a participant.
 func ThreadKey(subject, from string) string {
+	return NormalizeSubject(subject) + "|" + strings.ToLower(strings.TrimSpace(from))
+}
+
+// NormalizeSubject is the conservative grouping form of a subject: lowercased,
+// trimmed, and stripped of reply and forward prefixes however many times they
+// were stacked. Deliberately no more than that — collapsing punctuation or
+// whitespace would start merging conversations that only look alike, and
+// subject grouping is already the weakest signal a conversation can rest on.
+func NormalizeSubject(subject string) string {
 	s := strings.ToLower(strings.TrimSpace(subject))
 	for {
 		trimmed := false
@@ -195,5 +204,5 @@ func ThreadKey(subject, from string) string {
 			break
 		}
 	}
-	return s + "|" + strings.ToLower(strings.TrimSpace(from))
+	return s
 }

@@ -91,7 +91,10 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 			"scanned PDFs and images will be skipped, not indexed")
 	}
 
-	email := &worker.EmailWorker{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleEmail)}
+	email := &worker.EmailWorker{
+		Vault: a.Vault, Docs: a.Docs, Emails: a.Emails, Bus: a.Bus,
+		Log: a.Logger(telemetry.RoleEmail),
+	}
 	docs := &worker.DocumentWorker{
 		Vault: a.Vault, Docs: a.Docs, Bus: a.Bus,
 		PDF: pdfEngine, OCR: p.ocrEngine, Log: a.Logger(telemetry.RoleDocument),

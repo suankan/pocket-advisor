@@ -216,6 +216,15 @@ func (r *DocumentRepo) DeleteWorkspace(ctx context.Context, workspaceID string) 
 	if err != nil {
 		return 0, fmt.Errorf("delete workspace %s: %w", workspaceID, err)
 	}
+	// The identifier graph does not cascade: its nodes outlive the documents
+	// they name, which is exactly how a conversation survives a missing
+	// ancestor. That makes them the one thing a wipe would leave behind — a
+	// graph of placeholders for a corpus that no longer exists — so they are
+	// removed explicitly (§2.5).
+	if _, err := r.db.Pool.Exec(ctx,
+		`DELETE FROM email_identifier_nodes WHERE workspace_id = $1`, workspaceID); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("delete workspace %s identifier graph: %w", workspaceID, err)
+	}
 	return tag.RowsAffected(), nil
 }
 

@@ -23,8 +23,13 @@ import (
 type EmailWorker struct {
 	Vault *rustfs.Vault
 	Docs  *postgres.DocumentRepo
-	Bus   *bus.Bus
-	Log   *slog.Logger
+	// Emails owns the durable browse metadata: structured identifiers,
+	// normalized mailboxes and the conversation assignment. Separate from Docs
+	// because it writes a different set of tables for a different question —
+	// what a message is, rather than where a document came from.
+	Emails *postgres.EmailRepo
+	Bus    *bus.Bus
+	Log    *slog.Logger
 }
 
 func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
@@ -56,6 +61,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	var children []email.Child
 	var bodyText, threadID string
 	var headers domain.EmailHeaders
+	var parsed *email.Parsed
 
 	if isArchive(meta.MimeType) {
 		children, err = email.UnrollArchive(data, meta.SourceFilename)
@@ -63,17 +69,39 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonRecursionLimit, err))
 		}
 	} else {
-		parsed, perr := email.ParseEmail(data)
+		p, perr := email.ParseEmail(data)
 		if perr != nil {
 			if errors.Is(perr, email.ErrUnknownCharset) {
 				return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, perr))
 			}
 			return WithDoc(meta.DocId, Fatal(domain.ReasonEmailParseFailed, perr))
 		}
+		parsed = p
 		children = parsed.Children
 		threadID = resolveThread(parsed)
 		headers = headersOf(parsed)
 		bodyText = strings.TrimSpace(parsed.BodyText)
+	}
+
+	// Browse metadata before either body path, and independently of both: it
+	// describes the message rather than its text, so a bodyless message and a
+	// message whose body is still queued for embedding are equally answerable
+	// by sender, date and conversation. The document row it hangs off already
+	// exists — discovery stubbed it — and a rewrite of the same doc_id
+	// converges rather than accumulating (§2.5).
+	if parsed != nil && w.Emails != nil {
+		conv, err := w.Emails.SaveEmailMessage(ctx, emailMessageOf(meta.DocId, meta.WorkspaceId, parsed))
+		if err != nil {
+			return WithDoc(meta.DocId, err)
+		}
+		if conv.DuplicateOf != "" {
+			// The identifier stays with whichever document claimed it first;
+			// this one is still stored and still browsable, it simply does not
+			// own the Message-ID. Worth saying once, because a corpus full of
+			// these means the same mailbox was ingested twice.
+			w.Log.Warn("duplicate message id",
+				"doc_id", meta.DocId, "owned_by", conv.DuplicateOf)
+		}
 	}
 
 	// Body text first: the embed command carries a reference, so the text has

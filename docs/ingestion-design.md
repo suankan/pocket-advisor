@@ -99,6 +99,31 @@ Startup verifies that the endpoint’s model and vector width match `schema_meta
 
 **Target state:** a model change is handled as an explicit re-embed into a distinct model namespace, with the existing namespace remaining queryable until backfill and cutover complete. The migration and backfill workflow is not implemented.
 
+Applying the schema to an already-provisioned workspace adds structural changes it predates, including the email message tables in §2.5. That path creates tables and indexes only: it rewrites no rows, synthesises no metadata for documents whose bytes it has not read, and is safe to run on every start.
+
+### 2.5 Email message metadata and conversations
+
+Email messages carry a second layer of Tier 2 state alongside their `documents` row. `documents` keeps the display-form subject, sender, recipients, and date that evidence renders; the tables below keep the structured identities a browse query filters and sorts on, and the graph conversations are reconstructed from.
+
+| Table | Contents |
+| --- | --- |
+| `email_messages` | one row per message document: canonical `Message-ID`, raw and normalized subject, parsed `sent_at`, separate `ingested_at`, bounded automated class and `List-Id`, the assigned conversation and the method that assigned it, typed parse warnings, and the parser version |
+| `email_addresses` | parsed mailboxes by header kind and header order, each with its normalized address, display name, original raw text, and whether it parsed |
+| `email_references` | `In-Reply-To` and `References` identifiers as written, in header order |
+| `email_identifier_nodes` | the workspace's identifier graph: one node per identifier ever seen, the document that owns it when there is one, and the component it belongs to |
+
+Nothing is fabricated. A missing or malformed header produces an empty value and a typed warning; an unparsable mailbox keeps its raw text with an empty address, so no exact filter can match it and the defect stays visible. `sent_at` is the message's own `Date` and is null when that was absent or unparsable. `ingested_at` is when the row was written; it is the watermark a stable browse cursor pages against and does not move when a document is reprocessed.
+
+A conversation is a connected component of the identifier graph. A message's identifier set is its own `Message-ID` when present, plus every `In-Reply-To` and `References` entry. Folding a message in unions the components of that set and keeps the lexicographically smallest component id, so a conversation depends on which messages a workspace holds and not on the order they arrived in. An identifier named only by a reply becomes a placeholder node with no document behind it: a conversation survives a missing ancestor, and no document row is invented to stand in for one. A `Message-ID` claimed by a second document stays with the first writer — the second is stored, joins the same conversation, and records a `duplicate_message_id` warning rather than retargeting the identifier.
+
+`conversation_method` is stored rather than inferred at read time, because a heuristic grouping must never be presented as an exact one: `references` for a message carrying any identifier, `subject_fallback` for a header orphan grouped by normalized subject *and* its sender within its workspace, `isolated` for a message with neither a usable subject and sender pair nor an identifier. Subject normalization is conservative — lowercasing, trimming, and removing stacked reply and forward prefixes — the sender keeps a recurring subject such as an invoice notice from collapsing unrelated correspondents into one conversation, and a subject group is never merged into an identifier component.
+
+Indexes cover conversation lookup, exact address-and-kind matching, the `sent_at DESC NULLS LAST, doc_id DESC` browse keyset, the `ingested_at` watermark, and identifier and component lookup.
+
+One message's metadata is written in a single transaction, serialized per workspace so that concurrent workers cannot plan a component merge against a graph the other is rewriting. The write is idempotent for a given `doc_id`: mailboxes and reply headers are replaced rather than appended, and component identity is derived from identifiers rather than minted per run, so re-ingesting a message from Tier 1 reproduces the same conversation. Re-ingestion is the supported way for documents older than these tables to gain the metadata.
+
+**Target state:** reply edges are derived per conversation at read time — an exact `In-Reply-To` match, otherwise the nearest resolvable `References` ancestor, labelled as recovery. Exact browse, conversation fetch, and awaiting-reply queries read these tables, using the workspace's configured owner identities to classify direction. Neither the read path nor its transport is implemented.
+
 ## 3. Upload and discovery
 
 ### 3.1 Workspace resolution
@@ -168,6 +193,7 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - extracts and compacts body text;
 - strips markup, quoted reply chains, signature boilerplate, and machine-generated tracking URLs over the configured structural threshold;
 - records headers in structured columns;
+- persists the durable message metadata and conversation assignment described in §2.5;
 - derives thread ids from message headers, with subject/participant/date fallback;
 - writes child bytes under `extracted/`;
 - creates child stubs before publishing child commands; and

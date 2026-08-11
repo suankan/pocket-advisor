@@ -29,6 +29,35 @@ func NewChunkID(docID, embedModel string, index int) string {
 	return uuidV5(Namespace, fmt.Sprintf("%s\x00%s\x00%d", docID, embedModel, index))
 }
 
+// NewEmailComponentID seeds a new identifier-graph component. Derived rather
+// than random so that two messages of one conversation arriving in either order
+// converge on the same component: whichever arrives first seeds it from the
+// same smallest identifier, and a later merge keeps the smaller id anyway.
+func NewEmailComponentID(workspaceID, messageID string) string {
+	return uuidV5(Namespace, "email-component\x00"+workspaceID+"\x00"+messageID)
+}
+
+// NewEmailSubjectConversationID is the conversation identity of the labelled
+// subject fallback. Messages with no identifiers at all group by normalized
+// subject *and* a participant, within one workspace and nowhere else.
+//
+// The participant is what keeps the fallback conservative. Subjects like
+// "invoice" or "meeting" recur across unrelated correspondents, and grouping on
+// the subject alone would collapse strangers into one conversation on the
+// weakest signal the model has. Requiring the same sender means the guess is at
+// least about one person's mail.
+func NewEmailSubjectConversationID(workspaceID, subjectNormalized, participant string) string {
+	return uuidV5(Namespace,
+		"email-subject\x00"+workspaceID+"\x00"+subjectNormalized+"\x00"+participant)
+}
+
+// NewEmailIsolatedConversationID is the conversation of a message that offers
+// neither identifiers nor a subject. It is a conversation of one, keyed on the
+// document, rather than a shared bucket for everything unidentifiable.
+func NewEmailIsolatedConversationID(docID string) string {
+	return uuidV5(Namespace, "email-isolated\x00"+docID)
+}
+
 // uuidV5 implements RFC 4122 §4.3: SHA-1 of namespace + name, with the
 // version and variant bits overwritten.
 func uuidV5(ns [16]byte, name string) string {

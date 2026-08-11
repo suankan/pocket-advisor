@@ -212,7 +212,12 @@ type TimelineRelation struct {
 	Type              RelationType `json:"type"`
 	Confidence        float64      `json:"confidence"`
 }
-type TimelineBudget struct{ NodesUsed, NodesAllowed, BytesUsed, BytesAllowed int }
+type TimelineBudget struct {
+	NodesUsed    int `json:"nodes_used"`
+	NodesAllowed int `json:"nodes_allowed"`
+	BytesUsed    int `json:"bytes_used"`
+	BytesAllowed int `json:"bytes_allowed"`
+}
 type TimelineResult struct {
 	GraphVersion string             `json:"graph_version"`
 	SnapshotAt   time.Time          `json:"snapshot_at"`

@@ -43,6 +43,9 @@ type QueryTool struct {
 	// Mailbox, when configured, exposes deterministic email browse tools in
 	// the same fixed workspace as retrieval.
 	Mailbox *MailboxTool
+	// Timeline, when configured, follows source-backed topic mentions from
+	// the active graph in this same fixed workspace.
+	Timeline *TimelineTool
 
 	stateMu          sync.Mutex
 	store            *snapshotStore
@@ -65,6 +68,7 @@ func (t *QueryTool) forCaller() *QueryTool {
 		Title:            t.Title,
 		Corpus:           append([]string(nil), t.Corpus...),
 		Mailbox:          t.Mailbox,
+		Timeline:         t.Timeline,
 		now:              t.now,
 		random:           t.random,
 		snapshotTTL:      t.snapshotTTL,
@@ -173,6 +177,9 @@ func (t *QueryTool) DescribeAll() []ToolDefinition {
 	if t.Mailbox != nil {
 		definitions = append(definitions, t.Mailbox.DescribeAll()...)
 	}
+	if t.Timeline != nil {
+		definitions = append(definitions, t.Timeline.Describe())
+	}
 	return definitions
 }
 
@@ -204,6 +211,9 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 	}
 	if t.Mailbox != nil && (params.Name == t.Mailbox.ListName() || params.Name == t.Mailbox.ConversationName() || params.Name == t.Mailbox.AwaitingReplyName()) {
 		return t.Mailbox.Call(ctx, raw)
+	}
+	if t.Timeline != nil && params.Name == t.Timeline.Name() {
+		return t.Timeline.Call(ctx, raw)
 	}
 	if params.Name != t.Name() && params.Name != t.ReadName() {
 		return CallToolResult{}, &unknownToolError{}

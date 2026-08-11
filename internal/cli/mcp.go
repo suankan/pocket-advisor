@@ -23,6 +23,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/retrieval"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/topicgraph"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
@@ -57,9 +58,15 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 		db.Close()
 		return nil, nil, nil, err
 	}
+	timelineService, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db), o.WorkspaceID)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, err
+	}
 	title, corpus := describeCorpus(o)
 	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title}
-	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool}, svc, db.Close, nil
+	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title}
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {

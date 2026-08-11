@@ -11,7 +11,7 @@ Pocket Advisor exposes retrieval evidence through two MCP transports:
 - a workspace-bound stdio MCP server over newline-delimited JSON-RPC; and
 - a workspace-bound Streamable HTTP MCP resource server, running as a local process, optionally authenticated against Google.
 
-Both transports expose the same typed JSON Schema 2020-12 compact-search and cursor-based evidence-page results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
+Both transports expose the same typed JSON Schema 2020-12 compact-search, mailbox, and bounded topic-timeline results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
 
 The stdio adapter is the default local integration, started with `mcp stdio`. The HTTP adapter, started with `mcp start`, runs as a local process bound to loopback by default and serves remote, browser, and hosted agent clients directly or behind an operator-supplied reverse proxy. Authentication is optional; when enabled, Google is the sole supported identity provider. The Go process is the resource server: it verifies every bearer token as a Google-issued OIDC ID token against Google's published JWKS (signature, issuer, audience, expiry), checks the verified `email`/`email_verified` claims against an operator-maintained allowlist, then keys continuation state by issuer and subject. RFC 9728 protected-resource metadata advertises the Google issuer. There is no token-result cache, so an ID token remains valid for its own natural (Google-issued) lifetime — revoking a caller means removing their email from the allowlist and restarting the server.
 
@@ -19,21 +19,22 @@ The stdio adapter is the default local integration, started with `mcp stdio`. Th
 
 ### Tools
 
-Each workspace-bound MCP server exposes retrieval and deterministic mailbox tools:
+Each workspace-bound MCP server exposes retrieval, deterministic mailbox, and topic-timeline tools:
 
 - `search` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
 - `list_messages` — lists exact email messages with bounded normalized sender, recipient, date, direction, order, collapse, and cursor filters.
 - `fetch_conversation` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
 - `awaiting_reply_candidates` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
+- `topic_timeline` — accepts only a server-issued topic mention or episode reference and bounded traversal direction, depth, node, and source-span byte limits. It returns the active graph version's cited chronological subgraph, derived relations, warnings, omissions, and budgets.
 
-Neither tool accepts a workspace, result identifier, document identifier, source URI, credential, byte range, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
+No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, graph version, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
 
-Both tools advertise closed inputs, one JSON Schema 2020-12 evidence-page output, and read-only, non-destructive, idempotent, closed-world annotations.
+Every tool advertises closed inputs, a typed JSON Schema 2020-12 output, and read-only, non-destructive, idempotent, closed-world annotations.
 
 ### Input bounds
 
-Stdio JSON-RPC frames are limited to 8 MiB. HTTP request bodies default to 1 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors are limited to 256 bytes. `top_k` is limited to 50.
+Stdio JSON-RPC frames are limited to 8 MiB. HTTP request bodies default to 1 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors and topic references are limited to 256 bytes. `top_k` is limited to 50. `topic_timeline` accepts `both`, `backward`, or `forward` direction; depth is 0–16, node count is 1–64, and cited UTF-8 source-span bytes are 1–65,536. Its latency budget is server controlled.
 
 ### Tool metadata and description
 
@@ -52,6 +53,10 @@ The fixed-workspace mailbox tools provide deterministic email evidence alongside
 `awaiting_reply_candidates` accepts bounded participant and date filters and requires configured owner identities. It returns candidates whose latest relevant human inbound message has no later human owner-authored exact-reply descendant. A candidate is evidence for review, not a conclusion that action is required. Subject grouping, semantic similarity, and an unlinked outbound message never prove that a reply occurred. Automated, list, delivery, and third-party events remain labelled context rather than silently closing a candidate.
 
 Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
+
+## Topic timelines
+
+`topic_timeline` follows only the active version of the fixed workspace's derived topic graph. Its `ref` input is an opaque mention or episode reference previously issued by the server; document citations are output-only and cannot seed traversal. The client may bound direction, depth, nodes, and aggregate cited source-span bytes, but cannot select a graph version, document, source range, or query expression. The server holds a repeatable-read graph snapshot for the walk and reports its version and timestamp. Each returned node preserves opaque mention and document references, UTF-8 offsets, and normalized-text and slice hashes for every cited span. Relations remain explicitly derived with a type and confidence; warnings and omitted-node counts make truncation and invalid evidence visible. A timeline has no continuation cursor: its bounded walk must fit the shared MCP response limits or fails safely so the client can lower its bounds and retry.
 
 ## Evidence interface
 
@@ -124,7 +129,7 @@ The compact index is paged at packet boundaries when necessary. Admitted primary
 
 ### Error contract
 
-Separate protocol errors from tool execution errors according to MCP semantics. Invalid arguments are correctable by the model. Unknown tools are protocol errors. Retrieval and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded page is rejected with an instruction to narrow and rerun the question. Internal retrieval details are never returned to the client.
+Separate protocol errors from tool execution errors according to MCP semantics. Invalid arguments are correctable by the model. Unknown tools are protocol errors. Retrieval, topic-timeline, and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded result is rejected with an instruction to narrow and rerun the request. Internal details are never returned to the client.
 
 ## Transports
 
@@ -318,7 +323,8 @@ The committed synthetic suite covers:
 - snapshot expiry and least-recently-used eviction;
 - wrong-session and wrong-workspace cursor rejection;
 - cancellation before continuation access;
-- complete JSON-RPC response size enforcement; and
+- complete JSON-RPC response size enforcement;
+- closed, bounded topic-timeline inputs and typed cited-span results; and
 - protocol lifecycle, concurrent tool calls, serialized writes, cancellation, safe errors, and clean shutdown.
 
 ### Authentication and authorization tests

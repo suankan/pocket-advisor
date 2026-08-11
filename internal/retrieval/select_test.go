@@ -12,7 +12,7 @@ func svc(q config.Query) *Service {
 }
 
 func mk(doc, thread string, score float64) scored {
-	return scored{candidate: candidate{DocID: doc, ThreadID: thread, ChunkID: doc + "#c"}, Score: score}
+	return scored{candidate: candidate{DocID: doc, ThreadID: thread, ChunkID: doc + "#c", Text: "passage " + doc}, Score: score}
 }
 
 // The floor is the reranker's own relevant/not-relevant boundary, not a tuned
@@ -103,4 +103,57 @@ func docIDs(in []scored) []string {
 		out[i] = s.DocID
 	}
 	return out
+}
+
+// Boilerplate is stored as its own chunk in every document that carries it,
+// so ten copies of one disclaimer are ten distinct documents that the
+// per-document rule cannot collapse.
+func TestSelectionReturnsEachDistinctPassageOnce(t *testing.T) {
+	s := svc(config.Query{MinRelevanceScore: 0, MaxPerThread: 3})
+	dup := "This message and any attachments are confidential."
+	ranked := []scored{
+		{candidate: candidate{ChunkID: "c1", DocID: "d1", Text: dup}, Score: 0.9},
+		{candidate: candidate{ChunkID: "c2", DocID: "d2", Text: dup}, Score: 0.8},
+		{candidate: candidate{ChunkID: "c3", DocID: "d3", Text: dup}, Score: 0.7},
+		{candidate: candidate{ChunkID: "c4", DocID: "d4", Text: "the roof was replaced in March"}, Score: 0.6},
+	}
+	sel := s.selectPackets(ranked, 15)
+	if len(sel.Picked) != 2 {
+		t.Fatalf("picked %d packets, want 2 distinct passages", len(sel.Picked))
+	}
+	if sel.Picked[0].ChunkID != "c1" {
+		t.Errorf("first pick = %q, want c1 — ranking must not change", sel.Picked[0].ChunkID)
+	}
+	if sel.Picked[1].ChunkID != "c4" {
+		t.Errorf("second pick = %q, want the distinct passage c4", sel.Picked[1].ChunkID)
+	}
+}
+
+// Extraction reflows the same paragraph differently per document, so the
+// duplication that matters is exact only after whitespace is normalised.
+func TestSelectionTreatsReflowedTextAsOnePassage(t *testing.T) {
+	s := svc(config.Query{MinRelevanceScore: 0, MaxPerThread: 3})
+	ranked := []scored{
+		{candidate: candidate{ChunkID: "c1", DocID: "d1", Text: "Licence No. 335666C\nPhone: 0000"}, Score: 0.9},
+		{candidate: candidate{ChunkID: "c2", DocID: "d2", Text: "Licence   No. 335666C\n\n  Phone:  0000  "}, Score: 0.8},
+	}
+	sel := s.selectPackets(ranked, 15)
+	if len(sel.Picked) != 1 {
+		t.Fatalf("picked %d packets, want 1 after whitespace normalisation", len(sel.Picked))
+	}
+}
+
+// Near-identical is not identical. Statements and invoices differing only in
+// dates or amounts must stay separate, which is why this is equality and not
+// a similarity threshold.
+func TestSelectionKeepsPassagesDifferingOnlyInDigits(t *testing.T) {
+	s := svc(config.Query{MinRelevanceScore: 0, MaxPerThread: 3})
+	ranked := []scored{
+		{candidate: candidate{ChunkID: "c1", DocID: "d1", Text: "Statement period 30 April to 30 May. Closing balance 1,204.55"}, Score: 0.9},
+		{candidate: candidate{ChunkID: "c2", DocID: "d2", Text: "Statement period 30 May to 30 June. Closing balance 1,318.02"}, Score: 0.8},
+	}
+	sel := s.selectPackets(ranked, 15)
+	if len(sel.Picked) != 2 {
+		t.Fatalf("picked %d packets, want 2 — these are distinct statements", len(sel.Picked))
+	}
 }

@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"sort"
+	"strings"
 )
 
 // poolCandidates merges every sub-query's candidates into the rerank window.
@@ -16,6 +17,15 @@ import (
 // another's dual-leg hits (§4.1).
 //
 // So floors are reserved first, then the remainder fills by score.
+//
+// Duplicate passages are deliberately NOT filtered here. Doing so was measured
+// and made ranking worse: dropping copies frees pool slots, which admit
+// lower-scored candidates, and the reranker sometimes prefers one of those to
+// the answer that previously ranked first. Five cases fell from first place to
+// second that way, costing 0.10 MRR, while recall did not improve. The pool
+// exists to give the reranker a stable window; deduplication belongs at
+// selection, where it changes what is returned without changing what is
+// scored (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
 func (s *Service) poolCandidates(groups [][]candidate, limit int) (pooled []candidate, floored bool) {
 	seen := make(map[string]struct{})
 	take := func(c candidate) bool {
@@ -78,6 +88,21 @@ func (s *Service) poolCandidates(groups [][]candidate, limit int) (pooled []cand
 		floored = false
 	}
 	return pooled, floored
+}
+
+// contentKey identifies a passage by its text, ignoring whitespace.
+//
+// Equality, not a similarity threshold. The duplication actually present is
+// exact once whitespace is normalised — extraction reflows the same paragraph
+// differently per document, which is why the raw text can differ while the
+// content does not. A tuned similarity threshold would buy nothing here and
+// would risk collapsing passages that genuinely differ: this corpus holds runs
+// of near-identical statements and invoices separated only by dates and
+// amounts, which are exactly the distinctions retrieval must keep. Merging by
+// similarity is deferred to the deduplication task, where it can be measured
+// rather than assumed (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
+func contentKey(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // scored is a candidate carrying its reranked relevance.
@@ -149,10 +174,18 @@ type selection struct {
 // thread_id == "" is not a thread. It is the default for anything that never
 // went through email threading, so capping on it would treat every standalone
 // PDF as one conversation.
+//
+// Duplicate passages are dropped alongside per-document dedup, and for the
+// same reason that rule is not enough on its own: boilerplate is stored as its
+// own chunk in every document that carries it, so ten copies of one disclaimer
+// are ten distinct documents that seenDoc cannot collapse. Ranking is
+// untouched — the first pick is whatever the reranker put first — so this only
+// ever replaces a repeat with the next distinct passage.
 func (s *Service) selectPackets(ranked []scored, topK int) selection {
 	var sel selection
 	perThread := map[string]int{}
 	seenDoc := map[string]struct{}{}
+	seenText := map[string]struct{}{}
 
 	for _, r := range ranked {
 		if r.Score < s.cfg.MinRelevanceScore {
@@ -165,12 +198,24 @@ func (s *Service) selectPackets(ranked []scored, topK int) selection {
 		if _, dup := seenDoc[r.DocID]; dup {
 			continue
 		}
+		// An empty key means there is no text to compare, not that every such
+		// candidate is the same passage — collapsing those would discard
+		// distinct documents on the strength of having nothing to compare.
+		textKey := contentKey(r.Text)
+		if textKey != "" {
+			if _, dup := seenText[textKey]; dup {
+				continue
+			}
+		}
 		if r.ThreadID != "" && s.cfg.MaxPerThread > 0 &&
 			perThread[r.ThreadID] >= s.cfg.MaxPerThread {
 			sel.ThreadCapped = true
 			continue
 		}
 		seenDoc[r.DocID] = struct{}{}
+		if textKey != "" {
+			seenText[textKey] = struct{}{}
+		}
 		if r.ThreadID != "" {
 			perThread[r.ThreadID]++
 		}

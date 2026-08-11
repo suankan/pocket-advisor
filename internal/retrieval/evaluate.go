@@ -227,12 +227,12 @@ func (s *Service) EvaluateExactSearch(ctx context.Context, vec []float32, embedM
 	}
 
 	rows, err := tx.Query(ctx, `
-SELECT chunk_id::text, doc_id::text,
-       CASE WHEN embedding <=> $1::halfvec < 0 THEN 0
-            ELSE embedding <=> $1::halfvec END AS distance
-FROM document_chunks
-WHERE embed_model = $2
-ORDER BY embedding <=> $1::halfvec
+SELECT p.chunk_id::text, p.doc_id::text,
+       CASE WHEN c.embedding <=> $1::halfvec < 0 THEN 0
+            ELSE c.embedding <=> $1::halfvec END AS distance
+FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
+WHERE c.embed_model = $2
+ORDER BY c.embedding <=> $1::halfvec
 LIMIT $3`,
 		formatVector(vec), embedModel, limit)
 	if err != nil {
@@ -277,11 +277,11 @@ func (s *Service) EvaluateHNSWSearch(ctx context.Context, vec []float32, embedMo
 	}
 
 	rows, err := tx.Query(ctx, `
-SELECT chunk_id::text, doc_id::text,
-       embedding <=> $1::halfvec AS distance
-FROM document_chunks
-WHERE embed_model = $2
-ORDER BY embedding <=> $1::halfvec
+SELECT p.chunk_id::text, p.doc_id::text,
+       c.embedding <=> $1::halfvec AS distance
+FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
+WHERE c.embed_model = $2
+ORDER BY c.embedding <=> $1::halfvec
 LIMIT $3`,
 		formatVector(vec), embedModel, limit)
 	if err != nil {

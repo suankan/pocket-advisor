@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,23 +29,43 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `DELETE FROM document_chunks WHERE doc_id = $1`, docID); err != nil {
+	// Which passages this document used to hold, so any left with no
+	// remaining placement can be swept below. Scoped to what this document
+	// released rather than a whole-table anti-join, which would get slower as
+	// the corpus grows.
+	rows, err := tx.Query(ctx,
+		`DELETE FROM document_chunks WHERE doc_id = $1 RETURNING content_id`, docID)
+	if err != nil {
+		return fmt.Errorf("clear chunks for %s: %w", docID, err)
+	}
+	var released []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("clear chunks for %s: %w", docID, err)
+		}
+		released = append(released, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("clear chunks for %s: %w", docID, err)
 	}
 
 	if len(chunks) > 0 {
-		rows := make([][]any, 0, len(chunks))
-		for _, c := range chunks {
-			rows = append(rows, []any{
-				c.ChunkID, c.DocID, c.Workspace, c.Index,
-				c.StartChar, c.EndChar, c.Text, c.EmbedModel,
-				formatVector(c.Embedding),
-			})
-		}
-		// CopyFrom cannot cast text to halfvec, so stage and cast in one
-		// statement instead.
-		if err := insertChunks(ctx, tx, rows); err != nil {
+		if err := insertChunks(ctx, tx, chunks); err != nil {
 			return err
+		}
+	}
+
+	if len(released) > 0 {
+		if _, err := tx.Exec(ctx, `
+            DELETE FROM chunks c
+            WHERE c.content_id = ANY($1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM document_chunks p WHERE p.content_id = c.content_id)`,
+			released); err != nil {
+			return fmt.Errorf("sweep orphaned chunks for %s: %w", docID, err)
 		}
 	}
 
@@ -61,36 +82,82 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 	return nil
 }
 
-func insertChunks(ctx context.Context, tx pgx.Tx, rows [][]any) error {
-	const cols = 9
-	var b strings.Builder
-	b.WriteString(`INSERT INTO document_chunks
-        (chunk_id, doc_id, workspace_id, chunk_index,
-         start_char_offset, end_char_offset, chunk_text, embed_model, embedding)
-        VALUES `)
+// contentHash identifies a passage by its text with whitespace runs collapsed.
+// Must stay byte-for-byte equivalent to the SQL in migrateChunkContent, or a
+// migrated workspace would start inserting duplicates of what it already holds.
+func contentHash(text string) []byte {
+	sum := sha256.Sum256([]byte(strings.Join(strings.Fields(text), " ")))
+	return sum[:]
+}
 
-	args := make([]any, 0, len(rows)*cols)
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteByte(',')
+// insertChunks writes each distinct passage once, then a placement per chunk.
+//
+// The vector is only computed into the statement for passages that turn out to
+// be new: ON CONFLICT DO NOTHING means a passage already present keeps its
+// existing row and its existing embedding, which is what makes a re-ingest of
+// shared boilerplate cheap rather than merely idempotent.
+func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
+	seen := make(map[string]struct{}, len(chunks))
+	var (
+		cb   strings.Builder
+		args []any
+		n    int
+	)
+	cb.WriteString(`INSERT INTO chunks
+        (content_id, workspace_id, embed_model, content_hash, chunk_text, embedding)
+        VALUES `)
+	hashes := make([][]byte, len(chunks))
+	for i, c := range chunks {
+		h := contentHash(c.Text)
+		hashes[i] = h
+		key := string(h)
+		if _, dup := seen[key]; dup {
+			continue
 		}
-		b.WriteByte('(')
-		for j := range r {
-			if j > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteByte('$')
-			b.WriteString(strconv.Itoa(i*cols + j + 1))
-			if j == cols-1 {
-				b.WriteString("::halfvec")
-			}
+		seen[key] = struct{}{}
+		if n > 0 {
+			cb.WriteByte(',')
 		}
-		b.WriteByte(')')
-		args = append(args, r...)
+		fmt.Fprintf(&cb, "(gen_random_uuid(),$%d,$%d,$%d,$%d,$%d::halfvec)",
+			n*5+1, n*5+2, n*5+3, n*5+4, n*5+5)
+		args = append(args, c.Workspace, c.EmbedModel, h, c.Text, formatVector(c.Embedding))
+		n++
+	}
+	cb.WriteString(` ON CONFLICT (workspace_id, embed_model, content_hash) DO NOTHING`)
+	if n > 0 {
+		if _, err := tx.Exec(ctx, cb.String(), args...); err != nil {
+			return fmt.Errorf("insert %d passages: %w", n, err)
+		}
 	}
 
-	if _, err := tx.Exec(ctx, b.String(), args...); err != nil {
-		return fmt.Errorf("insert %d chunks: %w", len(rows), err)
+	var pb strings.Builder
+	pb.WriteString(`INSERT INTO document_chunks
+        (chunk_id, doc_id, content_id, workspace_id, chunk_index,
+         start_char_offset, end_char_offset)
+        SELECT v.chunk_id, v.doc_id, c.content_id, v.workspace_id,
+               v.chunk_index, v.start_char_offset, v.end_char_offset
+        FROM (VALUES `)
+	pargs := make([]any, 0, len(chunks)*8)
+	for i, c := range chunks {
+		if i > 0 {
+			pb.WriteByte(',')
+		}
+		b := i * 8
+		fmt.Fprintf(&pb, "($%d::uuid,$%d::uuid,$%d,$%d,$%d::bytea,$%d::int,$%d::int,$%d::int)",
+			b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8)
+		pargs = append(pargs, c.ChunkID, c.DocID, c.Workspace, c.EmbedModel, hashes[i],
+			c.Index, c.StartChar, c.EndChar)
+	}
+	// embed_model is part of the join, not just the insert: identity is scoped
+	// by model namespace, so a re-embed leaves the same hash present twice and
+	// a join without it would attach two placements to one chunk.
+	pb.WriteString(`) AS v(chunk_id, doc_id, workspace_id, embed_model, content_hash,
+                          chunk_index, start_char_offset, end_char_offset)
+        JOIN chunks c ON c.workspace_id = v.workspace_id
+                     AND c.embed_model  = v.embed_model
+                     AND c.content_hash = v.content_hash`)
+	if _, err := tx.Exec(ctx, pb.String(), pargs...); err != nil {
+		return fmt.Errorf("insert %d placements: %w", len(chunks), err)
 	}
 	return nil
 }

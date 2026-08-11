@@ -64,7 +64,7 @@ func New(
 // startup, and fails loudly instead (§3.4).
 func (s *Service) AssertScope(ctx context.Context) error {
 	rows, err := s.DB.Pool.Query(ctx,
-		`SELECT DISTINCT workspace_id FROM document_chunks LIMIT 5`)
+		`SELECT DISTINCT workspace_id FROM chunks LIMIT 5`)
 	if err != nil {
 		return fmt.Errorf("assert workspace scope: %w", err)
 	}

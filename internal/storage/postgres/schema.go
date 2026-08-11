@@ -85,26 +85,58 @@ CREATE INDEX IF NOT EXISTS documents_raw_uri_idx    ON documents(rustfs_raw_uri)
 CREATE INDEX IF NOT EXISTS documents_email_date_idx
     ON documents(email_date DESC NULLS LAST);
 
+-- A passage, stored once however many documents contain it.
+--
+-- Boilerplate repeats: a disclaimer, a letterhead, a template paragraph is its
+-- own chunk in every document that carries it, and measured on a real corpus
+-- one stored chunk in six was a copy of another, each carrying its own
+-- embedding and its own index entries. Identity is the SHA-256 of the text
+-- with whitespace runs collapsed, because extraction reflows the same
+-- paragraph differently per document, so the bytes differ while the passage
+-- does not.
+--
+-- Identity is scoped by embed_model as well as workspace: a re-embed writes a
+-- new model namespace, and collapsing across namespaces would serve a vector
+-- from the wrong model. Equality only — never a similarity threshold. Measured
+-- on this corpus, chunks naming different monthly statement periods sit at
+-- cosine 0.991 to 0.993, so any threshold loose enough to merge reformatted
+-- text also merges statements that must stay distinct
+-- (docs/tasks/p0-0-dilution-by-duplicated-chunks.md).
+CREATE TABLE IF NOT EXISTS chunks (
+    content_id   UUID PRIMARY KEY,
+    workspace_id VARCHAR NOT NULL,
+    embed_model  VARCHAR NOT NULL,
+    content_hash BYTEA   NOT NULL,
+    chunk_text   TEXT    NOT NULL,
+    embedding    halfvec(%[1]d),
+    UNIQUE (workspace_id, embed_model, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS chunks_hnsw_idx ON chunks
+    USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+-- Where a passage sits in one document. Offsets and ordinal are per-document
+-- and stay here: the same passage occupies different byte ranges in each
+-- document that contains it, so folding them onto the shared row would make a
+-- citation resolve against the wrong text.
+--
+-- chunk_id remains the identity of a passage-in-a-document, which is what
+-- retrieval ranks and what a packet cites. One row per placement, exactly as
+-- before deduplication, so the read path sees the same candidates it always
+-- did — only the text and vector behind them are now shared.
 CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_id          UUID PRIMARY KEY,
     doc_id            UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    content_id        UUID NOT NULL REFERENCES chunks(content_id) ON DELETE RESTRICT,
     workspace_id      VARCHAR NOT NULL,
     chunk_index       INT     NOT NULL,
     start_char_offset INT     NOT NULL,
-    end_char_offset   INT     NOT NULL,
-    -- Exactly normalized_text[start_char_offset:end_char_offset], and nothing
-    -- else. A chunk is an atomic passage: nothing about the document or thread
-    -- it belongs to is folded in here or into its vector. That association is
-    -- a retrieval-time lookup through doc_id (§5.6).
-    chunk_text        TEXT    NOT NULL,
-    embed_model       VARCHAR NOT NULL,
-    embedding         halfvec(%[1]d)
+    end_char_offset   INT     NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS chunks_doc_idx       ON document_chunks(doc_id);
-CREATE INDEX IF NOT EXISTS chunks_workspace_idx ON document_chunks(workspace_id, embed_model);
-CREATE INDEX IF NOT EXISTS chunks_hnsw_idx      ON document_chunks
-    USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS chunks_doc_idx        ON document_chunks(doc_id);
+CREATE INDEX IF NOT EXISTS chunks_workspace_idx  ON document_chunks(workspace_id);
+CREATE INDEX IF NOT EXISTS chunks_content_idx    ON document_chunks(content_id);
 `
 
 // searchIndexName is the lexical leg's BM25 index. Named, not anonymous,
@@ -127,7 +159,7 @@ const searchIndexName = "chunks_bm25_idx"
 // it, the same cross-contamination atomic embedding avoids in the dense leg.
 func (d *DB) BuildSearchIndex(ctx context.Context) error {
 	_, err := d.Pool.Exec(ctx, fmt.Sprintf(
-		`CREATE INDEX IF NOT EXISTS %s ON document_chunks
+		`CREATE INDEX IF NOT EXISTS %s ON chunks
 		 USING bm25 (chunk_text) WITH (text_config='simple')`, searchIndexName))
 	if err != nil {
 		return fmt.Errorf("build search index: %w", err)
@@ -170,7 +202,9 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 					"this is a re-embed into a new embed_model namespace, not a migration",
 				existing.EmbedModel, existing.EmbedDim, meta.EmbedDim)
 		}
-		return nil
+		// An already-provisioned workspace never re-runs the DDL above, so
+		// structural changes reach it here or not at all.
+		return d.migrateChunkContent(ctx, existing.EmbedDim)
 	} else if !errors.Is(err, pgx.ErrNoRows) && !isUndefinedTable(err) {
 		return err
 	}
@@ -230,4 +264,126 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// migrateChunkContent moves passage text and vectors off document_chunks onto
+// the shared chunks table, collapsing duplicates.
+//
+// Idempotent and a no-op once done: it keys off document_chunks still having a
+// chunk_text column. Existing embeddings are carried across unchanged, so this
+// is a migration rather than a re-embed — the text is not re-chunked and the
+// vectors are not recomputed. One passage's surviving row is chosen by lowest
+// chunk_id purely so the choice is deterministic; every copy holds the same
+// text and the same vector, which is what makes them duplicates.
+//
+// Runs in one transaction. A partial migration would leave the read path
+// querying columns that no longer exist, so this either lands whole or not at
+// all.
+func (d *DB) migrateChunkContent(ctx context.Context, dim int) error {
+	var legacy bool
+	if err := d.Pool.QueryRow(ctx, `
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'document_chunks' AND column_name = 'chunk_text')`,
+	).Scan(&legacy); err != nil {
+		return fmt.Errorf("detect chunk schema: %w", err)
+	}
+	if !legacy {
+		return nil
+	}
+
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin chunk migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// hashOf must match contentHash in chunk_repo.go exactly: the write path
+	// and this backfill have to agree on what counts as the same passage, or a
+	// migrated workspace would keep inserting duplicates of what it holds.
+	// Parameterised by column because both tables carry chunk_text while the
+	// migration is in flight, which makes a bare reference ambiguous.
+	hashOf := func(col string) string {
+		return fmt.Sprintf(
+			`sha256(convert_to(btrim(regexp_replace(%s, '\s+', ' ', 'g')), 'UTF8'))`, col)
+	}
+	normalisedHashSQL := hashOf("chunk_text")
+
+	steps := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS chunks (
+            content_id   UUID PRIMARY KEY,
+            workspace_id VARCHAR NOT NULL,
+            embed_model  VARCHAR NOT NULL,
+            content_hash BYTEA   NOT NULL,
+            chunk_text   TEXT    NOT NULL,
+            embedding    halfvec(%d),
+            UNIQUE (workspace_id, embed_model, content_hash))`, dim),
+
+		fmt.Sprintf(`INSERT INTO chunks
+            (content_id, workspace_id, embed_model, content_hash, chunk_text, embedding)
+         SELECT DISTINCT ON (workspace_id, embed_model, %[1]s)
+                gen_random_uuid(), workspace_id, embed_model, %[1]s, chunk_text, embedding
+         FROM document_chunks
+         ORDER BY workspace_id, embed_model, %[1]s, chunk_id`, normalisedHashSQL),
+
+		`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS content_id UUID`,
+
+		fmt.Sprintf(`UPDATE document_chunks dc SET content_id = c.content_id
+         FROM chunks c
+         WHERE c.workspace_id = dc.workspace_id
+           AND c.embed_model  = dc.embed_model
+           AND c.content_hash = %s`, hashOf("dc.chunk_text")),
+
+		`ALTER TABLE document_chunks ALTER COLUMN content_id SET NOT NULL`,
+		`ALTER TABLE document_chunks ADD CONSTRAINT document_chunks_content_fk
+             FOREIGN KEY (content_id) REFERENCES chunks(content_id) ON DELETE RESTRICT`,
+
+		// The old indexes name columns that are about to disappear.
+		`DROP INDEX IF EXISTS chunks_hnsw_idx`,
+		`DROP INDEX IF EXISTS ` + searchIndexName,
+		`DROP INDEX IF EXISTS chunks_workspace_idx`,
+
+		`ALTER TABLE document_chunks
+             DROP COLUMN chunk_text,
+             DROP COLUMN embed_model,
+             DROP COLUMN embedding`,
+
+		`CREATE INDEX chunks_hnsw_idx ON chunks
+             USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64)`,
+		`CREATE INDEX chunks_workspace_idx ON document_chunks(workspace_id)`,
+		`CREATE INDEX IF NOT EXISTS chunks_content_idx ON document_chunks(content_id)`,
+
+		// Rebuilt here rather than left to the next ingest. BuildSearchIndex is
+		// normally deferred until after a bulk load, but this migration dropped
+		// a populated index and the rows are already in place: leaving it out
+		// would strand the workspace with no lexical leg until something
+		// happened to re-ingest it.
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON chunks
+             USING bm25 (chunk_text) WITH (text_config='simple')`, searchIndexName),
+	}
+
+	for i, stmt := range steps {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("chunk migration step %d: %w", i+1, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit chunk migration: %w", err)
+	}
+
+	// Outside the transaction because VACUUM cannot run inside one, and not
+	// optional: DROP COLUMN only marks a column dropped, and the content_id
+	// backfill leaves a dead tuple per row, so without this the table keeps
+	// every byte the migration was meant to remove. Measured on a real
+	// workspace the placement heap stood at 42 MB immediately after committing
+	// and 2 MB after this ran.
+	//
+	// A failure here costs space, not correctness, so it is reported rather
+	// than returned: the migration itself has already landed.
+	if _, err := d.Pool.Exec(ctx, `VACUUM FULL document_chunks`); err != nil {
+		return fmt.Errorf("chunk migration committed, but reclaiming space failed "+
+			"(run VACUUM FULL document_chunks by hand): %w", err)
+	}
+	return nil
 }

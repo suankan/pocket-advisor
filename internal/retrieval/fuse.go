@@ -48,21 +48,28 @@ type candidate struct {
 // No workspace_id predicate: each workspace is its own database, so it would
 // match every row. Scope is asserted once at startup instead, where it can
 // reveal foreign data rather than silently hiding it (§3.4).
+//
+// Both legs join placements to the shared passage they point at, and rank
+// placements rather than passages, so a passage occurring in several documents
+// still yields one candidate per document exactly as it did before chunk text
+// was deduplicated. Deduplication is a storage change; what retrieval sees is
+// unchanged, and dropping repeats from a result set remains selection's job
+// (internal/retrieval/select.go).
 const fusionSQL = `
 WITH dense AS (
-    SELECT chunk_id,
-           ROW_NUMBER() OVER (ORDER BY embedding <=> $1::halfvec) AS rank
-    FROM document_chunks
-    WHERE embed_model = $2
-    ORDER BY embedding <=> $1::halfvec
+    SELECT p.chunk_id,
+           ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::halfvec) AS rank
+    FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
+    WHERE c.embed_model = $2
+    ORDER BY c.embedding <=> $1::halfvec
     LIMIT $3
 ),
 lexical AS (
-    SELECT c.chunk_id,
+    SELECT p.chunk_id,
            ROW_NUMBER() OVER (
                ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
            ) AS rank
-    FROM document_chunks c
+    FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
     WHERE $4 <> '' AND c.embed_model = $2
     ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
     LIMIT $5
@@ -74,12 +81,13 @@ fused AS (
            COALESCE(1.0 / ($6 + d.rank), 0) + COALESCE(1.0 / ($6 + l.rank), 0) AS rrf
     FROM dense d FULL OUTER JOIN lexical l USING (chunk_id)
 )
-SELECT f.chunk_id::text, c.doc_id::text, d.thread_id, c.chunk_text,
-       c.start_char_offset, c.end_char_offset,
+SELECT f.chunk_id::text, p.doc_id::text, d.thread_id, c.chunk_text,
+       p.start_char_offset, p.end_char_offset,
        f.dense_rank, f.lex_rank, f.rrf
 FROM fused f
-JOIN document_chunks c USING (chunk_id)
-JOIN documents d USING (doc_id)
+JOIN document_chunks p USING (chunk_id)
+JOIN chunks c ON c.content_id = p.content_id
+JOIN documents d ON d.doc_id = p.doc_id
 ORDER BY f.rrf DESC
 LIMIT $7`
 

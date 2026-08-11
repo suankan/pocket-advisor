@@ -378,17 +378,13 @@ For OpenCode on macOS, using Google as the identity provider, matching the loopb
 
 ## 8. Evaluate retrieval quality
 
-The evaluation framework measures whether retrieval returns the right evidence before model, index, chunking, fusion, reranking, or selection changes are accepted. It generates evaluation cases from the actual workspace content using the LLM, so tests reflect real retrieval scenarios rather than synthetic fixtures.
+The evaluation framework measures whether retrieval returns the right evidence before model, index, chunking, fusion, reranking, or selection changes are accepted. It uses a curated private golden suite maintained by the operator; evaluation cases are never generated from workspace content by this codebase.
 
-### Generate evaluation fixtures
+### Curated private cases
 
-Before running evaluation, generate cases from your workspace:
+Store the curated v3 case set outside version control at `workspaces/evaluation/<workspace>/cases.json`, or pass its private path with `--eval-cases`. Expected documents use `expected_documents[]`, where each entry has a `document_id` and relevance `grade`; set `require_all_expected_documents` when every listed document must be retrieved. Forbidden documents use `forbidden_document_ids`. Every identity is the stable PostgreSQL document UUID, never a filename stem or source hash. Do not commit case questions, document identifiers, or reports.
 
-```sh
-./bin/pocket-advisor --evaluate --generate-fixtures --workspace-id test
-```
-
-This samples ~30 documents from the workspace, generates questions using the LLM, and writes cases to `workspaces/evaluation/test/cases.json`. The generator creates cases across categories: exact identifiers, paraphrases, multi-topic decomposition, and thread-aware queries.
+Every evaluation report records a SHA-256 identity of its case-set contents. Compare quality metrics only between reports with the same case-set digest.
 
 ### Run evaluation
 
@@ -460,10 +456,9 @@ Use a custom case file instead of the convention path:
 
 The evaluation reports:
 
-- **Source recall at k**: fraction of expected sources found in top-k results
-- **Reciprocal rank**: 1/rank of first acceptable source
-- **nDCG**: normalized discounted cumulative gain with relevance grades
-- **Topic group coverage**: fraction of topic groups with at least one hit
+- **Document recall at k**: fraction of expected documents found in top-k results
+- **Reciprocal rank**: 1/rank of the first expected document
+- **nDCG**: normalized discounted cumulative gain using expected-document grades
 - **Forbidden hits**: unexpected documents that indicate false positives
 - **Empty pass rate**: off-domain queries correctly returning no results
 - **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select)

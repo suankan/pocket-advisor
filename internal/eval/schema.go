@@ -6,6 +6,8 @@
 package eval
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,7 +15,7 @@ import (
 )
 
 // CaseSchemaVersion is the current evaluation case format version.
-const CaseSchemaVersion = 1
+const CaseSchemaVersion = 3
 
 // Category constants for case classification.
 const (
@@ -29,28 +31,21 @@ const (
 // Case is a single evaluation case. Stable IDs allow comparing repeated runs
 // without using question text as an identifier.
 type Case struct {
-	ID               string           `json:"id"`
-	Category         string           `json:"category"`
-	Question         string           `json:"question"`
-	ExpectedSources  []ExpectedSource `json:"expected_sources"`
-	TopicGroups      []TopicGroup     `json:"topic_groups,omitempty"`
-	ForbiddenSources []string         `json:"forbidden_sources,omitempty"`
-	ExpectedEmpty    bool             `json:"expected_empty,omitempty"`
-	RelevanceGrades  map[string]int   `json:"relevance_grades,omitempty"` // fixture_id -> grade (0-3)
+	ID                          string             `json:"id"`
+	Category                    string             `json:"category"`
+	Question                    string             `json:"question"`
+	ExpectedDocuments           []ExpectedDocument `json:"expected_documents"`
+	RequireAllExpectedDocuments bool               `json:"require_all_expected_documents,omitempty"`
+	ForbiddenDocumentIDs        []string           `json:"forbidden_document_ids,omitempty"`
+	ExpectedEmpty               bool               `json:"expected_empty,omitempty"`
 }
 
-// ExpectedSource identifies an acceptable document by stable fixture ID.
-type ExpectedSource struct {
-	FixtureID string `json:"fixture_id"`
-	Grade     int    `json:"grade,omitempty"` // relevance grade when present
-}
-
-// TopicGroup names a set of acceptable sources that together cover one topic
-// of a multi-topic question. Every group must have at least one hit for full
-// topic coverage.
-type TopicGroup struct {
-	GroupID    string   `json:"group_id"`
-	FixtureIDs []string `json:"fixture_ids"`
+// ExpectedDocument identifies a relevant document by its Postgres document
+// UUID. The UUID is stable within the evaluated workspace and is not inferred
+// from a filename, source hash, or other mutable document metadata.
+type ExpectedDocument struct {
+	DocumentID string `json:"document_id"`
+	Grade      int    `json:"grade"`
 }
 
 // CaseSet is a versioned collection of evaluation cases.
@@ -58,6 +53,18 @@ type CaseSet struct {
 	Version int    `json:"version"`
 	SetID   string `json:"set_id"`
 	Cases   []Case `json:"cases"`
+}
+
+// CaseSetSHA256 returns a canonical content identity for a case set. Reports
+// use it to prevent measurements from different curated suites being
+// compared as though they exercised the same questions.
+func CaseSetSHA256(cs *CaseSet) string {
+	canonical, err := json.Marshal(cs)
+	if err != nil {
+		panic(fmt.Sprintf("marshal case set for digest: %v", err))
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 // LoadCaseSet reads and validates a case-set file.
@@ -99,8 +106,63 @@ func ValidateCaseSet(cs *CaseSet) error {
 		if c.Question == "" && !c.ExpectedEmpty {
 			return fmt.Errorf("case %q has no question and is not expected-empty", c.ID)
 		}
+		if err := validateCaseDocumentIDs(c); err != nil {
+			return fmt.Errorf("case %q: %w", c.ID, err)
+		}
 	}
 	return nil
+}
+
+func validateCaseDocumentIDs(c Case) error {
+	if c.ExpectedEmpty {
+		if len(c.ExpectedDocuments) > 0 {
+			return fmt.Errorf("expected-empty case has expected documents")
+		}
+		if c.RequireAllExpectedDocuments {
+			return fmt.Errorf("expected-empty case requires all expected documents")
+		}
+	} else if len(c.ExpectedDocuments) == 0 {
+		return fmt.Errorf("non-empty case has no expected documents")
+	}
+
+	expected := make(map[string]struct{}, len(c.ExpectedDocuments))
+	for _, document := range c.ExpectedDocuments {
+		if !isUUID(document.DocumentID) {
+			return fmt.Errorf("expected document has invalid document_id %q", document.DocumentID)
+		}
+		if _, duplicate := expected[document.DocumentID]; duplicate {
+			return fmt.Errorf("duplicate expected document_id %q", document.DocumentID)
+		}
+		expected[document.DocumentID] = struct{}{}
+		if document.Grade < 0 || document.Grade > 3 {
+			return fmt.Errorf("expected document %q has grade %d outside 0-3", document.DocumentID, document.Grade)
+		}
+	}
+
+	for _, documentID := range c.ForbiddenDocumentIDs {
+		if !isUUID(documentID) {
+			return fmt.Errorf("forbidden document has invalid document_id %q", documentID)
+		}
+	}
+	return nil
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // FilterCases returns cases matching the given IDs and categories. Empty
@@ -143,6 +205,7 @@ type Report struct {
 	RunID         string           `json:"run_id"`
 	SetID         string           `json:"set_id"`
 	SetVersion    int              `json:"set_version"`
+	CaseSetSHA256 string           `json:"case_set_sha256"`
 	WorkspaceID   string           `json:"workspace_id"`
 	Timestamp     time.Time        `json:"timestamp"`
 	CommitSHA     string           `json:"commit_sha"`
@@ -163,32 +226,30 @@ type Report struct {
 
 // CaseReport is the result for one evaluation case.
 type CaseReport struct {
-	CaseID             string       `json:"case_id"`
-	Category           string       `json:"category"`
-	Passed             bool         `json:"passed"`
-	ExpectedEmpty      bool         `json:"expected_empty"`
-	Warnings           []string     `json:"warnings"`
-	PacketCount        int          `json:"packet_count"`
-	SourceRecallAtK    float64      `json:"source_recall_at_k"`
-	RRFirstAcceptable  float64      `json:"rr_first_acceptable"`
-	NDCG               float64      `json:"ndcg"`
-	TopicGroupCoverage float64      `json:"topic_group_coverage"`
-	TopicGroupsHit     int          `json:"topic_groups_hit"`
-	TopicGroupsTotal   int          `json:"topic_groups_total"`
-	ForbiddenHits      int          `json:"forbidden_hits"`
-	DenseCandidates    int          `json:"dense_candidates"`
-	LexicalCandidates  int          `json:"lexical_candidates"`
-	FusedCandidates    int          `json:"fused_candidates"`
-	RerankedCandidates int          `json:"reranked_candidates"`
-	SelectedPackets    int          `json:"selected_packets"`
-	BudgetUsed         int          `json:"budget_used"`
-	BudgetAllowed      int          `json:"budget_allowed"`
-	BudgetTruncated    bool         `json:"budget_truncated"`
-	WarningCount       int          `json:"warning_count"`
-	Stages             StageMetrics `json:"stages"`
-	LatencyMS          float64      `json:"latency_ms"`
-	SubQueries         int          `json:"sub_queries"`
-	Failures           []string     `json:"failures,omitempty"`
+	CaseID                  string       `json:"case_id"`
+	Category                string       `json:"category"`
+	Passed                  bool         `json:"passed"`
+	ExpectedEmpty           bool         `json:"expected_empty"`
+	ExpectedDocumentCount   int          `json:"expected_document_count"`
+	Warnings                []string     `json:"warnings"`
+	PacketCount             int          `json:"packet_count"`
+	DocumentRecallAtK       float64      `json:"document_recall_at_k"`
+	RRFirstExpectedDocument float64      `json:"rr_first_expected_document"`
+	NDCG                    float64      `json:"ndcg"`
+	ForbiddenHits           int          `json:"forbidden_hits"`
+	DenseCandidates         int          `json:"dense_candidates"`
+	LexicalCandidates       int          `json:"lexical_candidates"`
+	FusedCandidates         int          `json:"fused_candidates"`
+	RerankedCandidates      int          `json:"reranked_candidates"`
+	SelectedPackets         int          `json:"selected_packets"`
+	BudgetUsed              int          `json:"budget_used"`
+	BudgetAllowed           int          `json:"budget_allowed"`
+	BudgetTruncated         bool         `json:"budget_truncated"`
+	WarningCount            int          `json:"warning_count"`
+	Stages                  StageMetrics `json:"stages"`
+	LatencyMS               float64      `json:"latency_ms"`
+	SubQueries              int          `json:"sub_queries"`
+	Failures                []string     `json:"failures,omitempty"`
 }
 
 // StageMetrics holds per-stage retrieval observations.
@@ -211,10 +272,10 @@ type Summary struct {
 	TotalCases        int     `json:"total_cases"`
 	PassedCases       int     `json:"passed_cases"`
 	FailedCases       int     `json:"failed_cases"`
+	RankedCases       int     `json:"ranked_cases"`
 	MeanRecall        float64 `json:"mean_recall"`
 	MeanMRR           float64 `json:"mean_mrr"`
 	MeanNDCG          float64 `json:"mean_ndcg"`
-	MeanTopicCov      float64 `json:"mean_topic_coverage"`
 	TotalForbidden    int     `json:"total_forbidden_hits"`
 	EmptyPassRate     float64 `json:"empty_pass_rate"`
 	TotalWarnings     int     `json:"total_warnings"`
@@ -267,25 +328,23 @@ type HNSWCaseReport struct {
 	ExactLatencyMS float64  `json:"exact_latency_ms"`
 }
 
-// ThresholdsConfig defines mandatory pass/fail thresholds for synthetic cases.
+// ThresholdsConfig defines mandatory pass/fail thresholds for curated cases.
 type ThresholdsConfig struct {
 	MinRecallAtK     float64 `json:"min_recall_at_k"`
 	MinMRR           float64 `json:"min_mrr"`
 	MinNDCG          float64 `json:"min_ndcg"`
-	MinTopicCoverage float64 `json:"min_topic_coverage"`
 	MaxForbiddenHits int     `json:"max_forbidden_hits"`
 	MinEmptyPassRate float64 `json:"min_empty_pass_rate"`
 	MinApproxRecall  float64 `json:"min_approximate_recall"`
 }
 
-// DefaultSyntheticThresholds returns the mandatory thresholds for the
-// synthetic evaluation suite.
-func DefaultSyntheticThresholds() ThresholdsConfig {
+// DefaultThresholds returns the mandatory thresholds for the
+// curated evaluation suite.
+func DefaultThresholds() ThresholdsConfig {
 	return ThresholdsConfig{
 		MinRecallAtK:     0.7,
 		MinMRR:           0.5,
 		MinNDCG:          0.5,
-		MinTopicCoverage: 0.75,
 		MaxForbiddenHits: 0,
 		MinEmptyPassRate: 1.0,
 		MinApproxRecall:  0.85,

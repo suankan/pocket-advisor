@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,16 +20,15 @@ import (
 
 // evaluateOptions holds the --evaluate flag set.
 type evaluateOptions struct {
-	CaseSet          string
-	ReportPath       string
-	FilterIDs        string
-	FilterCats       string
-	JSON             bool
-	RunHNSW          bool
-	EfSearch         int
-	Readiness        bool
-	Thresholds       string
-	GenerateFixtures bool
+	CaseSet    string
+	ReportPath string
+	FilterIDs  string
+	FilterCats string
+	JSON       bool
+	RunHNSW    bool
+	EfSearch   int
+	Readiness  bool
+	Thresholds string
 }
 
 // runEvaluate runs the retrieval quality evaluation.
@@ -71,27 +71,12 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		return nil
 	}
 
-	// Generate fixtures mode: sample the workspace, produce cases, and exit.
-	if eo.GenerateFixtures {
-		if err := eval.GenerateFixtures(ctx, db, l, cfg.Query, o.WorkspaceID, eo.CaseSet, log); err != nil {
-			return fmt.Errorf("generate fixtures: %w", err)
-		}
-		path := eo.CaseSet
-		if path == "" {
-			path = eval.CasePath(o.WorkspaceID)
-		}
-		fmt.Fprintf(os.Stderr, "wrote evaluation cases to %s\n", path)
-		return nil
-	}
-
-	// Resolve convention-based case path when none is explicitly provided.
+	// Resolve the curated private case set when none is explicitly provided.
 	caseSetPath := eo.CaseSet
 	if caseSetPath == "" {
-		caseSetPath = eval.CasePath(o.WorkspaceID)
+		caseSetPath = defaultCaseSetPath(o.WorkspaceID)
 		if _, err := os.Stat(caseSetPath); os.IsNotExist(err) {
-			return fmt.Errorf("no evaluation cases found; tried %s\n"+
-				"  generate cases with: pocket-advisor --evaluate --generate-fixtures --workspace-id %s",
-				caseSetPath, o.WorkspaceID)
+			return fmt.Errorf("no evaluation cases found; add the curated private case set at %s or pass --eval-cases", caseSetPath)
 		}
 	}
 
@@ -136,15 +121,21 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 	if eo.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(report)
+		if err := enc.Encode(report); err != nil {
+			return err
+		}
+	} else {
+		renderEvalReport(report)
 	}
-
-	renderEvalReport(report)
 
 	if !report.Summary.OverallPassed {
 		return fmt.Errorf("evaluation thresholds not met")
 	}
 	return nil
+}
+
+func defaultCaseSetPath(workspaceID string) string {
+	return filepath.Join("workspaces", "evaluation", workspaceID, "cases.json")
 }
 
 func splitTrim(s string) []string {
@@ -195,6 +186,7 @@ func renderReadiness(rpt *eval.ReadinessReport) {
 
 func renderEvalReport(r *eval.Report) {
 	fmt.Printf("Retrieval evaluation: %s\n", r.SetID)
+	fmt.Printf("Case-set SHA256: %s\n", r.CaseSetSHA256)
 	fmt.Printf("Workspace: %s  Commit: %s\n", r.WorkspaceID, r.CommitSHA)
 	fmt.Printf("Model: %s  Reranker: %s\n", r.EmbedModel, r.RerankModel)
 	fmt.Println()
@@ -219,8 +211,8 @@ func renderEvalReport(r *eval.Report) {
 			status = "FAIL"
 		}
 		fmt.Printf("[%s] %s (%s) recall=%.2f MRR=%.2f nDCG=%.2f packets=%d\n",
-			status, c.CaseID, c.Category, c.SourceRecallAtK,
-			c.RRFirstAcceptable, c.NDCG, c.PacketCount)
+			status, c.CaseID, c.Category, c.DocumentRecallAtK,
+			c.RRFirstExpectedDocument, c.NDCG, c.PacketCount)
 		if len(c.Failures) > 0 {
 			for _, f := range c.Failures {
 				fmt.Printf("      FAIL: %s\n", f)

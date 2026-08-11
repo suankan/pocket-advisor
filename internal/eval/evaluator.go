@@ -63,6 +63,7 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		RunID:         fmt.Sprintf("eval-%s", time.Now().UTC().Format("20060102T150405Z")),
 		SetID:         cs.SetID,
 		SetVersion:    cs.Version,
+		CaseSetSHA256: CaseSetSHA256(cs),
 		WorkspaceID:   evalCfg.WorkspaceID,
 		Timestamp:     time.Now().UTC(),
 		CommitSHA:     commitSHA,
@@ -83,26 +84,24 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		return nil, fmt.Errorf("assert scope: %w", err)
 	}
 
-	// Build fixture lookup from the database.
-	lookup, err := e.buildFixtureLookup(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("build fixture lookup: %w", err)
-	}
-
 	// Run each case.
-	var totalEmbed, totalDense, totalLexical, totalFuse, totalRerank, totalSelect, totalExpand, totalTotal []float64
+	var stageResults []*retrieval.StageResult
 	var allFailures []string
 
 	for _, c := range cases {
-		cr, err := e.runCase(ctx, svc, c, lookup)
+		cr, sr, err := e.runCase(ctx, svc, c)
 		if err != nil {
 			e.Log.Warn("case failed", "id", c.ID, "error", err)
 			cr = &CaseReport{
-				CaseID:   c.ID,
-				Category: c.Category,
-				Passed:   false,
-				Failures: []string{fmt.Sprintf("execution error: %v", err)},
+				CaseID:                c.ID,
+				Category:              c.Category,
+				ExpectedEmpty:         c.ExpectedEmpty,
+				ExpectedDocumentCount: len(c.ExpectedDocuments),
+				Passed:                false,
+				Failures:              []string{fmt.Sprintf("execution error: %v", err)},
 			}
+		} else {
+			stageResults = append(stageResults, sr)
 		}
 		report.Cases = append(report.Cases, *cr)
 
@@ -111,45 +110,73 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 				allFailures = append(allFailures, fmt.Sprintf("%s: %s", c.ID, f))
 			}
 		}
-
-		// Accumulate latencies.
-		totalTotal = append(totalTotal, cr.LatencyMS)
 	}
 
 	// Build summary.
 	report.Summary = e.buildSummary(report.Cases, evalCfg)
 
-	// Build latency distributions.
-	report.Latency = LatencyReport{
-		TotalMS:   DistributionFrom(totalTotal),
-		EmbedMS:   DistributionFrom(totalEmbed),
-		DenseMS:   DistributionFrom(totalDense),
-		LexicalMS: DistributionFrom(totalLexical),
-		FusedMS:   DistributionFrom(totalFuse),
-		RerankMS:  DistributionFrom(totalRerank),
-		SelectMS:  DistributionFrom(totalSelect),
-		ExpandMS:  DistributionFrom(totalExpand),
-	}
+	// Build latency distributions from successful stage-level evaluations.
+	report.Latency = latencyReport(stageResults)
 
-	// Exact vs HNSW comparison.
+	// Exact vs HNSW comparison. Its recall threshold applies only when this
+	// optional comparison produced at least one comparable case.
 	if evalCfg.RunHNSW {
 		hnswReport, err := e.runHNSWComparison(ctx, svc, cases, evalCfg)
 		if err != nil {
 			e.Log.Warn("HNSW comparison failed", "error", err)
 		} else {
 			report.ExactVsHNSW = hnswReport
+			applyHNSWThreshold(&report.Summary, hnswReport, thresholdsFor(evalCfg))
 		}
 	}
 
 	return report, nil
 }
 
+func latencyReport(stageResults []*retrieval.StageResult) LatencyReport {
+	var embed, dense, lexical, fused, rerank, selectStage, expand, total []float64
+	for _, sr := range stageResults {
+		embed = append(embed, milliseconds(sr.EmbedDuration))
+		// Dense and lexical candidate generation share the fused SQL round trip.
+		// Evaluate records that overlapping wall-clock observation for each leg;
+		// if a caller supplies no observation, preserve an empty distribution
+		// rather than reporting a measured zero duration.
+		if sr.DenseDuration > 0 {
+			dense = append(dense, milliseconds(sr.DenseDuration))
+		}
+		if sr.LexicalDuration > 0 {
+			lexical = append(lexical, milliseconds(sr.LexicalDuration))
+		}
+		fused = append(fused, milliseconds(sr.FuseDuration))
+		rerank = append(rerank, milliseconds(sr.RerankDuration))
+		selectStage = append(selectStage, milliseconds(sr.SelectDuration))
+		expand = append(expand, milliseconds(sr.ExpandDuration))
+		total = append(total, milliseconds(sr.TotalDuration))
+	}
+
+	return LatencyReport{
+		EmbedMS:   DistributionFrom(embed),
+		DenseMS:   DistributionFrom(dense),
+		LexicalMS: DistributionFrom(lexical),
+		FusedMS:   DistributionFrom(fused),
+		RerankMS:  DistributionFrom(rerank),
+		SelectMS:  DistributionFrom(selectStage),
+		ExpandMS:  DistributionFrom(expand),
+		TotalMS:   DistributionFrom(total),
+	}
+}
+
+func milliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
+}
+
 // runCase evaluates a single case.
-func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case, lookup *FixtureLookup) (*CaseReport, error) {
+func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case) (*CaseReport, *retrieval.StageResult, error) {
 	cr := &CaseReport{
-		CaseID:        c.ID,
-		Category:      c.Category,
-		ExpectedEmpty: c.ExpectedEmpty,
+		CaseID:                c.ID,
+		Category:              c.Category,
+		ExpectedEmpty:         c.ExpectedEmpty,
+		ExpectedDocumentCount: len(c.ExpectedDocuments),
 	}
 
 	req := retrieval.Request{
@@ -157,15 +184,13 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case,
 		TopK:     e.Config.DefaultTopK,
 	}
 
-	start := time.Now()
-
 	// Use the stage-level evaluation path.
 	sr, err := svc.Evaluate(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	cr.LatencyMS = float64(time.Since(start).Milliseconds())
+	cr.LatencyMS = milliseconds(sr.TotalDuration)
 	cr.Warnings = sr.Warnings
 	cr.WarningCount = len(sr.Warnings)
 	cr.BudgetUsed = sr.Budget.BytesUsed
@@ -180,13 +205,12 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case,
 		}
 	}
 
-	// Convert selected packets to packetRefs with fixture ID resolution.
+	// Retrieval packets carry the Postgres document UUID used by evaluation cases.
 	var packets []packetRef
 	for _, p := range sr.SelectedPackets {
 		packets = append(packets, packetRef{
-			DocID:     p.DocID,
-			FixtureID: lookup.Resolve(p.DocID, p.SHA256),
-			Score:     p.Match.Score,
+			DocID: p.DocID,
+			Score: p.Match.Score,
 		})
 	}
 	cr.PacketCount = len(packets)
@@ -217,29 +241,13 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case,
 	cr.FusedCandidates = sr.FusedCount
 	cr.RerankedCandidates = sr.RerankCount
 
-	// Build expected source set from the case.
-	var expected []ExpectedSource
-	for _, es := range c.ExpectedSources {
-		expected = append(expected, ExpectedSource{
-			FixtureID: es.FixtureID,
-			Grade:     es.Grade,
-		})
-	}
-
-	// Metrics.
-	cr.SourceRecallAtK = SourceRecallAtK(packets, expected, e.Config.DefaultTopK)
-	cr.RRFirstAcceptable = ReciprocalRankFirst(packets, expected)
-	cr.NDCG = NDCG(packets, expected, c.RelevanceGrades)
-
-	// Topic group coverage.
-	if len(c.TopicGroups) > 0 {
-		cr.TopicGroupCoverage = TopicGroupCoverage(packets, c.TopicGroups)
-		cr.TopicGroupsTotal = len(c.TopicGroups)
-		cr.TopicGroupsHit = int(cr.TopicGroupCoverage * float64(cr.TopicGroupsTotal))
-	}
+	// Metrics compare document UUIDs directly; no metadata lookup is involved.
+	cr.DocumentRecallAtK = DocumentRecallAtK(packets, c.ExpectedDocuments, e.Config.DefaultTopK)
+	cr.RRFirstExpectedDocument = ReciprocalRankFirstExpectedDocument(packets, c.ExpectedDocuments)
+	cr.NDCG = NDCG(packets, c.ExpectedDocuments)
 
 	// Forbidden hits.
-	cr.ForbiddenHits = ForbiddenHits(packets, c.ForbiddenSources)
+	cr.ForbiddenHits = ForbiddenHits(packets, c.ForbiddenDocumentIDs)
 
 	// Determine pass/fail.
 	cr.Passed = true
@@ -249,31 +257,49 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case,
 		cr.Passed = false
 	}
 
-	return cr, nil
+	return cr, sr, nil
 }
 
-// checkCase validates a case report against expected outcomes.
+// checkCase validates a case report against the case's explicit contracts.
+// Ranking-quality thresholds remain aggregate gates; this check deliberately
+// uses no numeric quality threshold.
 func (e *Evaluator) checkCase(c Case, cr *CaseReport) []string {
 	var failures []string
 
-	if c.ExpectedEmpty {
-		if cr.PacketCount > 0 {
-			failures = append(failures, fmt.Sprintf(
-				"expected empty result, got %d packets", cr.PacketCount))
+	if c.ExpectedEmpty && cr.PacketCount > 0 {
+		failures = append(failures, fmt.Sprintf(
+			"expected empty result, got %d packets", cr.PacketCount))
+	}
+
+	// ExpectedDocuments is an acceptable-document set. A regular case needs at
+	// least one expected document in the results, or every expected document
+	// when its contract explicitly requires complete coverage.
+	if !c.ExpectedEmpty {
+		if c.RequireAllExpectedDocuments {
+			if cr.DocumentRecallAtK < 1 {
+				failures = append(failures, fmt.Sprintf(
+					"found %d of %d expected documents", int(math.Round(cr.DocumentRecallAtK*float64(cr.ExpectedDocumentCount))), cr.ExpectedDocumentCount))
+			}
+		} else if cr.DocumentRecallAtK == 0 {
+			failures = append(failures, "no expected document in results")
 		}
-		return failures
 	}
 
-	if len(c.ExpectedSources) > 0 && cr.PacketCount == 0 {
-		failures = append(failures, "expected sources but got zero packets")
-	}
-
+	// Forbidden documents invalidate every case kind, including expected-empty
+	// cases, even when the empty-result failure already records the outcome.
 	if cr.ForbiddenHits > 0 {
 		failures = append(failures, fmt.Sprintf(
-			"%d forbidden source(s) in results", cr.ForbiddenHits))
+			"%d forbidden document(s) in results", cr.ForbiddenHits))
 	}
 
 	return failures
+}
+
+func thresholdsFor(cfg EvaluateConfig) ThresholdsConfig {
+	if cfg.Thresholds != nil {
+		return *cfg.Thresholds
+	}
+	return DefaultThresholds()
 }
 
 // buildSummary aggregates case reports.
@@ -282,14 +308,9 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		TotalCases: len(cases),
 	}
 
-	var recallSum, mrrSum, ndcgSum, topicCovSum float64
-	var emptyCases, emptyPassed int
-	var emptyExpected int
-
-	thresholds := DefaultSyntheticThresholds()
-	if cfg.Thresholds != nil {
-		thresholds = *cfg.Thresholds
-	}
+	var recallSum, mrrSum, ndcgSum float64
+	var emptyPassed, emptyExpected int
+	thresholds := thresholdsFor(cfg)
 
 	for _, c := range cases {
 		if c.Passed {
@@ -299,18 +320,20 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		}
 
 		if c.ExpectedEmpty {
-			emptyCases++
 			emptyExpected++
 			if c.PacketCount == 0 {
 				emptyPassed++
 			}
 		}
 
-		recallSum += c.SourceRecallAtK
-		mrrSum += c.RRFirstAcceptable
-		ndcgSum += c.NDCG
-		topicCovSum += c.TopicGroupCoverage
-
+		// Expected-empty cases have no relevance ranking to score. Their
+		// metrics must not be treated as perfect retrieval outcomes.
+		if c.ExpectedDocumentCount > 0 {
+			s.RankedCases++
+			recallSum += c.DocumentRecallAtK
+			mrrSum += c.RRFirstExpectedDocument
+			ndcgSum += c.NDCG
+		}
 		s.TotalForbidden += c.ForbiddenHits
 		s.TotalWarnings += c.WarningCount
 		if c.BudgetTruncated {
@@ -318,27 +341,25 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		}
 	}
 
-	n := float64(len(cases))
-	if n > 0 {
-		s.MeanRecall = recallSum / n
-		s.MeanMRR = mrrSum / n
-		s.MeanNDCG = ndcgSum / n
-		s.MeanTopicCov = topicCovSum / n
+	if s.RankedCases > 0 {
+		denominator := float64(s.RankedCases)
+		s.MeanRecall = recallSum / denominator
+		s.MeanMRR = mrrSum / denominator
+		s.MeanNDCG = ndcgSum / denominator
 	}
-
 	if emptyExpected > 0 {
 		s.EmptyPassRate = float64(emptyPassed) / float64(emptyExpected)
 	}
 
-	// Evaluate thresholds.
+	// Evaluate thresholds only for the case types whose metric they measure.
 	s.OverallPassed = true
-	if s.MeanRecall < thresholds.MinRecallAtK {
+	if s.RankedCases > 0 && s.MeanRecall < thresholds.MinRecallAtK {
 		s.OverallPassed = false
 	}
-	if s.MeanMRR < thresholds.MinMRR {
+	if s.RankedCases > 0 && s.MeanMRR < thresholds.MinMRR {
 		s.OverallPassed = false
 	}
-	if s.MeanNDCG < thresholds.MinNDCG {
+	if s.RankedCases > 0 && s.MeanNDCG < thresholds.MinNDCG {
 		s.OverallPassed = false
 	}
 	if s.TotalForbidden > thresholds.MaxForbiddenHits {
@@ -351,45 +372,12 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 	return s
 }
 
-// buildFixtureLookup reads document metadata to build a doc_id -> fixture_id
-// mapping. For synthetic cases, fixture IDs are stored in the document's
-// source_filename or metadata.
-func (e *Evaluator) buildFixtureLookup(ctx context.Context) (*FixtureLookup, error) {
-	byDocID := make(map[string]string)
-	byHash := make(map[string]string)
-
-	rows, err := e.DB.Pool.Query(ctx, `
-SELECT doc_id::text, raw_sha256,
-       COALESCE(NULLIF(source_filename, ''), '')
-FROM documents`)
-	if err != nil {
-		return nil, err
+// applyHNSWThreshold applies the approximate-recall gate only to an actual
+// exact-vs-HNSW comparison. It is not a retrieval result-quality threshold.
+func applyHNSWThreshold(s *Summary, hnsw *HNSWReport, thresholds ThresholdsConfig) {
+	if hnsw != nil && hnsw.CasesCompared > 0 && hnsw.MeanRecall < thresholds.MinApproxRecall {
+		s.OverallPassed = false
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var docID, sha, filename string
-		if err := rows.Scan(&docID, &sha, &filename); err != nil {
-			return nil, err
-		}
-		// Synthetic fixtures use a stable naming convention: the filename
-		// without extension is the fixture ID.
-		if filename != "" {
-			fid := stripExtension(filename)
-			byDocID[docID] = fid
-			if sha != "" {
-				byHash[sha] = fid
-			}
-		}
-	}
-	return NewFixtureLookup(byDocID, byHash), rows.Err()
-}
-
-func stripExtension(name string) string {
-	if i := strings.LastIndex(name, "."); i > 0 {
-		return name[:i]
-	}
-	return name
 }
 
 func gitSHA() string {
@@ -421,7 +409,7 @@ func (e *Evaluator) runHNSWComparison(
 	var recalls []float64
 
 	for _, c := range cases {
-		if c.ExpectedEmpty || len(c.ExpectedSources) == 0 {
+		if c.ExpectedEmpty || len(c.ExpectedDocuments) == 0 {
 			continue
 		}
 

@@ -114,14 +114,12 @@ func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, erro
 			warn.add(WarnLexicalQueryEmpty)
 		}
 
-		denseStart := time.Now()
-		lexStart := time.Now()
-
+		fuseStart := time.Now()
 		cands, err := sub.fuse(ctx, vecs[0], q, i)
 		if err != nil {
 			return nil, err
 		}
-		sr.FuseDuration += time.Since(denseStart) // fuse includes both legs in one round trip
+		sr.recordFusionDuration(time.Since(fuseStart))
 
 		// Count dense and lexical contributions.
 		for _, c := range cands {
@@ -138,25 +136,13 @@ func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, erro
 		}
 
 		groups = append(groups, cands)
-		_ = denseStart
-		_ = lexStart
 	}
 
 	sr.DenseCount = denseCount
 	sr.LexicalCount = lexCount
 
 	// Record fused candidates.
-	for _, g := range groups {
-		for _, c := range g {
-			sr.FusedCandidates = append(sr.FusedCandidates, EvalCandidate{
-				ChunkID:   c.ChunkID,
-				DocID:     c.DocID,
-				DenseRank: c.DenseRank,
-				LexRank:   c.LexRank,
-				RRF:       c.RRF,
-			})
-		}
-	}
+	sr.recordFusedCandidates(groups)
 
 	// 3. Pool candidates.
 	poolStart := time.Now()
@@ -206,6 +192,31 @@ func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, erro
 	sr.SelectCount = len(sel.Picked)
 
 	return sr, nil
+}
+
+// recordFusionDuration records the shared SQL round-trip for every logical
+// stage it performs. Dense and lexical candidates are calculated in the same
+// statement, so their timings overlap rather than being additive.
+func (sr *StageResult) recordFusionDuration(d time.Duration) {
+	sr.DenseDuration += d
+	sr.LexicalDuration += d
+	sr.FuseDuration += d
+}
+
+// recordFusedCandidates exposes the fused candidate yield used by evaluation.
+func (sr *StageResult) recordFusedCandidates(groups [][]candidate) {
+	for _, g := range groups {
+		for _, c := range g {
+			sr.FusedCandidates = append(sr.FusedCandidates, EvalCandidate{
+				ChunkID:   c.ChunkID,
+				DocID:     c.DocID,
+				DenseRank: c.DenseRank,
+				LexRank:   c.LexRank,
+				RRF:       c.RRF,
+			})
+		}
+	}
+	sr.FusedCount = len(sr.FusedCandidates)
 }
 
 // EvaluateExactSearch runs a brute-force cosine-distance search over the same

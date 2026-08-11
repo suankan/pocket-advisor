@@ -118,6 +118,12 @@ The current process emits structured logs and includes warning codes in CLI and 
 
 Both the stdio and authenticated Streamable HTTP MCP transports are described in [MCP server design](mcp.md). They expose the same tool contract, evidence interface, citation system, pagination, and response bounds over the retrieval package. The retrieval package remains transport-independent; both MCP adapters are thin boundaries over `internal/retrieval` and the shared `internal/mcp.QueryTool`.
 
+## Evaluation
+
+`pocket-advisor --evaluate` runs a private workspace case set through the same retrieval service and reports document recall, reciprocal rank, nDCG, forbidden hits, warnings, candidate yields, and stage timing. A case passes only when it satisfies its explicit contract: an expected-empty case has no packets, a regular case returns at least one expected document, a case with `require_all_expected_documents` returns every expected document, and no forbidden document is returned. Aggregate ranking thresholds remain the run-level quality gate; an optional `--eval-hnsw` run also gates approximate-search recall.
+
+The operator maintains the version 3 case set as a curated private golden suite outside version control. Each `expected_documents` entry contains a PostgreSQL document UUID and relevance grade; `require_all_expected_documents` makes every listed document mandatory, and `forbidden_document_ids` contains PostgreSQL document UUIDs. The evaluator never generates cases from workspace content and never resolves evaluation identity through filenames or source hashes. Each report records a SHA-256 identity of its case-set contents, and results are comparable only when that case-set identity is unchanged.
+
 ## Target service boundary
 
 The broader user API remains one long-running retrieval workload per workspace, reached only through the authenticated API gateway described in [API server design](api-server-design.md). Future non-MCP HTTP adapters translate transport requests into the same `retrieval.Request` and return the same result semantics. They must not accept a caller-supplied workspace that bypasses the gateway's authenticated route.
@@ -128,12 +134,12 @@ Target observability should expose per-stage latency, candidate yields by leg, w
 
 ## Verification
 
-Use the repository commands in [README §9](../README.md#9-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, and the manual query and supported-client smoke checks in the handbook. MCP-specific tests are described in [MCP server design](mcp.md#testing).
+Use the repository commands in [README §10](../README.md#10-verification). Retrieval behavior is covered by unit tests under `internal/retrieval`, storage integration tests, and the manual query and supported-client smoke checks in the handbook. MCP-specific tests are described in [MCP server design](mcp.md#testing).
 
 ## Open decisions
 
 - Decide whether long-lived retrieval traffic requires an explicit HNSW iterative-scan policy or other recall guard as the index grows.
 - Decide whether retrieval startup must verify its configured embedding model and dimension against `schema_metadata`, matching ingestion's fail-fast check.
-- Define a representative, privacy-safe evaluation set and acceptance thresholds for model or tuning changes.
+- Calibrate representative category coverage and acceptance thresholds for model or tuning changes as corpora and models change.
 - Choose metrics buckets and labels that diagnose quality and latency without exposing workspace identifiers or query text.
 - Decide whether multi-turn question state belongs in the future generation service or solely in its client.

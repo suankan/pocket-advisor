@@ -28,6 +28,14 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 
 // Selecting two modes at once is ambiguous in a way that could destroy data —
 // --delete-data alongside --ingest-all must never be resolved by picking one.
+func TestParseRejectsRemovedFixtureGenerationFlags(t *testing.T) {
+	for _, flag := range []string{"--generate-fixtures", "--eval-generate"} {
+		if _, err := Parse([]string{"--evaluate", flag, "--workspace-id", "test"}); err == nil {
+			t.Errorf("Parse accepted removed flag %s", flag)
+		}
+	}
+}
+
 func TestParseRejectsMultipleModes(t *testing.T) {
 	_, err := Parse([]string{"--ingest-all", "--delete-data", "--workspace-id", "test"})
 	if err == nil {

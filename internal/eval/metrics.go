@@ -8,7 +8,10 @@ import (
 
 // SourceRecallAtK computes the fraction of expected sources found among the
 // top-k selected packets. A packet matches when its doc_id or source hash
-// appears in the expected set.
+// appears in the expected set. A source counts once no matter how many of
+// its chunks appear in the top-k — this is source recall, not packet
+// recall, so a document split across several selected packets must not
+// inflate the result past 1.0.
 func SourceRecallAtK(packets []packetRef, expected []ExpectedSource, k int) float64 {
 	if len(expected) == 0 {
 		return 1.0
@@ -20,16 +23,16 @@ func SourceRecallAtK(packets []packetRef, expected []ExpectedSource, k int) floa
 	for _, e := range expected {
 		expectedSet[e.FixtureID] = struct{}{}
 	}
-	hit := 0
+	found := make(map[string]struct{}, len(expected))
 	for i, p := range packets {
 		if i >= k {
 			break
 		}
 		if _, ok := expectedSet[p.FixtureID]; ok {
-			hit++
+			found[p.FixtureID] = struct{}{}
 		}
 	}
-	return float64(hit) / float64(len(expected))
+	return float64(len(found)) / float64(len(expected))
 }
 
 // ReciprocalRankFirst returns 1/(rank of first acceptable source), or 0 if
@@ -52,27 +55,37 @@ func ReciprocalRankFirst(packets []packetRef, expected []ExpectedSource) float64
 
 // NDCG computes normalized discounted cumulative gain using relevance grades
 // from the case. When no relevance grades are present, binary relevance is
-// assumed (1 for expected sources, 0 otherwise).
+// assumed (1 for expected sources, 0 otherwise). Each expected source earns
+// its gain at most once, on its best-ranked (first) occurrence — a document
+// split across several selected packets must not earn repeat credit, or the
+// achieved DCG could exceed the ideal DCG it is normalized against.
 func NDCG(packets []packetRef, expected []ExpectedSource, grades map[string]int) float64 {
 	if len(expected) == 0 {
 		return 1.0
 	}
+	expectedSet := make(map[string]struct{}, len(expected))
+	for _, e := range expected {
+		expectedSet[e.FixtureID] = struct{}{}
+	}
+
 	// Build relevance vector for returned packets.
 	relevances := make([]float64, len(packets))
+	credited := make(map[string]struct{}, len(expected))
 	for i, p := range packets {
+		if _, ok := expectedSet[p.FixtureID]; !ok {
+			continue
+		}
+		if _, dup := credited[p.FixtureID]; dup {
+			continue
+		}
+		credited[p.FixtureID] = struct{}{}
 		if grades != nil {
 			if g, ok := grades[p.FixtureID]; ok {
 				relevances[i] = float64(g)
 				continue
 			}
 		}
-		// Binary: 1 if in expected set, 0 otherwise.
-		for _, e := range expected {
-			if e.FixtureID == p.FixtureID {
-				relevances[i] = 1.0
-				break
-			}
-		}
+		relevances[i] = 1.0
 	}
 
 	// Ideal ranking: sort expected by grade descending.

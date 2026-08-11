@@ -60,6 +60,23 @@ func TestSourceRecallAtK(t *testing.T) {
 	}
 }
 
+// TestSourceRecallAtKDedupesRepeatedSource guards against a real bug: a
+// source split across several selected chunks must count once, not once per
+// chunk, or recall can exceed 1.0.
+func TestSourceRecallAtKDedupesRepeatedSource(t *testing.T) {
+	packets := []packetRef{
+		{DocID: "a-chunk1", FixtureID: "doc-a"},
+		{DocID: "a-chunk2", FixtureID: "doc-a"},
+		{DocID: "a-chunk3", FixtureID: "doc-a"},
+	}
+	expected := []ExpectedSource{{FixtureID: "doc-a"}}
+
+	got := SourceRecallAtK(packets, expected, 3)
+	if got != 1.0 {
+		t.Errorf("SourceRecallAtK() = %v, want 1.0 (a repeated source must not exceed 1.0)", got)
+	}
+}
+
 func TestReciprocalRankFirst(t *testing.T) {
 	packets := []packetRef{
 		{DocID: "a", FixtureID: "doc-a"},
@@ -140,6 +157,27 @@ func TestNDCG(t *testing.T) {
 				t.Errorf("NDCG() = %v, want [%v, %v]", got, tt.wantMin, tt.wantMax)
 			}
 		})
+	}
+}
+
+// TestNDCGDedupesRepeatedSource guards against a real bug: crediting a
+// source's relevance grade on every chunk that mentions it, rather than
+// once on its best-ranked occurrence, let achieved DCG exceed ideal DCG.
+func TestNDCGDedupesRepeatedSource(t *testing.T) {
+	packets := []packetRef{
+		{DocID: "a-chunk1", FixtureID: "doc-a"},
+		{DocID: "a-chunk2", FixtureID: "doc-a"},
+		{DocID: "a-chunk3", FixtureID: "doc-a"},
+	}
+	expected := []ExpectedSource{{FixtureID: "doc-a", Grade: 3}}
+	grades := map[string]int{"doc-a": 3}
+
+	got := NDCG(packets, expected, grades)
+	if got > 1.0+1e-9 {
+		t.Errorf("NDCG() = %v, want <= 1.0 (a repeated source must not exceed ideal DCG)", got)
+	}
+	if got < 1.0-1e-9 {
+		t.Errorf("NDCG() = %v, want 1.0 (the source is found at rank 1)", got)
 	}
 }
 

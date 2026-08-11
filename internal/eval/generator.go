@@ -105,6 +105,12 @@ func (g *Generator) Generate(ctx context.Context, outputPath string) error {
 // documents. It uses ORDER BY RANDOM() with a limit to spread across the
 // corpus; the database's random sampling is sufficient for evaluation fixture
 // generation.
+//
+// The 300-character floor excludes near-empty documents (a one-line reply,
+// a quoted forward) that cannot be told apart from near-duplicate siblings
+// by content alone — real workspaces can hold long threads of dozens of
+// short, topically identical messages, and a source that thin cannot ground
+// a fair fixture regardless of retrieval quality.
 func (g *Generator) sampleDocuments(ctx context.Context) ([]sampledDoc, error) {
 	rows, err := g.DB.Pool.Query(ctx, `
 SELECT doc_id::text, COALESCE(NULLIF(source_filename, ''), ''),
@@ -113,7 +119,7 @@ SELECT doc_id::text, COALESCE(NULLIF(source_filename, ''), ''),
 FROM documents
 WHERE processing_status = 'COMPLETED'
   AND normalized_text IS NOT NULL
-  AND LENGTH(normalized_text) > 50
+  AND LENGTH(normalized_text) > 300
 ORDER BY RANDOM()
 LIMIT $1`, SampleSize)
 	if err != nil {
@@ -161,9 +167,9 @@ func (g *Generator) generateCases(ctx context.Context, docs []sampledDoc) ([]Cas
 
 // llmQuestion is the JSON structure the LLM is expected to return per document.
 type llmQuestion struct {
-	Question   string   `json:"question"`
-	Category   string   `json:"category"`
-	FixtureIDs []string `json:"fixture_ids"` // source filenames without extension
+	Question  string   `json:"question"`
+	Category  string   `json:"category"`
+	DocLabels []string `json:"doc_labels"` // opaque per-batch labels, e.g. "DOC0"
 }
 
 // llmBatchResponse is the top-level structure from the LLM for a batch.
@@ -172,32 +178,62 @@ type llmBatchResponse struct {
 }
 
 // generateBatch sends a batch of documents to the LLM and returns cases.
+//
+// The LLM sees only an opaque per-batch label for each document, never its
+// fixture_id — a fixture_id is the source filename stripped of extension,
+// and for email sources that filename bakes in the sender, date, and
+// subject, none of which appear in the indexed normalized_text. Handing the
+// LLM that string invites it to write "exact-identifier" questions about
+// metadata the retrieval system has no access to, which no amount of
+// retrieval quality could ever satisfy. Labels are mapped back to real
+// fixture_ids after the LLM responds, and any label it invents that wasn't
+// actually offered in this batch is dropped rather than trusted.
 func (g *Generator) generateBatch(ctx context.Context, docs []sampledDoc, startNum int) ([]Case, error) {
+	labelToFixtureID := make(map[string]string, len(docs))
 	var docEntries strings.Builder
 	for i, d := range docs {
-		fid := fixtureIDFromFilename(d.Filename)
+		label := fmt.Sprintf("DOC%d", i)
+		labelToFixtureID[label] = fixtureIDFromFilename(d.Filename)
+		hasThread := "no"
+		if d.ThreadID != "" {
+			hasThread = "yes"
+		}
 		docEntries.WriteString(fmt.Sprintf(
-			"[DOC %d] fixture_id=%q source=%q thread_id=%q snippet=%s\n",
-			i, fid, d.Source, d.ThreadID, truncate(d.Snippet, 300)))
+			"[%s] source=%q has_thread=%s snippet=%s\n",
+			label, d.Source, hasThread, truncate(d.Snippet, 300)))
 	}
 
-	prompt := fmt.Sprintf(`You are generating evaluation questions for a retrieval system.
-Given document snippets, produce questions that test whether the system can find the right documents.
+	prompt := fmt.Sprintf(`You are generating evaluation questions for a retrieval system that
+searches only the document body text shown below. It has no access to
+filenames, senders, recipients, dates, subject lines, or thread identifiers
+— only the snippet text itself.
 
 RULES:
 - Generate 2-3 questions per document.
+- Every question must be answerable using only facts, names, numbers, or
+  statements that literally appear in the snippet text shown for that
+  document. Never ask about a sender, recipient, date, filename, subject
+  line, or thread identifier — unless that exact information is itself
+  quoted inside the snippet text (e.g. a screenshot of an email header).
+- Write each question the way a real user would ask it. Never mention a
+  document's own [DOCn] label inside the question text — that label is
+  only for the doc_labels field below, not for the question itself.
 - Mix categories across the batch:
-  * "exact-identifier": questions about specific facts, names, dates, or identifiers in the document
-  * "paraphrase": questions that rephrase concepts from the document
-  * "multi-topic": questions that span multiple documents (use fixture_ids from multiple docs)
-  * "thread": questions about email threads (only for docs with non-empty thread_id)
-- Questions must require reading the document to answer.
-- Each question lists which documents (by fixture_id) contain the answer.
-- Multi-topic questions must list fixture_ids from at least 2 different documents.
+  * "exact-identifier": a specific fact, name, number, or detail stated in the snippet text itself
+  * "paraphrase": rephrases a concept actually described in the snippet
+  * "multi-topic": the question ITSELF must genuinely require combining
+    information from 2+ documents to answer — never write a question fully
+    answerable from one document and then attach a second, unrelated
+    document's label just to satisfy this category. If a question only
+    needs one document, categorize it as exact-identifier or paraphrase
+    instead, even if other documents are available in this batch.
+  * "thread": about the content of a document marked has_thread=yes, not its thread identifier
+- Reference documents only by the label shown in brackets (e.g. DOC0).
+  Never invent a label that is not listed below.
 
 Return ONLY valid JSON with this structure:
 {"questions": [
-  {"question": "...", "category": "...", "fixture_ids": ["fixture-id-1"]}
+  {"question": "...", "category": "...", "doc_labels": ["DOC0"]}
 ]}
 
 Valid categories: exact-identifier, paraphrase, multi-topic, thread.
@@ -227,13 +263,24 @@ Documents:
 			cat = CatParaphrase
 		}
 
-		// Determine primary fixture_id (the one with the most information).
-		fixtureIDs := q.FixtureIDs
-		if len(fixtureIDs) == 0 {
-			// Fall back to first doc in batch.
-			if len(docs) > 0 {
-				fixtureIDs = []string{fixtureIDFromFilename(docs[0].Filename)}
+		// Resolve labels to real fixture_ids, dropping any label the LLM
+		// invented that was never offered in this batch — a case grounded
+		// in nothing real is worse than no case at all.
+		var fixtureIDs []string
+		seen := make(map[string]struct{}, len(q.DocLabels))
+		for _, label := range q.DocLabels {
+			fid, ok := labelToFixtureID[label]
+			if !ok {
+				continue
 			}
+			if _, dup := seen[fid]; dup {
+				continue
+			}
+			seen[fid] = struct{}{}
+			fixtureIDs = append(fixtureIDs, fid)
+		}
+		if len(fixtureIDs) == 0 {
+			continue
 		}
 
 		batchCaseNum++
@@ -270,8 +317,8 @@ Documents:
 func parseLLMQuestions(raw string) ([]llmQuestion, error) {
 	// Strip markdown code fences if present.
 	raw = strings.TrimSpace(raw)
-	raw = regexp.MustCompile(`^` + "```" + `(?:json)?\s*`).ReplaceAllString(raw, "")
-	raw = regexp.MustCompile(`\s*` + "```" + `$`).ReplaceAllString(raw, "")
+	raw = regexp.MustCompile(`^`+"```"+`(?:json)?\s*`).ReplaceAllString(raw, "")
+	raw = regexp.MustCompile(`\s*`+"```"+`$`).ReplaceAllString(raw, "")
 
 	var resp llmBatchResponse
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {

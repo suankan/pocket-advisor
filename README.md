@@ -168,7 +168,20 @@ Useful modes:
 
 # Keep the worker pools running for objects uploaded by another S3 client.
 ./bin/pocket-advisor --listen --workspace-id example
+
+# Rebuild durable email browse metadata after upgrading a workspace that was
+# ingested before the email metadata tables existed. Start with a bounded,
+# non-writing check; rows whose Tier 1 object cannot be read are reported.
+./bin/pocket-advisor --reprocess-email-metadata --workspace-id example \
+  --reprocess-limit 500 --dry-run
+
+# Apply the rebuild. It only reads Tier 1 and updates email metadata; it does
+# not upload, queue, extract, chunk, embed, or alter canonical documents.
+./bin/pocket-advisor --reprocess-email-metadata --workspace-id example \
+  --reprocess-missing-only --reprocess-concurrency 4
 ```
+
+`--reprocess-email-metadata` walks only email message documents in the fixed workspace in deterministic order. It is idempotent and resumable: re-running it writes the same metadata through the live email worker's parser and transaction, does not duplicate rows or move `ingested_at`, and leaves documents, chunks, retrieval data, and legacy thread IDs untouched. `--reprocess-limit N` bounds a run (`0` is all messages); `--reprocess-missing-only` is useful after an interrupted pass. The summary reports processed, updated, unreadable, and failed counts. Unreadable Tier 1 bytes and parse/write failures cause a non-zero exit after the complete summary, rather than being silently skipped. `--json` produces the summary as JSON.
 
 The first interrupt stops fetching and drains in-flight handlers. A second interrupt aborts immediately. Queued and unacknowledged messages remain durable in JetStream, so the next run resumes them.
 

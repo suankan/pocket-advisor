@@ -293,6 +293,60 @@ func replaceReferences(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) er
 	return nil
 }
 
+// EmailDocumentQuery selects the email message documents of one workspace for
+// a metadata reprocessing pass (ingestion-design.md §2.5).
+//
+// After is the exclusive lower bound of a keyset walk, empty on the first
+// batch. Ordering is by doc_id, which is content-derived and stable, so a run
+// interrupted at any point resumes over the same sequence rather than a
+// re-shuffled one.
+type EmailDocumentQuery struct {
+	WorkspaceID string
+	After       string
+	Limit       int
+	// OnlyMissing restricts the walk to documents that have no email_messages
+	// row yet — the cheap pass after an interrupted rebuild. It is a selection
+	// narrowing, never a correctness one: a full pass rewrites every message
+	// from its Tier 1 bytes and converges on the same rows.
+	OnlyMissing bool
+}
+
+// EmailDocuments lists a workspace's email message documents in deterministic
+// doc_id order.
+//
+// Only doc_type = 'email' is returned. An archive is a container routed to the
+// same worker but is not a message and has no metadata of its own, and a
+// document with no Tier 1 object is still returned so the reprocessor can
+// report it as unreadable rather than silently losing the missing metadata.
+func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([]domain.Document, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+        SELECT d.doc_id::text, d.workspace_id, d.collection_id, d.mime_type,
+               d.rustfs_raw_uri, d.raw_sha256
+        FROM documents d
+        WHERE d.workspace_id = $1
+          AND d.doc_type = 'email'
+          AND ($2::text = '' OR d.doc_id > $2::uuid)
+          AND (NOT $3::bool OR NOT EXISTS (
+                SELECT 1 FROM email_messages m WHERE m.doc_id = d.doc_id))
+        ORDER BY d.doc_id
+        LIMIT $4`, q.WorkspaceID, q.After, q.OnlyMissing, q.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("list email documents: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Document
+	for rows.Next() {
+		var d domain.Document
+		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.Collection, &d.MimeType,
+			&d.RawURI, &d.RawSHA256); err != nil {
+			return nil, fmt.Errorf("list email documents: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func orEmptyWarnings(w []domain.EmailParseWarning) []domain.EmailParseWarning {
 	if w == nil {
 		return []domain.EmailParseWarning{}

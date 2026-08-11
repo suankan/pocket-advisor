@@ -13,6 +13,8 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 		"reconcile":   {"--reconcile", "--workspace-id", "test"},
 		"doctor":      {"--doctor", "--workspace-id", "test"},
 		"recover":     {"--recover", "--workspace-id", "test"},
+		"reprocess-email-metadata": {
+			"--reprocess-email-metadata", "--workspace-id", "test"},
 	}
 	for wantMode, args := range cases {
 		o, err := Parse(args)
@@ -58,7 +60,7 @@ func TestParseRequiresAMode(t *testing.T) {
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{
 		"--ingest-all", "--delete-data", "--scan", "--reconcile",
-		"--doctor", "--recover",
+		"--doctor", "--recover", "--reprocess-email-metadata",
 	} {
 		if _, err := Parse([]string{mode}); err == nil {
 			t.Errorf("Parse(%s) accepted a missing --workspace-id", mode)
@@ -82,6 +84,7 @@ func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 	enqueues := map[string]bool{
 		"--ingest-all": true, "--scan": true, "--reconcile": true,
 		"--delete-data": false, "--doctor": false, "--recover": false,
+		"--reprocess-email-metadata": false,
 	}
 	for mode, want := range enqueues {
 		o, err := Parse([]string{mode, "--workspace-id", "test"})
@@ -111,5 +114,44 @@ func TestRecoverDoesNotNeedPipeline(t *testing.T) {
 	}
 	if o.NeedsPipeline() {
 		t.Error("--recover should not need pipeline")
+	}
+}
+
+// Reprocessing rebuilds metadata for one workspace from Tier 1. Its bounds are
+// the only thing standing between a maintenance command and a corpus-sized
+// walk, so a negative bound is refused rather than silently treated as "all".
+func TestParseValidatesReprocessBounds(t *testing.T) {
+	ok, err := Parse([]string{
+		"--reprocess-email-metadata", "--workspace-id", "test",
+		"--reprocess-limit", "500", "--reprocess-concurrency", "2",
+		"--reprocess-missing-only", "--dry-run", "--json",
+	})
+	if err != nil {
+		t.Fatalf("Parse rejected a valid reprocessing invocation: %v", err)
+	}
+	if ok.ReprocessLimit != 500 || ok.ReprocessConc != 2 || !ok.ReprocessMissing ||
+		!ok.DryRun || !ok.JSON {
+		t.Errorf("options not carried through: %+v", ok)
+	}
+
+	for _, args := range [][]string{
+		{"--reprocess-email-metadata", "--workspace-id", "test", "--reprocess-limit", "-1"},
+		{"--reprocess-email-metadata", "--workspace-id", "test", "--reprocess-concurrency", "-4"},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Errorf("Parse(%v) accepted a negative bound", args)
+		}
+	}
+}
+
+// It writes only the email metadata tables and publishes nothing, so it must
+// not be mistaken for a mode that has to drain the queues.
+func TestReprocessIsExclusiveWithOtherModes(t *testing.T) {
+	_, err := Parse([]string{"--reprocess-email-metadata", "--ingest-all", "--workspace-id", "test"})
+	if err == nil {
+		t.Fatal("Parse accepted reprocessing alongside an ingest")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error %q does not explain the conflict", err)
 	}
 }

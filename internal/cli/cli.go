@@ -52,6 +52,13 @@ type Options struct {
 	Doctor  bool
 	Recover bool
 
+	// Email metadata reprocessing (ingestion-design.md §2.5): a maintenance
+	// walk over one workspace's email message documents, not an ingest.
+	ReprocessEmail   bool
+	ReprocessLimit   int
+	ReprocessConc    int
+	ReprocessMissing bool
+
 	Evaluate       bool
 	EvalCases      string
 	EvalReport     string
@@ -84,6 +91,15 @@ Modes (exactly one):
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
+  --reprocess-email-metadata
+                      rebuild durable email browse metadata from Tier 1 for
+                      every email message document in the workspace. For a
+                      workspace ingested before those tables existed: the
+                      schema upgrade adds them empty and synthesises nothing.
+                      Reads objects and writes only the email metadata tables —
+                      no upload, no queue, no re-extraction, no re-embedding —
+                      and is idempotent, so repeating an interrupted run
+                      converges (ingestion-design.md §2.5)
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
@@ -122,6 +138,15 @@ Query options:
   --no-rerank               skip the cross-encoder; serve fused order
   --no-decompose            do not split a multi-topic question
 
+Email metadata reprocessing options:
+  --reprocess-limit N        stop after this many documents (0 = the whole
+                             workspace)
+  --reprocess-concurrency N  concurrent Tier 1 reads and metadata writes
+                             (default 4)
+  --reprocess-missing-only   only documents that have no metadata row yet
+  --dry-run                  read and parse, report the counts, write nothing
+  --json                     machine-readable summary
+
 Evaluate options:
   --eval-cases <path>        evaluation case set JSON (default: workspaces/evaluation/<workspace>/cases.json)
   --eval-report <path>       write report to path (gitignored, default: none)
@@ -147,6 +172,7 @@ Examples:
   pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
   pocket-advisor mcp stdio --workspace-id test
   pocket-advisor mcp start --workspace-id test
+  pocket-advisor --reprocess-email-metadata --workspace-id test --dry-run
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -209,6 +235,10 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
+	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from Tier 1 bytes")
+	fs.IntVar(&o.ReprocessLimit, "reprocess-limit", 0, "stop after this many documents (0 = whole workspace)")
+	fs.IntVar(&o.ReprocessConc, "reprocess-concurrency", 0, "concurrent Tier 1 reads and metadata writes (0 = default)")
+	fs.BoolVar(&o.ReprocessMissing, "reprocess-missing-only", false, "only documents with no email metadata row yet")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write report to path (gitignored)")
@@ -256,6 +286,7 @@ func (o *Options) modes() []string {
 		{o.Query != "", "--query"},
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
+		{o.ReprocessEmail, "--reprocess-email-metadata"},
 		{o.Evaluate, "--evaluate"},
 	} {
 		if c.on {
@@ -275,7 +306,8 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --doctor, --recover, --evaluate, --delete-data, --forget, or the mcp subcommand (--help for details)")
+			"--query, --doctor, --recover, --reprocess-email-metadata, --evaluate, --delete-data, " +
+			"--forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
 	}
@@ -285,6 +317,12 @@ func (o *Options) validate() error {
 	// or bucket left to act on without one (workspace-isolation.md §13).
 	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
+	}
+	if o.ReprocessLimit < 0 {
+		return fmt.Errorf("--reprocess-limit cannot be negative, got %d", o.ReprocessLimit)
+	}
+	if o.ReprocessConc < 0 {
+		return fmt.Errorf("--reprocess-concurrency cannot be negative, got %d", o.ReprocessConc)
 	}
 	if o.Forget != "" && len(o.Forget) != 64 {
 		return fmt.Errorf("--forget expects a 64-character sha256, got %d characters", len(o.Forget))
@@ -395,6 +433,8 @@ func Run(o *Options) error {
 		return runDoctor(o, cfg, logs)
 	case o.Recover:
 		return runRecover(o, cfg, logs)
+	case o.ReprocessEmail:
+		return runReprocessEmail(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

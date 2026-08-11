@@ -9,6 +9,21 @@ import (
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
+// Direction is the relationship between a message and configured workspace
+// owner identities. It is deliberately closed: callers choose a mailbox
+// operation, never a predicate expression.
+type Direction string
+
+const (
+	DirectionEither   Direction = "either"
+	DirectionInbound  Direction = "inbound"
+	DirectionOutbound Direction = "outbound"
+)
+
+func (d Direction) valid() bool {
+	return d == DirectionEither || d == DirectionInbound || d == DirectionOutbound
+}
+
 // Filters is the complete browse predicate. Every field is a value, never an
 // expression: exact normalized mailboxes, half-open date bounds, and a flag.
 type Filters struct {
@@ -25,7 +40,8 @@ type Filters struct {
 	Before time.Time
 	// Collapse returns one row per conversation — the matching message that
 	// is extreme in the requested order — plus a summary of the conversation.
-	Collapse bool
+	Collapse  bool
+	Direction Direction
 }
 
 func (f Filters) dated() bool { return !f.After.IsZero() || !f.Before.IsZero() }
@@ -45,6 +61,9 @@ type ListRequest struct {
 	// Cursor continues a previous page series. It must have been issued for
 	// the same filters and order.
 	Cursor string
+	// Direction limits the result relative to configured owner identities. An
+	// omitted direction preserves identity-independent exact browsing.
+	Direction Direction
 }
 
 // AppliedFilters echoes what the service actually used, normalized. A caller
@@ -56,6 +75,7 @@ type AppliedFilters struct {
 	After     *time.Time `json:"after,omitempty"`
 	Before    *time.Time `json:"before,omitempty"`
 	Collapse  bool       `json:"collapse_conversations"`
+	Direction Direction  `json:"direction,omitempty"`
 }
 
 // Page is the pagination state of one result.
@@ -167,9 +187,10 @@ func (s *Service) ListMessages(ctx context.Context, req ListRequest) (*ListResul
 		// One extra row decides HasMore. A count would answer a different
 		// question — how many match now — which is not what the caller is
 		// paging through.
-		Limit:    limit + 1,
-		Snapshot: snapshot,
-		After:    after,
+		Limit:           limit + 1,
+		Snapshot:        snapshot,
+		After:           after,
+		OwnerIdentities: s.ownerIdentities,
 	})
 	if err != nil {
 		return nil, err
@@ -261,11 +282,20 @@ func (s *Service) normalize(req ListRequest) (Filters, Order, error) {
 	if !order.valid() {
 		return Filters{}, "", errUnsupportedOrder(order)
 	}
+	if req.Direction != "" && !req.Direction.valid() {
+		return Filters{}, "", fmt.Errorf("unsupported message direction %q", req.Direction)
+	}
+	if req.Direction != "" {
+		if err := s.requireOwnerIdentities(); err != nil {
+			return Filters{}, "", err
+		}
+	}
 
 	f := Filters{
-		After:    req.After.UTC(),
-		Before:   req.Before.UTC(),
-		Collapse: req.CollapseConversations,
+		After:     req.After.UTC(),
+		Before:    req.Before.UTC(),
+		Collapse:  req.CollapseConversations,
+		Direction: req.Direction,
 	}
 	if req.After.IsZero() {
 		f.After = time.Time{}
@@ -314,7 +344,7 @@ func verifyPage(rows []Message, order Order, after *key) error {
 }
 
 func appliedFilters(f Filters) AppliedFilters {
-	a := AppliedFilters{Sender: f.Sender, Recipient: f.Recipient, Collapse: f.Collapse}
+	a := AppliedFilters{Sender: f.Sender, Recipient: f.Recipient, Collapse: f.Collapse, Direction: f.Direction}
 	if !f.After.IsZero() {
 		after := f.After.UTC()
 		a.After = &after

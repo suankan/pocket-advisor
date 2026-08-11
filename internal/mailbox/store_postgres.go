@@ -81,6 +81,35 @@ func (p *PostgresStore) ListMessages(ctx context.Context, q PageQuery) ([]Messag
                     WHERE a.doc_id = m.doc_id AND a.kind IN ('to','cc','bcc')
                       AND a.valid AND a.address = $%d)`, len(args))
 	}
+	if q.Filters.Direction != "" {
+		if len(q.OwnerIdentities) == 0 {
+			return nil, ErrOwnerIdentitiesRequired
+		}
+		args = append(args, q.OwnerIdentities)
+		owners := fmt.Sprintf("$%d::text[]", len(args))
+		switch q.Filters.Direction {
+		case DirectionOutbound:
+			fmt.Fprintf(&where, `
+        AND EXISTS (SELECT 1 FROM email_addresses a
+                    WHERE a.doc_id = m.doc_id AND a.kind = 'from'
+                      AND a.valid AND a.address = ANY(%s))`, owners)
+		case DirectionInbound:
+			// Mail from one owner alias to another is owner-authored, never
+			// inbound merely because the receiving alias was also configured.
+			fmt.Fprintf(&where, `
+        AND EXISTS (SELECT 1 FROM email_addresses a
+                    WHERE a.doc_id = m.doc_id AND a.kind IN ('to','cc','bcc')
+                      AND a.valid AND a.address = ANY(%s))
+        AND NOT EXISTS (SELECT 1 FROM email_addresses a
+                        WHERE a.doc_id = m.doc_id AND a.kind = 'from'
+                          AND a.valid AND a.address = ANY(%s))`, owners, owners)
+		case DirectionEither:
+			// Explicit either documents that owner-relative direction was
+			// requested but intentionally admits both sides.
+		default:
+			return nil, fmt.Errorf("unsupported message direction %q", q.Filters.Direction)
+		}
+	}
 	// Half-open, matching Filters: >= after, < before. Undated messages fail
 	// both comparisons and drop out, which the service reports as a warning
 	// rather than leaving the caller to infer.
@@ -260,6 +289,63 @@ func (p *PostgresStore) Summaries(ctx context.Context, workspaceID string, conve
 		return nil, fmt.Errorf("summarize participants: %w", err)
 	}
 	return out, nil
+}
+
+// CandidateMessages selects exact-reference conversations through an eligible
+// inbound human event, then returns every event in those selected conversations.
+// The second step deliberately has no participant/date predicate: a reply just
+// outside a review window still changes whether its inbound message awaits one.
+func (p *PostgresStore) CandidateMessages(ctx context.Context, q CandidateQuery) ([]Message, error) {
+	if len(q.OwnerIdentities) == 0 {
+		return nil, ErrOwnerIdentitiesRequired
+	}
+	args := []any{q.WorkspaceID, q.Snapshot, q.OwnerIdentities}
+	var eligible strings.Builder
+	eligible.WriteString(`m.workspace_id = $1 AND m.ingested_at <= $2
+          AND m.conversation_method = 'references' AND m.automated_class = ''
+          AND EXISTS (SELECT 1 FROM email_addresses a
+                      WHERE a.doc_id = m.doc_id AND a.kind IN ('to','cc','bcc')
+                        AND a.valid AND a.address = ANY($3::text[]))
+          AND NOT EXISTS (SELECT 1 FROM email_addresses a
+                          WHERE a.doc_id = m.doc_id AND a.kind = 'from'
+                            AND a.valid AND a.address = ANY($3::text[]))`)
+	if q.Participant != "" {
+		args = append(args, q.Participant)
+		fmt.Fprintf(&eligible, ` AND EXISTS (SELECT 1 FROM email_addresses a
+                      WHERE a.doc_id = m.doc_id AND a.valid AND a.address = $%d)`, len(args))
+	}
+	if !q.After.IsZero() {
+		args = append(args, q.After)
+		fmt.Fprintf(&eligible, " AND m.sent_at >= $%d", len(args))
+	}
+	if !q.Before.IsZero() {
+		args = append(args, q.Before)
+		fmt.Fprintf(&eligible, " AND m.sent_at < $%d", len(args))
+	}
+	query := fmt.Sprintf(`
+WITH eligible_conversations AS (
+    SELECT DISTINCT m.conversation_id FROM email_messages m WHERE %s
+)
+SELECT %s, 0
+FROM email_messages m
+JOIN eligible_conversations e ON e.conversation_id = m.conversation_id
+WHERE m.workspace_id = $1 AND m.ingested_at <= $2
+ORDER BY m.conversation_id, m.sent_at ASC NULLS LAST, m.doc_id ASC`, eligible.String(), messageColumns)
+	rows, err := p.db.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("read awaiting-reply candidates: %w", err)
+	}
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.hydrateAddresses(ctx, msgs); err != nil {
+		return nil, err
+	}
+	if err := p.hydrateReferences(ctx, msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
 }
 
 // ConversationOf resolves a message document to its conversation.

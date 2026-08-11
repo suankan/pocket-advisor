@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 // Config bounds what one request may cost. Kept here rather than in
@@ -35,6 +37,8 @@ type Config struct {
 	MaxLimit int
 	// MaxParticipants bounds the participant list on a conversation summary.
 	MaxParticipants int
+	// MaxCandidates bounds candidate conversations rendered by one request.
+	MaxCandidates int
 }
 
 // DefaultConfig is the compiled default bound set.
@@ -43,6 +47,7 @@ func DefaultConfig() Config {
 		DefaultLimit:    25,
 		MaxLimit:        200,
 		MaxParticipants: 12,
+		MaxCandidates:   100,
 	}
 }
 
@@ -56,6 +61,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxParticipants <= 0 {
 		c.MaxParticipants = d.MaxParticipants
+	}
+	if c.MaxCandidates <= 0 {
+		c.MaxCandidates = d.MaxCandidates
 	}
 	return c
 }
@@ -123,6 +131,11 @@ type Omission struct {
 	Count  int    `json:"count"`
 }
 
+// ErrOwnerIdentitiesRequired means the operation needs the workspace owner's
+// private mailbox configuration. The error intentionally does not disclose an
+// identity or workspace name.
+var ErrOwnerIdentitiesRequired = errors.New("owner identities are required for direction-dependent mailbox operations")
+
 // ErrUnknownReference is returned for a reference this server did not issue,
 // or one naming a message that is not in this workspace. The two are one error
 // on purpose: distinguishing them would let a caller probe for the existence of
@@ -135,24 +148,52 @@ var ErrUnknownReference = errors.New("reference does not name a message in this 
 // never read from a request, which is what makes cross-workspace access
 // unreachable rather than merely unimplemented (workspace-isolation.md §3).
 type Service struct {
-	store     Store
-	workspace string
-	cfg       Config
-	log       *slog.Logger
+	store           Store
+	workspace       string
+	cfg             Config
+	log             *slog.Logger
+	ownerIdentities []string
 }
 
 // New wires a Service and refuses to build an unscoped one.
-func New(store Store, workspace string, cfg Config, log *slog.Logger) (*Service, error) {
+func New(store Store, workspaceID string, cfg Config, log *slog.Logger) (*Service, error) {
+	return NewWithOwnerIdentities(store, workspaceID, nil, cfg, log)
+}
+
+// NewWithOwnerIdentities wires a service with the private, workspace-scoped
+// owner mailboxes resolved from workspace configuration. They are normalized at
+// this boundary so callers cannot accidentally compare display strings.
+func NewWithOwnerIdentities(store Store, workspaceID string, ownerIdentities []string, cfg Config, log *slog.Logger) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("mailbox service requires a store")
 	}
-	if workspace == "" {
+	if workspaceID == "" {
 		return nil, errors.New("mailbox service requires a workspace scope")
+	}
+	owners := make([]string, 0, len(ownerIdentities))
+	seen := make(map[string]struct{}, len(ownerIdentities))
+	for _, identity := range ownerIdentities {
+		address, err := workspace.NormalizeMailbox(identity)
+		if err != nil {
+			return nil, errors.New("mailbox service owner identity is not a valid mailbox")
+		}
+		if _, duplicate := seen[address]; duplicate {
+			return nil, errors.New("mailbox service owner identities contain a duplicate mailbox")
+		}
+		seen[address] = struct{}{}
+		owners = append(owners, address)
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{store: store, workspace: workspace, cfg: cfg.withDefaults(), log: log}, nil
+	return &Service{store: store, workspace: workspaceID, cfg: cfg.withDefaults(), log: log, ownerIdentities: owners}, nil
+}
+
+func (s *Service) requireOwnerIdentities() error {
+	if len(s.ownerIdentities) == 0 {
+		return ErrOwnerIdentitiesRequired
+	}
+	return nil
 }
 
 // Workspace is the fixed scope this service serves, for diagnostics.

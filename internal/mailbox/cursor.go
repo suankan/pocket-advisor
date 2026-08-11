@@ -145,6 +145,7 @@ func (f Filters) fingerprint() string {
 	write("v" + strconv.Itoa(cursorVersion))
 	write(f.Sender)
 	write(f.Recipient)
+	write(string(f.Direction))
 	write(timeFingerprint(f.After))
 	write(timeFingerprint(f.Before))
 	if f.Collapse {

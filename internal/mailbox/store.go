@@ -33,6 +33,12 @@ type Store interface {
 	// messages the page was drawn from.
 	Summaries(ctx context.Context, workspaceID string, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error)
 
+	// CandidateMessages returns complete exact-reference conversations that have
+	// at least one potentially eligible inbound human message. It returns every
+	// event in those conversations so a later reply cannot be hidden by a date
+	// or participant filter on the candidate itself.
+	CandidateMessages(ctx context.Context, q CandidateQuery) ([]Message, error)
+
 	// ConversationOf resolves one message document to its conversation.
 	// Returns ErrUnknownReference when the workspace holds no such message.
 	ConversationOf(ctx context.Context, workspaceID, docID string) (string, error)
@@ -57,6 +63,8 @@ type PageQuery struct {
 	Snapshot    time.Time
 	// After is the exclusive page boundary, nil for the first page.
 	After *key
+	// OwnerIdentities is set only for an explicit direction filter.
+	OwnerIdentities []string
 }
 
 // Message is one stored email message as browsing sees it.
@@ -108,4 +116,16 @@ type Aggregate struct {
 	// Participants are the distinct normalized From mailboxes, ascending. The
 	// caller bounds how many it renders; the store returns what it found.
 	Participants []string
+}
+
+// CandidateQuery is the store-side, closed predicate for awaiting-reply work.
+// Date and participant bounds select possible inbound messages; they never
+// prune later events from a selected conversation.
+type CandidateQuery struct {
+	WorkspaceID     string
+	OwnerIdentities []string
+	Participant     string
+	After           time.Time
+	Before          time.Time
+	Snapshot        time.Time
 }

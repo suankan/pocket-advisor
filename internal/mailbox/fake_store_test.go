@@ -43,7 +43,7 @@ func (f *fakeStore) ListMessages(_ context.Context, q PageQuery) ([]Message, err
 		if q.WorkspaceID != f.workspace {
 			continue
 		}
-		if m.IngestedAt.After(q.Snapshot) || !matches(m, q.Filters) {
+		if m.IngestedAt.After(q.Snapshot) || !matches(m, q.Filters) || !matchesDirection(m, q.Filters.Direction, q.OwnerIdentities) {
 			continue
 		}
 		matched = append(matched, m)
@@ -109,6 +109,32 @@ func matches(m Message, f Filters) bool {
 	return true
 }
 
+func matchesDirection(m Message, direction Direction, owners []string) bool {
+	if direction == "" || direction == DirectionEither {
+		return true
+	}
+	isOwner := func(address string) bool {
+		for _, owner := range owners {
+			if address == owner {
+				return true
+			}
+		}
+		return false
+	}
+	fromOwner := isOwner(m.Sender)
+	toOwner := false
+	for _, recipient := range m.Recipients {
+		if isOwner(recipient) {
+			toOwner = true
+			break
+		}
+	}
+	if direction == DirectionOutbound {
+		return fromOwner
+	}
+	return toOwner && !fromOwner
+}
+
 func (f *fakeStore) Summaries(_ context.Context, workspaceID string, ids []string, snapshot time.Time) (map[string]Aggregate, error) {
 	want := map[string]struct{}{}
 	for _, id := range ids {
@@ -143,6 +169,61 @@ func (f *fakeStore) Summaries(_ context.Context, workspaceID string, ids []strin
 		sort.Strings(agg.Participants)
 		out[id] = agg
 	}
+	return out, nil
+}
+
+func (f *fakeStore) CandidateMessages(_ context.Context, q CandidateQuery) ([]Message, error) {
+	conversationIDs := map[string]struct{}{}
+	isOwner := func(address string) bool {
+		for _, owner := range q.OwnerIdentities {
+			if owner == address {
+				return true
+			}
+		}
+		return false
+	}
+	matchesParticipant := func(m Message) bool {
+		if q.Participant == "" {
+			return true
+		}
+		if m.Sender == q.Participant {
+			return true
+		}
+		for _, recipient := range m.Recipients {
+			if recipient == q.Participant {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range f.messages {
+		if q.WorkspaceID != f.workspace || m.IngestedAt.After(q.Snapshot) ||
+			m.ConversationMethod != domain.ConversationByReferences ||
+			m.AutomatedClass != domain.EmailAutomatedNone || isOwner(m.Sender) || !matchesParticipant(m) {
+			continue
+		}
+		recipientOwner := false
+		for _, recipient := range m.Recipients {
+			if isOwner(recipient) {
+				recipientOwner = true
+				break
+			}
+		}
+		if !recipientOwner || (!q.After.IsZero() && (m.SentAt.IsZero() || m.SentAt.Before(q.After))) ||
+			(!q.Before.IsZero() && (m.SentAt.IsZero() || !m.SentAt.Before(q.Before))) {
+			continue
+		}
+		conversationIDs[m.ConversationID] = struct{}{}
+	}
+	var out []Message
+	for _, m := range f.messages {
+		if q.WorkspaceID == f.workspace && !m.IngestedAt.After(q.Snapshot) {
+			if _, ok := conversationIDs[m.ConversationID]; ok {
+				out = append(out, m)
+			}
+		}
+	}
+	chronological(out)
 	return out, nil
 }
 

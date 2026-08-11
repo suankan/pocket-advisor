@@ -18,7 +18,7 @@ import (
 // bootstrap. Every statement in that half is IF NOT EXISTS, so the two paths
 // are the same statements run under different circumstances rather than two
 // descriptions of one schema that could drift apart.
-const schemaSQL = coreSchemaSQL + emailSchemaSQL
+const schemaSQL = coreSchemaSQL + emailSchemaSQL + topicGraphSchemaSQL
 
 const coreSchemaSQL = `
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -253,6 +253,125 @@ CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
     ON email_identifier_nodes(doc_id) WHERE doc_id IS NOT NULL;
 `
 
+// topicGraphSchemaSQL is the replaceable, source-backed topic mention layer.
+// It deliberately has no episode or relation tables: this first substrate only
+// records validated evidence annotations and their explicit build lifecycle.
+const topicGraphSchemaSQL = `
+CREATE TABLE IF NOT EXISTS topic_graph_versions (
+    version_id              UUID PRIMARY KEY,
+    workspace_id            VARCHAR NOT NULL,
+    status                  VARCHAR NOT NULL CHECK (status IN ('BUILDING','READY','ACTIVE','RETIRED')),
+    extraction_version      VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
+    config_version          VARCHAR NOT NULL CHECK (octet_length(config_version) BETWEEN 1 AND 128),
+    max_mentions_per_doc    INT NOT NULL CHECK (max_mentions_per_doc > 0 AND max_mentions_per_doc <= 1000),
+    max_spans_per_mention   INT NOT NULL CHECK (max_spans_per_mention > 0 AND max_spans_per_mention <= 64),
+    max_display_label_bytes INT NOT NULL CHECK (max_display_label_bytes > 0 AND max_display_label_bytes <= 1024),
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (version_id, workspace_id)
+);
+
+-- A partial unique index makes two ACTIVE rows impossible even if an operator
+-- bypasses the repository. Promotion changes the old and replacement rows in
+-- one transaction, so an existing active graph remains readable until that
+-- transaction commits.
+CREATE UNIQUE INDEX IF NOT EXISTS topic_graph_versions_one_active_idx
+    ON topic_graph_versions(workspace_id) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS topic_graph_versions_workspace_status_idx
+    ON topic_graph_versions(workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS topic_mentions (
+    mention_id         UUID PRIMARY KEY,
+    version_id         UUID NOT NULL,
+    workspace_id       VARCHAR NOT NULL,
+    doc_id             UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    display_label      VARCHAR NOT NULL DEFAULT '' CHECK (octet_length(display_label) <= 1024),
+    extraction_version VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (mention_id, workspace_id, doc_id),
+    FOREIGN KEY (version_id, workspace_id)
+        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS topic_mentions_source_idx
+    ON topic_mentions(workspace_id, doc_id, version_id);
+CREATE INDEX IF NOT EXISTS topic_mentions_version_idx
+    ON topic_mentions(workspace_id, version_id, doc_id);
+
+CREATE TABLE IF NOT EXISTS topic_mention_spans (
+    mention_id             UUID NOT NULL,
+    workspace_id           VARCHAR NOT NULL,
+    doc_id                 UUID NOT NULL,
+    ordinal                INT NOT NULL CHECK (ordinal >= 0),
+    start_byte             INT NOT NULL CHECK (start_byte >= 0),
+    end_byte               INT NOT NULL CHECK (end_byte > start_byte),
+    normalized_text_sha256 BYTEA NOT NULL CHECK (octet_length(normalized_text_sha256) = 32),
+    slice_sha256           BYTEA NOT NULL CHECK (octet_length(slice_sha256) = 32),
+    PRIMARY KEY (mention_id, ordinal),
+    FOREIGN KEY (mention_id, workspace_id, doc_id)
+        REFERENCES topic_mentions(mention_id, workspace_id, doc_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS topic_mention_spans_source_idx
+    ON topic_mention_spans(workspace_id, doc_id, start_byte, end_byte);
+
+-- Configuration and extraction metadata identify the evaluated build and are
+-- immutable. Only the closed lifecycle transitions below may update a version.
+CREATE OR REPLACE FUNCTION topic_graph_version_guard() RETURNS trigger AS $$
+BEGIN
+    IF NEW.version_id IS DISTINCT FROM OLD.version_id
+       OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+       OR NEW.extraction_version IS DISTINCT FROM OLD.extraction_version
+       OR NEW.config_version IS DISTINCT FROM OLD.config_version
+       OR NEW.max_mentions_per_doc IS DISTINCT FROM OLD.max_mentions_per_doc
+       OR NEW.max_spans_per_mention IS DISTINCT FROM OLD.max_spans_per_mention
+       OR NEW.max_display_label_bytes IS DISTINCT FROM OLD.max_display_label_bytes
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'topic graph version metadata is immutable';
+    END IF;
+    IF NOT ((OLD.status = 'BUILDING' AND NEW.status = 'READY')
+         OR (OLD.status = 'READY' AND NEW.status = 'ACTIVE')
+         OR (OLD.status = 'ACTIVE' AND NEW.status = 'RETIRED')) THEN
+        RAISE EXCEPTION 'invalid topic graph version lifecycle transition';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS topic_graph_version_guard_trigger ON topic_graph_versions;
+CREATE TRIGGER topic_graph_version_guard_trigger
+    BEFORE UPDATE ON topic_graph_versions
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_version_guard();
+
+-- Mention replacement is permitted only while the version is BUILDING. This
+-- database guard keeps a stray SQL writer from mutating evaluated or active
+-- evidence behind the repository's back.
+CREATE OR REPLACE FUNCTION topic_graph_mentions_building_guard() RETURNS trigger AS $$
+DECLARE
+    graph_status VARCHAR;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        SELECT status INTO graph_status FROM topic_graph_versions
+        WHERE version_id = OLD.version_id AND workspace_id = OLD.workspace_id;
+    ELSE
+        SELECT status INTO graph_status FROM topic_graph_versions
+        WHERE version_id = NEW.version_id AND workspace_id = NEW.workspace_id;
+    END IF;
+    IF graph_status IS DISTINCT FROM 'BUILDING' THEN
+        RAISE EXCEPTION 'topic mentions are mutable only while graph version is BUILDING';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS topic_graph_mentions_building_guard_trigger ON topic_mentions;
+CREATE TRIGGER topic_graph_mentions_building_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON topic_mentions
+    FOR EACH ROW EXECUTE FUNCTION topic_graph_mentions_building_guard();
+`
+
 // searchIndexName is the lexical leg's BM25 index. Named, not anonymous,
 // because to_bm25query's two-argument form (BuildSearchIndex, fuse.go) must
 // name the index it scores against.
@@ -321,7 +440,10 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		if err := d.migrateChunkContent(ctx, existing.EmbedDim); err != nil {
 			return err
 		}
-		return d.applyEmailSchema(ctx)
+		if err := d.applyEmailSchema(ctx); err != nil {
+			return err
+		}
+		return d.applyTopicGraphSchema(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) && !isUndefinedTable(err) {
 		return err
 	}
@@ -342,7 +464,10 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 	// A no-op here — schemaSQL already carried these statements — and run
 	// anyway, so every bootstrap proves the upgrade path is idempotent instead
 	// of leaving that only to workspaces old enough to need it.
-	return d.applyEmailSchema(ctx)
+	if err := d.applyEmailSchema(ctx); err != nil {
+		return err
+	}
+	return d.applyTopicGraphSchema(ctx)
 }
 
 // applyEmailSchema creates the email browse and conversation tables on a
@@ -356,6 +481,16 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 func (d *DB) applyEmailSchema(ctx context.Context) error {
 	if _, err := d.Pool.Exec(ctx, emailSchemaSQL); err != nil {
 		return fmt.Errorf("apply email schema: %w", err)
+	}
+	return nil
+}
+
+// applyTopicGraphSchema upgrades a workspace with the replaceable topic
+// mention substrate. It is structural only: existing documents and canonical
+// email metadata are never backfilled or changed by schema application.
+func (d *DB) applyTopicGraphSchema(ctx context.Context) error {
+	if _, err := d.Pool.Exec(ctx, topicGraphSchemaSQL); err != nil {
+		return fmt.Errorf("apply topic graph schema: %w", err)
 	}
 	return nil
 }

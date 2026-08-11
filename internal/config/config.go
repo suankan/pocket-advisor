@@ -224,19 +224,27 @@ type LLM struct {
 	Timeout  time.Duration
 }
 
-// TopicGraph fixes the bounded local-model extraction contract for one
-// replaceable graph version. Version values are operator-maintained opaque
-// identifiers: change them before a model, prompt, or bound changes.
+// TopicGraph fixes the bounded local-model mention extraction and relation
+// classification contracts for one replaceable graph version. Version values
+// are operator-maintained opaque identifiers: change ConfigVersion before a
+// model, prompt, threshold, or bound changes.
 type TopicGraph struct {
-	ExtractionVersion    string
-	ConfigVersion        string
-	PromptVersion        string
-	MaxInputBytes        int
-	MaxOutputBytes       int
-	MaxOutputTokens      int
-	MaxMentionsPerDoc    int
-	MaxSpansPerMention   int
-	MaxDisplayLabelBytes int
+	ExtractionVersion       string
+	ConfigVersion           string
+	PromptVersion           string
+	MaxInputBytes           int
+	MaxOutputBytes          int
+	MaxOutputTokens         int
+	MaxMentionsPerDoc       int
+	MaxSpansPerMention      int
+	MaxDisplayLabelBytes    int
+	RelationVersion         string
+	RelationPromptVersion   string
+	RelationMaxInputBytes   int
+	RelationMaxOutputBytes  int
+	RelationMaxOutputTokens int
+	RelationMaxCandidates   int
+	RelationMinConfidence   float64
 }
 
 // Query is the read-path tuning surface. None of it invalidates the index.
@@ -318,15 +326,22 @@ type file struct {
 			Timeout  string `yaml:"timeout"`
 		} `yaml:"llm"`
 		TopicGraph struct {
-			ExtractionVersion    string `yaml:"extraction_version"`
-			ConfigVersion        string `yaml:"config_version"`
-			PromptVersion        string `yaml:"prompt_version"`
-			MaxInputBytes        int    `yaml:"max_input_bytes"`
-			MaxOutputBytes       int    `yaml:"max_output_bytes"`
-			MaxOutputTokens      int    `yaml:"max_output_tokens"`
-			MaxMentionsPerDoc    int    `yaml:"max_mentions_per_doc"`
-			MaxSpansPerMention   int    `yaml:"max_spans_per_mention"`
-			MaxDisplayLabelBytes int    `yaml:"max_display_label_bytes"`
+			ExtractionVersion       string  `yaml:"extraction_version"`
+			ConfigVersion           string  `yaml:"config_version"`
+			PromptVersion           string  `yaml:"prompt_version"`
+			MaxInputBytes           int     `yaml:"max_input_bytes"`
+			MaxOutputBytes          int     `yaml:"max_output_bytes"`
+			MaxOutputTokens         int     `yaml:"max_output_tokens"`
+			MaxMentionsPerDoc       int     `yaml:"max_mentions_per_doc"`
+			MaxSpansPerMention      int     `yaml:"max_spans_per_mention"`
+			MaxDisplayLabelBytes    int     `yaml:"max_display_label_bytes"`
+			RelationVersion         string  `yaml:"relation_version"`
+			RelationPromptVersion   string  `yaml:"relation_prompt_version"`
+			RelationMaxInputBytes   int     `yaml:"relation_max_input_bytes"`
+			RelationMaxOutputBytes  int     `yaml:"relation_max_output_bytes"`
+			RelationMaxOutputTokens int     `yaml:"relation_max_output_tokens"`
+			RelationMaxCandidates   int     `yaml:"relation_max_candidates"`
+			RelationMinConfidence   float64 `yaml:"relation_min_confidence"`
 		} `yaml:"topic_graph"`
 		Observability struct {
 			MetricsPort int    `yaml:"metrics_port"`
@@ -598,6 +613,23 @@ func applyFile(c *Config, path string) error {
 	}
 	if in.TopicGraph.MaxDisplayLabelBytes > 0 {
 		c.TopicGraph.MaxDisplayLabelBytes = in.TopicGraph.MaxDisplayLabelBytes
+	}
+	setStr(&c.TopicGraph.RelationVersion, in.TopicGraph.RelationVersion)
+	setStr(&c.TopicGraph.RelationPromptVersion, in.TopicGraph.RelationPromptVersion)
+	if in.TopicGraph.RelationMaxInputBytes > 0 {
+		c.TopicGraph.RelationMaxInputBytes = in.TopicGraph.RelationMaxInputBytes
+	}
+	if in.TopicGraph.RelationMaxOutputBytes > 0 {
+		c.TopicGraph.RelationMaxOutputBytes = in.TopicGraph.RelationMaxOutputBytes
+	}
+	if in.TopicGraph.RelationMaxOutputTokens > 0 {
+		c.TopicGraph.RelationMaxOutputTokens = in.TopicGraph.RelationMaxOutputTokens
+	}
+	if in.TopicGraph.RelationMaxCandidates > 0 {
+		c.TopicGraph.RelationMaxCandidates = in.TopicGraph.RelationMaxCandidates
+	}
+	if in.TopicGraph.RelationMinConfidence > 0 {
+		c.TopicGraph.RelationMinConfidence = in.TopicGraph.RelationMinConfidence
 	}
 
 	if in.Observability.MetricsPort > 0 {

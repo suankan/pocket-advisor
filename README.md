@@ -78,7 +78,7 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 ## 3. Configuration
 
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
-`infra.topic_graph` fixes the bounded local-LLM topic-mention extraction contract: opaque extraction, configuration, and prompt versions plus input, output, and mention limits. Change the version fields before changing the configured model, prompt, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
+`infra.topic_graph` fixes the bounded local-LLM topic-mention extraction and exact-reference relation-classification contracts: opaque extraction, configuration, relation, and prompt versions plus input, output, mention, candidate, and confidence limits. Change `config_version` before changing the configured model, prompt, threshold, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
 
 `workspaces/workspace-config.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's collections and local staging paths. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
@@ -200,7 +200,7 @@ Topic mentions are replaceable derived annotations over canonical root email bod
   --topic-graph-version <uuid> --topic-graph-limit 500 --dry-run
 ```
 
-Repeat without `--dry-run` to create a `BUILDING` version and replace mentions only in that version. The command selects messages against one database watermark in deterministic document order. Its summary contains aggregate processed, replaced, mention, and closed failure-reason counts only; it never prints or logs source text, labels, prompts, completions, or document/version identifiers. A failed extraction leaves that target's prior annotations untouched and ends the run non-zero, so finalize only a complete build.
+Repeat without `--dry-run` to create a `BUILDING` version and replace mentions only in that version. After a complete mention pass, the same explicit command uses the local model to classify a bounded set of pairs selected solely from exact email `In-Reply-To` and `References` links. It sends only the pairs' cited source spans, can decline a pair, and never runs during normal email ingestion. Its summary contains aggregate processed, replaced, mention, relation, and closed failure-reason counts only; it never prints or logs source text, labels, prompts, completions, or document/version identifiers. A failed extraction or relation classification ends the run non-zero, so finalize only a complete build.
 
 ```sh
 ./bin/pocket-advisor --topic-graph-build --workspace-id example \

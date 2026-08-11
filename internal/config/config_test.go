@@ -143,3 +143,26 @@ func TestBareConfigNameKeepsPathsUnchanged(t *testing.T) {
 		t.Errorf("resolveAgainst(\".\", …) = %q, want it unchanged", got)
 	}
 }
+
+func TestTopicGraphRelationContractLoads(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+  topic_graph:
+    relation_version: relations-v1
+    relation_prompt_version: relation-prompt-v1
+    relation_max_input_bytes: 100
+    relation_max_output_bytes: 200
+    relation_max_output_tokens: 30
+    relation_max_candidates: 7
+    relation_min_confidence: 0.8
+workspaces:
+  config: registry.yaml
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TopicGraph.RelationVersion != "relations-v1" || c.TopicGraph.RelationPromptVersion != "relation-prompt-v1" || c.TopicGraph.RelationMaxCandidates != 7 || c.TopicGraph.RelationMinConfidence != .8 {
+		t.Fatalf("relation topic graph config = %#v", c.TopicGraph)
+	}
+}

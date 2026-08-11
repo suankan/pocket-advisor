@@ -8,11 +8,14 @@ import (
 )
 
 type fakeBuildStore struct {
-	created    []VersionSpec
-	replaced   []ReplaceRequest
-	emails     []CanonicalEmail
-	watermark  time.Time
-	workspaces []string
+	created            []VersionSpec
+	replaced           []ReplaceRequest
+	emails             []CanonicalEmail
+	watermark          time.Time
+	workspaces         []string
+	relationInputs     []RelationInput
+	relationInputLimit int
+	relationRequests   []ReplaceRelationCandidatesRequest
 }
 
 func (s *fakeBuildStore) CreateBuilding(_ context.Context, workspace string, spec VersionSpec) error {
@@ -35,6 +38,17 @@ func (s *fakeBuildStore) CanonicalEmails(_ context.Context, workspace string, _ 
 		}
 	}
 	return out, nil
+}
+
+func (s *fakeBuildStore) RelationInputs(_ context.Context, workspace, _ string, limit int) ([]RelationInput, error) {
+	s.workspaces = append(s.workspaces, workspace)
+	s.relationInputLimit = limit
+	return s.relationInputs, nil
+}
+func (s *fakeBuildStore) ReplaceRelationCandidates(_ context.Context, workspace string, request ReplaceRelationCandidatesRequest) error {
+	s.workspaces = append(s.workspaces, workspace)
+	s.relationRequests = append(s.relationRequests, request)
+	return nil
 }
 
 type fakeExtractor struct {
@@ -117,5 +131,35 @@ func TestBuilderRejectsUnboundedBuild(t *testing.T) {
 	builder, _ := NewBuilder(&fakeBuildStore{}, "fixed-workspace", &fakeExtractor{})
 	if _, err := builder.Run(context.Background(), BuildOptions{Spec: buildSpec()}); err == nil {
 		t.Fatal("unbounded build accepted")
+	}
+}
+
+type fakeRelationClassifier struct {
+	inputs []RelationInput
+	result []RelationCandidate
+	err    error
+	limit  int
+}
+
+func (c *fakeRelationClassifier) CandidateLimit() int { return c.limit }
+
+func (c *fakeRelationClassifier) Classify(_ context.Context, inputs []RelationInput) ([]RelationCandidate, error) {
+	c.inputs = inputs
+	return c.result, c.err
+}
+
+func TestBuilderClassifiesOnlyExplicitStoreCandidatesAfterMentions(t *testing.T) {
+	store := &fakeBuildStore{emails: []CanonicalEmail{{DocID: "a", NormalizedText: "alpha"}}, relationInputs: []RelationInput{{EarlierMentionID: testMentionA, LaterMentionID: testMentionB, EarlierSpans: []string{"earlier"}, LaterSpans: []string{"later"}}}}
+	classifier := &fakeRelationClassifier{result: []RelationCandidate{testRelation(testMentionA, testMentionB)}, limit: 3}
+	builder, err := NewBuilder(store, "fixed-workspace", &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha")}}, classifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := builder.Run(context.Background(), BuildOptions{Spec: buildSpec(), Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(classifier.inputs) != 1 || store.relationInputLimit != 3 || len(store.relationRequests) != 1 || store.relationRequests[0].VersionID != testVersionID || summary.Relations != 1 {
+		t.Fatalf("inputs=%#v requests=%#v summary=%+v", classifier.inputs, store.relationRequests, summary)
 	}
 }

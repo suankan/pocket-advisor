@@ -116,6 +116,16 @@ infra:
     max_mentions_per_doc: 64
     max_spans_per_mention: 8
     max_display_label_bytes: 256
+    # Relation classification runs only in the explicit topic graph build after
+    # source-backed mentions are persisted. Its candidates are exact email
+    # references, never subject or embedding similarity.
+    relation_version: topic-relations-v1
+    relation_prompt_version: topic-relations-prompt-v1
+    relation_max_input_bytes: 524288
+    relation_max_output_bytes: 65536
+    relation_max_output_tokens: 1024
+    relation_max_candidates: 512
+    relation_min_confidence: 0.80
 
   observability:
     metrics_port: 9090

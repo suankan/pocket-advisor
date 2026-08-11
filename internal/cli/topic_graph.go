@@ -50,14 +50,23 @@ func runTopicGraph(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		if err != nil {
 			return err
 		}
-		builder, err := topicgraph.NewBuilder(repo, o.WorkspaceID, extractor)
+		relations, err := topicgraph.NewLocalLLMRelationClassifier(llm.New(cfg.LLM), topicgraph.LocalRelationConfig{
+			RelationVersion: cfg.TopicGraph.RelationVersion, PromptVersion: cfg.TopicGraph.RelationPromptVersion,
+			ModelVersion: cfg.LLM.Model, MaxInputBytes: cfg.TopicGraph.RelationMaxInputBytes,
+			MaxOutputBytes: cfg.TopicGraph.RelationMaxOutputBytes, MaxOutputTokens: cfg.TopicGraph.RelationMaxOutputTokens,
+			MaxCandidates: cfg.TopicGraph.RelationMaxCandidates, MinConfidence: cfg.TopicGraph.RelationMinConfidence,
+		})
+		if err != nil {
+			return err
+		}
+		builder, err := topicgraph.NewBuilder(repo, o.WorkspaceID, extractor, relations)
 		if err != nil {
 			return err
 		}
 		summary, runErr := builder.Run(ctx, topicgraph.BuildOptions{Spec: spec, Limit: o.TopicGraphLimit, DryRun: o.DryRun})
 		a.Logger(telemetry.RoleTopicGraph).Info("topic graph mention build finished",
 			"processed", summary.Processed, "replaced", summary.Replaced,
-			"mentions", summary.Mentions, "failed", summary.Failed,
+			"mentions", summary.Mentions, "relations", summary.Relations, "failed", summary.Failed,
 			"reasons", summary.Reasons, "dry_run", summary.DryRun)
 		if o.JSON {
 			b, err := json.MarshalIndent(summary, "", "  ")
@@ -107,10 +116,10 @@ func runTopicGraph(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 func printTopicGraphBuildSummary(s topicgraph.BuildSummary) {
 	mode := "APPLY"
 	if s.DryRun {
-		mode = "DRY RUN (no graph version or mentions written)"
+		mode = "DRY RUN (no graph version, mentions, or relations written)"
 	}
-	fmt.Printf("\ntopic graph mention build\n  mode: %s\n  processed: %d\n  replaced: %d\n  mentions: %d\n  failed: %d\n", mode, s.Processed, s.Replaced, s.Mentions, s.Failed)
-	for _, code := range []string{topicgraph.ReasonBuildInvalidSource, topicgraph.ReasonBuildMetadataMismatch, topicgraph.ReasonBuildExtractionFailed, topicgraph.ReasonBuildReplaceFailed} {
+	fmt.Printf("\ntopic graph build\n  mode: %s\n  processed: %d\n  replaced: %d\n  mentions: %d\n  relations: %d\n  failed: %d\n", mode, s.Processed, s.Replaced, s.Mentions, s.Relations, s.Failed)
+	for _, code := range []string{topicgraph.ReasonBuildInvalidSource, topicgraph.ReasonBuildMetadataMismatch, topicgraph.ReasonBuildExtractionFailed, topicgraph.ReasonBuildReplaceFailed, topicgraph.ReasonBuildRelationFailed} {
 		if n := s.Reasons[code]; n > 0 {
 			fmt.Printf("    %-20s %d\n", code, n)
 		}

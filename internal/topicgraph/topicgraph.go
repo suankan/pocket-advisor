@@ -141,8 +141,9 @@ func (s *Service) ReplaceMentions(ctx context.Context, request ReplaceRequest) e
 	return s.store.ReplaceMentions(ctx, s.workspace, request)
 }
 
-// ReplaceRelationCandidates accepts only explicit deterministic inputs. No
-// local LLM or retrieval path is wired to this relation write boundary.
+// ReplaceRelationCandidates accepts only explicit, already-validated inputs.
+// The local classifier is invoked by the explicit builder, never this service
+// boundary or a retrieval path.
 func (s *Service) ReplaceRelationCandidates(ctx context.Context, request ReplaceRelationCandidatesRequest) error {
 	return s.store.ReplaceRelationCandidates(ctx, s.workspace, request)
 }

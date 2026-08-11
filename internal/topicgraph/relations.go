@@ -33,11 +33,10 @@ var (
 	ErrRelationCycle      = errors.New("topic relation cycle")
 )
 
-// RelationCandidate is a result from a trusted deterministic relation source.
-// This package deliberately provides no model-backed relation classifier: an
-// operator or deterministic integration supplies candidates explicitly. A
-// supported candidate becomes an edge; unsupported candidates remain an
-// inspectable record but never affect episode membership.
+// RelationCandidate is a validated relation assessment from the explicit
+// build's bounded classifier or another trusted integration. A supported
+// candidate becomes an edge; unsupported candidates remain an inspectable
+// record but never affect episode membership.
 type RelationCandidate struct {
 	EarlierMentionID     string
 	LaterMentionID       string
@@ -52,8 +51,7 @@ type RelationCandidate struct {
 // ReplaceRelationCandidatesRequest replaces all relation candidates in one
 // BUILDING graph version. An empty list is valid and clears prior candidates,
 // edges, and the episodes derived from them. It is intentionally separate from
-// mention replacement: mention extraction has no authority to classify
-// relations.
+// mention replacement: mention extraction has no authority to classify relations.
 type ReplaceRelationCandidatesRequest struct {
 	VersionID  string
 	Candidates []RelationCandidate

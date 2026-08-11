@@ -111,8 +111,9 @@ Modes (exactly one):
                       and is idempotent, so repeating an interrupted run
                       converges (ingestion-design.md §2.5)
   --topic-graph-build create a BUILDING topic graph version and populate it
-                      with bounded source-backed email mentions. It never
-                      changes the active version; finalize and promote are
+                      with bounded source-backed email mentions, then classifies only
+                      exact-reference candidate pairs with the local model. It
+                      never changes the active version; finalize and promote are
                       separate operator actions.
   --finalize-topic-graph <uuid>
                       seal a complete BUILDING version for evaluation

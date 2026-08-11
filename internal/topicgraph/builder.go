@@ -18,6 +18,14 @@ type BuildStore interface {
 	CanonicalEmails(context.Context, string, time.Time, string, int) ([]CanonicalEmail, error)
 }
 
+// RelationBuildStore supplies only pre-bounded candidates selected from the
+// exact email reference graph. The builder never asks a model to discover a
+// candidate beyond this boundary.
+type RelationBuildStore interface {
+	RelationInputs(context.Context, string, string, int) ([]RelationInput, error)
+	ReplaceRelationCandidates(context.Context, string, ReplaceRelationCandidatesRequest) error
+}
+
 // BuildOptions names an immutable version and caps one operator run. Limit is
 // deliberately never "all": a corpus-scale rebuild is a series of explicit,
 // observable bounded runs.
@@ -42,6 +50,7 @@ type BuildSummary struct {
 	Replaced  int            `json:"replaced"`
 	Mentions  int            `json:"mentions"`
 	Failed    int            `json:"failed"`
+	Relations int            `json:"relations"`
 	Reasons   map[string]int `json:"reasons,omitempty"`
 	DryRun    bool           `json:"dry_run"`
 }
@@ -51,6 +60,7 @@ const (
 	ReasonBuildMetadataMismatch = "metadata_mismatch"
 	ReasonBuildExtractionFailed = "extraction_failed"
 	ReasonBuildReplaceFailed    = "replacement_failed"
+	ReasonBuildRelationFailed   = "relation_failed"
 )
 
 // Builder creates one BUILDING version and fills it with independently
@@ -60,16 +70,24 @@ type Builder struct {
 	store     BuildStore
 	workspace string
 	extractor Extractor
+	relations RelationClassifier
 }
 
-func NewBuilder(store BuildStore, workspaceID string, extractor Extractor) (*Builder, error) {
-	if store == nil || extractor == nil {
+// NewBuilder optionally accepts a relation classifier. Leaving it absent keeps
+// the mention-only builder usable by tests and maintenance tools; the explicit
+// operator CLI always supplies it.
+func NewBuilder(store BuildStore, workspaceID string, extractor Extractor, relations ...RelationClassifier) (*Builder, error) {
+	if store == nil || extractor == nil || len(relations) > 1 || (len(relations) == 1 && relations[0] == nil) {
 		return nil, errors.New("topic graph builder requires a store and extractor")
 	}
 	if workspaceID == "" {
 		return nil, errors.New("topic graph builder requires a workspace scope")
 	}
-	return &Builder{store: store, workspace: workspaceID, extractor: extractor}, nil
+	b := &Builder{store: store, workspace: workspaceID, extractor: extractor}
+	if len(relations) == 1 {
+		b.relations = relations[0]
+	}
+	return b, nil
 }
 
 func (o *BuildOptions) normalize() error {
@@ -168,6 +186,32 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 	}
 	if summary.Failed > 0 {
 		return summary, errors.New("topic graph build incomplete")
+	}
+	if b.relations != nil && !o.DryRun {
+		relationStore, ok := b.store.(RelationBuildStore)
+		if !ok {
+			summary.recordFailure(ReasonBuildRelationFailed)
+			return summary, errors.New("topic graph build store lacks exact relation candidates")
+		}
+		relationLimit := AbsoluteMaxRelationCandidates
+		if bounded, ok := b.relations.(interface{ CandidateLimit() int }); ok {
+			relationLimit = bounded.CandidateLimit()
+		}
+		inputs, err := relationStore.RelationInputs(ctx, b.workspace, o.Spec.ID, relationLimit)
+		if err != nil {
+			summary.recordFailure(ReasonBuildRelationFailed)
+			return summary, fmt.Errorf("select topic relation candidates: %w", err)
+		}
+		candidates, err := b.relations.Classify(ctx, inputs)
+		if err != nil {
+			summary.recordFailure(ReasonBuildRelationFailed)
+			return summary, fmt.Errorf("classify topic relations: %w", err)
+		}
+		if err := relationStore.ReplaceRelationCandidates(ctx, b.workspace, ReplaceRelationCandidatesRequest{VersionID: o.Spec.ID, Candidates: candidates}); err != nil {
+			summary.recordFailure(ReasonBuildRelationFailed)
+			return summary, fmt.Errorf("replace topic relation candidates: %w", err)
+		}
+		summary.Relations = len(candidates)
 	}
 	return summary, nil
 }

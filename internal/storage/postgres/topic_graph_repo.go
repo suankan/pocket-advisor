@@ -1,13 +1,17 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
+	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/suankan/pocket-advisor/internal/topicgraph"
@@ -358,9 +362,143 @@ func loadTopicSourceTexts(ctx context.Context, tx pgx.Tx, workspaceID string, do
 	return texts, nil
 }
 
-// ReplaceRelationCandidates persists only caller-supplied deterministic
-// candidates. It deliberately has no LLM, vector, label, retrieval, or MCP
-// dependency. Supported candidates project to chronological edges, and the
+// RelationInputs returns a bounded candidate set from the exact parsed email
+// reference graph only. It deliberately does not use conversation labels,
+// subjects, embeddings, chronology neighbourhoods, or semantic retrieval.
+// The model receives only validated source spans for these already-admitted
+// pairs; it cannot create a cross-message candidate of its own.
+func (r *TopicGraphRepo) RelationInputs(ctx context.Context, workspaceID, versionID string, limit int) ([]topicgraph.RelationInput, error) {
+	if workspaceID == "" || !validTopicGraphUUID(versionID) || limit <= 0 || limit > topicgraph.AbsoluteMaxRelationCandidates {
+		return nil, topicgraph.ErrInvalidRequest
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+        SELECT DISTINCT earlier.mention_id::text, later.mention_id::text,
+               earlier.doc_id::text, later.doc_id::text, early_message.sent_at, late_message.sent_at
+        FROM topic_mentions later
+        JOIN email_messages late_message ON late_message.doc_id = later.doc_id
+                                     AND late_message.workspace_id = later.workspace_id
+        JOIN email_references reference ON reference.doc_id = later.doc_id
+        JOIN email_messages early_message ON early_message.workspace_id = later.workspace_id
+                                      AND early_message.message_id <> ''
+                                      AND early_message.message_id = reference.message_id
+        JOIN topic_mentions earlier ON earlier.workspace_id = later.workspace_id
+                                  AND earlier.version_id = later.version_id
+                                  AND earlier.doc_id = early_message.doc_id
+        WHERE later.workspace_id = $1 AND later.version_id = $2
+        ORDER BY earlier.mention_id, later.mention_id
+        LIMIT $3`, workspaceID, versionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select exact topic relation candidates: %w", err)
+	}
+	defer rows.Close()
+	type pair struct {
+		earlier, later     topicRelationMention
+		earlierID, laterID string
+	}
+	pairs := make(map[string]pair)
+	for rows.Next() {
+		var item pair
+		if err := rows.Scan(&item.earlierID, &item.laterID, &item.earlier.docID, &item.later.docID, &item.earlier.sentAt, &item.later.sentAt); err != nil {
+			return nil, fmt.Errorf("scan exact topic relation candidate: %w", err)
+		}
+		if item.earlierID == item.laterID {
+			continue
+		}
+		if !chronologicallyBefore(item.earlier, item.later) {
+			item.earlier, item.later = item.later, item.earlier
+			item.earlierID, item.laterID = item.laterID, item.earlierID
+		}
+		pairs[item.earlierID+"\x00"+item.laterID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("select exact topic relation candidates: %w", err)
+	}
+	if len(pairs) == 0 {
+		return []topicgraph.RelationInput{}, nil
+	}
+	ids := make([]string, 0, len(pairs)*2)
+	seen := make(map[string]struct{}, len(pairs)*2)
+	for _, pair := range pairs {
+		for _, id := range []string{pair.earlierID, pair.laterID} {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	sort.Strings(ids)
+	evidence, err := r.relationEvidence(ctx, workspaceID, versionID, ids)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(pairs))
+	for key := range pairs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]topicgraph.RelationInput, 0, len(keys))
+	for _, key := range keys {
+		pair := pairs[key]
+		early, earlyOK := evidence[pair.earlierID]
+		late, lateOK := evidence[pair.laterID]
+		if !earlyOK || !lateOK || len(early) == 0 || len(late) == 0 {
+			return nil, topicgraph.ErrInvalidRelation
+		}
+		out = append(out, topicgraph.RelationInput{EarlierMentionID: pair.earlierID, LaterMentionID: pair.laterID, EarlierSpans: early, LaterSpans: late})
+	}
+	return out, nil
+}
+
+func (r *TopicGraphRepo) relationEvidence(ctx context.Context, workspaceID, versionID string, ids []string) (map[string][]string, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+        SELECT tm.mention_id::text, d.normalized_text, span.start_byte, span.end_byte,
+               span.normalized_text_sha256, span.slice_sha256
+        FROM topic_mentions tm
+        JOIN documents d ON d.doc_id = tm.doc_id AND d.workspace_id = tm.workspace_id
+        JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
+                                  AND span.workspace_id = tm.workspace_id AND span.doc_id = tm.doc_id
+        WHERE tm.workspace_id = $1 AND tm.version_id = $2 AND tm.mention_id = ANY($3::uuid[])
+        ORDER BY tm.mention_id, span.ordinal`, workspaceID, versionID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select topic relation source spans: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string][]string, len(ids))
+	for rows.Next() {
+		var id, text string
+		var start, end int
+		var fullHash, sliceHash []byte
+		if err := rows.Scan(&id, &text, &start, &end, &fullHash, &sliceHash); err != nil {
+			return nil, fmt.Errorf("scan topic relation source span: %w", err)
+		}
+		if start < 0 || end <= start || end > len(text) || !utf8.ValidString(text) || !topicGraphByteBoundary(text, start) || !topicGraphByteBoundary(text, end) {
+			return nil, topicgraph.ErrInvalidRelation
+		}
+		full := sha256.Sum256([]byte(text))
+		slice := sha256.Sum256([]byte(text[start:end]))
+		if !bytes.Equal(fullHash, full[:]) || !bytes.Equal(sliceHash, slice[:]) {
+			return nil, topicgraph.ErrInvalidRelation
+		}
+		result[id] = append(result[id], text[start:end])
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("select topic relation source spans: %w", err)
+	}
+	if len(result) != len(ids) {
+		return nil, topicgraph.ErrInvalidRelation
+	}
+	return result, nil
+}
+
+func validTopicGraphUUID(value string) bool { _, err := uuid.Parse(value); return err == nil }
+func topicGraphByteBoundary(text string, offset int) bool {
+	return offset == 0 || offset == len(text) || (offset > 0 && offset < len(text) && text[offset]&0xc0 != 0x80)
+}
+
+// ReplaceRelationCandidates persists only already-validated candidates. It
+// deliberately has no LLM, vector, label, retrieval, or MCP dependency: the
+// explicit builder classifies the exact-reference candidates before this write
+// boundary. Supported candidates project to chronological edges, and the
 // resulting undirected edge components are the only source of episodes.
 func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspaceID string, request topicgraph.ReplaceRelationCandidatesRequest) error {
 	if workspaceID == "" {

@@ -261,3 +261,72 @@ func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
 		t.Fatalf("failed replacement changed edges=%d: %v", edges, err)
 	}
 }
+
+// TestTopicTimelineRead exercises the bounded transport-independent timeline
+// service against the real version, mention, edge, and episode tables. It is
+// manual because ApplySchema needs a disposable PostgreSQL/pgvector database;
+// all messages and source text below are synthetic.
+func TestTopicTimelineRead(t *testing.T) {
+	ctx := context.Background()
+	db, _ := scratch(t, "topictimeline")
+	if err := db.ApplySchema(ctx, stageBMeta()); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewTopicGraphRepo(db)
+	emails := NewEmailRepo(db)
+	versionID := "55555555-5555-5555-8555-555555555555"
+	if err := repo.CreateBuilding(ctx, stageBWorkspace, topicSpec(versionID)); err != nil {
+		t.Fatal(err)
+	}
+
+	texts := []string{"café raised", "café addressed", "café resolved"}
+	docIDs := []string{document(t, db, strings.Repeat("a", 64)), document(t, db, strings.Repeat("b", 64)), document(t, db, strings.Repeat("c", 64))}
+	mentions := make([]topicgraph.Mention, len(docIDs))
+	for i, docID := range docIDs {
+		if _, err := db.Pool.Exec(ctx, `UPDATE documents SET normalized_text = $1 WHERE doc_id = $2`, texts[i], docID); err != nil {
+			t.Fatal(err)
+		}
+		m := message(docID, fmt.Sprintf("timeline-%d@mail.example.test", i), "Timeline", "")
+		m.SentAt = time.Date(2026, 2, 1+i, 0, 0, 0, 0, time.UTC)
+		if _, err := emails.SaveEmailMessage(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+		mentions[i] = topicMention(docID, texts[i])
+		if err := repo.ReplaceMentions(ctx, stageBWorkspace, topicgraph.ReplaceRequest{VersionID: versionID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{mentions[i]}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := []string{topicgraph.MentionID(versionID, mentions[0]), topicgraph.MentionID(versionID, mentions[1]), topicgraph.MentionID(versionID, mentions[2])}
+	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, topicgraph.ReplaceRelationCandidatesRequest{VersionID: versionID, Candidates: []topicgraph.RelationCandidate{
+		{EarlierMentionID: ids[0], LaterMentionID: ids[1], Type: topicgraph.RelationAddresses, Confidence: .9, SupportingMentionIDs: []string{ids[0], ids[1]}, Method: "manual", MethodVersion: "v1", Supported: true},
+		{EarlierMentionID: ids[1], LaterMentionID: ids[2], Type: topicgraph.RelationStatesResolution, Confidence: .8, SupportingMentionIDs: []string{ids[1], ids[2]}, Method: "manual", MethodVersion: "v1", Supported: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Finalize(ctx, stageBWorkspace, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Promote(ctx, stageBWorkspace, versionID); err != nil {
+		t.Fatal(err)
+	}
+
+	service, err := topicgraph.NewTimelineService(NewTopicTimelineStore(db), stageBWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := service.Timeline(ctx, topicgraph.TimelineRequest{Reference: topicgraph.EncodeMentionReference(versionID, ids[0]), Limits: topicgraph.TimelineLimits{ForwardDepth: 2, MaxNodes: 3, MaxBytes: 1024, MaxLatency: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.GraphVersion != versionID || len(out.Nodes) != 3 || len(out.Relations) != 2 {
+		t.Fatalf("timeline = %+v", out)
+	}
+	if out.Nodes[0].MentionRef != topicgraph.EncodeMentionReference(versionID, ids[0]) || out.Nodes[2].MentionRef != topicgraph.EncodeMentionReference(versionID, ids[2]) {
+		t.Fatalf("timeline ordering = %+v", out.Nodes)
+	}
+	for _, node := range out.Nodes {
+		if len(node.Evidence) == 0 || node.Evidence[0].DocumentRef == "" {
+			t.Fatalf("node lacks canonical source range: %+v", node)
+		}
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/client/llm"
 	"github.com/suankan/pocket-advisor/internal/client/reranking"
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/mailbox"
 	"github.com/suankan/pocket-advisor/internal/mcp"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -27,6 +28,13 @@ import (
 
 func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telemetry.Logs) (*mcp.QueryTool, *retrieval.Service, func(), error) {
 	log := logs.Logger(telemetry.RoleApp)
+	// Resolve the one selected workspace before constructing either service.
+	// Owner identities stay private in the registry and are passed only to the
+	// fixed-scope mailbox service; MCP arguments cannot replace them.
+	resolved, err := workspace.Load(o.WorkspaceConfig, o.WorkspaceID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	dsn, err := cfg.WorkspacePostgresDSN(o.WorkspaceID)
 	if err != nil {
 		return nil, nil, nil, err
@@ -44,8 +52,14 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 		db.Close()
 		return nil, nil, nil, err
 	}
+	mailboxService, err := mailbox.NewWithOwnerIdentities(mailbox.NewPostgresStore(db), o.WorkspaceID, resolved.OwnerIdentities, mailbox.DefaultConfig(), log)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, err
+	}
 	title, corpus := describeCorpus(o)
-	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus}, svc, db.Close, nil
+	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title}
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool}, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {

@@ -40,6 +40,9 @@ type QueryTool struct {
 	// from the private registry at runtime; committed tests use synthetic names.
 	Title  string
 	Corpus []string
+	// Mailbox, when configured, exposes deterministic email browse tools in
+	// the same fixed workspace as retrieval.
+	Mailbox *MailboxTool
 
 	stateMu          sync.Mutex
 	store            *snapshotStore
@@ -61,6 +64,7 @@ func (t *QueryTool) forCaller() *QueryTool {
 		Workspace:        t.Workspace,
 		Title:            t.Title,
 		Corpus:           append([]string(nil), t.Corpus...),
+		Mailbox:          t.Mailbox,
 		now:              t.now,
 		random:           t.random,
 		snapshotTTL:      t.snapshotTTL,
@@ -169,7 +173,11 @@ func (t *QueryTool) DescribeRead() ToolDefinition {
 }
 
 func (t *QueryTool) DescribeAll() []ToolDefinition {
-	return []ToolDefinition{t.Describe(), t.DescribeRead()}
+	definitions := []ToolDefinition{t.Describe(), t.DescribeRead()}
+	if t.Mailbox != nil {
+		definitions = append(definitions, t.Mailbox.DescribeAll()...)
+	}
+	return definitions
 }
 
 type rawCallParams struct {
@@ -197,6 +205,9 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 	}
 	if params.Name == "" {
 		return CallToolResult{}, &argumentError{message: "tool name is required"}
+	}
+	if t.Mailbox != nil && (params.Name == t.Mailbox.ListName() || params.Name == t.Mailbox.ConversationName() || params.Name == t.Mailbox.AwaitingReplyName()) {
+		return t.Mailbox.Call(ctx, raw)
 	}
 	if params.Name != t.Name() && params.Name != t.ReadName() {
 		return CallToolResult{}, &unknownToolError{}

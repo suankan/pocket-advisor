@@ -560,14 +560,6 @@ func applyFile(c *Config, path string) error {
 	dir := filepath.Dir(path)
 	c.WorkspacesConfigPath = resolveAgainst(dir, c.WorkspacesConfigPath)
 
-	// Same reasoning as the two workspace paths above: LogDir defaults to the
-	// relative "logs" and must anchor to config.yaml's directory, not the
-	// process's cwd, or an MCP client launching the binary from an arbitrary
-	// directory gets a log directory (and, for `mcp start`/`mcp stop`, a PID
-	// file location) that silently drifts with whatever cwd it happened to
-	// launch from.
-	c.LogDir = resolveAgainst(dir, c.LogDir)
-
 	// MCP configuration
 	setStr(&c.MCP.HTTP.Addr, f.MCP.HTTP.Addr)
 	setStr(&c.MCP.HTTP.Endpoint, f.MCP.HTTP.Endpoint)
@@ -684,6 +676,17 @@ func applyFile(c *Config, path string) error {
 	}
 	setStr(&c.LogLevel, in.Observability.LogLevel)
 	setStr(&c.LogDir, in.Observability.LogDir)
+	// LogDir defaults to the relative "logs" and must anchor to config.yaml's
+	// directory, not the process's cwd, or an MCP client launching the binary
+	// from an arbitrary (sometimes unwritable) directory gets a log directory
+	// — and, for `mcp start`/`mcp stop`, a PID file location — that silently
+	// drifts with whatever cwd it happened to launch from. This has to run
+	// after setStr above, once the raw configured value has actually been
+	// read; resolving it earlier only to have setStr overwrite the resolved
+	// path with the unresolved one straight back is exactly the bug that let
+	// a working directory the process could not write to break every log
+	// call, invisibly, until an MCP client's own cwd surfaced it.
+	c.LogDir = resolveAgainst(dir, c.LogDir)
 	return nil
 }
 

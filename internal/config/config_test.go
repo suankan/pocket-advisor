@@ -97,6 +97,97 @@ func TestEnvironmentOverrideIsTakenLiterally(t *testing.T) {
 	}
 }
 
+// LogDir must resolve exactly like WorkspacesConfigPath: anchored to
+// config.yaml's own directory, not the process's working directory. This is
+// a regression test for a real bug: the resolution used to run before
+// setStr(&c.LogDir, in.Observability.LogDir) applied the file's own
+// (typically still-relative) value, so setStr silently overwrote the
+// resolved absolute path with the unresolved one straight back whenever
+// config.yaml set observability.log_dir at all — which the committed
+// config.yaml does. It was invisible from the repository root, where the
+// unresolved relative path still happened to work by coincidence, and only
+// became a hard failure ("mkdir logs: read-only file system") once an MCP
+// client launched mcp stdio from a working directory the process could not
+// write to.
+func TestLogDirResolvesAgainstTheConfigFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+  observability:
+    log_dir: logs
+workspaces:
+  config: workspaces/workspace-config.yaml
+`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(tmp, "logs")
+	if c.LogDir != want {
+		t.Errorf("LogDir = %q, want %q", c.LogDir, want)
+	}
+}
+
+func TestLogDirResolvesAgainstTheConfigFileEvenWithoutAnExplicitValue(t *testing.T) {
+	// No observability.log_dir at all: setStr is then a no-op, and it is the
+	// Go-side default "logs" (from defaults()) that must still be resolved,
+	// not left relative.
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+workspaces:
+  config: workspaces/workspace-config.yaml
+`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(tmp, "logs")
+	if c.LogDir != want {
+		t.Errorf("LogDir = %q, want %q", c.LogDir, want)
+	}
+}
+
+func TestAbsoluteLogDirIsLeftAlone(t *testing.T) {
+	tmp := t.TempDir()
+	elsewhere := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+  observability:
+    log_dir: `+elsewhere+`
+workspaces:
+  config: workspaces/workspace-config.yaml
+`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogDir != elsewhere {
+		t.Errorf("LogDir = %q, want it unchanged at %q", c.LogDir, elsewhere)
+	}
+}
+
+func TestLogDirEnvironmentOverrideIsTakenLiterally(t *testing.T) {
+	tmp := t.TempDir()
+	path := writeConfig(t, tmp, validInfra+`
+  observability:
+    log_dir: logs
+workspaces:
+  config: workspaces/workspace-config.yaml
+`)
+	t.Setenv("LOG_DIR", "some/other/logs")
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogDir != "some/other/logs" {
+		t.Errorf("LogDir = %q, want the environment's value verbatim", c.LogDir)
+	}
+}
+
 func TestMissingConfigFileIsAConfigurationError(t *testing.T) {
 	// A missing file used to fall back to a built-in default describing a
 	// stock local cluster. There is no such default left (deviation 41) —

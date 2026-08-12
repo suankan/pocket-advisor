@@ -32,11 +32,22 @@ func NewDocID() string {
 	return uuid.New().String()
 }
 
-// NewChunkID derives a chunk identifier from its parent and position, so that
-// re-embedding a document reproduces exactly the same chunk_ids rather than
-// generating a second set (§2.3).
-func NewChunkID(docID, embedModel string, index int) string {
-	return deterministicUUID(Namespace, fmt.Sprintf("%s\x00%s\x00%d", docID, embedModel, index))
+// NewChunkID mints a fresh, opaque placement identifier for one chunk of one
+// document (§2.3) — a random UUIDv4, exactly like NewDocID, and for the same
+// reason: chunk_id carries no relationship to its document, embedding model,
+// or position, it is just a short, indexable key document_chunks rows use to
+// cite one placement.
+//
+// It does not need to be deterministic. ReplaceChunks writes a document's
+// whole chunk set in one transaction that deletes every existing placement
+// for that doc_id before inserting the new set, so a retry after a crash —
+// the case chunk_id determinism used to exist for — converges correctly
+// regardless of what the new chunk_ids happen to be: the old rows are gone
+// before the new ones are written, never appended alongside them. The
+// content each placement points at is deduplicated separately, by
+// chunks.content_hash, not by chunk_id.
+func NewChunkID() string {
+	return uuid.New().String()
 }
 
 // NewEmailComponentID seeds a new identifier-graph component. Derived rather

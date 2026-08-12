@@ -34,18 +34,28 @@ func TestNewDocIDIsNeverTheSameTwice(t *testing.T) {
 	}
 }
 
-func TestChunkIDStableAcrossReEmbed(t *testing.T) {
-	// Re-embedding must reproduce the same chunk ids rather than a second set.
-	a := NewChunkID("doc-1", "model-a", 3)
-	b := NewChunkID("doc-1", "model-a", 3)
-	if a != b {
-		t.Fatal("chunk id is not stable")
+// chunk_id, like doc_id, carries no relationship to what it names: it does
+// not need to be stable across a re-embed, because ReplaceChunks deletes a
+// document's whole placement set before inserting the new one in the same
+// transaction (chunk_repo.go).
+func TestNewChunkIDIsAWellFormedUUIDv4(t *testing.T) {
+	id := NewChunkID()
+	if len(id) != 36 {
+		t.Fatalf("expected uuid form, got %q", id)
 	}
-	if a == NewChunkID("doc-1", "model-b", 3) {
-		t.Error("different models must occupy different chunk ids")
+	if id[14] != '4' {
+		t.Errorf("expected version 4 uuid, got %q", id)
 	}
-	if a == NewChunkID("doc-1", "model-a", 4) {
-		t.Error("different indexes must occupy different chunk ids")
+}
+
+func TestNewChunkIDIsNeverTheSameTwice(t *testing.T) {
+	seen := make(map[string]bool, 1000)
+	for range 1000 {
+		id := NewChunkID()
+		if seen[id] {
+			t.Fatalf("NewChunkID repeated %s within 1000 calls", id)
+		}
+		seen[id] = true
 	}
 }
 

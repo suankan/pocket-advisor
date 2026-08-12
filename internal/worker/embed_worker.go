@@ -69,7 +69,7 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		inputs := make([]string, len(batch))
 		for i, c := range batch {
 			batchChunks[i] = domain.Chunk{
-				ChunkID:    domain.NewChunkID(meta.DocId, model, c.Index),
+				ChunkID:    domain.NewChunkID(),
 				DocID:      meta.DocId,
 				Workspace:  workspace,
 				Index:      c.Index,

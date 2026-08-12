@@ -322,11 +322,18 @@ CREATE INDEX IF NOT EXISTS topic_mention_spans_source_idx
 -- scoped key above existed. The key makes every relation foreign key prove its
 -- endpoints are in this exact replaceable graph version, not merely a global
 -- mention UUID.
+--
+-- A UNIQUE constraint always creates a backing index of the same name, so a
+-- second ApplySchema run against a database that already has this
+-- constraint fails while creating that index, not the constraint: Postgres
+-- raises duplicate_table (42P07), not duplicate_object (42710), because the
+-- collision is in the relation namespace the index lives in. Both are
+-- caught so this block is idempotent either way.
 DO $$ BEGIN
     ALTER TABLE topic_mentions
         ADD CONSTRAINT topic_mentions_version_scope_key
         UNIQUE (mention_id, version_id, workspace_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 
 -- Relation candidates are explicitly supplied by a trusted deterministic
 -- writer. They preserve even unsupported assessments for evaluation, while

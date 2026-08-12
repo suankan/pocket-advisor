@@ -136,12 +136,13 @@ MCP (a subcommand, not a mode flag):
                       This is where answer generation happens — outside this
                       binary (retrieval-design.md §6.1)
   mcp start --workspace-id <id> [options]
-                      serve the same fixed-workspace tools over Streamable
-                      HTTP, on loopback by default. Optionally authenticated
-                      against Google as the sole identity provider (config.yaml's
-                      mcp.oauth: google_client_id + allowed_emails); omit both
-                      to run unauthenticated for local development. See
-                      docs/mcp.md.
+                      start the same fixed-workspace tools over Streamable
+                      HTTP as a detached background daemon, on loopback by
+                      default, and return once it is confirmed running.
+                      Optionally authenticated against Google as the sole
+                      identity provider (config.yaml's mcp.oauth:
+                      google_client_id + allowed_emails); omit both to run
+                      unauthenticated for local development. See docs/mcp.md.
   mcp stop --workspace-id <id>
                       stop a running "mcp start" server for that workspace
   mcp status --workspace-id <id>
@@ -418,7 +419,7 @@ func Run(o *Options) error {
 		case "mcp stdio":
 			return mcpStdioCmd(cfg, o.SubArgs)
 		case "mcp start":
-			return mcpStartCmd(cfg, o.SubArgs)
+			return mcpStartCmd(cfg, o.ConfigPath, o.SubArgs)
 		case "mcp stop":
 			return mcpStopCmd(cfg, o.SubArgs)
 		case "mcp status":
@@ -454,12 +455,8 @@ func Run(o *Options) error {
 	// The read path logs to stderr rather than to per-role files. Those files
 	// exist to separate five concurrent worker pools during an ingest; a query
 	// has no pools. (The mcp subcommands never reach this line at all — they
-	// return above and build their own stderr-only logs the same way, for the
-	// same reason: an MCP client launches the server from a working directory
-	// it may not be able to write to, and creating a relative "logs" directory
-	// there fails outright — which is precisely how the first Claude Desktop
-	// attempt died, before the handshake and with the reason only visible in
-	// the client's own log.)
+	// return above and build their own file-backed RoleMCP logs the same way
+	// every other long-running role does; see telemetry.StderrLogs.)
 	var logs *telemetry.Logs
 	if o.Query != "" {
 		logs = telemetry.StderrLogs(cfg.LogLevel)

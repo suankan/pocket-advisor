@@ -266,6 +266,8 @@ Zero packets is a valid result when nothing relevant exists in the workspace.
 
 The MCP server exposes retrieval evidence through stdio and Streamable HTTP, both run locally by the same binary. HTTP authentication is optional (§ [HTTP MCP](#http-mcp) below). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
 
+Both transports log to the same file, `<log_dir>/mcp.log` (`logs/mcp.log` by default), rather than to the client's own captured stderr — useful for a stdio client whose own log view is hard to reach, and essential for `mcp start`, which runs as a background daemon with no controlling terminal to capture.
+
 Run one stdio MCP server per workspace:
 
 ```sh
@@ -304,10 +306,11 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
   -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
 ```
 
-Both modes are started the same way:
+Both modes are started the same way. `mcp start` forks a detached background daemon and returns once it is confirmed running, so it never blocks the shell and does not need `&` or `nohup`:
 
 ```sh
 ./bin/pocket-advisor mcp start --workspace-id test
+# mcp server for workspace "test" started (pid 12345); logging to logs/mcp.log
 ```
 
 Optional CLI overrides for either mode:
@@ -325,7 +328,7 @@ Optional CLI overrides for either mode:
 | `--trusted-proxy-cidrs` | none | Comma-separated trusted proxy CIDRs |
 | `--max-concurrent` | From config | Maximum concurrent HTTP requests |
 
-Check on or stop a running server (works the same for either mode):
+Check on or stop a running daemon:
 
 ```sh
 ./bin/pocket-advisor mcp status --workspace-id test

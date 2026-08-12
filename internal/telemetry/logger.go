@@ -17,6 +17,7 @@ import (
 // how you read one of them in isolation. The files are that, restored.
 const (
 	RoleApp        = "pocket-advisor"
+	RoleMCP        = "mcp"
 	RoleUploader   = "uploader"
 	RoleDiscover   = "discovery"
 	RoleEmail      = "email-processor"
@@ -28,7 +29,7 @@ const (
 
 // Roles is every role that gets a log file, in pipeline order.
 var Roles = []string{
-	RoleApp, RoleUploader, RoleDiscover,
+	RoleApp, RoleMCP, RoleUploader, RoleDiscover,
 	RoleEmail, RoleDocument, RoleOffice, RoleEmbed, RoleTopicGraph,
 }
 
@@ -48,13 +49,15 @@ type Logs struct {
 
 // StderrLogs sends every role to stderr and touches no files.
 //
-// For the read path this is the right destination, not a fallback. --query is
-// a one-shot command whose operator is watching the terminal, and the mcp
-// stdio/start subcommands are launched by a client that captures the
-// server's stderr into its own log — which is exactly where someone
-// debugging a failed server will look. Both may also be started from a
-// directory they cannot write to, which is fatal for the file-backed logger
-// and meaningless for them.
+// For the read path this is the right destination, not a fallback: --query is
+// a one-shot command whose operator is watching the terminal. The mcp
+// stdio/start subcommands are not one-shot — an MCP client keeps a stdio
+// child running for a whole session, and mcp start is a long-lived daemon —
+// so both use the file-backed RoleMCP logger (logs/mcp.log) instead, the same
+// as any other long-running role. cfg.LogDir is anchored to the directory of
+// the config file that named it, not to the process's working directory (see
+// config.applyFile), so this is safe even when a client launches the server
+// from a directory it cannot itself write to.
 func StderrLogs(level string) *Logs {
 	return &Logs{
 		dir:     "",

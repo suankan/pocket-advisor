@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -28,7 +29,7 @@ import (
 )
 
 func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telemetry.Logs) (*mcp.QueryTool, *retrieval.Service, func(), error) {
-	log := logs.Logger(telemetry.RoleApp)
+	log := logs.Logger(telemetry.RoleMCP)
 	// Resolve the one selected workspace before constructing either service.
 	// Owner identities stay private in the registry and are passed only to the
 	// fixed-scope mailbox service; MCP arguments cannot replace them.
@@ -163,14 +164,18 @@ func mcpStdioCmd(cfg *config.Config, args []string) error {
 		wsConfig = *workspaceConfig
 	}
 
-	// stdio is the protocol channel. Nothing here may print: the dashboard is
-	// never started, and every log goes to a file.
+	// stdio is the protocol channel. Nothing here may print to stdout: the
+	// dashboard is never started, and every log goes to logs/mcp.log instead
+	// (RoleMCP), the same file mcp start writes to.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	logs := telemetry.StderrLogs(cfg.LogLevel)
+	logs, err := telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
+	if err != nil {
+		return err
+	}
 	defer logs.Close()
-	log := logs.Logger(telemetry.RoleApp)
+	log := logs.Logger(telemetry.RoleMCP)
 
 	tool, _, closeDB, err := newMCPTool(ctx, &Options{WorkspaceID: *workspaceID, WorkspaceConfig: wsConfig}, cfg, logs)
 	if err != nil {
@@ -183,10 +188,151 @@ func mcpStdioCmd(cfg *config.Config, args []string) error {
 	return srv.Serve(ctx)
 }
 
-// mcpStartCmd starts the MCP HTTP server. Authentication is optional: leave
+// mcpDaemonEnvVar selects the daemon child's own code path when mcp start
+// re-execs this same binary. Its presence, not its value, matters: the
+// wrapper never runs with it set, and the child never runs without it.
+const mcpDaemonEnvVar = "POCKET_ADVISOR_MCP_DAEMON"
+
+// mcpStartCmd starts the MCP HTTP server as a detached background daemon,
+// operated afterward through mcp stop/status, and returns once that daemon is
+// confirmed running. The invoking process (the wrapper) forks a child that
+// re-execs this same binary with mcpDaemonEnvVar set; that env var, inherited
+// by the child alone, is what selects runMCPHTTPServer over forking again.
+func mcpStartCmd(cfg *config.Config, configPath string, args []string) error {
+	if os.Getenv(mcpDaemonEnvVar) == "1" {
+		return runMCPHTTPServer(cfg, args)
+	}
+	return daemonizeMCPStart(cfg, configPath, args)
+}
+
+// daemonizeMCPStart is the wrapper half of mcp start: it fails fast on an
+// already-running daemon, forks and detaches the actual server, and waits for
+// that child to confirm it is alive before returning — so a caller never sees
+// a false "started" for a child that immediately exited on a bad flag or an
+// unreachable database.
+func daemonizeMCPStart(cfg *config.Config, configPath string, args []string) error {
+	workspaceID := scanFlagValue(args, "workspace-id")
+	if workspaceID == "" {
+		return fmt.Errorf("--workspace-id is required")
+	}
+	pidPath := mcpPIDPath(cfg, workspaceID)
+	if pid, alive := readLivePID(pidPath); alive {
+		return fmt.Errorf("mcp server for workspace %q is already running (pid %d); stop it first", workspaceID, pid)
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+	absConfigPath, err := resolveConfigPath(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+
+	logPath := filepath.Join(cfg.LogDir, telemetry.RoleMCP+".log")
+	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(execPath, daemonChildArgs(absConfigPath, args)...)
+	cmd.Env = append(os.Environ(), mcpDaemonEnvVar+"=1")
+	// The child's own structured logging (RoleMCP, opened independently
+	// inside runMCPHTTPServer) already goes to logPath. Redirecting the raw
+	// process streams here too catches anything outside that — a panic before
+	// the logger opens, or output from a linked C library — so nothing a
+	// detached daemon produces is ever silently lost.
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	// Setsid detaches the child from this process's controlling terminal and
+	// session, so it keeps running (and does not receive a SIGHUP) after this
+	// wrapper exits — a real background daemon, not a job an operator has to
+	// remember to disown or nohup themselves.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start mcp daemon: %w", err)
+	}
+	// This process never waits for the daemon to exit; Release drops Go's own
+	// bookkeeping for that child rather than leaving a Wait no caller will
+	// ever make.
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("release mcp daemon: %w", err)
+	}
+
+	// Confirm the daemon reached the point of writing its own PID file — proof
+	// it opened its logs, resolved the workspace, and connected to the
+	// database, not merely that the OS accepted fork+exec — before reporting
+	// success. A daemon that dies immediately after (a bad flag, an
+	// unreachable database) is diagnosed from logPath, which already holds its
+	// output.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid, alive := readLivePID(pidPath); alive {
+			fmt.Printf("mcp server for workspace %q started (pid %d); logging to %s\n", workspaceID, pid, logPath)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("mcp server for workspace %q did not confirm startup within 5s; see %s", workspaceID, logPath)
+}
+
+// daemonChildArgs rebuilds the daemon child's command line: the original
+// mcp start arguments, prefixed with an explicit absolute --config so the
+// child's own top-level flag parsing resolves the same configuration
+// regardless of its working directory once detached.
+func daemonChildArgs(absConfigPath string, args []string) []string {
+	childArgs := make([]string, 0, len(args)+4)
+	childArgs = append(childArgs, "mcp", "start", "--config", absConfigPath)
+	return append(childArgs, args...)
+}
+
+// resolveConfigPath applies the same empty-path default config.Load does,
+// then resolves it to an absolute path, so the forked child depends on
+// neither its parent's working directory (should the two ever differ once
+// detached) nor an inherited relative path.
+func resolveConfigPath(configPath string) (string, error) {
+	if configPath == "" {
+		configPath = config.DefaultPath
+	}
+	return filepath.Abs(configPath)
+}
+
+// scanFlagValue reads one flag's value out of an unparsed argument list
+// without declaring the rest of the flag surface, which the wrapper does not
+// need and must not have to keep in sync with runMCPHTTPServer's full set. It
+// accepts a single or double dash and either "-name value" or "-name=value",
+// matching what Go's own flag package accepts.
+func scanFlagValue(args []string, name string) string {
+	oneDash, twoDash := "-"+name, "--"+name
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == oneDash || arg == twoDash:
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		case strings.HasPrefix(arg, oneDash+"="):
+			return strings.TrimPrefix(arg, oneDash+"=")
+		case strings.HasPrefix(arg, twoDash+"="):
+			return strings.TrimPrefix(arg, twoDash+"=")
+		}
+	}
+	return ""
+}
+
+// runMCPHTTPServer is the daemon child's actual server. It is a sibling of
+// mcpStdioCmd, not a second implementation: both are thin adapters over the
+// same retrieval.Query, which is why §7 requires that package to be
+// transport-agnostic. Authentication is optional: leave
 // --google-client-id/--allowed-emails (and config.yaml's mcp.oauth) unset to
 // serve unauthenticated on loopback, for local development.
-func mcpStartCmd(cfg *config.Config, args []string) error {
+func runMCPHTTPServer(cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("mcp start", flag.ExitOnError)
 	workspaceID := fs.String("workspace-id", "", "workspace to serve")
 	addr := fs.String("addr", "", "listen address (default from config)")
@@ -247,9 +393,12 @@ func mcpStartCmd(cfg *config.Config, args []string) error {
 		cfg.MCP.HTTP.ResourceURI = "http://" + cfg.MCP.HTTP.Addr + cfg.MCP.HTTP.Endpoint
 	}
 
-	logs := telemetry.StderrLogs(cfg.LogLevel)
+	logs, err := telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
+	if err != nil {
+		return err
+	}
 	defer logs.Close()
-	log := logs.Logger(telemetry.RoleApp)
+	log := logs.Logger(telemetry.RoleMCP)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -300,7 +449,8 @@ func mcpStartCmd(cfg *config.Config, args []string) error {
 	return server.Serve(ctx)
 }
 
-// mcpStopCmd stops a running MCP HTTP server for the given workspace.
+// mcpStopCmd stops a running MCP HTTP daemon for the given workspace,
+// signalling the exact process mcp start's wrapper confirmed and recorded.
 func mcpStopCmd(cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("mcp stop", flag.ExitOnError)
 	workspaceID := fs.String("workspace-id", "", "workspace whose server to stop")
@@ -325,9 +475,10 @@ func mcpStopCmd(cfg *config.Config, args []string) error {
 		return fmt.Errorf("signal process %d: %w", pid, err)
 	}
 
-	// mcpStartCmd removes its own PID file as part of graceful shutdown once
-	// its context is cancelled by this same SIGTERM, so polling for the file
-	// (or the process) to go away is polling for confirmed exit, not guessing.
+	// runMCPHTTPServer removes its own PID file as part of graceful shutdown
+	// once its context is cancelled by this same SIGTERM, so polling for the
+	// file (or the process) to go away is polling for confirmed exit, not
+	// guessing.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, stillAlive := readLivePID(path); !stillAlive {
@@ -359,11 +510,11 @@ func mcpStatusCmd(cfg *config.Config, args []string) error {
 	return nil
 }
 
-// mcpPIDPath is where mcpStartCmd records its process id so mcp stop/status
-// can find it later. It lives next to the per-role logs (cfg.LogDir is
-// already anchored to config.yaml's directory, not the process's cwd — see
-// config.applyFile), keyed by workspace so more than one workspace's server
-// can run at once.
+// mcpPIDPath is where runMCPHTTPServer (the daemon child mcp start forks and
+// detaches) records its process id, so mcp stop/status can find it later. It
+// lives next to the per-role logs (cfg.LogDir is already anchored to
+// config.yaml's directory, not the process's cwd — see config.applyFile),
+// keyed by workspace so more than one workspace's server can run at once.
 func mcpPIDPath(cfg *config.Config, workspaceID string) string {
 	return filepath.Join(cfg.LogDir, "mcp-"+workspaceID+".pid")
 }

@@ -55,21 +55,28 @@ type candidate struct {
 // was deduplicated. Deduplication is a storage change; what retrieval sees is
 // unchanged, and dropping repeats from a result set remains selection's job
 // (internal/retrieval/select.go).
+//
+// The output column is aliased chunk_id throughout, matching what this
+// package and its callers have always called a candidate's identity, even
+// though its source is document_chunks.placement_id: chunks.chunk_id and
+// document_chunks.chunk_id both name the shared passage now (schema.go's
+// chunks/document_chunks comments), and a candidate here is one placement of
+// one, not the passage itself.
 const fusionSQL = `
 WITH dense AS (
-    SELECT p.chunk_id,
+    SELECT p.placement_id AS chunk_id,
            ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::halfvec) AS rank
-    FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
+    FROM chunks c JOIN document_chunks p ON p.chunk_id = c.chunk_id
     WHERE c.embed_model = $2
     ORDER BY c.embedding <=> $1::halfvec
     LIMIT $3
 ),
 lexical AS (
-    SELECT p.chunk_id,
+    SELECT p.placement_id AS chunk_id,
            ROW_NUMBER() OVER (
                ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
            ) AS rank
-    FROM chunks c JOIN document_chunks p ON p.content_id = c.content_id
+    FROM chunks c JOIN document_chunks p ON p.chunk_id = c.chunk_id
     WHERE $4 <> '' AND c.embed_model = $2
     ORDER BY c.chunk_text <@> to_bm25query($4, 'chunks_bm25_idx') ASC
     LIMIT $5
@@ -85,8 +92,8 @@ SELECT f.chunk_id::text, p.doc_id::text, d.thread_id, c.chunk_text,
        p.start_char_offset, p.end_char_offset,
        f.dense_rank, f.lex_rank, f.rrf
 FROM fused f
-JOIN document_chunks p USING (chunk_id)
-JOIN chunks c ON c.content_id = p.content_id
+JOIN document_chunks p ON p.placement_id = f.chunk_id
+JOIN chunks c ON c.chunk_id = p.chunk_id
 JOIN documents d ON d.doc_id = p.doc_id
 ORDER BY f.rrf DESC
 LIMIT $7`

@@ -45,7 +45,7 @@ func NewDocID() string {
 // regardless of what the new chunk_ids happen to be: the old rows are gone
 // before the new ones are written, never appended alongside them. The
 // content each placement points at is deduplicated separately, by
-// chunks.content_hash, not by chunk_id.
+// chunks.raw_sha256, not by this id.
 func NewChunkID() string {
 	return uuid.New().String()
 }

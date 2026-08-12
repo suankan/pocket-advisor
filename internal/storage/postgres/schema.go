@@ -64,12 +64,6 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- An already-provisioned workspace has this row without workspace_id.
--- Backfilling it from the connecting process's own configured id is safe
--- exactly because it is the only value that was ever going to be correct in
--- a database dedicated to one workspace.
-ALTER TABLE schema_metadata ADD COLUMN IF NOT EXISTS workspace_id VARCHAR;
-
 CREATE TABLE IF NOT EXISTS documents (
     doc_id            UUID PRIMARY KEY,
     parent_doc_id     UUID REFERENCES documents(doc_id) ON DELETE CASCADE,
@@ -110,18 +104,6 @@ DO $$ BEGIN
         ADD CONSTRAINT documents_raw_sha256_key UNIQUE (raw_sha256);
 EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 
--- A workspace is now one recursively walked directory with no further
--- subdivision (ingestion-design.md §3.1). An older database may still carry
--- this column and its index from before that change; both are dropped so a
--- fresh bootstrap and an upgraded existing database converge on the same
--- schema.
-DROP INDEX IF EXISTS documents_collection_idx;
-ALTER TABLE documents DROP COLUMN IF EXISTS collection_id;
--- workspace_id here was always exactly the one value schema_metadata now
--- carries once, for the whole database (deviation 34) — dropped for the same
--- reason collection_id was above.
-DROP INDEX IF EXISTS documents_workspace_idx;
-ALTER TABLE documents DROP COLUMN IF EXISTS workspace_id;
 -- Drives the stale-PENDING reconciliation sweep (§2.2).
 CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';
@@ -139,32 +121,27 @@ CREATE INDEX IF NOT EXISTS documents_email_date_idx
 -- embedding and its own index entries. Identity is the SHA-256 of the text
 -- with whitespace runs collapsed, because extraction reflows the same
 -- paragraph differently per document, so the bytes differ while the passage
--- does not.
+-- does not. raw_sha256 plays the same content-identity role
+-- documents.raw_sha256 does — enforced by the constraint below — even though
+-- what it hashes is normalised chunk text, not a document's raw bytes.
+--
+-- chunk_id is an opaque, randomly generated row identifier (like
+-- documents.doc_id), independent of raw_sha256 for the same reason doc_id is
+-- independent of documents.raw_sha256: a short, indexable cross-reference
+-- key, not a derivation of what it names.
 --
 -- Identity is scoped by embed_model: a re-embed writes a new model
 -- namespace, and collapsing across namespaces would serve a vector from the
 -- wrong model. Equality only — never a similarity threshold — because
 -- passages that differ only in dates or amounts must remain distinct.
 CREATE TABLE IF NOT EXISTS chunks (
-    content_id   UUID PRIMARY KEY,
+    chunk_id     UUID PRIMARY KEY,
     embed_model  VARCHAR NOT NULL,
-    content_hash BYTEA   NOT NULL,
+    raw_sha256   BYTEA   NOT NULL,
     chunk_text   TEXT    NOT NULL,
     embedding    halfvec(%[1]d),
-    UNIQUE (embed_model, content_hash)
+    UNIQUE (embed_model, raw_sha256)
 );
-
--- An older database's dedup key still names workspace_id, which the
--- replacement above is deliberately free of (schema_metadata comment).
--- Dropping the column takes the old same-table UNIQUE constraint with it —
--- Postgres cascades a table's own dependent constraints automatically, no
--- CASCADE keyword needed — so only the new constraint needs adding back;
--- a fresh table already has it from the CREATE TABLE above.
-ALTER TABLE chunks DROP COLUMN IF EXISTS workspace_id;
-DO $$ BEGIN
-    ALTER TABLE chunks ADD CONSTRAINT chunks_embed_model_content_hash_key
-        UNIQUE (embed_model, content_hash);
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS chunks_hnsw_idx ON chunks
     USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
@@ -174,24 +151,24 @@ CREATE INDEX IF NOT EXISTS chunks_hnsw_idx ON chunks
 -- document that contains it, so folding them onto the shared row would make a
 -- citation resolve against the wrong text.
 --
--- chunk_id remains the identity of a passage-in-a-document, which is what
+-- placement_id is the identity of a passage-in-a-document, which is what
 -- retrieval ranks and what a packet cites. One row per placement, exactly as
 -- before deduplication, so the read path sees the same candidates it always
--- did — only the text and vector behind them are now shared.
+-- did — only the text and vector behind them are now shared. chunk_id here
+-- is the placement's own reference to the shared passage it points at — the
+-- same name as chunks' own primary key, exactly the way doc_id names both
+-- documents' primary key and every foreign key that points at it.
 CREATE TABLE IF NOT EXISTS document_chunks (
-    chunk_id          UUID PRIMARY KEY,
+    placement_id      UUID PRIMARY KEY,
     doc_id            UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    content_id        UUID NOT NULL REFERENCES chunks(content_id) ON DELETE RESTRICT,
+    chunk_id          UUID NOT NULL REFERENCES chunks(chunk_id) ON DELETE RESTRICT,
     chunk_index       INT     NOT NULL,
     start_char_offset INT     NOT NULL,
     end_char_offset   INT     NOT NULL
 );
 
-DROP INDEX IF EXISTS chunks_workspace_idx;
-ALTER TABLE document_chunks DROP COLUMN IF EXISTS workspace_id;
-
 CREATE INDEX IF NOT EXISTS chunks_doc_idx        ON document_chunks(doc_id);
-CREATE INDEX IF NOT EXISTS chunks_content_idx    ON document_chunks(content_id);
+CREATE INDEX IF NOT EXISTS chunks_chunk_idx      ON document_chunks(chunk_id);
 `
 
 // emailSchemaSQL is the durable email browse and conversation model
@@ -226,10 +203,6 @@ CREATE TABLE IF NOT EXISTS email_messages (
     parse_warnings      JSONB       NOT NULL DEFAULT '[]'::jsonb,
     parse_version       INT         NOT NULL DEFAULT 1
 );
-
--- workspace_id here was always exactly the one value schema_metadata now
--- carries once, for the whole database (deviation 34).
-ALTER TABLE email_messages DROP COLUMN IF EXISTS workspace_id;
 
 CREATE INDEX IF NOT EXISTS email_messages_conversation_idx
     ON email_messages(conversation_id);
@@ -300,19 +273,6 @@ CREATE TABLE IF NOT EXISTS email_identifier_nodes (
     component_id UUID    NOT NULL
 );
 
--- An older database still has workspace_id as part of the primary key.
--- Gated on that column actually being present, so a fresh table never pays
--- for dropping and re-adding a primary key it already has correctly.
-DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_name = 'email_identifier_nodes'
-                 AND column_name = 'workspace_id') THEN
-        ALTER TABLE email_identifier_nodes DROP CONSTRAINT email_identifier_nodes_pkey;
-        ALTER TABLE email_identifier_nodes DROP COLUMN workspace_id;
-        ALTER TABLE email_identifier_nodes ADD PRIMARY KEY (message_id);
-    END IF;
-END $$;
-
 -- Drives the merge rewrite, which is by component rather than by identifier.
 CREATE INDEX IF NOT EXISTS email_identifier_nodes_component_idx
     ON email_identifier_nodes(component_id);
@@ -326,26 +286,7 @@ CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
 const topicGraphSchemaSQL = `
 -- Topic graph tables are entirely derived, replaceable, versioned evidence
 -- (ingestion-design.md §2.6) — never authoritative, unlike documents or email
--- metadata. An older database's workspace_id-scoped shape is dropped and
--- rebuilt from a fresh graph build rather than migrated constraint-by-
--- constraint through a dense compound-key dependency tree that CASCADE would
--- otherwise have to unwind one FK at a time: rebuilding a topic graph is
--- already a normal, cheap, expected operation this system supports, unlike
--- migrating canonical documents or email metadata ever would be.
-DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_name = 'topic_graph_versions' AND column_name = 'workspace_id') THEN
-        DROP TABLE IF EXISTS topic_episode_memberships CASCADE;
-        DROP TABLE IF EXISTS topic_episodes CASCADE;
-        DROP TABLE IF EXISTS topic_relation_edges CASCADE;
-        DROP TABLE IF EXISTS topic_relation_candidate_supports CASCADE;
-        DROP TABLE IF EXISTS topic_relation_candidates CASCADE;
-        DROP TABLE IF EXISTS topic_mention_spans CASCADE;
-        DROP TABLE IF EXISTS topic_mentions CASCADE;
-        DROP TABLE IF EXISTS topic_graph_versions CASCADE;
-    END IF;
-END $$;
-
+-- metadata.
 CREATE TABLE IF NOT EXISTS topic_graph_versions (
     version_id              UUID PRIMARY KEY,
     status                  VARCHAR NOT NULL CHECK (status IN ('BUILDING','READY','ACTIVE','RETIRED')),
@@ -730,25 +671,13 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		}
 		// An already-provisioned workspace never re-runs the DDL above, so
 		// structural changes reach it here or not at all.
-		if err := d.migrateChunkContent(ctx, existing.EmbedDim); err != nil {
-			return err
-		}
 		if err := d.applyEmailSchema(ctx); err != nil {
 			return err
 		}
 		if err := d.applyTopicGraphSchema(ctx); err != nil {
 			return err
 		}
-		// A database provisioned before workspace_id moved onto this row
-		// (deviation 34) has it empty; the configured id backfills it here,
-		// unconditionally, because it is the only value that was ever going
-		// to be correct for a database dedicated to one workspace.
-		if existing.WorkspaceID == "" {
-			if _, err := d.Pool.Exec(ctx,
-				`UPDATE schema_metadata SET workspace_id = $1 WHERE id`, meta.WorkspaceID); err != nil {
-				return fmt.Errorf("backfill schema metadata workspace id: %w", err)
-			}
-		} else if existing.WorkspaceID != meta.WorkspaceID {
+		if existing.WorkspaceID != meta.WorkspaceID {
 			return fmt.Errorf(
 				"database is scoped to workspace %q, refusing to apply schema for %q",
 				existing.WorkspaceID, meta.WorkspaceID)
@@ -856,126 +785,4 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
-}
-
-// migrateChunkContent moves passage text and vectors off document_chunks onto
-// the shared chunks table, collapsing duplicates.
-//
-// Idempotent and a no-op once done: it keys off document_chunks still having a
-// chunk_text column. Existing embeddings are carried across unchanged, so this
-// is a migration rather than a re-embed — the text is not re-chunked and the
-// vectors are not recomputed. One passage's surviving row is chosen by lowest
-// chunk_id purely so the choice is deterministic; every copy holds the same
-// text and the same vector, which is what makes them duplicates.
-//
-// Runs in one transaction. A partial migration would leave the read path
-// querying columns that no longer exist, so this either lands whole or not at
-// all.
-func (d *DB) migrateChunkContent(ctx context.Context, dim int) error {
-	var legacy bool
-	if err := d.Pool.QueryRow(ctx, `
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'document_chunks' AND column_name = 'chunk_text')`,
-	).Scan(&legacy); err != nil {
-		return fmt.Errorf("detect chunk schema: %w", err)
-	}
-	if !legacy {
-		return nil
-	}
-
-	tx, err := d.Pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin chunk migration: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// hashOf must match contentHash in chunk_repo.go exactly: the write path
-	// and this backfill have to agree on what counts as the same passage, or a
-	// migrated workspace would keep inserting duplicates of what it holds.
-	// Parameterised by column because both tables carry chunk_text while the
-	// migration is in flight, which makes a bare reference ambiguous.
-	hashOf := func(col string) string {
-		return fmt.Sprintf(
-			`sha256(convert_to(btrim(regexp_replace(%s, '\s+', ' ', 'g')), 'UTF8'))`, col)
-	}
-	normalisedHashSQL := hashOf("chunk_text")
-
-	steps := []string{
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS chunks (
-            content_id   UUID PRIMARY KEY,
-            workspace_id VARCHAR NOT NULL,
-            embed_model  VARCHAR NOT NULL,
-            content_hash BYTEA   NOT NULL,
-            chunk_text   TEXT    NOT NULL,
-            embedding    halfvec(%d),
-            UNIQUE (workspace_id, embed_model, content_hash))`, dim),
-
-		fmt.Sprintf(`INSERT INTO chunks
-            (content_id, workspace_id, embed_model, content_hash, chunk_text, embedding)
-         SELECT DISTINCT ON (workspace_id, embed_model, %[1]s)
-                gen_random_uuid(), workspace_id, embed_model, %[1]s, chunk_text, embedding
-         FROM document_chunks
-         ORDER BY workspace_id, embed_model, %[1]s, chunk_id`, normalisedHashSQL),
-
-		`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS content_id UUID`,
-
-		fmt.Sprintf(`UPDATE document_chunks dc SET content_id = c.content_id
-         FROM chunks c
-         WHERE c.workspace_id = dc.workspace_id
-           AND c.embed_model  = dc.embed_model
-           AND c.content_hash = %s`, hashOf("dc.chunk_text")),
-
-		`ALTER TABLE document_chunks ALTER COLUMN content_id SET NOT NULL`,
-		`ALTER TABLE document_chunks ADD CONSTRAINT document_chunks_content_fk
-             FOREIGN KEY (content_id) REFERENCES chunks(content_id) ON DELETE RESTRICT`,
-
-		// The old indexes name columns that are about to disappear.
-		`DROP INDEX IF EXISTS chunks_hnsw_idx`,
-		`DROP INDEX IF EXISTS ` + searchIndexName,
-		`DROP INDEX IF EXISTS chunks_workspace_idx`,
-
-		`ALTER TABLE document_chunks
-             DROP COLUMN chunk_text,
-             DROP COLUMN embed_model,
-             DROP COLUMN embedding`,
-
-		`CREATE INDEX chunks_hnsw_idx ON chunks
-             USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64)`,
-		`CREATE INDEX chunks_workspace_idx ON document_chunks(workspace_id)`,
-		`CREATE INDEX IF NOT EXISTS chunks_content_idx ON document_chunks(content_id)`,
-
-		// Rebuilt here rather than left to the next ingest. BuildSearchIndex is
-		// normally deferred until after a bulk load, but this migration dropped
-		// a populated index and the rows are already in place: leaving it out
-		// would strand the workspace with no lexical leg until something
-		// happened to re-ingest it.
-		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON chunks
-             USING bm25 (chunk_text) WITH (text_config='simple')`, searchIndexName),
-	}
-
-	for i, stmt := range steps {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("chunk migration step %d: %w", i+1, err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit chunk migration: %w", err)
-	}
-
-	// Outside the transaction because VACUUM cannot run inside one, and not
-	// optional: DROP COLUMN only marks a column dropped, and the content_id
-	// backfill leaves a dead tuple per row, so without this the table keeps
-	// every byte the migration was meant to remove. Measured on a real
-	// workspace the placement heap stood at 42 MB immediately after committing
-	// and 2 MB after this ran.
-	//
-	// A failure here costs space, not correctness, so it is reported rather
-	// than returned: the migration itself has already landed.
-	if _, err := d.Pool.Exec(ctx, `VACUUM FULL document_chunks`); err != nil {
-		return fmt.Errorf("chunk migration committed, but reclaiming space failed "+
-			"(run VACUUM FULL document_chunks by hand): %w", err)
-	}
-	return nil
 }

@@ -34,7 +34,7 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 	// released rather than a whole-table anti-join, which would get slower as
 	// the corpus grows.
 	rows, err := tx.Query(ctx,
-		`DELETE FROM document_chunks WHERE doc_id = $1 RETURNING content_id`, docID)
+		`DELETE FROM document_chunks WHERE doc_id = $1 RETURNING chunk_id`, docID)
 	if err != nil {
 		return fmt.Errorf("clear chunks for %s: %w", docID, err)
 	}
@@ -61,9 +61,9 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 	if len(released) > 0 {
 		if _, err := tx.Exec(ctx, `
             DELETE FROM chunks c
-            WHERE c.content_id = ANY($1)
+            WHERE c.chunk_id = ANY($1)
               AND NOT EXISTS (
-                  SELECT 1 FROM document_chunks p WHERE p.content_id = c.content_id)`,
+                  SELECT 1 FROM document_chunks p WHERE p.chunk_id = c.chunk_id)`,
 			released); err != nil {
 			return fmt.Errorf("sweep orphaned chunks for %s: %w", docID, err)
 		}
@@ -82,10 +82,10 @@ func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []do
 	return nil
 }
 
-// contentHash identifies a passage by its text with whitespace runs collapsed.
-// Must stay byte-for-byte equivalent to the SQL in migrateChunkContent, or a
-// migrated workspace would start inserting duplicates of what it already holds.
-func contentHash(text string) []byte {
+// rawSHA256 identifies a passage by its text with whitespace runs collapsed —
+// chunks.raw_sha256, the content-identity counterpart of documents.raw_sha256
+// one stage further down the pipeline (schema.go's chunks comment).
+func rawSHA256(text string) []byte {
 	sum := sha256.Sum256([]byte(strings.Join(strings.Fields(text), " ")))
 	return sum[:]
 }
@@ -104,11 +104,11 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 		n    int
 	)
 	cb.WriteString(`INSERT INTO chunks
-        (content_id, embed_model, content_hash, chunk_text, embedding)
+        (chunk_id, embed_model, raw_sha256, chunk_text, embedding)
         VALUES `)
 	hashes := make([][]byte, len(chunks))
 	for i, c := range chunks {
-		h := contentHash(c.Text)
+		h := rawSHA256(c.Text)
 		hashes[i] = h
 		key := string(h)
 		if _, dup := seen[key]; dup {
@@ -123,7 +123,7 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 		args = append(args, c.EmbedModel, h, c.Text, formatVector(c.Embedding))
 		n++
 	}
-	cb.WriteString(` ON CONFLICT (embed_model, content_hash) DO NOTHING`)
+	cb.WriteString(` ON CONFLICT (embed_model, raw_sha256) DO NOTHING`)
 	if n > 0 {
 		if _, err := tx.Exec(ctx, cb.String(), args...); err != nil {
 			return fmt.Errorf("insert %d passages: %w", n, err)
@@ -132,9 +132,9 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 
 	var pb strings.Builder
 	pb.WriteString(`INSERT INTO document_chunks
-        (chunk_id, doc_id, content_id, chunk_index,
+        (placement_id, doc_id, chunk_id, chunk_index,
          start_char_offset, end_char_offset)
-        SELECT v.chunk_id, v.doc_id, c.content_id,
+        SELECT v.placement_id, v.doc_id, c.chunk_id,
                v.chunk_index, v.start_char_offset, v.end_char_offset
         FROM (VALUES `)
 	pargs := make([]any, 0, len(chunks)*7)
@@ -151,10 +151,10 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 	// embed_model is part of the join, not just the insert: identity is scoped
 	// by model namespace, so a re-embed leaves the same hash present twice and
 	// a join without it would attach two placements to one chunk.
-	pb.WriteString(`) AS v(chunk_id, doc_id, embed_model, content_hash,
+	pb.WriteString(`) AS v(placement_id, doc_id, embed_model, raw_sha256,
                           chunk_index, start_char_offset, end_char_offset)
-        JOIN chunks c ON c.embed_model  = v.embed_model
-                     AND c.content_hash = v.content_hash`)
+        JOIN chunks c ON c.embed_model = v.embed_model
+                     AND c.raw_sha256 = v.raw_sha256`)
 	if _, err := tx.Exec(ctx, pb.String(), pargs...); err != nil {
 		return fmt.Errorf("insert %d placements: %w", len(chunks), err)
 	}

@@ -225,6 +225,8 @@ The document worker has separate PDF and image consumer pools sharing one extrac
 
 OCR is compiled behind the `ocr` build tag. The supported build command enables it. A binary built without that tag remains usable but records scanned PDFs and images as `SKIPPED / OCR_UNAVAILABLE`.
 
+A collection's registry `ingestion-type: bank-transactions` (`workspace-config.yaml`) does not change extraction: a bank statement PDF goes through this same worker and becomes ordinary unstructured `normalized_text`, identically to any other PDF. `bsb`, `account_number`, `owners`, and `type` are registry metadata that this worker attaches to the Tier 1 raw object but does not copy into PostgreSQL. [Exact bank statement browse](retrieval-design.md#exact-bank-statement-browse) resolves that same registry metadata directly at query time instead, so deterministic document selection by owner or account needs no schema change here. Parsing individual transaction line items out of statement text remains out of scope; statement text is a layout-preserving PDF extraction, not CSV.
+
 ### 4.3 Office worker
 
 The pure-Go office worker handles:

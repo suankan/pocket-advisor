@@ -22,6 +22,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/mailbox"
 	"github.com/suankan/pocket-advisor/internal/mcp"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
+	"github.com/suankan/pocket-advisor/internal/statements"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/topicgraph"
@@ -67,7 +68,10 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 	title, corpus := describeCorpus(o)
 	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title}
 	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title}
-	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}, svc, db.Close, nil
+	statementsService := statements.New(statements.NewPostgresStore(db), resolved, o.WorkspaceID)
+	queryTool := &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}
+	queryTool.Statements = &mcp.StatementsTool{Browser: statementsService, Query: queryTool, Workspace: o.WorkspaceID, Title: title}
+	return queryTool, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {

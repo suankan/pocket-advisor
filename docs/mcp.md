@@ -27,6 +27,7 @@ Each workspace-bound MCP server exposes retrieval, deterministic mailbox, and to
 - `fetch_conversation` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
 - `awaiting_reply_candidates` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
 - `topic_timeline` — accepts only a server-issued topic mention or episode reference and bounded traversal direction, depth, node, and source-span byte limits. It returns the active graph version's cited chronological subgraph, derived relations, warnings, omissions, and budgets.
+- `list_bank_statements` — lists exact bank statement documents filtered by owner, account (bsb and/or account_number, or an account-name match against the registry), and period, returning each matched document's full text as evidence exactly like `search`.
 
 No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, graph version, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
 
@@ -53,6 +54,14 @@ The fixed-workspace mailbox tools provide deterministic email evidence alongside
 `awaiting_reply_candidates` accepts bounded participant and date filters and requires configured owner identities. It returns candidates whose latest relevant human inbound message has no later human owner-authored exact-reply descendant. A candidate is evidence for review, not a conclusion that action is required. Subject grouping, semantic similarity, and an unlinked outbound message never prove that a reply occurred. Automated, list, delivery, and third-party events remain labelled context rather than silently closing a candidate.
 
 Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
+
+## Exact bank statement browse
+
+`list_bank_statements` provides deterministic bank statement document selection alongside semantic retrieval. It never ranks: a filter either resolves a registry `bank-transactions` collection or it does not (`internal/statements`). It accepts a bounded owner name, BSB, account number, and account name (each matched against the workspace registry, not free text), and an optional period. Matching uses AND across every filter given; an empty call lists every bank statement document in the workspace.
+
+Statement text is a layout-preserving PDF extraction, not CSV, and this tool does not parse individual transaction line items — the closed, deliberate scope described in [Ingestion Design §4.2](ingestion-design.md#42-pdf-and-image-worker). A matched document's snippet includes a best-effort period detected from the unambiguous dates in its own text (day, month, and four-digit year; two-digit years are never matched, and a detected date outside a plausibility window around the current time is discarded — both decisions responding to real false positives found in production bank statement boilerplate). A document whose own text carries no confidently detectable date is excluded from a period-filtered call rather than admitted on a guess, and every detected period is a hint for narrowing, not an authoritative fact — the caller reads a matched document's full text for the real period, exactly as it would for any other evidence.
+
+Successful calls use the same evidence packet, citation, snapshot, and continuation machinery as `search`: matched documents become ranked packets with `legs: "exact"` in place of a scored `dense`/`lexical`/`both` match, and oversized results page through `read_evidence` identically.
 
 ## Topic timelines
 

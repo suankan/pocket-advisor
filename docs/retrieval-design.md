@@ -41,6 +41,14 @@ Awaiting-reply candidates require configured owner identities and exact-referenc
 
 The MCP tools in [MCP server design](mcp.md) adapt this service; semantic retrieval may remain independent of mailbox browse.
 
+## Exact bank statement browse
+
+`internal/statements` is a transport-independent, fixed-workspace read service over the registry's `bank-transactions` collections (`workspace-config.yaml`, [Ingestion Design §4.2](ingestion-design.md#42-pdf-and-image-worker)). It selects whole statement documents deterministically by owner, BSB, account number, or account name, each matched against the registry rather than free text, combined with AND. It does not parse transaction line items: statement text is a layout-preserving PDF extraction, not CSV, so a matched document's full text is the evidence, exactly as `search` returns full text for a semantic hit.
+
+An optional period bound filters by the earliest and latest unambiguous date (day, month, and four-digit year) found anywhere in a document's own text — not a parsed "Statement Period" header, whose label and wording differ per bank. Two-digit years and dates outside a plausibility window around the current time are never matched, both in response to real false positives found in production statement boilerplate (a table's misaligned column spacing, a legal disclaimer citing a long-past regulatory date). A document with no confidently detectable date is excluded from a period-filtered call rather than admitted on a guess; every detected period is a best-effort narrowing hint, not an authoritative fact.
+
+The MCP tool in [MCP server design](mcp.md) adapts this service, reusing `search`'s evidence packet, citation, snapshot, and continuation machinery rather than a separate reference scheme.
+
 ## Candidate generation
 
 ### Dense leg

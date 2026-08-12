@@ -46,6 +46,9 @@ type QueryTool struct {
 	// Timeline, when configured, follows source-backed topic mentions from
 	// the active graph in this same fixed workspace.
 	Timeline *TimelineTool
+	// Statements, when configured, exposes deterministic bank statement
+	// document browsing in the same fixed workspace as retrieval.
+	Statements *StatementsTool
 
 	stateMu          sync.Mutex
 	store            *snapshotStore
@@ -62,7 +65,7 @@ type QueryTool struct {
 // renewal without becoming usable by another caller. Stdio already creates
 // one QueryTool per process and therefore does not need this clone.
 func (t *QueryTool) forCaller() *QueryTool {
-	return &QueryTool{
+	clone := &QueryTool{
 		Service:          t.Service,
 		Workspace:        t.Workspace,
 		Title:            t.Title,
@@ -75,6 +78,17 @@ func (t *QueryTool) forCaller() *QueryTool {
 		maxSnapshots:     t.maxSnapshots,
 		maxSnapshotBytes: t.maxSnapshotBytes,
 	}
+	// Statements stores its evidence through this same clone's snapshot
+	// store, not the original QueryTool's — otherwise a per-caller clone
+	// would still share one caller's continuation namespace with every
+	// other, defeating the reason this method exists.
+	if t.Statements != nil {
+		clone.Statements = &StatementsTool{
+			Browser: t.Statements.Browser, Query: clone,
+			Workspace: t.Statements.Workspace, Title: t.Statements.Title,
+		}
+	}
+	return clone
 }
 
 type ToolDefinition struct {
@@ -180,6 +194,9 @@ func (t *QueryTool) DescribeAll() []ToolDefinition {
 	if t.Timeline != nil {
 		definitions = append(definitions, t.Timeline.Describe())
 	}
+	if t.Statements != nil {
+		definitions = append(definitions, t.Statements.Describe())
+	}
 	return definitions
 }
 
@@ -214,6 +231,9 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 	}
 	if t.Timeline != nil && params.Name == t.Timeline.Name() {
 		return t.Timeline.Call(ctx, raw)
+	}
+	if t.Statements != nil && params.Name == t.Statements.Name() {
+		return t.Statements.Call(ctx, raw)
 	}
 	if params.Name != t.Name() && params.Name != t.ReadName() {
 		return CallToolResult{}, &unknownToolError{}

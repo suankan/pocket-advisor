@@ -68,7 +68,7 @@ func evidencePageOutputSchema() map[string]any {
 				"properties": map[string]any{
 					"chunk_id": map[string]any{"type": "string", "minLength": 1}, "start": map[string]any{"type": "integer", "minimum": 0},
 					"end": map[string]any{"type": "integer", "minimum": 0}, "offset_unit": map[string]any{"const": utf8ByteUnit},
-					"score": map[string]any{"type": "number"}, "legs": map[string]any{"enum": []string{"dense", "lexical", "both"}},
+					"score": map[string]any{"type": "number"}, "legs": map[string]any{"enum": []string{"dense", "lexical", "both", "exact"}},
 					"sub_query": nullableStringSchema(), "snippet": map[string]any{"type": "string"},
 				},
 				"required": []string{"chunk_id", "start", "end", "offset_unit", "score", "legs", "sub_query", "snippet"},

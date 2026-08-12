@@ -176,10 +176,11 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	}
 
 	route := discovery.Classify(c.Data, c.Filename)
-	childID := domain.NewDocID(parent.WorkspaceId, sum)
 
 	doc := &domain.Document{
-		DocID:       childID,
+		// A fresh candidate id; CreateStub resolves it against raw_sha256
+		// the same way discovery's root documents do (domain.NewDocID).
+		DocID:       domain.NewDocID(),
 		ParentDocID: parent.DocId,
 		WorkspaceID: parent.WorkspaceId,
 		ThreadID:    threadID,
@@ -192,7 +193,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	// Stub before publish, always: when the child is processed its
 	// parent_doc_id already exists, so relational integrity holds regardless
 	// of consumption order (§2.1).
-	created, err := w.Docs.CreateStub(ctx, doc)
+	childID, created, err := w.Docs.CreateStub(ctx, doc)
 	if err != nil {
 		return err
 	}

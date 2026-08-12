@@ -69,11 +69,13 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 		return fmt.Errorf("object %s hashes to %s: corrupted or tampered", key, actual)
 	}
 
-	docID := domain.NewDocID(workspaceID, actual)
 	route := Classify(data, prov.SourceFilename)
 
 	doc := &domain.Document{
-		DocID:       docID,
+		// A fresh candidate id. CreateStub only uses it if this content is
+		// genuinely new; existing content resolves to whichever id already
+		// claimed it (domain.NewDocID, document_repo.go's CreateStub).
+		DocID:       domain.NewDocID(),
 		WorkspaceID: workspaceID,
 		Status:      domain.StatusPending,
 		DocType:     route.DocType,
@@ -88,7 +90,7 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 		},
 	}
 
-	created, err := s.Docs.CreateStub(ctx, doc)
+	docID, created, err := s.Docs.CreateStub(ctx, doc)
 	if err != nil {
 		telemetry.DiscoveryFiles.WithLabelValues(mode, "error").Inc()
 		return err

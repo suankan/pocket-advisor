@@ -9,7 +9,7 @@ Ingestion is a bounded host process. One `pocket-advisor` binary contains the up
 The central invariants are:
 
 1. RustFS is the sole authoritative store for document bytes. A workspace's local directory is a staging feed used only by the uploader.
-2. Root document identity is content-addressed within a workspace: the workspace registry defines a workspace as a single directory recursively walked with no further subdivision, so a document's identity does not depend on which subdirectory contains it.
+2. Document identity (doc_id) and content identity (raw_sha256) are deliberately independent: doc_id is an opaque, randomly generated cross-reference key, and raw_sha256 — enforced unique per workspace database — is what deduplication and idempotency actually depend on. Neither depends on a workspace, a path, or which subdirectory of a workspace's single recursively walked directory currently holds the file.
 3. Discovery is the only component that creates root documents. Container workers create children with explicit lineage.
 4. Every worker is idempotent under at-least-once delivery.
 5. Indexed text is extracted source text only. No generated summaries or answers enter Tier 2 or Tier 3.
@@ -61,11 +61,12 @@ Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on re
 
 ### 2.2 Tier 2: PostgreSQL documents
 
-Root identity is deterministic:
+doc_id and raw_sha256 are two independent identities on the same row, not one value serving both purposes:
 
-```text
-doc_id = UUIDv5(namespace, workspace_id || sha256)
-```
+- `doc_id` is a random UUIDv4 (`domain.NewDocID`), assigned once and never derived from anything — a short, indexable key that lets every other table (chunks, email metadata, topic mentions) cross-reference one document cheaply. It carries no information about content, workspace, or placement.
+- `raw_sha256` is the actual content identity: a `UNIQUE` constraint (`documents_raw_sha256_key`) makes it, not doc_id, the idempotency key. `CreateStub` inserts a candidate doc_id but upserts on `raw_sha256` (`ON CONFLICT (raw_sha256) DO UPDATE ... RETURNING doc_id`), so re-scanning a workspace, retrying a failed publish, and two racing intake requests for the same bytes all resolve to whichever doc_id first claimed that content — the candidate id a caller generated is only used if the content is genuinely new.
+
+This is what makes moving a file within a workspace, reorganizing a workspace's directory layout, or renaming a workspace itself an ordinary metadata change rather than a re-identification: nothing about a document's identity is derived from where it currently lives.
 
 The `documents` table holds:
 

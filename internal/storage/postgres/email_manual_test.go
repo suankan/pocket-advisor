@@ -216,11 +216,11 @@ func applied(t *testing.T, name string) (*DB, *EmailRepo) {
 // discovery would have.
 func document(t *testing.T, db *DB, sha string) string {
 	t.Helper()
-	docID := domain.NewDocID(stageBWorkspace, sha)
+	docID := domain.NewDocID()
 	if _, err := db.Pool.Exec(context.Background(), `
-        INSERT INTO documents (doc_id, workspace_id, processing_status, doc_type)
-        VALUES ($1, $2, 'COMPLETED', 'email')
-        ON CONFLICT (doc_id) DO NOTHING`, docID, stageBWorkspace); err != nil {
+        INSERT INTO documents (doc_id, workspace_id, processing_status, doc_type, raw_sha256)
+        VALUES ($1, $2, 'COMPLETED', 'email', $3)
+        ON CONFLICT (raw_sha256) DO NOTHING`, docID, stageBWorkspace, sha); err != nil {
 		t.Fatalf("create document: %v", err)
 	}
 	return docID

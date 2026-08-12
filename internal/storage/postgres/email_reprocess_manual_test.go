@@ -25,12 +25,12 @@ import (
 // doc_type and Tier 1 URI the selection query filters on.
 func reprocessDoc(t *testing.T, db *DB, workspace, sha, docType, rawURI string) string {
 	t.Helper()
-	docID := domain.NewDocID(workspace, sha)
+	docID := domain.NewDocID()
 	if _, err := db.Pool.Exec(context.Background(), `
         INSERT INTO documents (doc_id, workspace_id, processing_status,
                                doc_type, mime_type, rustfs_raw_uri, raw_sha256)
         VALUES ($1, $2, 'COMPLETED', $3, 'message/rfc822', $4, $5)
-        ON CONFLICT (doc_id) DO NOTHING`,
+        ON CONFLICT (raw_sha256) DO NOTHING`,
 		docID, workspace, docType, rawURI, sha); err != nil {
 		t.Fatalf("create document: %v", err)
 	}

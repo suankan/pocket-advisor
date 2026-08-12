@@ -84,6 +84,19 @@ CREATE INDEX IF NOT EXISTS documents_workspace_idx  ON documents(workspace_id);
 CREATE INDEX IF NOT EXISTS documents_thread_idx     ON documents(thread_id);
 CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
 
+-- doc_id and raw_sha256 are deliberately independent: doc_id is an opaque,
+-- randomly generated row identifier (domain.NewDocID) with no relationship
+-- to the bytes it names, and raw_sha256 is the content identity idempotency
+-- actually depends on. This constraint is what CreateStub upserts against
+-- (ON CONFLICT (raw_sha256)) to converge two racing intake attempts, a
+-- retried publish, and a re-scan of the same bytes on one row — the
+-- guarantee doc_id used to provide by being derived from the hash itself,
+-- now provided by this constraint instead of by doc_id's own value.
+DO $$ BEGIN
+    ALTER TABLE documents
+        ADD CONSTRAINT documents_raw_sha256_key UNIQUE (raw_sha256);
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
+
 -- A workspace is now one recursively walked directory with no further
 -- subdivision (ingestion-design.md §3.1). An older database may still carry
 -- this column and its index from before that change; both are dropped so a

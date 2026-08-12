@@ -163,12 +163,12 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 
 	// An extracted child cannot become a message-topic source merely because a
 	// malformed writer attached email metadata to it.
-	childID := domain.NewDocID(stageBWorkspace, strings.Repeat("f", 64))
+	childID := domain.NewDocID()
 	if _, err := db.Pool.Exec(ctx, `
         INSERT INTO documents (doc_id, parent_doc_id, workspace_id,
-                               processing_status, doc_type, normalized_text)
-        VALUES ($1, $2, $3, 'COMPLETED', 'email', $4)`,
-		childID, docID, stageBWorkspace, text); err != nil {
+                               processing_status, doc_type, normalized_text, raw_sha256)
+        VALUES ($1, $2, $3, 'COMPLETED', 'email', $4, $5)`,
+		childID, docID, stageBWorkspace, text, strings.Repeat("f", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := emailRepo.SaveEmailMessage(ctx, message(childID, "child@mail.example.test", "Child", "")); err != nil {

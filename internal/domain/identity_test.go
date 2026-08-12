@@ -2,42 +2,35 @@ package domain
 
 import "testing"
 
-// Determinism is the load-bearing property of the whole entry path: it is what
-// makes re-scanning, retried publishes and racing intake requests converge on
-// one row (§5.2).
-func TestNewDocIDIsDeterministic(t *testing.T) {
-	a := NewDocID("ws", "abc123")
-	b := NewDocID("ws", "abc123")
-	if a != b {
-		t.Fatalf("same inputs produced different ids: %s vs %s", a, b)
+// doc_id and content identity are deliberately independent (identity.go):
+// doc_id is nothing more than a short, indexable, opaque cross-reference key
+// that ties one document's rows together across tables, and raw_sha256 —
+// not doc_id — is what CreateStub's documents_raw_sha256_key constraint uses
+// for dedup and idempotency. NewDocID reflects that: it takes no input at
+// all, and every call must produce a distinct, validly shaped id.
+func TestNewDocIDIsAWellFormedUUIDv4(t *testing.T) {
+	id := NewDocID()
+	if len(id) != 36 {
+		t.Fatalf("expected uuid form, got %q", id)
 	}
-	if len(a) != 36 {
-		t.Fatalf("expected uuid form, got %q", a)
+	if id[14] != '4' {
+		t.Errorf("expected version 4 uuid, got %q", id)
 	}
-	if a[14] != '5' {
-		t.Errorf("expected version 5 uuid, got %q", a)
-	}
-}
-
-func TestNewDocIDSeparatesFields(t *testing.T) {
-	// Without a separator, ("ab","c") and ("a","bc") would collide.
-	if NewDocID("ab", "c") == NewDocID("a", "bc") {
-		t.Error("field boundaries are not separated in the id derivation")
-	}
-	if NewDocID("ws", "h1") == NewDocID("ws", "h2") {
-		t.Error("different content produced the same doc id")
+	// RFC 4122 variant: the high bits of this byte must be 10.
+	variant := id[19]
+	if variant < '8' || variant > 'b' {
+		t.Errorf("expected RFC 4122 variant nibble in [8-b], got %q in %q", variant, id)
 	}
 }
 
-func TestNewDocIDIsContentAddressedWithinAWorkspace(t *testing.T) {
-	// A workspace is a single recursively walked directory with no further
-	// subdivision: the same bytes reachable twice within one workspace are
-	// one document regardless of which subdirectory found them first.
-	if NewDocID("ws", "same-hash") != NewDocID("ws", "same-hash") {
-		t.Error("identical workspace and content must converge on one id")
-	}
-	if NewDocID("ws-a", "same-hash") == NewDocID("ws-b", "same-hash") {
-		t.Error("different workspaces must not collide on the same content")
+func TestNewDocIDIsNeverTheSameTwice(t *testing.T) {
+	seen := make(map[string]bool, 1000)
+	for range 1000 {
+		id := NewDocID()
+		if seen[id] {
+			t.Fatalf("NewDocID repeated %s within 1000 calls", id)
+		}
+		seen[id] = true
 	}
 }
 

@@ -81,7 +81,6 @@ type Document struct {
 	DocID       string
 	ParentDocID string // empty for root documents
 	WorkspaceID string
-	Collection  string
 	ThreadID    string
 	Status      Status
 	DocType     string

@@ -24,14 +24,14 @@ import (
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
-	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 type Options struct {
 	WorkspaceID string
-	// Collections come from the workspace registry, not from a flag: the
-	// registry is the single definition of what a matter contains (§5.1).
-	Collections []workspace.ResolvedCollection
+	// AbsPath is the single directory the workspace registry resolved for
+	// this workspace. Every file under it, at any depth, is a candidate
+	// document — there is no further subdivision to iterate (§5.1).
+	AbsPath     string
 	Concurrency int
 	DryRun      bool
 	RunID       string
@@ -46,7 +46,7 @@ type Result struct {
 	Bytes     int64
 }
 
-// Add accumulates a per-collection result into a run total.
+// Add accumulates a result into a run total.
 func (r *Result) Add(o Result) {
 	r.Uploaded += o.Uploaded
 	r.Duplicate += o.Duplicate
@@ -72,66 +72,34 @@ var skipNames = map[string]bool{
 	"desktop.ini": true,
 }
 
-// Run uploads every collection the workspace mounts.
+// Run uploads every file the workspace's directory contains, at any depth.
 //
 // The uploader is additive. It never infers that a document should be removed
 // because this run's folder did not contain it: a staging directory is
 // legitimately partial, and inferring deletion from absence would let an
 // incomplete run destroy the corpus. Removal is explicit (Forget).
 func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
-	var total Result
-
 	u.log.Info("upload starting",
 		"workspace_id", opts.WorkspaceID,
-		"collections", len(opts.Collections),
+		"path", opts.AbsPath,
 		"dry_run", opts.DryRun,
 		"uploader_run_id", opts.RunID)
 
-	// Content seen anywhere in this run, across every collection. Deliberately
-	// shared: the same PDF disclosed under two collections is one object in
-	// Tier 1, and only the first occurrence uploads it.
-	var seen sync.Map
+	files, err := collect(opts.AbsPath)
+	if err != nil {
+		return Result{}, err
+	}
+	u.log.Info("workspace files found", "workspace_id", opts.WorkspaceID, "files", len(files))
 
-	// Count everything before moving anything, so the progress bar has a fixed
-	// denominator. A second walk is metadata-only and costs far less than a
-	// total that keeps growing under the bar.
 	if opts.Progress != nil {
-		var fileCount int64
-		for _, c := range opts.Collections {
-			files, err := collect(c.AbsPath)
-			if err != nil {
-				return total, fmt.Errorf("collection %s: %w", c.ID, err)
-			}
-			fileCount += int64(len(files))
-		}
-		opts.Progress.Start(fileCount)
+		opts.Progress.Start(int64(len(files)))
 		defer opts.Progress.Finish()
 	}
 
-	for _, c := range opts.Collections {
-		res, err := u.collection(ctx, opts, c, &seen)
-		total.Add(res)
-		if err != nil {
-			return total, fmt.Errorf("collection %s: %w", c.ID, err)
-		}
-		u.log.Info("collection complete",
-			"collection_id", c.ID,
-			"uploaded", res.Uploaded, "duplicate", res.Duplicate,
-			"failed", res.Failed, "bytes", res.Bytes)
-	}
-	return total, nil
-}
-
-func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.ResolvedCollection, seen *sync.Map) (Result, error) {
-	var res Result
-
-	files, err := collect(c.AbsPath)
-	if err != nil {
-		return res, err
-	}
-	u.log.Info("collection starting",
-		"collection_id", c.ID, "files", len(files),
-		"ingestion_type", c.IngestionType, "path", c.AbsPath)
+	// Content seen anywhere in this run. Deliberately shared across the whole
+	// walk: the same PDF reachable twice within one workspace is one object
+	// in Tier 1, and only the first occurrence uploads it.
+	var seen sync.Map
 
 	conc := opts.Concurrency
 	if conc < 1 {
@@ -145,7 +113,7 @@ func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.Res
 	for _, f := range files {
 		select {
 		case <-ctx.Done():
-			return res, ctx.Err()
+			return Result{}, ctx.Err()
 		default:
 		}
 
@@ -155,7 +123,7 @@ func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.Res
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			n, outcome, err := u.one(ctx, path, opts, c, seen)
+			n, outcome, err := u.one(ctx, path, opts, &seen)
 			switch {
 			case err != nil:
 				atomic.AddInt64(&failed, 1)
@@ -183,26 +151,30 @@ func (u *Uploader) collection(ctx context.Context, opts Options, c workspace.Res
 	}
 	wg.Wait()
 
-	res = Result{
+	res := Result{
 		Uploaded:  atomic.LoadInt64(&uploaded),
 		Duplicate: atomic.LoadInt64(&duplicate),
 		Failed:    atomic.LoadInt64(&failed),
 		Bytes:     atomic.LoadInt64(&bytes),
 	}
+	u.log.Info("upload complete",
+		"workspace_id", opts.WorkspaceID,
+		"uploaded", res.Uploaded, "duplicate", res.Duplicate,
+		"failed", res.Failed, "bytes", res.Bytes)
 	return res, nil
 }
 
 // one uploads a single file. The sequence is hash → key → StatObject →
 // PutObject: skip-if-present is exact rather than heuristic, because the key
 // is the content hash.
-func (u *Uploader) one(ctx context.Context, path string, opts Options, c workspace.ResolvedCollection, seen *sync.Map) (int64, string, error) {
+func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *sync.Map) (int64, string, error) {
 	sum, size, err := hashFile(path)
 	if err != nil {
 		return 0, "", err
 	}
 
 	key := domain.RawObjectKey(sum)
-	rel, err := filepath.Rel(c.AbsPath, path)
+	rel, err := filepath.Rel(opts.AbsPath, path)
 	if err != nil {
 		rel = filepath.Base(path)
 	}
@@ -249,13 +221,8 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, c workspa
 	prov = rustfs.Provenance{
 		SourceFilename: name,
 		SourcePath:     filepath.ToSlash(rel),
-		CollectionID:   c.ID,
 		UploadedAt:     time.Now().UTC().Format(time.RFC3339),
 		UploaderRunID:  opts.RunID,
-		// Registry attributes travel with the bytes: the workspace config does
-		// not live in the cluster, so anything it knows about a document's
-		// origin is lost unless it is written onto the object (§5.1).
-		Extra: c.Metadata(),
 	}
 	// The uploader does not sniff formats — it is a byte mover. All format
 	// knowledge lives in discovery, in one place (§5.1).

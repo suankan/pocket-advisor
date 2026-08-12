@@ -168,7 +168,7 @@ func (q *DoctorQueries) Tier2MissingTier1(ctx context.Context) (int, error) {
 // StalePENDING returns PENDING rows older than the threshold for recovery.
 func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, workspace_id, collection_id, mime_type,
+		SELECT doc_id::text, workspace_id, mime_type,
 		       rustfs_raw_uri, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
@@ -188,7 +188,7 @@ func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duratio
 // StalePROCESSING returns PROCESSING rows older than the threshold.
 func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, workspace_id, collection_id, mime_type,
+		SELECT doc_id::text, workspace_id, mime_type,
 		       rustfs_raw_uri, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
@@ -209,7 +209,7 @@ func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Dura
 func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]DoctorDoc, error) {
 	// Pull all FAILED rows; the caller filters by classification.
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, workspace_id, collection_id, mime_type,
+		SELECT doc_id::text, workspace_id, mime_type,
 		       rustfs_raw_uri, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
@@ -229,7 +229,6 @@ func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]Docto
 type DoctorDoc struct {
 	DocID       string
 	WorkspaceID string
-	Collection  string
 	MimeType    string
 	RawURI      string
 	RawSHA256   string
@@ -243,7 +242,7 @@ func scanDoctorDocs(rows pgxRows) ([]DoctorDoc, error) {
 	var out []DoctorDoc
 	for rows.Next() {
 		var d DoctorDoc
-		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.Collection, &d.MimeType,
+		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.MimeType,
 			&d.RawURI, &d.RawSHA256, &d.SourceName, &d.ParentDocID,
 			&d.Reason, &d.UpdatedAt); err != nil {
 			return nil, err

@@ -25,10 +25,10 @@ The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The 
 
 - Every command is scoped to one workspace with `--workspace-id`.
 - The stores are shared processes, but each workspace has its own PostgreSQL database and role, RustFS bucket, and NATS subject/stream namespace — no per-workspace identity in RustFS or NATS, isolation is naming, not a credential (see [§3](#3-configuration)).
-- RustFS is the source of truth. Local collection paths are staging inputs used only by the uploader.
+- RustFS is the source of truth. A workspace's local directory is a staging input used only by the uploader.
 - Ingestion is reconciled. Re-running it skips objects already present, finds Tier 1 objects without Tier 2 rows, and drains durable queued work.
 - PostgreSQL is derived state. If a workspace database is lost, its schema and index can be rebuilt from Tier 1 by ingesting again.
-- Removing content is always explicit. A file disappearing from a local collection does not delete its Tier 1 object.
+- Removing content is always explicit. A file disappearing from a workspace's local directory does not delete its Tier 1 object.
 - Retrieval returns cited evidence packets, not generated prose.
 
 The authoritative designs are:
@@ -80,7 +80,7 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
 `infra.topic_graph` fixes the bounded local-LLM topic-mention extraction and exact-reference relation-classification contracts: opaque extraction, configuration, relation, and prompt versions plus input, output, mention, candidate, and confidence limits. Change `config_version` before changing the configured model, prompt, threshold, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
 
-`workspaces/workspace-config.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's collections and local staging paths. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
+`workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the single local directory it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
 - **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
 - **RustFS**: the root identity is the literal `admin`/`admin` (used only by `./pocket-advisor.sh deploy-workspaces` to provision buckets). The application itself connects anonymously — a workspace's bucket carries a public policy scoped to itself, so isolation is the bucket name, not a credential.
@@ -91,23 +91,18 @@ Example registry:
 ```yaml
 schema_version: 2
 
-collections:
-  - id: example-documents
-    title: Example Documents
-    ingestion-type: general
-    path: corpora/example-documents
-
 workspaces:
   - id: example
     title: Example Workspace
+    path: data/example
     # Optional private mailbox identities used only for email direction.
     owner-identities:
       - owner@example.test
-    collections:
-      - id: example-documents
 ```
 
-`owner-identities` is optional, private, and scoped to one workspace; it is distinct from a collection's financial `owners:` metadata. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
+A workspace's `path` is the single directory the ingestion pipeline walks recursively; every regular file found under it, at any depth, is a candidate document. There is no further subdivision — no collection, no per-subdirectory registry metadata.
+
+`owner-identities` is optional and private, scoped to one workspace. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
 
 Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database, RustFS bucket/policy, and NATS streams from its id alone — nothing else to configure.
 
@@ -122,7 +117,7 @@ Bring up the shared stores and provision every registered workspace, then build 
 ./pocket-advisor.sh build
 ```
 
-`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for the PostgreSQL, RustFS, and NATS StatefulSets to roll out, and then runs `deploy-workspaces` automatically — every workspace in `workspaces/workspace-config.yaml` is provisioned before `deploy-infra` returns. The chart itself needs only each workspace's `id` to render its RustFS notification target.
+`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for the PostgreSQL, RustFS, and NATS StatefulSets to roll out, and then runs `deploy-workspaces` automatically — every workspace in `workspaces/workspaces.yaml` is provisioned before `deploy-infra` returns. The chart itself needs only each workspace's `id` to render its RustFS notification target.
 
 Re-run provisioning on its own after editing the registry, without touching the shared stores:
 
@@ -142,7 +137,7 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 
 ### Add another workspace
 
-1. Add it to `workspaces/workspace-config.yaml`.
+1. Add it to `workspaces/workspaces.yaml`.
 2. Run `./pocket-advisor.sh deploy-infra` (renders its RustFS notification target and provisions it, along with every other registered workspace) — or, if the shared stores are already up, just `./pocket-advisor.sh deploy-workspaces`.
 3. Run an ingest to apply its schema and load content.
 
@@ -154,7 +149,7 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 
 `--ingest-all`:
 
-1. resolves the workspace collections;
+1. resolves the workspace's directory;
 2. uploads new content-addressed objects to Tier 1;
 3. reconciles Tier 1 objects missing from Tier 2;
 4. runs every worker pool until the queues remain idle for the settling period; and
@@ -535,7 +530,7 @@ Destroy the workspace infrastructure itself:
 ./pocket-advisor.sh destroy-workspace example
 ```
 
-Then remove its entry from `workspaces/workspace-config.yaml` and run `./pocket-advisor.sh deploy-infra` so the chart stops rendering its RustFS notification target (and `deploy-workspaces` re-provisions every workspace still listed).
+Then remove its entry from `workspaces/workspaces.yaml` and run `./pocket-advisor.sh deploy-infra` so the chart stops rendering its RustFS notification target (and `deploy-workspaces` re-provisions every workspace still listed).
 
 ## 10. Verification
 
@@ -561,7 +556,7 @@ Upgrade the shared-store release with the supported wrapper:
 ./pocket-advisor.sh deploy-infra
 ```
 
-Always use the wrapper rather than invoking Helm directly: it derives the chart's `workspaces:` list, and provisions every workspace via `deploy-workspaces`, straight from `workspaces/workspace-config.yaml` — a bare `helm upgrade` would do neither.
+Always use the wrapper rather than invoking Helm directly: it derives the chart's `workspaces:` list, and provisions every workspace via `deploy-workspaces`, straight from `workspaces/workspaces.yaml` — a bare `helm upgrade` would do neither.
 
 StatefulSet volume claim templates are immutable. Changing a configured storage size requires deliberately recreating the relevant StatefulSet and claim. A PostgreSQL major-version change also requires a new data volume and re-ingestion.
 

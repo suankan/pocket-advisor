@@ -31,9 +31,9 @@ There is no per-workspace Kubernetes namespace or per-workspace storage server i
 
 ## Private configuration
 
-One gitignored file describes local workspaces: `workspaces/workspace-config.yaml` contains workspace IDs, collections, and local corpus paths. There is no separate credentials file — every per-workspace resource name and (for PostgreSQL) role is the workspace id itself, or derived from it by fixed convention, computed wherever it's needed rather than stored.
+One gitignored file describes local workspaces: `workspaces/workspaces.yaml` contains each workspace's id and the single local directory it recursively walks for documents. There is no separate credentials file — every per-workspace resource name and (for PostgreSQL) role is the workspace id itself, or derived from it by fixed convention, computed wherever it's needed rather than stored.
 
-A workspace entry may also carry `owner-identities:`, the list of mailboxes the workspace owner writes from. It is optional, workspace-scoped, and distinct from a collection's `owners:` financial metadata; `internal/workspace` lowercases each entry, strips display names and angle brackets, rejects a syntactically invalid or repeated mailbox, and exposes the result as `Resolved.OwnerIdentities` with an `IsOwnerIdentity` membership test. The identities exist to classify message direction inside one workspace and nothing else: they are never echoed in errors, health output, or logs, no request may supply or replace them, and an address configured for one workspace has no meaning in another.
+A workspace entry may also carry `owner-identities:`, the list of mailboxes the workspace owner writes from. It is optional and workspace-scoped; `internal/workspace` lowercases each entry, strips display names and angle brackets, rejects a syntactically invalid or repeated mailbox, and exposes the result as `Resolved.OwnerIdentities` with an `IsOwnerIdentity` membership test. The identities exist to classify message direction inside one workspace and nothing else: they are never echoed in errors, health output, or logs, no request may supply or replace them, and an address configured for one workspace has no meaning in another.
 
 Committed `config.yaml` points to that file but contains no workspace content. Real names, paths, identifiers, and endpoints must not be copied out of `workspaces/`.
 
@@ -69,7 +69,7 @@ This is convention, not an account boundary: nothing prevents a caller that know
 
 ## Process and request isolation
 
-Every CLI invocation includes a workspace ID. Configuration resolution happens before clients are created, and the resulting process owns only that workspace's PostgreSQL, RustFS, and NATS clients. Ingestion jobs also carry workspace and collection identifiers; consumers validate job scope against the process workspace before doing work.
+Every CLI invocation includes a workspace ID. Configuration resolution happens before clients are created, and the resulting process owns only that workspace's PostgreSQL, RustFS, and NATS clients. Ingestion jobs also carry a workspace identifier; consumers validate job scope against the process workspace before doing work.
 
 MCP-specific process and request isolation is described in [MCP server design](mcp.md#workspace-isolation). The core invariants apply: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name, public route, OAuth audience, and subject are routing and authorization inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
 
@@ -79,7 +79,7 @@ Future non-MCP gateway routes must preserve the implemented pattern: authenticat
 
 ### Add or change a workspace
 
-1. Add the workspace and collection metadata to the private workspace registry.
+1. Add the workspace's id and directory to the private workspace registry.
 2. Run `./pocket-advisor.sh deploy-infra` — it renders RustFS's per-workspace notification-target environment for every registered workspace (NATS itself needs no static per-workspace config any more) and then runs `deploy-workspaces` automatically, provisioning the new workspace's database and role, bucket and policy, notification binding, and streams along with every other one. Idempotent, so this is also how an already-provisioned workspace gets its role renamed onto the current convention if it still carries the pre-convention `<id>_user` name. If the shared stores are already up, `./pocket-advisor.sh deploy-workspaces` alone is enough.
 3. Run `./bin/pocket-advisor --ingest-all --workspace-id <id>` or the narrower operational mode required.
 4. Verify storage access, JetStream resources, ingestion status, and a scoped query using [README §9](../README.md#9-verification).

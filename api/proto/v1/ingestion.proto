@@ -11,7 +11,11 @@ message DocumentMetadata {
   // Empty for root documents. Only DiscoveryService mints those.
   string parent_doc_id = 2;
   string workspace_id = 3;
-  string collection_id = 4;
+  // A workspace is a single recursively walked directory with no further
+  // subdivision (ingestion-design.md §3.1); field 4 named the collection
+  // that concept used to require and is retired rather than reused.
+  reserved 4;
+  reserved "collection_id";
   string thread_id = 5;
   string source_filename = 6;
   string mime_type = 7;

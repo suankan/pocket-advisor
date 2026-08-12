@@ -30,7 +30,7 @@ func ensureSchema(ctx context.Context, cfg *config.Config, id string, info embed
 	if err != nil {
 		return fmt.Errorf("connect workspace database: %w\n"+
 			"  `./pocket-advisor.sh deploy-workspaces` creates every registered "+
-			"workspace's database and role — is %q in workspaces/workspace-config.yaml, "+
+			"workspace's database and role — is %q in workspaces/workspaces.yaml, "+
 			"and has deploy-workspaces (or deploy-infra) been run since it was added?",
 			err, id)
 	}

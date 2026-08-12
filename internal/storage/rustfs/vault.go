@@ -22,20 +22,14 @@ import (
 type Provenance struct {
 	SourceFilename string
 	SourcePath     string
-	CollectionID   string
 	UploadedAt     string
 	UploaderRunID  string
 	AliasFilenames []string
-	// Extra carries registry attributes the workspace config knows and the
-	// bytes do not — ingestion type, and for bank collections the account
-	// identification. Keys are stored verbatim under x-amz-meta-.
-	Extra map[string]string
 }
 
 const (
 	metaFilename = "source-filename"
 	metaPath     = "source-path"
-	metaColl     = "collection-id"
 	metaUploaded = "uploaded-at"
 	metaRunID    = "uploader-run-id"
 	metaAliases  = "alias-filenames"
@@ -78,21 +72,11 @@ func (p Provenance) toUserMetadata() map[string]string {
 	m := map[string]string{
 		metaFilename: p.SourceFilename,
 		metaPath:     p.SourcePath,
-		metaColl:     p.CollectionID,
 		metaUploaded: p.UploadedAt,
 		metaRunID:    p.UploaderRunID,
 	}
 	if a := encodeAliases(p.AliasFilenames); a != "" {
 		m[metaAliases] = a
-	}
-	for k, v := range p.Extra {
-		if v == "" {
-			continue
-		}
-		// Never let an Extra key shadow a core provenance field.
-		if _, reserved := m[k]; !reserved {
-			m[k] = v
-		}
 	}
 	return m
 }
@@ -128,29 +112,10 @@ func provenanceFrom(userMeta map[string]string) Provenance {
 	p := Provenance{
 		SourceFilename: get(metaFilename),
 		SourcePath:     get(metaPath),
-		CollectionID:   get(metaColl),
 		UploadedAt:     get(metaUploaded),
 		UploaderRunID:  get(metaRunID),
 	}
 	p.AliasFilenames = decodeAliases(get(metaAliases))
-
-	// Anything not a core field is a registry attribute. Round-tripping it
-	// matters: AddAlias rewrites the object's metadata wholesale, so a key
-	// dropped here is a key deleted from Tier 1.
-	core := map[string]bool{
-		metaFilename: true, metaPath: true, metaColl: true,
-		metaUploaded: true, metaRunID: true, metaAliases: true,
-	}
-	for name, v := range userMeta {
-		k := strings.ToLower(strings.TrimPrefix(name, "X-Amz-Meta-"))
-		if core[k] || v == "" {
-			continue
-		}
-		if p.Extra == nil {
-			p.Extra = map[string]string{}
-		}
-		p.Extra[k] = v
-	}
 	return p
 }
 
@@ -296,9 +261,9 @@ func (v *Vault) Put(ctx context.Context, key string, r io.Reader, size int64, co
 // The existing metadata is read and written back deliberately. ReplaceMetadata
 // means "replace with what I supply", so supplying nothing does not preserve
 // provenance, it erases it — a touched object came back with userMetadata:{},
-// losing the source filename and collection id that Ingest builds the document
-// from. Re-copying the object was meant to be an identity operation; without
-// this it silently destroyed the very fields it exists to redeliver.
+// losing the source filename and path that Ingest builds the document from.
+// Re-copying the object was meant to be an identity operation; without this
+// it silently destroyed the very fields it exists to redeliver.
 func (v *Vault) Touch(ctx context.Context, key string) error {
 	if err := v.refuseRawWrite("touch", key); err != nil {
 		return err

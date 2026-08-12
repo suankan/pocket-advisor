@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS documents (
     doc_id            UUID PRIMARY KEY,
     parent_doc_id     UUID REFERENCES documents(doc_id) ON DELETE CASCADE,
     workspace_id      VARCHAR NOT NULL,
-    collection_id     VARCHAR NOT NULL DEFAULT '',
     thread_id         VARCHAR NOT NULL DEFAULT '',
     processing_status processing_status NOT NULL DEFAULT 'PENDING',
     doc_type          VARCHAR NOT NULL DEFAULT '',
@@ -82,9 +81,16 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS documents_workspace_idx  ON documents(workspace_id);
-CREATE INDEX IF NOT EXISTS documents_collection_idx ON documents(collection_id);
 CREATE INDEX IF NOT EXISTS documents_thread_idx     ON documents(thread_id);
 CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
+
+-- A workspace is now one recursively walked directory with no further
+-- subdivision (ingestion-design.md §3.1). An older database may still carry
+-- this column and its index from before that change; both are dropped so a
+-- fresh bootstrap and an upgraded existing database converge on the same
+-- schema.
+DROP INDEX IF EXISTS documents_collection_idx;
+ALTER TABLE documents DROP COLUMN IF EXISTS collection_id;
 -- Drives the stale-PENDING reconciliation sweep (§2.2).
 CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';

@@ -72,7 +72,7 @@ Implement bounded recovery for:
 - a missing BM25 index after otherwise completed ingestion; and
 - detectable partial reset or forget operations.
 
-Reconstruct work only from authoritative Tier 1 bytes and durable Tier 2 metadata. If a command cannot be reconstructed without guessing workspace, collection, lineage, MIME type, thread context, or source identity, report it as not safely recoverable.
+Reconstruct work only from authoritative Tier 1 bytes and durable Tier 2 metadata. If a command cannot be reconstructed without guessing workspace, lineage, MIME type, thread context, or source identity, report it as not safely recoverable.
 
 Use compare-and-set state transitions or an equivalent lease mechanism so a live worker and a recovery command cannot both claim the same document. A recovery crash must leave a state that a later recovery run can inspect and converge.
 

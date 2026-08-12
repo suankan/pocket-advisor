@@ -29,7 +29,6 @@ type DocumentMetadata struct {
 	// Empty for root documents. Only DiscoveryService mints those.
 	ParentDocId    string `protobuf:"bytes,2,opt,name=parent_doc_id,json=parentDocId,proto3" json:"parent_doc_id,omitempty"`
 	WorkspaceId    string `protobuf:"bytes,3,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	CollectionId   string `protobuf:"bytes,4,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	ThreadId       string `protobuf:"bytes,5,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	SourceFilename string `protobuf:"bytes,6,opt,name=source_filename,json=sourceFilename,proto3" json:"source_filename,omitempty"`
 	MimeType       string `protobuf:"bytes,7,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
@@ -91,13 +90,6 @@ func (x *DocumentMetadata) GetParentDocId() string {
 func (x *DocumentMetadata) GetWorkspaceId() string {
 	if x != nil {
 		return x.WorkspaceId
-	}
-	return ""
-}
-
-func (x *DocumentMetadata) GetCollectionId() string {
-	if x != nil {
-		return x.CollectionId
 	}
 	return ""
 }
@@ -471,12 +463,11 @@ var File_ingestion_proto protoreflect.FileDescriptor
 
 const file_ingestion_proto_rawDesc = "" +
 	"\n" +
-	"\x0fingestion.proto\x12\x1apocketadvisor.ingestion.v1\"\x85\x04\n" +
+	"\x0fingestion.proto\x12\x1apocketadvisor.ingestion.v1\"\xf5\x03\n" +
 	"\x10DocumentMetadata\x12\x15\n" +
 	"\x06doc_id\x18\x01 \x01(\tR\x05docId\x12\"\n" +
 	"\rparent_doc_id\x18\x02 \x01(\tR\vparentDocId\x12!\n" +
-	"\fworkspace_id\x18\x03 \x01(\tR\vworkspaceId\x12#\n" +
-	"\rcollection_id\x18\x04 \x01(\tR\fcollectionId\x12\x1b\n" +
+	"\fworkspace_id\x18\x03 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tthread_id\x18\x05 \x01(\tR\bthreadId\x12'\n" +
 	"\x0fsource_filename\x18\x06 \x01(\tR\x0esourceFilename\x12\x1b\n" +
 	"\tmime_type\x18\a \x01(\tR\bmimeType\x12\x1d\n" +
@@ -488,7 +479,7 @@ const file_ingestion_proto_rawDesc = "" +
 	"\x11custom_attributes\x18\v \x03(\v2B.pocketadvisor.ingestion.v1.DocumentMetadata.CustomAttributesEntryR\x10customAttributes\x1aC\n" +
 	"\x15CustomAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x85\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x04\x10\x05R\rcollection_id\"\x85\x01\n" +
 	"\x13ProcessEmailCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12$\n" +
 	"\x0erustfs_raw_uri\x18\x02 \x01(\tR\frustfsRawUri\"\x9f\x01\n" +

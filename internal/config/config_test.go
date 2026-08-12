@@ -50,7 +50,7 @@ func TestWorkspacePathsResolveAgainstTheConfigFile(t *testing.T) {
 	tmp := t.TempDir()
 	path := writeConfig(t, tmp, validInfra+`
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 
 	c, err := Load(path)
@@ -58,7 +58,7 @@ workspaces:
 		t.Fatal(err)
 	}
 
-	wantConfig := filepath.Join(tmp, "workspaces/workspace-config.yaml")
+	wantConfig := filepath.Join(tmp, "workspaces/workspaces.yaml")
 	if c.WorkspacesConfigPath != wantConfig {
 		t.Errorf("registry path = %q, want %q", c.WorkspacesConfigPath, wantConfig)
 	}
@@ -85,7 +85,7 @@ func TestEnvironmentOverrideIsTakenLiterally(t *testing.T) {
 	// The environment is set by whoever launches the process, in their own
 	// working directory, so it wins over the file and is not re-anchored to it.
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspace-config.yaml\n")
+	path := writeConfig(t, tmp, validInfra+"\nworkspaces:\n  config: workspaces/workspaces.yaml\n")
 	t.Setenv("WORKSPACES_CONFIG", "some/other/registry.yaml")
 
 	c, err := Load(path)
@@ -115,7 +115,7 @@ func TestLogDirResolvesAgainstTheConfigFile(t *testing.T) {
   observability:
     log_dir: logs
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 
 	c, err := Load(path)
@@ -136,7 +136,7 @@ func TestLogDirResolvesAgainstTheConfigFileEvenWithoutAnExplicitValue(t *testing
 	tmp := t.TempDir()
 	path := writeConfig(t, tmp, validInfra+`
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 
 	c, err := Load(path)
@@ -157,7 +157,7 @@ func TestAbsoluteLogDirIsLeftAlone(t *testing.T) {
   observability:
     log_dir: `+elsewhere+`
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 
 	c, err := Load(path)
@@ -175,7 +175,7 @@ func TestLogDirEnvironmentOverrideIsTakenLiterally(t *testing.T) {
   observability:
     log_dir: logs
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 	t.Setenv("LOG_DIR", "some/other/logs")
 
@@ -203,7 +203,7 @@ func TestConfigExpandsRequiredEnvironmentPlaceholders(t *testing.T) {
 	tmp := t.TempDir()
 	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${TEST_RUSTFS_ENDPOINT}", 1)+`
 workspaces:
-  config: workspaces/workspace-config.yaml
+  config: workspaces/workspaces.yaml
 `)
 	t.Setenv("TEST_RUSTFS_ENDPOINT", "rustfs.from-env:9000")
 
@@ -230,7 +230,7 @@ func TestBareConfigNameKeepsPathsUnchanged(t *testing.T) {
 	// filepath.Dir("config.yaml") is ".", and joining against it must be a
 	// no-op — this is the path every command run from the repository root
 	// takes, and it has to behave exactly as it did before anchoring existed.
-	if got := resolveAgainst(".", "workspaces/workspace-config.yaml"); got != "workspaces/workspace-config.yaml" {
+	if got := resolveAgainst(".", "workspaces/workspaces.yaml"); got != "workspaces/workspaces.yaml" {
 		t.Errorf("resolveAgainst(\".\", …) = %q, want it unchanged", got)
 	}
 }

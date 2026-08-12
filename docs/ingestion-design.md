@@ -8,8 +8,8 @@ Ingestion is a bounded host process. One `pocket-advisor` binary contains the up
 
 The central invariants are:
 
-1. RustFS is the sole authoritative store for document bytes. Local collection paths are staging feeds used only by the uploader.
-2. Root document identity is content-addressed within a workspace and collection.
+1. RustFS is the sole authoritative store for document bytes. A workspace's local directory is a staging feed used only by the uploader.
+2. Root document identity is content-addressed within a workspace: the workspace registry defines a workspace as a single directory recursively walked with no further subdivision, so a document's identity does not depend on which subdirectory contains it.
 3. Discovery is the only component that creates root documents. Container workers create children with explicit lineage.
 4. Every worker is idempotent under at-least-once delivery.
 5. Indexed text is extracted source text only. No generated summaries or answers enter Tier 2 or Tier 3.
@@ -19,7 +19,7 @@ The central invariants are:
 
 ```mermaid
 flowchart LR
-  Source["Local collection paths\n(staging only)"] --> Upload["Uploader"]
+  Source["Local workspace directory\n(staging only)"] --> Upload["Uploader"]
   Upload --> Raw["RustFS raw/"]
   Raw --> Notify["RustFS notification target"]
   Notify --> Events["RUSTFS_EVENTS"]
@@ -45,19 +45,17 @@ raw/<sha256-prefix>/<sha256>
 extracted/<sha256-prefix>/<sha256>
 ```
 
-`raw/` holds uploaded root objects. `extracted/` holds child objects unrolled from email and archive containers. Keys are stable content hashes, so identical bytes in one collection converge on one object and repeated uploads can use an exact existence check.
+`raw/` holds uploaded root objects. `extracted/` holds child objects unrolled from email and archive containers. Keys are stable content hashes, so identical bytes anywhere in one workspace converge on one object and repeated uploads can use an exact existence check.
 
 The object metadata carries the provenance that a content-addressed key cannot:
 
 | Metadata | Purpose |
 | --- | --- |
 | `source-filename` | original basename |
-| `source-path` | path relative to the collection root |
-| `collection-id` | collection scope used for document identity |
+| `source-path` | path relative to the workspace's own directory |
 | `uploaded-at` | upload timestamp |
 | `uploader-run-id` | upload run correlation |
 | `alias-filenames` | additional names observed for identical content |
-| collection attributes | ingestion type and collection-specific metadata |
 
 Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on read before names are compared.
 
@@ -66,13 +64,13 @@ Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on re
 Root identity is deterministic:
 
 ```text
-doc_id = UUIDv5(namespace, workspace_id || collection_id || sha256)
+doc_id = UUIDv5(namespace, workspace_id || sha256)
 ```
 
 The `documents` table holds:
 
 - parent/child and thread lineage;
-- workspace and collection ids;
+- workspace id;
 - processing status;
 - detected type and MIME type;
 - Tier 1 URI and content hash;
@@ -146,13 +144,13 @@ Topic relations and episodes are a second replaceable BUILDING-only layer in the
 
 ### 3.1 Workspace resolution
 
-`--ingest-all` resolves collections from `workspaces/workspace-config.yaml`, or the configured override, before touching a store. Unknown workspace ids and missing collection references are errors.
+`--ingest-all` resolves the named workspace's single directory from `workspaces/workspaces.yaml`, or the configured override, before touching a store. An unknown workspace id is an error, as is a configured path that does not exist or is not a directory.
 
-Collection paths are resolved relative to the registry file. Only the uploader reads those paths; workers and retrieval never do.
+A workspace's path is resolved relative to the registry file. Only the uploader reads it; workers and retrieval never do. There is no further subdivision inside a workspace — no collection, no per-subdirectory registry metadata — the uploader walks the whole directory recursively and every regular file found, at any depth, is a candidate document.
 
 ### 3.2 Upload
 
-For every regular file in the selected collections, the uploader:
+For every regular file found under the workspace's directory, at any depth, the uploader:
 
 1. streams the file and computes SHA-256;
 2. forms the canonical `raw/` key;
@@ -225,8 +223,6 @@ The document worker has separate PDF and image consumer pools sharing one extrac
 
 OCR is compiled behind the `ocr` build tag. The supported build command enables it. A binary built without that tag remains usable but records scanned PDFs and images as `SKIPPED / OCR_UNAVAILABLE`.
 
-A collection's registry `ingestion-type: bank-transactions` (`workspace-config.yaml`) does not change extraction: a bank statement PDF goes through this same worker and becomes ordinary unstructured `normalized_text`, identically to any other PDF. `bsb`, `account_number`, `owners`, and `type` are registry metadata that this worker attaches to the Tier 1 raw object but does not copy into PostgreSQL. [Exact bank statement browse](retrieval-design.md#exact-bank-statement-browse) resolves that same registry metadata directly at query time instead, so deterministic document selection by owner or account needs no schema change here. Parsing individual transaction line items out of statement text remains out of scope; statement text is a layout-preserving PDF extraction, not CSV.
-
 ### 4.3 Office worker
 
 The pure-Go office worker handles:
@@ -245,7 +241,7 @@ Discovery writes supported plain text directly to `documents.normalized_text` be
 
 ## 5. Commands and queues
 
-Every ingestion command is Protobuf and begins with `DocumentMetadata` containing document identity, workspace, collection, lineage, MIME type, content hash, trace context, and container depth.
+Every ingestion command is Protobuf and begins with `DocumentMetadata` containing document identity, workspace, lineage, MIME type, content hash, trace context, and container depth.
 
 | Command | Subject | Payload role |
 | --- | --- | --- |

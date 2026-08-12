@@ -33,13 +33,13 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (bool
 	var id string
 	err = r.db.Pool.QueryRow(ctx, `
         INSERT INTO documents (
-            doc_id, parent_doc_id, workspace_id, collection_id, thread_id,
+            doc_id, parent_doc_id, workspace_id, thread_id,
             processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
             source_filename, metadata_headers)
-        VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11)
+        VALUES ($1,$2,$3,$4,'PENDING',$5,$6,$7,$8,$9,$10)
         ON CONFLICT (doc_id) DO NOTHING
         RETURNING doc_id::text`,
-		d.DocID, parent, d.WorkspaceID, d.Collection, d.ThreadID,
+		d.DocID, parent, d.WorkspaceID, d.ThreadID,
 		d.DocType, d.MimeType, d.RawURI, d.RawSHA256, d.SourceName, meta).Scan(&id)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -150,7 +150,7 @@ func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, 
 // the reconciliation sweep (§2.2).
 func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-        SELECT doc_id::text, workspace_id, collection_id, mime_type,
+        SELECT doc_id::text, workspace_id, mime_type,
                rustfs_raw_uri, raw_sha256, source_filename,
                COALESCE(parent_doc_id::text, '')
         FROM documents
@@ -166,7 +166,7 @@ func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Dur
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.Collection, &d.MimeType,
+		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.MimeType,
 			&d.RawURI, &d.RawSHA256, &d.SourceName, &d.ParentDocID); err != nil {
 			return nil, err
 		}

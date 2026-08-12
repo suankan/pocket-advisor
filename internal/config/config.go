@@ -288,11 +288,11 @@ type Config struct {
 
 	// WorkspacesConfigPath points at the workspace registry
 	// (config.yaml's workspaces.config — required, no fallback) — the same
-	// file internal/workspace reads for collections and paths. There is no
-	// separate credentials file any more: every workspace's Postgres role,
-	// RustFS bucket, and NATS subjects/streams are named after its id by
-	// fixed convention (see Workspace), so nothing per-workspace needs its
-	// own registry entry.
+	// file internal/workspace reads for each workspace's single recursively
+	// walked path. There is no separate credentials file any more: every
+	// workspace's Postgres role, RustFS bucket, and NATS subjects/streams
+	// are named after its id by fixed convention (see Workspace), so
+	// nothing per-workspace needs its own registry entry.
 	WorkspacesConfigPath string
 
 	MetricsPort int

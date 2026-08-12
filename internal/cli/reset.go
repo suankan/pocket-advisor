@@ -63,7 +63,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	if !o.Yes && !confirm(fmt.Sprintf(
-		"DELETE ALL DATA for workspace %q (%d collections)?\n"+
+		"DELETE ALL DATA for workspace %q?\n"+
 			"  - %s\n"+
 			"  - deletes every object in this workspace's bucket\n"+
 			"  - deletes every documents row and every chunk for the workspace\n"+
@@ -71,7 +71,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 			"    names an object and a row that will no longer exist\n"+
 			"This cannot be undone. Tier 1 is the source of truth; re-ingesting\n"+
 			"requires the original files still being on disk.",
-		ws.ID, len(ws.Collections), counts)) {
+		ws.ID, counts)) {
 		return errAborted
 	}
 

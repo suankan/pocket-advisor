@@ -320,7 +320,7 @@ type EmailDocumentQuery struct {
 // report it as unreadable rather than silently losing the missing metadata.
 func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([]domain.Document, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-        SELECT d.doc_id::text, d.workspace_id, d.collection_id, d.mime_type,
+        SELECT d.doc_id::text, d.workspace_id, d.mime_type,
                d.rustfs_raw_uri, d.raw_sha256
         FROM documents d
         WHERE d.workspace_id = $1
@@ -338,7 +338,7 @@ func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.Collection, &d.MimeType,
+		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.MimeType,
 			&d.RawURI, &d.RawSHA256); err != nil {
 			return nil, fmt.Errorf("list email documents: %w", err)
 		}

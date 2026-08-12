@@ -22,7 +22,6 @@ import (
 	"github.com/suankan/pocket-advisor/internal/mailbox"
 	"github.com/suankan/pocket-advisor/internal/mcp"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
-	"github.com/suankan/pocket-advisor/internal/statements"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/topicgraph"
@@ -68,10 +67,7 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 	title, corpus := describeCorpus(o)
 	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title}
 	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title}
-	statementsService := statements.New(statements.NewPostgresStore(db), resolved, o.WorkspaceID)
-	queryTool := &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}
-	queryTool.Statements = &mcp.StatementsTool{Browser: statementsService, Query: queryTool, Workspace: o.WorkspaceID, Title: title}
-	return queryTool, svc, db.Close, nil
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {
@@ -122,23 +118,26 @@ func splitCSV(raw string) []string {
 // Failure is deliberately soft: an undescribed tool is worse than an
 // unstartable server, so a registry that cannot be read costs the description
 // and nothing else.
+//
+// A workspace no longer carries per-directory registry descriptions — it is
+// one recursively walked tree with no further subdivision (§3.1) — so the
+// contents hint is instead the workspace's own top-level directory names, a
+// cheap single-level read rather than the full recursive walk ingestion
+// itself performs.
 func describeCorpus(o *Options) (title string, corpus []string) {
 	ws, err := workspace.Load(o.WorkspaceConfig, o.WorkspaceID)
 	if err != nil {
 		return "", nil
 	}
-	for _, c := range ws.Collections {
-		switch {
-		case c.Title != "":
-			corpus = append(corpus, c.Title)
-		case c.AccountNumber != "":
-			// Bank collections carry no title but do carry the account it
-			// covers, which is exactly what makes them selectable.
-			label := strings.ReplaceAll(c.ID, "-", " ")
-			corpus = append(corpus, label+" (account "+c.AccountNumber+")")
-		default:
-			corpus = append(corpus, strings.ReplaceAll(c.ID, "-", " "))
+	entries, err := os.ReadDir(ws.AbsPath)
+	if err != nil {
+		return ws.Title, nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
 		}
+		corpus = append(corpus, strings.ReplaceAll(e.Name(), "-", " "))
 	}
 	return ws.Title, corpus
 }
@@ -189,7 +188,7 @@ func mcpStdioCmd(cfg *config.Config, args []string) error {
 	}
 	defer closeDB()
 
-	log.Info("mcp server ready", "workspace_id", *workspaceID, "transport", "stdio", "collections", len(tool.Corpus))
+	log.Info("mcp server ready", "workspace_id", *workspaceID, "transport", "stdio", "corpus_entries", len(tool.Corpus))
 	srv := mcp.NewServer(tool, os.Stdin, os.Stdout, log)
 	return srv.Serve(ctx)
 }
@@ -450,7 +449,7 @@ func runMCPHTTPServer(cfg *config.Config, args []string) error {
 		"addr", cfg.MCP.HTTP.Addr,
 		"resource_uri", cfg.MCP.HTTP.ResourceURI,
 		"authenticated", cfg.MCP.OAuth.GoogleClientID != "",
-		"collections", len(tool.Corpus))
+		"corpus_entries", len(tool.Corpus))
 
 	return server.Serve(ctx)
 }

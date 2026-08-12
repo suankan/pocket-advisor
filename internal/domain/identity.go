@@ -13,13 +13,17 @@ var Namespace = mustParseUUID("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
 
 // NewDocID derives the deterministic document identifier (§5.2).
 //
-//	doc_id = UUIDv5(Namespace, workspace_id || collection_id || sha256)
+//	doc_id = UUIDv5(Namespace, workspace_id || sha256)
 //
 // Determinism is what makes the whole entry path idempotent: re-scanning a
-// collection, retrying a failed publish, and two racing intake requests for
-// the same bytes all converge on one row.
-func NewDocID(workspaceID, collectionID, sha256hex string) string {
-	return uuidV5(Namespace, workspaceID+"\x00"+collectionID+"\x00"+sha256hex)
+// workspace, retrying a failed publish, and two racing intake requests for
+// the same bytes all converge on one row. Content-addressed within the
+// workspace only — a workspace is now simply a recursively walked file tree
+// with no further subdivision, so the same bytes reachable twice within one
+// workspace are one document regardless of which subdirectory found them
+// first.
+func NewDocID(workspaceID, sha256hex string) string {
+	return uuidV5(Namespace, workspaceID+"\x00"+sha256hex)
 }
 
 // NewChunkID derives a chunk identifier from its parent and position, so that

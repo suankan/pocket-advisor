@@ -6,8 +6,8 @@ import "testing"
 // makes re-scanning, retried publishes and racing intake requests converge on
 // one row (§5.2).
 func TestNewDocIDIsDeterministic(t *testing.T) {
-	a := NewDocID("ws", "coll", "abc123")
-	b := NewDocID("ws", "coll", "abc123")
+	a := NewDocID("ws", "abc123")
+	b := NewDocID("ws", "abc123")
 	if a != b {
 		t.Fatalf("same inputs produced different ids: %s vs %s", a, b)
 	}
@@ -21,11 +21,23 @@ func TestNewDocIDIsDeterministic(t *testing.T) {
 
 func TestNewDocIDSeparatesFields(t *testing.T) {
 	// Without a separator, ("ab","c") and ("a","bc") would collide.
-	if NewDocID("ab", "c", "h") == NewDocID("a", "bc", "h") {
+	if NewDocID("ab", "c") == NewDocID("a", "bc") {
 		t.Error("field boundaries are not separated in the id derivation")
 	}
-	if NewDocID("ws", "coll", "h1") == NewDocID("ws", "coll", "h2") {
+	if NewDocID("ws", "h1") == NewDocID("ws", "h2") {
 		t.Error("different content produced the same doc id")
+	}
+}
+
+func TestNewDocIDIsContentAddressedWithinAWorkspace(t *testing.T) {
+	// A workspace is a single recursively walked directory with no further
+	// subdivision: the same bytes reachable twice within one workspace are
+	// one document regardless of which subdirectory found them first.
+	if NewDocID("ws", "same-hash") != NewDocID("ws", "same-hash") {
+		t.Error("identical workspace and content must converge on one id")
+	}
+	if NewDocID("ws-a", "same-hash") == NewDocID("ws-b", "same-hash") {
+		t.Error("different workspaces must not collide on the same content")
 	}
 }
 

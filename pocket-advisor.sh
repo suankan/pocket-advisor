@@ -5,7 +5,7 @@
 # workspace-specific — a database, a bucket, a set of streams — is
 # provisioned by `./pocket-advisor.sh deploy-workspaces`, calling
 # psql/rc/aws-cli/natscli directly once per workspace listed in
-# workspaces/workspace-config.yaml, the same operation an operator would
+# workspaces/workspaces.yaml, the same operation an operator would
 # have made but run once by a human instead of continuously by a
 # controller. `deploy-infra` runs it automatically after the shared stores
 # come up, so a stock `deploy-infra` alone leaves nothing unprovisioned.
@@ -103,7 +103,7 @@ usage: ./pocket-advisor.sh <command> [args]
   destroy-state             delete every PVC in $POCKET_ADVISOR_NAMESPACE (irreversible)
   deploy-metrics-server     helm install metrics-server into $METRICS_SERVER_NAMESPACE
   destroy-metrics-server    helm uninstall metrics-server
-  deploy-workspaces         provision every workspace in workspaces/workspace-config.yaml
+  deploy-workspaces         provision every workspace in workspaces/workspaces.yaml
   destroy-workspace <id>    tear down one workspace's database/bucket/streams
   clean                     rm -rf bin
 EOF
@@ -210,8 +210,8 @@ cmd_docker_build_postgres() {
 # gone with the operators (deviation 39).
 cmd_deploy_infra() {
   cmd_docker_build_postgres || exit 1
-  if [ ! -f workspaces/workspace-config.yaml ]; then
-    echo "missing workspaces/workspace-config.yaml" >&2
+  if [ ! -f workspaces/workspaces.yaml ]; then
+    echo "missing workspaces/workspaces.yaml" >&2
     exit 1
   fi
   # The chart's workspaces: list only needs an id per entry now (no
@@ -219,7 +219,7 @@ cmd_deploy_infra() {
   # authoritative registry, not a second credentials-only file.
   set --
   i=0
-  for id in $(yq '.workspaces[].id' workspaces/workspace-config.yaml); do
+  for id in $(yq '.workspaces[].id' workspaces/workspaces.yaml); do
     set -- "$@" --set "workspaces[$i].id=$id"
     i=$((i + 1))
   done
@@ -229,7 +229,7 @@ cmd_deploy_infra() {
     kubectl rollout status statefulset/"$sts" -n "$POCKET_ADVISOR_NAMESPACE" --timeout=5m || exit 1
   done
   echo
-  echo "shared stores ready. provisioning every workspace in workspaces/workspace-config.yaml..."
+  echo "shared stores ready. provisioning every workspace in workspaces/workspaces.yaml..."
   cmd_deploy_workspaces
   echo
   echo "deploy-infra brought up Postgres, RustFS, NATS, and every registered workspace. next:"
@@ -363,17 +363,17 @@ provision_workspace() {
   echo "workspace \"$id\" provisioned."
 }
 
-# Provisions every workspace listed in workspaces/workspace-config.yaml —
+# Provisions every workspace listed in workspaces/workspaces.yaml —
 # the one authoritative registry, same list deploy-infra already reads to
 # populate the chart's workspaces: values. Run standalone to (re-)provision
 # after editing the registry, or automatically at the end of deploy-infra.
 cmd_deploy_workspaces() {
-  if [ ! -f workspaces/workspace-config.yaml ]; then
-    echo "missing workspaces/workspace-config.yaml" >&2
+  if [ ! -f workspaces/workspaces.yaml ]; then
+    echo "missing workspaces/workspaces.yaml" >&2
     exit 1
   fi
   resolve_infra
-  for id in $(yq '.workspaces[].id' workspaces/workspace-config.yaml); do
+  for id in $(yq '.workspaces[].id' workspaces/workspaces.yaml); do
     echo
     echo "=== workspace: $id ==="
     provision_workspace "$id"
@@ -416,7 +416,7 @@ cmd_destroy_workspace() {
   done
 
   echo
-  echo "workspace \"$id\" torn down. Remove its entry from workspaces/workspace-config.yaml by hand."
+  echo "workspace \"$id\" torn down. Remove its entry from workspaces/workspaces.yaml by hand."
 }
 
 cmd_clean() {

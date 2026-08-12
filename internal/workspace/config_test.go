@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fixture writes a registry plus the collection directories it references.
+// fixture writes a registry plus the workspace directories it references.
 func fixture(t *testing.T, yaml string, dirs ...string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -16,46 +16,25 @@ func fixture(t *testing.T, yaml string, dirs ...string) string {
 			t.Fatal(err)
 		}
 	}
-	p := filepath.Join(root, "workspace-config.yaml")
+	p := filepath.Join(root, "workspaces.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
-const twoCollections = `
+const twoWorkspaces = `
 schema_version: 2
-collections:
-  - id: correspondence
-    title: Correspondence
-    ingestion-type: general
-    path: corpora/correspondence
-  - id: bank-one
-    description: Joint account
-    ingestion-type: bank-transactions
-    bsb: "032289"
-    account_number: "773595"
-    type: daily-transactions
-    owners: [suan, svetlana]
-    path: corpora/bank/one
-  - id: unused
-    ingestion-type: general
-    path: corpora/unused
 workspaces:
   - id: matter
-    path: matter
+    path: data/matter
     title: The Matter
-    collections:
-      - id: correspondence
-      - id: bank-one
   - id: other
-    path: other
-    collections:
-      - id: unused
+    path: data/other
 `
 
-func TestLoadResolvesOnlyTheWorkspacesCollections(t *testing.T) {
-	p := fixture(t, twoCollections, "corpora/correspondence", "corpora/bank/one", "corpora/unused")
+func TestLoadResolvesTheNamedWorkspace(t *testing.T) {
+	p := fixture(t, twoWorkspaces, "data/matter", "data/other")
 
 	ws, err := Load(p, "matter")
 	if err != nil {
@@ -64,64 +43,28 @@ func TestLoadResolvesOnlyTheWorkspacesCollections(t *testing.T) {
 	if ws.ID != "matter" || ws.Title != "The Matter" {
 		t.Errorf("workspace identity wrong: %+v", ws)
 	}
-	if len(ws.Collections) != 2 {
-		t.Fatalf("expected 2 collections, got %d", len(ws.Collections))
+	if !filepath.IsAbs(ws.AbsPath) {
+		t.Errorf("path not absolute: %s", ws.AbsPath)
 	}
-	for _, c := range ws.Collections {
-		if c.ID == "unused" {
-			t.Error("a collection this workspace does not mount was included")
-		}
-		// Paths are relative to the registry file's own directory.
-		if !filepath.IsAbs(c.AbsPath) {
-			t.Errorf("path not absolute: %s", c.AbsPath)
-		}
-		if _, err := os.Stat(c.AbsPath); err != nil {
-			t.Errorf("resolved path does not exist: %v", err)
-		}
+	if _, err := os.Stat(ws.AbsPath); err != nil {
+		t.Errorf("resolved path does not exist: %v", err)
 	}
 }
 
-func TestBankMetadataTravelsWithTheBytes(t *testing.T) {
-	// The registry does not live in the cluster, so account identification is
-	// lost unless it is written onto the object.
-	p := fixture(t, twoCollections, "corpora/correspondence", "corpora/bank/one", "corpora/unused")
+func TestLoadDoesNotResolveOtherWorkspaces(t *testing.T) {
+	p := fixture(t, twoWorkspaces, "data/matter", "data/other")
+
 	ws, err := Load(p, "matter")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var bank ResolvedCollection
-	for _, c := range ws.Collections {
-		if c.ID == "bank-one" {
-			bank = c
-		}
-	}
-	m := bank.Metadata()
-	for k, want := range map[string]string{
-		"ingestion-type": "bank-transactions",
-		"account-bsb":    "032289",
-		"account-number": "773595",
-		"account-type":   "daily-transactions",
-		"account-owners": "suan,svetlana",
-	} {
-		if m[k] != want {
-			t.Errorf("metadata %s = %q, want %q", k, m[k], want)
-		}
-	}
-
-	// A general collection must not invent empty account fields.
-	for _, c := range ws.Collections {
-		if c.ID != "correspondence" {
-			continue
-		}
-		if _, ok := c.Metadata()["account-bsb"]; ok {
-			t.Error("non-bank collection carries account metadata")
-		}
+	if strings.Contains(ws.AbsPath, "other") {
+		t.Errorf("resolved the wrong workspace's path: %s", ws.AbsPath)
 	}
 }
 
 func TestUnknownWorkspaceListsTheAvailableOnes(t *testing.T) {
-	p := fixture(t, twoCollections, "corpora/correspondence", "corpora/bank/one", "corpora/unused")
+	p := fixture(t, twoWorkspaces, "data/matter", "data/other")
 
 	_, err := Load(p, "typo")
 	if err == nil {
@@ -135,45 +78,33 @@ func TestUnknownWorkspaceListsTheAvailableOnes(t *testing.T) {
 	}
 }
 
-func TestDanglingCollectionReferenceIsAnError(t *testing.T) {
-	// Silently uploading less than the matter contains is the worst outcome.
+func TestMissingWorkspacePathIsAnError(t *testing.T) {
 	y := `
 schema_version: 2
-collections:
-  - id: present
-    path: corpora/present
 workspaces:
   - id: matter
-    collections:
-      - id: present
-      - id: missing
-`
-	p := fixture(t, y, "corpora/present")
-	_, err := Load(p, "matter")
-	if err == nil || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("expected a dangling reference to be reported, got: %v", err)
-	}
-}
-
-func TestMissingCollectionDirectoryIsAnError(t *testing.T) {
-	y := `
-schema_version: 2
-collections:
-  - id: gone
-    path: corpora/gone
-workspaces:
-  - id: matter
-    collections:
-      - id: gone
+    path: data/gone
 `
 	p := fixture(t, y) // directory deliberately not created
 	if _, err := Load(p, "matter"); err == nil {
-		t.Fatal("expected a missing collection directory to be reported")
+		t.Fatal("expected a missing workspace directory to be reported")
+	}
+}
+
+func TestWorkspaceWithNoPathIsAnError(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+`
+	p := fixture(t, y)
+	if _, err := Load(p, "matter"); err == nil {
+		t.Fatal("expected a workspace with no path to be rejected")
 	}
 }
 
 func TestWrongSchemaVersionRejected(t *testing.T) {
-	y := "schema_version: 1\ncollections: []\nworkspaces: []\n"
+	y := "schema_version: 1\nworkspaces: []\n"
 	p := fixture(t, y)
 	if _, err := Load(p, "matter"); err == nil {
 		t.Fatal("expected schema_version 1 to be rejected")
@@ -186,27 +117,21 @@ func TestWrongSchemaVersionRejected(t *testing.T) {
 
 const withOwnerIdentities = `
 schema_version: 2
-collections:
-  - id: mail
-    ingestion-type: general
-    path: corpora/mail
 workspaces:
   - id: matter
+    path: data/matter
     title: The Matter
     owner-identities:
       - Owner Person <Owner@Example.com>
       - "  alias@example.NET  "
       - <third@example.org>
-    collections:
-      - id: mail
   - id: other
-    collections:
-      - id: mail
+    path: data/other
 `
 
 func TestWorkspaceWithoutOwnerIdentitiesLoadsUnchanged(t *testing.T) {
-	// The key is new; registries written before it must not start failing.
-	p := fixture(t, twoCollections, "corpora/correspondence", "corpora/bank/one", "corpora/unused")
+	// The key is optional; registries written before it must not start failing.
+	p := fixture(t, twoWorkspaces, "data/matter", "data/other")
 
 	ws, err := Load(p, "matter")
 	if err != nil {
@@ -223,7 +148,7 @@ func TestWorkspaceWithoutOwnerIdentitiesLoadsUnchanged(t *testing.T) {
 func TestOwnerIdentitiesAreNormalizedInOrder(t *testing.T) {
 	// Display names, angle brackets, case and stray whitespace all describe the
 	// same mailbox; only one spelling may survive into the resolved workspace.
-	p := fixture(t, withOwnerIdentities, "corpora/mail")
+	p := fixture(t, withOwnerIdentities, "data/matter", "data/other")
 
 	ws, err := Load(p, "matter")
 	if err != nil {
@@ -269,17 +194,13 @@ func TestOwnerIdentitiesAreNormalizedInOrder(t *testing.T) {
 func TestSingleOwnerIdentity(t *testing.T) {
 	y := `
 schema_version: 2
-collections:
-  - id: mail
-    path: corpora/mail
 workspaces:
   - id: matter
+    path: data/matter
     owner-identities:
       - sole@example.com
-    collections:
-      - id: mail
 `
-	p := fixture(t, y, "corpora/mail")
+	p := fixture(t, y, "data/matter")
 	ws, err := Load(p, "matter")
 	if err != nil {
 		t.Fatal(err)
@@ -294,19 +215,15 @@ func TestDuplicateOwnerIdentityIsAnError(t *testing.T) {
 	// missing, and direction would silently be wrong for it.
 	y := `
 schema_version: 2
-collections:
-  - id: mail
-    path: corpora/mail
 workspaces:
   - id: matter
+    path: data/matter
     owner-identities:
       - owner@example.com
       - alias@example.net
       - Owner <OWNER@example.com>
-    collections:
-      - id: mail
 `
-	p := fixture(t, y, "corpora/mail")
+	p := fixture(t, y, "data/matter")
 	_, err := Load(p, "matter")
 	if err == nil {
 		t.Fatal("expected a duplicate owner identity to be reported")
@@ -329,23 +246,19 @@ func TestMalformedOwnerIdentityIsAnError(t *testing.T) {
 		"two addresses":     "owner@example.com, alias@example.net",
 		"empty":             `""`,
 		"whitespace only":   `"   "`,
-		"quoted with space": `'"owner person"@example.com'`,
+		"quoted with space": `\'"owner person"@example.com\'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			y := `
 schema_version: 2
-collections:
-  - id: mail
-    path: corpora/mail
 workspaces:
   - id: matter
+    path: data/matter
     owner-identities:
       - good@example.com
       - ` + entry + `
-    collections:
-      - id: mail
 `
-			p := fixture(t, y, "corpora/mail")
+			p := fixture(t, y, "data/matter")
 			_, err := Load(p, "matter")
 			if err == nil {
 				t.Fatalf("expected %s to be rejected", name)

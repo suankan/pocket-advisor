@@ -161,9 +161,9 @@ infra:
 # directory of its own choosing. An absolute path here is left as written.
 # ============================================================================
 workspaces:
-  # REQUIRED. What each workspace holds: its collections and where they live
-  # on disk.
-  config: workspaces/workspace-config.yaml
+  # REQUIRED. What each workspace holds: the single directory it recursively
+  # walks for documents.
+  config: workspaces/workspaces.yaml
 
 # ============================================================================
 # MCP Server Configuration

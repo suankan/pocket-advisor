@@ -30,11 +30,10 @@ Define a versioned artifact containing:
 - every object required to reproduce the workspace, including `raw/` and any retained `extracted/` objects;
 - exact object keys, sizes, ETags where meaningful, content SHA-256 values, content types, and user metadata;
 - a manifest checksum and per-object checksums;
-- workspace-independent format and tool versions;
-- collection identifiers required to preserve deterministic document identity; and
+- workspace-independent format and tool versions; and
 - a completion marker written only after every object and manifest entry has been verified.
 
-The artifact must not contain model API keys, local corpus paths, or unrelated workspace configuration. (Store credentials are not a concern the way they once were — RustFS and NATS access is unauthenticated by convention and the PostgreSQL role carries no password — but nothing about a workspace's identity or content stops being private for that reason.) Any workspace identifier or collection metadata present inside the artifact is private and receives the same protection as document content.
+The artifact must not contain model API keys, local corpus paths, or unrelated workspace configuration. (Store credentials are not a concern the way they once were — RustFS and NATS access is unauthenticated by convention and the PostgreSQL role carries no password — but nothing about a workspace's identity or content stops being private for that reason.) Any workspace identifier present inside the artifact is private and receives the same protection as document content.
 
 Choose and document an encryption mechanism before writing real artifacts. Encryption at rest is the default. A plaintext export, if supported for synthetic tests, requires an explicit unsafe flag and a destination outside version control.
 

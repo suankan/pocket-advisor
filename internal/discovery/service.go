@@ -69,14 +69,12 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 		return fmt.Errorf("object %s hashes to %s: corrupted or tampered", key, actual)
 	}
 
-	collection := prov.CollectionID
-	docID := domain.NewDocID(workspaceID, collection, actual)
+	docID := domain.NewDocID(workspaceID, actual)
 	route := Classify(data, prov.SourceFilename)
 
 	doc := &domain.Document{
 		DocID:       docID,
 		WorkspaceID: workspaceID,
-		Collection:  collection,
 		Status:      domain.StatusPending,
 		DocType:     route.DocType,
 		MimeType:    route.MimeType,
@@ -127,7 +125,6 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 	meta := &ingestionv1.DocumentMetadata{
 		DocId:          docID,
 		WorkspaceId:    workspaceID,
-		CollectionId:   collection,
 		SourceFilename: prov.SourceFilename,
 		MimeType:       route.MimeType,
 		RawSha256:      actual,

@@ -81,12 +81,12 @@ func TestProvenanceDecodesRFC2047Metadata(t *testing.T) {
 func TestProvenanceLeavesPlainValuesAlone(t *testing.T) {
 	p := provenanceFrom(map[string]string{
 		"X-Amz-Meta-Source-Filename": "statement.pdf",
-		"X-Amz-Meta-Collection-Id":   "test-correspondence",
+		"X-Amz-Meta-Source-Path":     "bank-accounts/statement.pdf",
 	})
 	if p.SourceFilename != "statement.pdf" {
 		t.Errorf("SourceFilename = %q", p.SourceFilename)
 	}
-	if p.CollectionID != "test-correspondence" {
-		t.Errorf("CollectionID = %q", p.CollectionID)
+	if p.SourcePath != "bank-accounts/statement.pdf" {
+		t.Errorf("SourcePath = %q", p.SourcePath)
 	}
 }

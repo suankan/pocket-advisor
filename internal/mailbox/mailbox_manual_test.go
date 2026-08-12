@@ -72,10 +72,10 @@ func manualScratch(t *testing.T) (*postgres.DB, *postgres.EmailRepo) {
 
 func manualMessage(t *testing.T, db *postgres.DB, n int, sender string, sent time.Time) domain.EmailMessage {
 	t.Helper()
-	docID := domain.NewDocID(manualWorkspace, "mail", fmt.Sprintf("%064x", n))
+	docID := domain.NewDocID(manualWorkspace, fmt.Sprintf("%064x", n))
 	if _, err := db.Pool.Exec(context.Background(), `
-        INSERT INTO documents (doc_id, workspace_id, collection_id, processing_status, doc_type)
-        VALUES ($1, $2, 'mail', 'COMPLETED', 'email')`, docID, manualWorkspace); err != nil {
+        INSERT INTO documents (doc_id, workspace_id, processing_status, doc_type)
+        VALUES ($1, $2, 'COMPLETED', 'email')`, docID, manualWorkspace); err != nil {
 		t.Fatalf("insert document: %v", err)
 	}
 	return domain.EmailMessage{

@@ -175,7 +175,7 @@ postgres:
 # The one list this chart is driven by. Empty here on purpose: this file is
 # committed, and the real list is `./pocket-advisor.sh deploy-infra`'s own
 # `--set workspaces[N].id=<id>` args, generated from the authoritative
-# registry (workspaces/workspace-config.yaml's own `.workspaces[].id` —
+# registry (workspaces/workspaces.yaml's own `.workspaces[].id` —
 # there is no second, credentials-only registry any more).
 #
 # Each entry is only ever `{id: <id>}` now — no nested rustfs/nats/postgres

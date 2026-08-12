@@ -252,7 +252,7 @@ func (result *EvidenceResult) Validate() error {
 		if math.IsNaN(packet.Match.Score) || math.IsInf(packet.Match.Score, 0) {
 			return fmt.Errorf("packet %s has a non-finite score", packet.Reference)
 		}
-		if !validLegs(packet.Match.Legs) {
+		if packet.Match.Legs != "dense" && packet.Match.Legs != "lexical" && packet.Match.Legs != "both" {
 			return fmt.Errorf("packet %s has invalid search legs", packet.Reference)
 		}
 		if err := validateText(packet.Text, packet.TextOmitted); err != nil {
@@ -305,15 +305,6 @@ func validRelation(relation string) bool {
 	return relation == string(retrieval.RelationParent) ||
 		relation == string(retrieval.RelationChild) ||
 		relation == string(retrieval.RelationThreadPeer)
-}
-
-// validLegs accepts the two real scored search legs and their combination,
-// plus "exact": a packet admitted by deterministic, non-ranked selection
-// (statements.Service.List) rather than any dense or lexical scoring. It is
-// provenance, not a fourth kind of relevance — score is fixed at 1 for it —
-// so a client reading legs still learns how a packet was found.
-func validLegs(legs string) bool {
-	return legs == "dense" || legs == "lexical" || legs == "both" || legs == "exact"
 }
 
 func (page *EvidencePage) Validate() error {

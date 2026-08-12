@@ -163,11 +163,11 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 
 	// An extracted child cannot become a message-topic source merely because a
 	// malformed writer attached email metadata to it.
-	childID := domain.NewDocID(stageBWorkspace, "stage-b", strings.Repeat("f", 64))
+	childID := domain.NewDocID(stageBWorkspace, strings.Repeat("f", 64))
 	if _, err := db.Pool.Exec(ctx, `
-        INSERT INTO documents (doc_id, parent_doc_id, workspace_id, collection_id,
+        INSERT INTO documents (doc_id, parent_doc_id, workspace_id,
                                processing_status, doc_type, normalized_text)
-        VALUES ($1, $2, $3, 'stage-b', 'COMPLETED', 'email', $4)`,
+        VALUES ($1, $2, $3, 'COMPLETED', 'email', $4)`,
 		childID, docID, stageBWorkspace, text); err != nil {
 		t.Fatal(err)
 	}

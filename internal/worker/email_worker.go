@@ -168,7 +168,6 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		prov := rustfs.Provenance{
 			SourceFilename: c.Filename,
 			SourcePath:     parent.SourceFilename + "!" + c.Filename,
-			CollectionID:   parent.CollectionId,
 		}
 		if err := w.Vault.Put(ctx, key, bytesReader(c.Data), int64(len(c.Data)),
 			"application/octet-stream", prov); err != nil {
@@ -177,13 +176,12 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	}
 
 	route := discovery.Classify(c.Data, c.Filename)
-	childID := domain.NewDocID(parent.WorkspaceId, parent.CollectionId, sum)
+	childID := domain.NewDocID(parent.WorkspaceId, sum)
 
 	doc := &domain.Document{
 		DocID:       childID,
 		ParentDocID: parent.DocId,
 		WorkspaceID: parent.WorkspaceId,
-		Collection:  parent.CollectionId,
 		ThreadID:    threadID,
 		DocType:     route.DocType,
 		MimeType:    route.MimeType,
@@ -199,7 +197,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		return err
 	}
 	if !created {
-		return nil // same content already known in this collection
+		return nil // same content already known in this workspace
 	}
 
 	if route.Declined {
@@ -273,7 +271,6 @@ func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, threadID, tp 
 		DocId:          docID,
 		ParentDocId:    parentID,
 		WorkspaceId:    src.WorkspaceId,
-		CollectionId:   src.CollectionId,
 		ThreadId:       threadID,
 		SourceFilename: src.SourceFilename,
 		MimeType:       src.MimeType,

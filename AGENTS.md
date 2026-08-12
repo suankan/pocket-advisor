@@ -24,7 +24,7 @@ For every task, load in order:
 
 Read the document matching the active concern. Read additional documents when they provide necessary broader context. If a task crosses concerns or ownership is unclear, read all relevant design documents. `docs/tasks/` contains task briefs, not design authority.
 
-For work involving a specific matter or corpus, additionally load `workspaces/workspace-config.yaml` to resolve the workspace/collection the task refers to before touching any document.
+For work involving a specific matter or corpus, additionally load `workspaces/workspaces.yaml` to resolve the workspace the task refers to before touching any document.
 
 ## Documentation philosophy — current and target state
 

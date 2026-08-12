@@ -19,19 +19,19 @@ import (
 //	Run: EMAIL_DSN=postgres://<role>@localhost:5432/<disposable-db> \
 //		go test -tags manual ./internal/storage/postgres/ -run EmailDocuments -v
 //
-// All content is synthetic. Nothing here reads a workspace.
+// All content is synthetic.
 
 // reprocessDoc creates one Tier 2 row the way discovery would have, with the
 // doc_type and Tier 1 URI the selection query filters on.
-func reprocessDoc(t *testing.T, db *DB, workspace, sha, docType, rawURI string) string {
+func reprocessDoc(t *testing.T, db *DB, sha, docType, rawURI string) string {
 	t.Helper()
 	docID := domain.NewDocID()
 	if _, err := db.Pool.Exec(context.Background(), `
-        INSERT INTO documents (doc_id, workspace_id, processing_status,
+        INSERT INTO documents (doc_id, processing_status,
                                doc_type, mime_type, rustfs_raw_uri, raw_sha256)
-        VALUES ($1, $2, 'COMPLETED', $3, 'message/rfc822', $4, $5)
+        VALUES ($1, 'COMPLETED', $2, 'message/rfc822', $3, $4)
         ON CONFLICT (raw_sha256) DO NOTHING`,
-		docID, workspace, docType, rawURI, sha); err != nil {
+		docID, docType, rawURI, sha); err != nil {
 		t.Fatalf("create document: %v", err)
 	}
 	return docID
@@ -46,28 +46,25 @@ func docIDs(docs []domain.Document) []string {
 }
 
 // A rebuild walks message documents and nothing else: an archive is a
-// container rather than a message, a non-email document has no metadata to
-// rebuild, and another workspace is never in scope at all. An email row with
-// no Tier 1 object is deliberately selected: the command must report it as
-// unreadable rather than silently skip the missing metadata.
+// container rather than a message, and a non-email document has no metadata
+// to rebuild. An email row with no Tier 1 object is deliberately selected:
+// the command must report it as unreadable rather than silently skip the
+// missing metadata.
 func TestEmailDocumentsSelectsOnlyMessageDocuments(t *testing.T) {
 	db, repo := applied(t, "select")
 	ctx := context.Background()
 
 	wantSet := map[string]bool{}
 	for i, sha := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
-		wantSet[reprocessDoc(t, db, stageBWorkspace, sha, "email",
+		wantSet[reprocessDoc(t, db, sha, "email",
 			fmt.Sprintf("s3://bucket/raw/%d", i))] = true
 	}
-	reprocessDoc(t, db, stageBWorkspace, strings.Repeat("c", 64), "archive", "s3://bucket/raw/c")
-	reprocessDoc(t, db, stageBWorkspace, strings.Repeat("d", 64), "pdf", "s3://bucket/raw/d")
-	missingObject := reprocessDoc(t, db, stageBWorkspace, strings.Repeat("e", 64), "email", "")
+	reprocessDoc(t, db, strings.Repeat("c", 64), "archive", "s3://bucket/raw/c")
+	reprocessDoc(t, db, strings.Repeat("d", 64), "pdf", "s3://bucket/raw/d")
+	missingObject := reprocessDoc(t, db, strings.Repeat("e", 64), "email", "")
 	wantSet[missingObject] = true
-	reprocessDoc(t, db, "other-workspace", strings.Repeat("f", 64), "email", "s3://bucket/raw/f")
 
-	got, err := repo.EmailDocuments(ctx, EmailDocumentQuery{
-		WorkspaceID: stageBWorkspace, Limit: 100,
-	})
+	got, err := repo.EmailDocuments(ctx, EmailDocumentQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
@@ -77,9 +74,6 @@ func TestEmailDocumentsSelectsOnlyMessageDocuments(t *testing.T) {
 	for _, d := range got {
 		if !wantSet[d.DocID] {
 			t.Errorf("selected an out-of-scope document %s", d.DocID)
-		}
-		if d.WorkspaceID != stageBWorkspace {
-			t.Errorf("document %s has workspace %q", d.DocID, d.WorkspaceID)
 		}
 	}
 }
@@ -92,11 +86,11 @@ func TestEmailDocumentsPagesDeterministically(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		reprocessDoc(t, db, stageBWorkspace, strings.Repeat(fmt.Sprint(i), 64),
+		reprocessDoc(t, db, strings.Repeat(fmt.Sprint(i), 64),
 			"email", fmt.Sprintf("s3://bucket/raw/%d", i))
 	}
 
-	all, err := repo.EmailDocuments(ctx, EmailDocumentQuery{WorkspaceID: stageBWorkspace, Limit: 100})
+	all, err := repo.EmailDocuments(ctx, EmailDocumentQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
@@ -113,7 +107,7 @@ func TestEmailDocumentsPagesDeterministically(t *testing.T) {
 	cursor := ""
 	for {
 		page, err := repo.EmailDocuments(ctx, EmailDocumentQuery{
-			WorkspaceID: stageBWorkspace, After: cursor, Limit: 2,
+			After: cursor, Limit: 2,
 		})
 		if err != nil {
 			t.Fatalf("page after %q: %v", cursor, err)
@@ -136,8 +130,8 @@ func TestEmailDocumentsCanSelectOnlyMissingMetadata(t *testing.T) {
 	db, repo := applied(t, "missing")
 	ctx := context.Background()
 
-	done := reprocessDoc(t, db, stageBWorkspace, strings.Repeat("7", 64), "email", "s3://bucket/raw/7")
-	pending := reprocessDoc(t, db, stageBWorkspace, strings.Repeat("8", 64), "email", "s3://bucket/raw/8")
+	done := reprocessDoc(t, db, strings.Repeat("7", 64), "email", "s3://bucket/raw/7")
+	pending := reprocessDoc(t, db, strings.Repeat("8", 64), "email", "s3://bucket/raw/8")
 
 	if _, err := repo.SaveEmailMessage(ctx,
 		message(done, "seven@mail.example.test", "Quarterly review", "")); err != nil {
@@ -145,7 +139,7 @@ func TestEmailDocumentsCanSelectOnlyMissingMetadata(t *testing.T) {
 	}
 
 	got, err := repo.EmailDocuments(ctx, EmailDocumentQuery{
-		WorkspaceID: stageBWorkspace, Limit: 100, OnlyMissing: true,
+		Limit: 100, OnlyMissing: true,
 	})
 	if err != nil {
 		t.Fatalf("select: %v", err)
@@ -156,9 +150,7 @@ func TestEmailDocumentsCanSelectOnlyMissingMetadata(t *testing.T) {
 
 	// And the full pass still sees both, because a rebuild from Tier 1 is
 	// allowed to rewrite a row that already exists.
-	all, err := repo.EmailDocuments(ctx, EmailDocumentQuery{
-		WorkspaceID: stageBWorkspace, Limit: 100,
-	})
+	all, err := repo.EmailDocuments(ctx, EmailDocumentQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("select all: %v", err)
 	}
@@ -174,7 +166,7 @@ func TestEmailReprocessingLeavesTheDocumentRowAlone(t *testing.T) {
 	db, repo := applied(t, "canonical")
 	ctx := context.Background()
 
-	docID := reprocessDoc(t, db, stageBWorkspace, strings.Repeat("9", 64), "email", "s3://bucket/raw/9")
+	docID := reprocessDoc(t, db, strings.Repeat("9", 64), "email", "s3://bucket/raw/9")
 	if _, err := db.Pool.Exec(ctx, `
         UPDATE documents SET normalized_text = $2, thread_id = $3, email_subject = $4
         WHERE doc_id = $1`, docID, "synthetic body", "thread-key", "Quarterly review"); err != nil {

@@ -109,8 +109,7 @@ const EmailParseVersion = 1
 // is not part of it: that is derived from the workspace's identifier graph at
 // write time and returned as an EmailConversation.
 type EmailMessage struct {
-	DocID       string
-	WorkspaceID string
+	DocID string
 
 	// MessageID is the canonical Message-ID, empty when the header was absent
 	// or unusable. It is never synthesised.

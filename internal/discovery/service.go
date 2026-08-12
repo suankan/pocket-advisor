@@ -47,7 +47,7 @@ type Service struct {
 //
 // Discovery reads Tier 1; it never writes it and never sees a user filesystem.
 // The bytes were put there by the uploader (§5.1).
-func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) error {
+func (s *Service) Ingest(ctx context.Context, key, mode string) error {
 	data, prov, err := s.Vault.Get(ctx, key)
 	if err != nil {
 		telemetry.DiscoveryFiles.WithLabelValues(mode, "error").Inc()
@@ -75,14 +75,13 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 		// A fresh candidate id. CreateStub only uses it if this content is
 		// genuinely new; existing content resolves to whichever id already
 		// claimed it (domain.NewDocID, document_repo.go's CreateStub).
-		DocID:       domain.NewDocID(),
-		WorkspaceID: workspaceID,
-		Status:      domain.StatusPending,
-		DocType:     route.DocType,
-		MimeType:    route.MimeType,
-		RawURI:      s.Vault.URI(key),
-		RawSHA256:   actual,
-		SourceName:  prov.SourceFilename,
+		DocID:      domain.NewDocID(),
+		Status:     domain.StatusPending,
+		DocType:    route.DocType,
+		MimeType:   route.MimeType,
+		RawURI:     s.Vault.URI(key),
+		RawSHA256:  actual,
+		SourceName: prov.SourceFilename,
 		Metadata: map[string]string{
 			"source_path": prov.SourcePath,
 			"uploaded_at": prov.UploadedAt,
@@ -126,7 +125,6 @@ func (s *Service) Ingest(ctx context.Context, workspaceID, key, mode string) err
 
 	meta := &ingestionv1.DocumentMetadata{
 		DocId:          docID,
-		WorkspaceId:    workspaceID,
 		SourceFilename: prov.SourceFilename,
 		MimeType:       route.MimeType,
 		RawSha256:      actual,
@@ -197,7 +195,7 @@ func imageDimensions(data []byte) (int, int) {
 // best-effort sweep: both sides of "every object under raw/ has a documents
 // row" are enumerable from one store. It is the backstop that makes a dropped
 // bucket notification a delay rather than a loss (§5.2).
-func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWater uint64) (int, error) {
+func (s *Service) Scan(ctx context.Context, highWater, lowWater uint64) (int, error) {
 	if s.Uploads == nil {
 		return 0, fmt.Errorf("scan requires an uploader-role vault to touch raw/ objects")
 	}
@@ -205,7 +203,7 @@ func (s *Service) Scan(ctx context.Context, workspaceID string, highWater, lowWa
 	if err != nil {
 		return 0, err
 	}
-	known, err := s.Docs.KnownRawURIs(ctx, workspaceID)
+	known, err := s.Docs.KnownRawURIs(ctx)
 	if err != nil {
 		return 0, err
 	}

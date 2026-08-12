@@ -188,9 +188,8 @@ func (s *Service) ListMessages(ctx context.Context, req ListRequest) (*ListResul
 	}
 
 	rows, err := s.store.ListMessages(ctx, PageQuery{
-		WorkspaceID: s.workspace,
-		Filters:     filters,
-		Order:       order,
+		Filters: filters,
+		Order:   order,
 		// One extra row decides HasMore. A count would answer a different
 		// question — how many match now — which is not what the caller is
 		// paging through.
@@ -228,7 +227,7 @@ func (s *Service) ListMessages(ctx context.Context, req ListRequest) (*ListResul
 		for _, m := range rows {
 			ids = append(ids, m.ConversationID)
 		}
-		summaries, err = s.store.Summaries(ctx, s.workspace, ids, snapshot)
+		summaries, err = s.store.Summaries(ctx, ids, snapshot)
 		if err != nil {
 			return nil, err
 		}

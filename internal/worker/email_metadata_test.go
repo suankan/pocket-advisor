@@ -33,7 +33,7 @@ func parseFixture(t *testing.T, raw string) *email.Parsed {
 }
 
 func TestEmailMessageOfCarriesIdentifiersAndAddresses(t *testing.T) {
-	m := emailMessageOf("doc-1", "workspace-1", parseFixture(t, threadedMessage))
+	m := emailMessageOf("doc-1", parseFixture(t, threadedMessage))
 
 	if m.MessageID != "c@mail.example.test" {
 		t.Errorf("message id = %q", m.MessageID)
@@ -81,7 +81,7 @@ func TestEmailMessageOfCarriesIdentifiersAndAddresses(t *testing.T) {
 // first, then its reply headers, each contributing once however often it was
 // repeated across them.
 func TestIdentifierSetIsDeduplicatedAndOrdered(t *testing.T) {
-	m := emailMessageOf("doc-1", "workspace-1", parseFixture(t, threadedMessage))
+	m := emailMessageOf("doc-1", parseFixture(t, threadedMessage))
 
 	want := []string{"c@mail.example.test", "b@mail.example.test", "a@mail.example.test"}
 	if got := m.Identifiers(); !reflect.DeepEqual(got, want) {
@@ -92,7 +92,7 @@ func TestIdentifierSetIsDeduplicatedAndOrdered(t *testing.T) {
 // A malformed mailbox is stored, not dropped: the raw text is evidence, and an
 // empty address is what keeps it out of exact filters.
 func TestEmailMessageOfKeepsMalformedAddresses(t *testing.T) {
-	m := emailMessageOf("doc-1", "workspace-1", parseFixture(t,
+	m := emailMessageOf("doc-1", parseFixture(t,
 		"From: not-an-address\r\nTo: bob@example.test\r\nSubject: Hello\r\n\r\nBody.\r\n"))
 
 	var from domain.EmailAddress
@@ -114,7 +114,7 @@ func TestEmailMessageOfKeepsMalformedAddresses(t *testing.T) {
 
 // Missing headers are ordinary input, reported rather than repaired.
 func TestEmailMessageOfReportsMissingIdentifierAndDate(t *testing.T) {
-	m := emailMessageOf("doc-1", "workspace-1", parseFixture(t,
+	m := emailMessageOf("doc-1", parseFixture(t,
 		"From: bob@example.test\r\nSubject: No id, no date\r\n\r\nBody.\r\n"))
 
 	if m.MessageID != "" {
@@ -176,7 +176,7 @@ func TestAutomatedClassNarrowsToStoredValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := emailMessageOf("doc-1", "workspace-1", parseFixture(t, tc.raw))
+			m := emailMessageOf("doc-1", parseFixture(t, tc.raw))
 			if m.AutomatedClass != tc.want {
 				t.Errorf("automated_class = %q, want %q", m.AutomatedClass, tc.want)
 			}

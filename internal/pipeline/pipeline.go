@@ -61,11 +61,6 @@ type Options struct {
 	// anything, currently true only for the "test" workspace. False leaves
 	// the pipeline exactly as it was before this existed.
 	RustFSEvents bool
-	// WorkspaceID is required when RustFSEvents is true — the live-event
-	// role has no other way to know which workspace an event belongs to,
-	// since object keys carry no workspace segment (each workspace has its
-	// own bucket, which already provides that scoping).
-	WorkspaceID string
 }
 
 // New builds every pool and its consumer.
@@ -123,9 +118,8 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 
 	if opts.RustFSEvents {
 		notify := &worker.RustFSNotifyWorker{
-			Discovery:   &discovery.Service{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleDiscover)},
-			WorkspaceID: opts.WorkspaceID,
-			Log:         a.Logger(telemetry.RoleDiscover),
+			Discovery: &discovery.Service{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleDiscover)},
+			Log:       a.Logger(telemetry.RoleDiscover),
 		}
 		specs = append(specs, &role{
 			name: telemetry.RoleDiscover, stream: bus.StreamRustFSEvents, subject: bus.SubjectRustFSEvents,

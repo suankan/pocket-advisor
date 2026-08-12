@@ -26,7 +26,6 @@ import (
 //
 // This test creates and drops one scratch schema. All content and addresses are
 // synthetic .test values.
-const manualWorkspace = "mailbox-manual"
 
 func manualScratch(t *testing.T) (*postgres.DB, *postgres.EmailRepo) {
 	t.Helper()
@@ -64,7 +63,7 @@ func manualScratch(t *testing.T) (*postgres.DB, *postgres.EmailRepo) {
 		}
 		admin.Close()
 	})
-	if err := db.ApplySchema(ctx, postgres.SchemaMetadata{EmbedModel: "mailbox-manual", EmbedDim: 8}); err != nil {
+	if err := db.ApplySchema(ctx, postgres.SchemaMetadata{WorkspaceID: "mailbox-manual", EmbedModel: "mailbox-manual", EmbedDim: 8}); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
 	return db, postgres.NewEmailRepo(db)
@@ -75,12 +74,12 @@ func manualMessage(t *testing.T, db *postgres.DB, n int, sender string, sent tim
 	docID := domain.NewDocID()
 	sha := fmt.Sprintf("%064x", n)
 	if _, err := db.Pool.Exec(context.Background(), `
-        INSERT INTO documents (doc_id, workspace_id, processing_status, doc_type, raw_sha256)
-        VALUES ($1, $2, 'COMPLETED', 'email', $3)`, docID, manualWorkspace, sha); err != nil {
+        INSERT INTO documents (doc_id, processing_status, doc_type, raw_sha256)
+        VALUES ($1, 'COMPLETED', 'email', $2)`, docID, sha); err != nil {
 		t.Fatalf("insert document: %v", err)
 	}
 	return domain.EmailMessage{
-		DocID: docID, WorkspaceID: manualWorkspace,
+		DocID:      docID,
 		MessageID:  fmt.Sprintf("m%d@mail.example.test", n),
 		SubjectRaw: "Synthetic mailbox message", SubjectNormalized: "synthetic mailbox message",
 		SentAt: sent,
@@ -93,7 +92,7 @@ func manualMessage(t *testing.T, db *postgres.DB, n int, sender string, sent tim
 
 func manualService(t *testing.T, db *postgres.DB) *Service {
 	t.Helper()
-	s, err := New(NewPostgresStore(db), manualWorkspace, Config{DefaultLimit: 2, MaxLimit: 10, MaxParticipants: 3}, nil)
+	s, err := New(NewPostgresStore(db), Config{DefaultLimit: 2, MaxLimit: 10, MaxParticipants: 3}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

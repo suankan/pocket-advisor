@@ -55,13 +55,13 @@ func (s *Service) FetchConversation(ctx context.Context, req ConversationRequest
 
 	conversationID := id
 	if kind == refMessage {
-		conversationID, err = s.store.ConversationOf(ctx, s.workspace, id)
+		conversationID, err = s.store.ConversationOf(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	msgs, err := s.store.ConversationMessages(ctx, s.workspace, conversationID, snapshot)
+	msgs, err := s.store.ConversationMessages(ctx, conversationID, snapshot)
 	if err != nil {
 		return nil, err
 	}

@@ -162,7 +162,7 @@ const (
 // service context; a PostgreSQL implementation holds a read-only repeatable
 // read transaction so promotion/removal cannot change a response mid-walk.
 type TimelineStore interface {
-	BeginTimeline(context.Context, string) (TimelineReader, error)
+	BeginTimeline(context.Context) (TimelineReader, error)
 }
 
 type TimelineReader interface {
@@ -249,20 +249,18 @@ type TimelineResult struct {
 	Budget       TimelineBudget     `json:"budget"`
 }
 
-// TimelineService is intentionally transport independent and fixed to one
-// workspace. It has no retrieval, model, or MCP dependency.
+// TimelineService is intentionally transport independent. It has no
+// retrieval, model, or MCP dependency.
 type TimelineService struct {
-	store     TimelineStore
-	workspace string
+	store TimelineStore
 }
 
-func NewTimelineService(store TimelineStore, workspaceID string) (*TimelineService, error) {
-	if store == nil || workspaceID == "" {
-		return nil, errors.New("topic timeline service requires a store and workspace scope")
+func NewTimelineService(store TimelineStore) (*TimelineService, error) {
+	if store == nil {
+		return nil, errors.New("topic timeline service requires a store")
 	}
-	return &TimelineService{store: store, workspace: workspaceID}, nil
+	return &TimelineService{store: store}, nil
 }
-func (s *TimelineService) Workspace() string { return s.workspace }
 
 func (s *TimelineService) Timeline(ctx context.Context, request TimelineRequest) (*TimelineResult, error) {
 	refs, err := decodeTimelineReferences(request)
@@ -275,7 +273,7 @@ func (s *TimelineService) Timeline(ctx context.Context, request TimelineRequest)
 	}
 	ctx, cancel := context.WithTimeout(ctx, limits.MaxLatency)
 	defer cancel()
-	reader, err := s.store.BeginTimeline(ctx, s.workspace)
+	reader, err := s.store.BeginTimeline(ctx)
 	if err != nil {
 		return nil, timelineContextError(ctx, err)
 	}

@@ -90,7 +90,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	// exists — discovery stubbed it — and a rewrite of the same doc_id
 	// converges rather than accumulating (§2.5).
 	if parsed != nil && w.Emails != nil {
-		conv, err := w.Emails.SaveEmailMessage(ctx, emailMessageOf(meta.DocId, meta.WorkspaceId, parsed))
+		conv, err := w.Emails.SaveEmailMessage(ctx, emailMessageOf(meta.DocId, parsed))
 		if err != nil {
 			return WithDoc(meta.DocId, err)
 		}
@@ -182,7 +182,6 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		// the same way discovery's root documents do (domain.NewDocID).
 		DocID:       domain.NewDocID(),
 		ParentDocID: parent.DocId,
-		WorkspaceID: parent.WorkspaceId,
 		ThreadID:    threadID,
 		DocType:     route.DocType,
 		MimeType:    route.MimeType,
@@ -271,7 +270,6 @@ func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, threadID, tp 
 	return &ingestionv1.DocumentMetadata{
 		DocId:          docID,
 		ParentDocId:    parentID,
-		WorkspaceId:    src.WorkspaceId,
 		ThreadId:       threadID,
 		SourceFilename: src.SourceFilename,
 		MimeType:       src.MimeType,

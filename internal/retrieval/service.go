@@ -2,9 +2,12 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/client/llm"
@@ -58,7 +61,7 @@ func New(
 	// Construction cannot fail for a non-empty fixed workspace. Keep the
 	// optional graph collaborator separate so disabled ordinary retrieval never
 	// opens a graph snapshot or consults derived data.
-	if timeline, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db), workspace); err == nil {
+	if timeline, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db)); err == nil {
 		service.timeline = timeline
 	}
 	return service
@@ -68,39 +71,30 @@ func New(
 // the expected workspace.
 //
 // The fusion query carries no workspace predicate, because each workspace is
-// its own database and the predicate would match every row. A per-query filter
-// that is always true gives false comfort: it would silently *hide* foreign
-// data rather than reveal that it should not be there. This checks once, at
-// startup, and fails loudly instead (§3.4).
+// its own database (deviation 34) and the predicate would match every row. A
+// per-query filter that is always true gives false comfort: it would
+// silently *hide* foreign data rather than reveal that it should not be
+// there. This checks once, at startup, and fails loudly instead (§3.4).
+//
+// The check reads schema_metadata, the one place workspace_id is still
+// recorded, rather than sampling a data table: a workspace with nothing
+// ingested yet would otherwise look indistinguishable from a misconfigured
+// one, and schema_metadata is written at provisioning time, before any
+// document ever lands.
 func (s *Service) AssertScope(ctx context.Context) error {
-	rows, err := s.DB.Pool.Query(ctx,
-		`SELECT DISTINCT workspace_id FROM chunks LIMIT 5`)
+	meta, err := s.DB.LoadSchemaMetadata(ctx)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || postgres.IsUndefinedTable(err) {
+			return nil // not yet provisioned is not a scope violation
+		}
 		return fmt.Errorf("assert workspace scope: %w", err)
 	}
-	defer rows.Close()
-
-	var found []string
-	for rows.Next() {
-		var w string
-		if err := rows.Scan(&w); err != nil {
-			return err
-		}
-		found = append(found, w)
+	if meta.WorkspaceID == "" {
+		return nil // provisioned before workspace scoping moved onto this row
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	switch {
-	case len(found) == 0:
-		return nil // empty index is not a scope violation
-	case len(found) > 1:
-		return fmt.Errorf("database holds %d workspaces (%s); it must hold exactly one",
-			len(found), strings.Join(found, ", "))
-	case found[0] != s.workspace:
+	if meta.WorkspaceID != s.workspace {
 		return fmt.Errorf("database holds workspace %q but %q was requested",
-			found[0], s.workspace)
+			meta.WorkspaceID, s.workspace)
 	}
 	return nil
 }

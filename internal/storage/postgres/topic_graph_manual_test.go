@@ -99,17 +99,17 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 	}
 
 	firstID := "11111111-1111-5111-8111-111111111111"
-	if err := topicRepo.CreateBuilding(ctx, stageBWorkspace, topicSpec(firstID)); err != nil {
+	if err := topicRepo.CreateBuilding(ctx, topicSpec(firstID)); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	request := topicgraph.ReplaceRequest{
 		VersionID: firstID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{topicMention(docID, text)},
 	}
-	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, request); err != nil {
+	if err := topicRepo.ReplaceMentions(ctx, request); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 	// At-least-once delivery must converge to one deterministic mention/span.
-	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, request); err != nil {
+	if err := topicRepo.ReplaceMentions(ctx, request); err != nil {
 		t.Fatalf("repeat replacement: %v", err)
 	}
 	var mentions, spans int
@@ -122,30 +122,30 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 		t.Fatalf("stored %d mentions and %d spans, want one each", mentions, spans)
 	}
 	request.Mentions = nil
-	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, request); err != nil {
+	if err := topicRepo.ReplaceMentions(ctx, request); err != nil {
 		t.Fatalf("empty replacement: %v", err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM topic_mentions`).Scan(&mentions); err != nil || mentions != 0 {
 		t.Fatalf("empty replacement leaves %d mentions: %v", mentions, err)
 	}
-	if err := topicRepo.Finalize(ctx, stageBWorkspace, firstID); err != nil {
+	if err := topicRepo.Finalize(ctx, firstID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, request); !errors.Is(err, topicgraph.ErrNotBuilding) {
+	if err := topicRepo.ReplaceMentions(ctx, request); !errors.Is(err, topicgraph.ErrNotBuilding) {
 		t.Fatalf("replace after finalization = %v, want ErrNotBuilding", err)
 	}
-	if err := topicRepo.Promote(ctx, stageBWorkspace, firstID); err != nil {
+	if err := topicRepo.Promote(ctx, firstID); err != nil {
 		t.Fatalf("initial promotion: %v", err)
 	}
 
 	secondID := "22222222-2222-5222-8222-222222222222"
-	if err := topicRepo.CreateBuilding(ctx, stageBWorkspace, topicSpec(secondID)); err != nil {
+	if err := topicRepo.CreateBuilding(ctx, topicSpec(secondID)); err != nil {
 		t.Fatal(err)
 	}
-	if err := topicRepo.Finalize(ctx, stageBWorkspace, secondID); err != nil {
+	if err := topicRepo.Finalize(ctx, secondID); err != nil {
 		t.Fatal(err)
 	}
-	if err := topicRepo.Promote(ctx, stageBWorkspace, secondID); err != nil {
+	if err := topicRepo.Promote(ctx, secondID); err != nil {
 		t.Fatalf("replacement promotion: %v", err)
 	}
 	var active, retired string
@@ -165,23 +165,23 @@ func TestTopicGraphReplacementAndLifecycle(t *testing.T) {
 	// malformed writer attached email metadata to it.
 	childID := domain.NewDocID()
 	if _, err := db.Pool.Exec(ctx, `
-        INSERT INTO documents (doc_id, parent_doc_id, workspace_id,
+        INSERT INTO documents (doc_id, parent_doc_id,
                                processing_status, doc_type, normalized_text, raw_sha256)
-        VALUES ($1, $2, $3, 'COMPLETED', 'email', $4, $5)`,
-		childID, docID, stageBWorkspace, text, strings.Repeat("f", 64)); err != nil {
+        VALUES ($1, $2, 'COMPLETED', 'email', $3, $4)`,
+		childID, docID, text, strings.Repeat("f", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := emailRepo.SaveEmailMessage(ctx, message(childID, "child@mail.example.test", "Child", "")); err != nil {
 		t.Fatal(err)
 	}
 	thirdID := "33333333-3333-5333-8333-333333333333"
-	if err := topicRepo.CreateBuilding(ctx, stageBWorkspace, topicSpec(thirdID)); err != nil {
+	if err := topicRepo.CreateBuilding(ctx, topicSpec(thirdID)); err != nil {
 		t.Fatal(err)
 	}
 	childRequest := topicgraph.ReplaceRequest{
 		VersionID: thirdID, TargetDocIDs: []string{childID}, Mentions: []topicgraph.Mention{topicMention(childID, text)},
 	}
-	if err := topicRepo.ReplaceMentions(ctx, stageBWorkspace, childRequest); !errors.Is(err, topicgraph.ErrInvalidRequest) {
+	if err := topicRepo.ReplaceMentions(ctx, childRequest); !errors.Is(err, topicgraph.ErrInvalidRequest) {
 		t.Fatalf("child source replacement = %v, want ErrInvalidRequest", err)
 	}
 }
@@ -195,7 +195,7 @@ func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
 	repo := NewTopicGraphRepo(db)
 	emailRepo := NewEmailRepo(db)
 	versionID := "44444444-4444-5444-8444-444444444444"
-	if err := repo.CreateBuilding(ctx, stageBWorkspace, topicSpec(versionID)); err != nil {
+	if err := repo.CreateBuilding(ctx, topicSpec(versionID)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -216,7 +216,7 @@ func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		mentions = append(mentions, topicMention(docID, text))
-		if err := repo.ReplaceMentions(ctx, stageBWorkspace, topicgraph.ReplaceRequest{
+		if err := repo.ReplaceMentions(ctx, topicgraph.ReplaceRequest{
 			VersionID: versionID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{mentions[i]},
 		}); err != nil {
 			t.Fatal(err)
@@ -233,7 +233,7 @@ func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
 		{EarlierMentionID: mentionIDs[1], LaterMentionID: mentionIDs[2], Type: topicgraph.RelationPossiblyRelated,
 			Confidence: .2, SupportingMentionIDs: []string{mentionIDs[1], mentionIDs[2]}, Method: "exact-reference", MethodVersion: "v1", Supported: false},
 	}}
-	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, request); err != nil {
+	if err := repo.ReplaceRelationCandidates(ctx, request); err != nil {
 		t.Fatalf("persist relations: %v", err)
 	}
 	var candidates, edges, episodes, memberships, supports int
@@ -254,7 +254,7 @@ func TestTopicGraphRelationsAndEpisodes(t *testing.T) {
 	// existing component or create a backward edge.
 	request.Candidates = []topicgraph.RelationCandidate{request.Candidates[0]}
 	request.Candidates[0].EarlierMentionID, request.Candidates[0].LaterMentionID = mentionIDs[1], mentionIDs[0]
-	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, request); !errors.Is(err, topicgraph.ErrRelationChronology) {
+	if err := repo.ReplaceRelationCandidates(ctx, request); !errors.Is(err, topicgraph.ErrRelationChronology) {
 		t.Fatalf("backward chronology = %v, want ErrRelationChronology", err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM topic_relation_edges`).Scan(&edges); err != nil || edges != 1 {
@@ -275,7 +275,7 @@ func TestTopicTimelineRead(t *testing.T) {
 	repo := NewTopicGraphRepo(db)
 	emails := NewEmailRepo(db)
 	versionID := "55555555-5555-5555-8555-555555555555"
-	if err := repo.CreateBuilding(ctx, stageBWorkspace, topicSpec(versionID)); err != nil {
+	if err := repo.CreateBuilding(ctx, topicSpec(versionID)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -292,25 +292,25 @@ func TestTopicTimelineRead(t *testing.T) {
 			t.Fatal(err)
 		}
 		mentions[i] = topicMention(docID, texts[i])
-		if err := repo.ReplaceMentions(ctx, stageBWorkspace, topicgraph.ReplaceRequest{VersionID: versionID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{mentions[i]}}); err != nil {
+		if err := repo.ReplaceMentions(ctx, topicgraph.ReplaceRequest{VersionID: versionID, TargetDocIDs: []string{docID}, Mentions: []topicgraph.Mention{mentions[i]}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ids := []string{topicgraph.MentionID(versionID, mentions[0]), topicgraph.MentionID(versionID, mentions[1]), topicgraph.MentionID(versionID, mentions[2])}
-	if err := repo.ReplaceRelationCandidates(ctx, stageBWorkspace, topicgraph.ReplaceRelationCandidatesRequest{VersionID: versionID, Candidates: []topicgraph.RelationCandidate{
+	if err := repo.ReplaceRelationCandidates(ctx, topicgraph.ReplaceRelationCandidatesRequest{VersionID: versionID, Candidates: []topicgraph.RelationCandidate{
 		{EarlierMentionID: ids[0], LaterMentionID: ids[1], Type: topicgraph.RelationAddresses, Confidence: .9, SupportingMentionIDs: []string{ids[0], ids[1]}, Method: "manual", MethodVersion: "v1", Supported: true},
 		{EarlierMentionID: ids[1], LaterMentionID: ids[2], Type: topicgraph.RelationStatesResolution, Confidence: .8, SupportingMentionIDs: []string{ids[1], ids[2]}, Method: "manual", MethodVersion: "v1", Supported: true},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.Finalize(ctx, stageBWorkspace, versionID); err != nil {
+	if err := repo.Finalize(ctx, versionID); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.Promote(ctx, stageBWorkspace, versionID); err != nil {
+	if err := repo.Promote(ctx, versionID); err != nil {
 		t.Fatal(err)
 	}
 
-	service, err := topicgraph.NewTimelineService(NewTopicTimelineStore(db), stageBWorkspace)
+	service, err := topicgraph.NewTimelineService(NewTopicTimelineStore(db))
 	if err != nil {
 		t.Fatal(err)
 	}

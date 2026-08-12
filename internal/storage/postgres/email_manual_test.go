@@ -79,7 +79,7 @@ func scratch(t *testing.T, name string) (*DB, string) {
 }
 
 func stageBMeta() SchemaMetadata {
-	return SchemaMetadata{EmbedModel: "stage-b-manual", EmbedDim: stageBDim, TruncatedDim: false}
+	return SchemaMetadata{WorkspaceID: "stage-b-manual", EmbedModel: "stage-b-manual", EmbedDim: stageBDim, TruncatedDim: false}
 }
 
 func relationExists(t *testing.T, db *DB, schema, name string) bool {
@@ -201,8 +201,6 @@ func TestEmailSchemaUpgradesAnExistingWorkspace(t *testing.T) {
 
 // ---- persistence -----------------------------------------------------------
 
-const stageBWorkspace = "stage-b-workspace"
-
 func applied(t *testing.T, name string) (*DB, *EmailRepo) {
 	t.Helper()
 	db, _ := scratch(t, name)
@@ -218,9 +216,9 @@ func document(t *testing.T, db *DB, sha string) string {
 	t.Helper()
 	docID := domain.NewDocID()
 	if _, err := db.Pool.Exec(context.Background(), `
-        INSERT INTO documents (doc_id, workspace_id, processing_status, doc_type, raw_sha256)
-        VALUES ($1, $2, 'COMPLETED', 'email', $3)
-        ON CONFLICT (raw_sha256) DO NOTHING`, docID, stageBWorkspace, sha); err != nil {
+        INSERT INTO documents (doc_id, processing_status, doc_type, raw_sha256)
+        VALUES ($1, 'COMPLETED', 'email', $2)
+        ON CONFLICT (raw_sha256) DO NOTHING`, docID, sha); err != nil {
 		t.Fatalf("create document: %v", err)
 	}
 	return docID
@@ -231,7 +229,6 @@ func document(t *testing.T, db *DB, sha string) string {
 func message(docID, messageID, subject string, inReplyTo string, references ...string) domain.EmailMessage {
 	m := domain.EmailMessage{
 		DocID:             docID,
-		WorkspaceID:       stageBWorkspace,
 		MessageID:         messageID,
 		SubjectRaw:        subject,
 		SubjectNormalized: strings.ToLower(strings.TrimPrefix(subject, "Re: ")),
@@ -357,8 +354,8 @@ func TestEmailConversationSurvivesOutOfOrderArrival(t *testing.T) {
 	var owner string
 	if err := db.Pool.QueryRow(ctx,
 		`SELECT COALESCE(doc_id::text,'') FROM email_identifier_nodes
-         WHERE workspace_id = $1 AND message_id = $2`,
-		stageBWorkspace, "a@mail.example.test").Scan(&owner); err != nil {
+         WHERE message_id = $1`,
+		"a@mail.example.test").Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
 	if owner != parentDoc {
@@ -367,8 +364,7 @@ func TestEmailConversationSurvivesOutOfOrderArrival(t *testing.T) {
 
 	var nodes int
 	if err := db.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM email_identifier_nodes WHERE workspace_id = $1`,
-		stageBWorkspace).Scan(&nodes); err != nil {
+		`SELECT count(*) FROM email_identifier_nodes`).Scan(&nodes); err != nil {
 		t.Fatal(err)
 	}
 	if nodes != 2 {
@@ -416,8 +412,7 @@ func TestEmailLateMessageMergesTwoComponents(t *testing.T) {
 
 	var components int
 	if err := db.Pool.QueryRow(ctx,
-		`SELECT count(DISTINCT component_id) FROM email_identifier_nodes WHERE workspace_id = $1`,
-		stageBWorkspace).Scan(&components); err != nil {
+		`SELECT count(DISTINCT component_id) FROM email_identifier_nodes`).Scan(&components); err != nil {
 		t.Fatal(err)
 	}
 	if components != 1 {
@@ -439,10 +434,8 @@ func TestEmailMissingAncestorStaysAPlaceholder(t *testing.T) {
 
 	var placeholders, documents int
 	if err := db.Pool.QueryRow(ctx, `
-        SELECT (SELECT count(*) FROM email_identifier_nodes
-                WHERE workspace_id = $1 AND doc_id IS NULL),
-               (SELECT count(*) FROM documents WHERE workspace_id = $1)`,
-		stageBWorkspace).Scan(&placeholders, &documents); err != nil {
+        SELECT (SELECT count(*) FROM email_identifier_nodes WHERE doc_id IS NULL),
+               (SELECT count(*) FROM documents)`).Scan(&placeholders, &documents); err != nil {
 		t.Fatal(err)
 	}
 	if placeholders != 1 {
@@ -480,8 +473,8 @@ func TestEmailDuplicateIdentifierKeepsTheFirstWriter(t *testing.T) {
 	var owner, warnings string
 	if err := db.Pool.QueryRow(ctx,
 		`SELECT COALESCE(doc_id::text,'') FROM email_identifier_nodes
-         WHERE workspace_id = $1 AND message_id = $2`,
-		stageBWorkspace, "a@mail.example.test").Scan(&owner); err != nil {
+         WHERE message_id = $1`,
+		"a@mail.example.test").Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
 	if owner != firstDoc {
@@ -609,8 +602,7 @@ func TestEmailHeaderOrphansUseTheLabelledFallbacks(t *testing.T) {
 
 	var nodes int
 	if err := db.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM email_identifier_nodes WHERE workspace_id = $1`,
-		stageBWorkspace).Scan(&nodes); err != nil {
+		`SELECT count(*) FROM email_identifier_nodes`).Scan(&nodes); err != nil {
 		t.Fatal(err)
 	}
 	if nodes != 0 {

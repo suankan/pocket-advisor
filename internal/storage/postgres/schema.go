@@ -47,18 +47,32 @@ DO $$ BEGIN
         ('PENDING','PROCESSING','COMPLETED','SKIPPED','FAILED');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- One workspace, one database (deviation 34): workspace_id belongs here,
+-- exactly once for the whole database, and nowhere else. Every other table
+-- in this schema used to repeat it on every row and filter by it on every
+-- query, which is a predicate that is always true — it can never distinguish
+-- one row from another *within* a database that only ever holds one
+-- workspace. AssertScope reads it from here now instead of taking a distinct
+-- sample of a data column, so the check remains cheap and exact even for an
+-- otherwise empty workspace.
 CREATE TABLE IF NOT EXISTS schema_metadata (
     id            BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    workspace_id  VARCHAR NOT NULL,
     embed_model   VARCHAR NOT NULL,
     embed_dim     INT     NOT NULL,
     truncated_dim BOOLEAN NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- An already-provisioned workspace has this row without workspace_id.
+-- Backfilling it from the connecting process's own configured id is safe
+-- exactly because it is the only value that was ever going to be correct in
+-- a database dedicated to one workspace.
+ALTER TABLE schema_metadata ADD COLUMN IF NOT EXISTS workspace_id VARCHAR;
+
 CREATE TABLE IF NOT EXISTS documents (
     doc_id            UUID PRIMARY KEY,
     parent_doc_id     UUID REFERENCES documents(doc_id) ON DELETE CASCADE,
-    workspace_id      VARCHAR NOT NULL,
     thread_id         VARCHAR NOT NULL DEFAULT '',
     processing_status processing_status NOT NULL DEFAULT 'PENDING',
     doc_type          VARCHAR NOT NULL DEFAULT '',
@@ -80,7 +94,6 @@ CREATE TABLE IF NOT EXISTS documents (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS documents_workspace_idx  ON documents(workspace_id);
 CREATE INDEX IF NOT EXISTS documents_thread_idx     ON documents(thread_id);
 CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
 
@@ -104,6 +117,11 @@ EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 -- schema.
 DROP INDEX IF EXISTS documents_collection_idx;
 ALTER TABLE documents DROP COLUMN IF EXISTS collection_id;
+-- workspace_id here was always exactly the one value schema_metadata now
+-- carries once, for the whole database (deviation 34) — dropped for the same
+-- reason collection_id was above.
+DROP INDEX IF EXISTS documents_workspace_idx;
+ALTER TABLE documents DROP COLUMN IF EXISTS workspace_id;
 -- Drives the stale-PENDING reconciliation sweep (§2.2).
 CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';
@@ -123,19 +141,30 @@ CREATE INDEX IF NOT EXISTS documents_email_date_idx
 -- paragraph differently per document, so the bytes differ while the passage
 -- does not.
 --
--- Identity is scoped by embed_model as well as workspace: a re-embed writes a
--- new model namespace, and collapsing across namespaces would serve a vector
--- from the wrong model. Equality only — never a similarity threshold — because
+-- Identity is scoped by embed_model: a re-embed writes a new model
+-- namespace, and collapsing across namespaces would serve a vector from the
+-- wrong model. Equality only — never a similarity threshold — because
 -- passages that differ only in dates or amounts must remain distinct.
 CREATE TABLE IF NOT EXISTS chunks (
     content_id   UUID PRIMARY KEY,
-    workspace_id VARCHAR NOT NULL,
     embed_model  VARCHAR NOT NULL,
     content_hash BYTEA   NOT NULL,
     chunk_text   TEXT    NOT NULL,
     embedding    halfvec(%[1]d),
-    UNIQUE (workspace_id, embed_model, content_hash)
+    UNIQUE (embed_model, content_hash)
 );
+
+-- An older database's dedup key still names workspace_id, which the
+-- replacement above is deliberately free of (schema_metadata comment).
+-- Dropping the column takes the old same-table UNIQUE constraint with it —
+-- Postgres cascades a table's own dependent constraints automatically, no
+-- CASCADE keyword needed — so only the new constraint needs adding back;
+-- a fresh table already has it from the CREATE TABLE above.
+ALTER TABLE chunks DROP COLUMN IF EXISTS workspace_id;
+DO $$ BEGIN
+    ALTER TABLE chunks ADD CONSTRAINT chunks_embed_model_content_hash_key
+        UNIQUE (embed_model, content_hash);
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS chunks_hnsw_idx ON chunks
     USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
@@ -153,14 +182,15 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_id          UUID PRIMARY KEY,
     doc_id            UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
     content_id        UUID NOT NULL REFERENCES chunks(content_id) ON DELETE RESTRICT,
-    workspace_id      VARCHAR NOT NULL,
     chunk_index       INT     NOT NULL,
     start_char_offset INT     NOT NULL,
     end_char_offset   INT     NOT NULL
 );
 
+DROP INDEX IF EXISTS chunks_workspace_idx;
+ALTER TABLE document_chunks DROP COLUMN IF EXISTS workspace_id;
+
 CREATE INDEX IF NOT EXISTS chunks_doc_idx        ON document_chunks(doc_id);
-CREATE INDEX IF NOT EXISTS chunks_workspace_idx  ON document_chunks(workspace_id);
 CREATE INDEX IF NOT EXISTS chunks_content_idx    ON document_chunks(content_id);
 `
 
@@ -180,7 +210,6 @@ const emailSchemaSQL = `
 -- claim the sender made.
 CREATE TABLE IF NOT EXISTS email_messages (
     doc_id              UUID PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
-    workspace_id        VARCHAR     NOT NULL,
     message_id          TEXT        NOT NULL DEFAULT '',
     subject_raw         TEXT        NOT NULL DEFAULT '',
     subject_normalized  TEXT        NOT NULL DEFAULT '',
@@ -198,19 +227,23 @@ CREATE TABLE IF NOT EXISTS email_messages (
     parse_version       INT         NOT NULL DEFAULT 1
 );
 
+-- workspace_id here was always exactly the one value schema_metadata now
+-- carries once, for the whole database (deviation 34).
+ALTER TABLE email_messages DROP COLUMN IF EXISTS workspace_id;
+
 CREATE INDEX IF NOT EXISTS email_messages_conversation_idx
-    ON email_messages(workspace_id, conversation_id);
+    ON email_messages(conversation_id);
 -- The browse keyset. Matches the read order exactly — sent_at DESC NULLS LAST,
 -- then doc_id DESC as the tiebreak — so a cursor page is an index range scan
 -- and undated messages sort last instead of dropping out.
 CREATE INDEX IF NOT EXISTS email_messages_keyset_idx
-    ON email_messages(workspace_id, sent_at DESC NULLS LAST, doc_id DESC);
+    ON email_messages(sent_at DESC NULLS LAST, doc_id DESC);
 -- The snapshot watermark: a page taken after a cursor was issued must be able
 -- to exclude everything ingested since.
 CREATE INDEX IF NOT EXISTS email_messages_ingested_idx
-    ON email_messages(workspace_id, ingested_at);
+    ON email_messages(ingested_at);
 CREATE INDEX IF NOT EXISTS email_messages_message_id_idx
-    ON email_messages(workspace_id, message_id) WHERE message_id <> '';
+    ON email_messages(message_id) WHERE message_id <> '';
 
 -- Parsed mailboxes, one row per header position. Ordinal preserves header
 -- order; a mailbox that could not be parsed keeps its raw text with an empty
@@ -251,7 +284,7 @@ CREATE TABLE IF NOT EXISTS email_references (
 CREATE INDEX IF NOT EXISTS email_references_message_idx
     ON email_references(message_id);
 
--- The identifier graph: one node per identifier ever seen in a workspace,
+-- The identifier graph: one node per identifier ever seen in the workspace,
 -- whether or not the message it names was ever ingested. An identifier
 -- mentioned only by a reply gets a placeholder node with a NULL doc_id — a
 -- conversation must survive a missing ancestor, and no document row is ever
@@ -262,16 +295,27 @@ CREATE INDEX IF NOT EXISTS email_references_message_idx
 -- merged ids, so the outcome depends on the set of messages ingested and not on
 -- the order they arrived in.
 CREATE TABLE IF NOT EXISTS email_identifier_nodes (
-    workspace_id VARCHAR NOT NULL,
-    message_id   TEXT    NOT NULL,
+    message_id   TEXT    NOT NULL PRIMARY KEY,
     doc_id       UUID REFERENCES documents(doc_id) ON DELETE SET NULL,
-    component_id UUID    NOT NULL,
-    PRIMARY KEY (workspace_id, message_id)
+    component_id UUID    NOT NULL
 );
+
+-- An older database still has workspace_id as part of the primary key.
+-- Gated on that column actually being present, so a fresh table never pays
+-- for dropping and re-adding a primary key it already has correctly.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'email_identifier_nodes'
+                 AND column_name = 'workspace_id') THEN
+        ALTER TABLE email_identifier_nodes DROP CONSTRAINT email_identifier_nodes_pkey;
+        ALTER TABLE email_identifier_nodes DROP COLUMN workspace_id;
+        ALTER TABLE email_identifier_nodes ADD PRIMARY KEY (message_id);
+    END IF;
+END $$;
 
 -- Drives the merge rewrite, which is by component rather than by identifier.
 CREATE INDEX IF NOT EXISTS email_identifier_nodes_component_idx
-    ON email_identifier_nodes(workspace_id, component_id);
+    ON email_identifier_nodes(component_id);
 CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
     ON email_identifier_nodes(doc_id) WHERE doc_id IS NOT NULL;
 `
@@ -280,49 +324,75 @@ CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
 // records validated mentions plus explicit deterministic relation candidates,
 // supported edges, and their derived episode memberships.
 const topicGraphSchemaSQL = `
+-- Topic graph tables are entirely derived, replaceable, versioned evidence
+-- (ingestion-design.md §2.6) — never authoritative, unlike documents or email
+-- metadata. An older database's workspace_id-scoped shape is dropped and
+-- rebuilt from a fresh graph build rather than migrated constraint-by-
+-- constraint through a dense compound-key dependency tree that CASCADE would
+-- otherwise have to unwind one FK at a time: rebuilding a topic graph is
+-- already a normal, cheap, expected operation this system supports, unlike
+-- migrating canonical documents or email metadata ever would be.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'topic_graph_versions' AND column_name = 'workspace_id') THEN
+        DROP TABLE IF EXISTS topic_episode_memberships CASCADE;
+        DROP TABLE IF EXISTS topic_episodes CASCADE;
+        DROP TABLE IF EXISTS topic_relation_edges CASCADE;
+        DROP TABLE IF EXISTS topic_relation_candidate_supports CASCADE;
+        DROP TABLE IF EXISTS topic_relation_candidates CASCADE;
+        DROP TABLE IF EXISTS topic_mention_spans CASCADE;
+        DROP TABLE IF EXISTS topic_mentions CASCADE;
+        DROP TABLE IF EXISTS topic_graph_versions CASCADE;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS topic_graph_versions (
     version_id              UUID PRIMARY KEY,
-    workspace_id            VARCHAR NOT NULL,
     status                  VARCHAR NOT NULL CHECK (status IN ('BUILDING','READY','ACTIVE','RETIRED')),
     extraction_version      VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
     config_version          VARCHAR NOT NULL CHECK (octet_length(config_version) BETWEEN 1 AND 128),
     max_mentions_per_doc    INT NOT NULL CHECK (max_mentions_per_doc > 0 AND max_mentions_per_doc <= 1000),
     max_spans_per_mention   INT NOT NULL CHECK (max_spans_per_mention > 0 AND max_spans_per_mention <= 64),
     max_display_label_bytes INT NOT NULL CHECK (max_display_label_bytes > 0 AND max_display_label_bytes <= 1024),
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (version_id, workspace_id)
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- A partial unique index makes two ACTIVE rows impossible even if an operator
 -- bypasses the repository. Promotion changes the old and replacement rows in
 -- one transaction, so an existing active graph remains readable until that
--- transaction commits.
+-- transaction commits. Indexing a constant expression rather than a column is
+-- the standard way to enforce "at most one row" for a whole table, which is
+-- what one database per workspace makes this: there is no workspace column
+-- left to key the partial index on.
 CREATE UNIQUE INDEX IF NOT EXISTS topic_graph_versions_one_active_idx
-    ON topic_graph_versions(workspace_id) WHERE status = 'ACTIVE';
-CREATE INDEX IF NOT EXISTS topic_graph_versions_workspace_status_idx
-    ON topic_graph_versions(workspace_id, status);
+    ON topic_graph_versions((1)) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS topic_graph_versions_status_idx
+    ON topic_graph_versions(status);
 
 CREATE TABLE IF NOT EXISTS topic_mentions (
     mention_id         UUID PRIMARY KEY,
-    version_id         UUID NOT NULL,
-    workspace_id       VARCHAR NOT NULL,
+    version_id         UUID NOT NULL REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE,
     doc_id             UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
     display_label      VARCHAR NOT NULL DEFAULT '' CHECK (octet_length(display_label) <= 1024),
     extraction_version VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (mention_id, workspace_id, doc_id),
-    FOREIGN KEY (version_id, workspace_id)
-        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE
+    -- Neither pair is a natural key on its own — mention_id alone already is,
+    -- via the primary key above. Both exist purely as reference targets for
+    -- compound foreign keys elsewhere in this schema, each proving a
+    -- different cross-column invariant: a span's doc_id actually matches its
+    -- mention's, and a relation's endpoints actually belong to the graph
+    -- version the relation itself belongs to.
+    UNIQUE (mention_id, doc_id),
+    UNIQUE (mention_id, version_id)
 );
 
 CREATE INDEX IF NOT EXISTS topic_mentions_source_idx
-    ON topic_mentions(workspace_id, doc_id, version_id);
+    ON topic_mentions(doc_id, version_id);
 CREATE INDEX IF NOT EXISTS topic_mentions_version_idx
-    ON topic_mentions(workspace_id, version_id, doc_id);
+    ON topic_mentions(version_id, doc_id);
 
 CREATE TABLE IF NOT EXISTS topic_mention_spans (
     mention_id             UUID NOT NULL,
-    workspace_id           VARCHAR NOT NULL,
     doc_id                 UUID NOT NULL,
     ordinal                INT NOT NULL CHECK (ordinal >= 0),
     start_byte             INT NOT NULL CHECK (start_byte >= 0),
@@ -330,29 +400,12 @@ CREATE TABLE IF NOT EXISTS topic_mention_spans (
     normalized_text_sha256 BYTEA NOT NULL CHECK (octet_length(normalized_text_sha256) = 32),
     slice_sha256           BYTEA NOT NULL CHECK (octet_length(slice_sha256) = 32),
     PRIMARY KEY (mention_id, ordinal),
-    FOREIGN KEY (mention_id, workspace_id, doc_id)
-        REFERENCES topic_mentions(mention_id, workspace_id, doc_id) ON DELETE CASCADE
+    FOREIGN KEY (mention_id, doc_id)
+        REFERENCES topic_mentions(mention_id, doc_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS topic_mention_spans_source_idx
-    ON topic_mention_spans(workspace_id, doc_id, start_byte, end_byte);
-
--- Existing workspaces may have received topic_mentions before the version
--- scoped key above existed. The key makes every relation foreign key prove its
--- endpoints are in this exact replaceable graph version, not merely a global
--- mention UUID.
---
--- A UNIQUE constraint always creates a backing index of the same name, so a
--- second ApplySchema run against a database that already has this
--- constraint fails while creating that index, not the constraint: Postgres
--- raises duplicate_table (42P07), not duplicate_object (42710), because the
--- collision is in the relation namespace the index lives in. Both are
--- caught so this block is idempotent either way.
-DO $$ BEGIN
-    ALTER TABLE topic_mentions
-        ADD CONSTRAINT topic_mentions_version_scope_key
-        UNIQUE (mention_id, version_id, workspace_id);
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
+    ON topic_mention_spans(doc_id, start_byte, end_byte);
 
 -- Relation candidates are explicitly supplied by a trusted deterministic
 -- writer. They preserve even unsupported assessments for evaluation, while
@@ -361,7 +414,6 @@ EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 CREATE TABLE IF NOT EXISTS topic_relation_candidates (
     candidate_id       UUID PRIMARY KEY,
     version_id         UUID NOT NULL,
-    workspace_id       VARCHAR NOT NULL,
     earlier_mention_id UUID NOT NULL,
     later_mention_id   UUID NOT NULL,
     relation_type      VARCHAR NOT NULL CHECK (relation_type IN
@@ -374,20 +426,20 @@ CREATE TABLE IF NOT EXISTS topic_relation_candidates (
     method_version     VARCHAR NOT NULL CHECK (octet_length(method_version) BETWEEN 1 AND 128),
     supported          BOOLEAN NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (candidate_id, version_id, workspace_id),
-    FOREIGN KEY (version_id, workspace_id)
-        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (earlier_mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (later_mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    UNIQUE (candidate_id, version_id),
+    FOREIGN KEY (version_id)
+        REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE,
+    FOREIGN KEY (earlier_mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (later_mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
     CHECK (earlier_mention_id <> later_mention_id)
 );
 
 CREATE INDEX IF NOT EXISTS topic_relation_candidates_version_idx
-    ON topic_relation_candidates(workspace_id, version_id, candidate_id);
+    ON topic_relation_candidates(version_id, candidate_id);
 CREATE INDEX IF NOT EXISTS topic_relation_candidates_mentions_idx
-    ON topic_relation_candidates(workspace_id, version_id, earlier_mention_id, later_mention_id);
+    ON topic_relation_candidates(version_id, earlier_mention_id, later_mention_id);
 
 -- Supporting mention IDs are normalized so they receive the same strict graph
 -- version foreign key as edge endpoints and can be inspected without storing
@@ -395,16 +447,15 @@ CREATE INDEX IF NOT EXISTS topic_relation_candidates_mentions_idx
 CREATE TABLE IF NOT EXISTS topic_relation_candidate_supports (
     candidate_id          UUID NOT NULL,
     version_id            UUID NOT NULL,
-    workspace_id          VARCHAR NOT NULL,
     supporting_mention_id UUID NOT NULL,
     PRIMARY KEY (candidate_id, supporting_mention_id),
-    FOREIGN KEY (candidate_id, version_id, workspace_id)
-        REFERENCES topic_relation_candidates(candidate_id, version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (supporting_mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE
+    FOREIGN KEY (candidate_id, version_id)
+        REFERENCES topic_relation_candidates(candidate_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (supporting_mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS topic_relation_candidate_supports_mention_idx
-    ON topic_relation_candidate_supports(workspace_id, version_id, supporting_mention_id);
+    ON topic_relation_candidate_supports(version_id, supporting_mention_id);
 
 -- An edge is an immutable projection of one supported candidate in a BUILDING
 -- version. Duplicating its traversal fields avoids joining candidates on every
@@ -412,7 +463,6 @@ CREATE INDEX IF NOT EXISTS topic_relation_candidate_supports_mention_idx
 CREATE TABLE IF NOT EXISTS topic_relation_edges (
     candidate_id       UUID PRIMARY KEY,
     version_id         UUID NOT NULL,
-    workspace_id       VARCHAR NOT NULL,
     earlier_mention_id UUID NOT NULL,
     later_mention_id   UUID NOT NULL,
     relation_type      VARCHAR NOT NULL CHECK (relation_type IN
@@ -421,19 +471,18 @@ CREATE TABLE IF NOT EXISTS topic_relation_edges (
     confidence         DOUBLE PRECISION NOT NULL CHECK
                            (confidence >= 0 AND confidence <= 1
                             AND confidence <> 'NaN'::double precision),
-    UNIQUE (candidate_id, version_id, workspace_id),
-    FOREIGN KEY (candidate_id, version_id, workspace_id)
-        REFERENCES topic_relation_candidates(candidate_id, version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (earlier_mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (later_mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (candidate_id, version_id)
+        REFERENCES topic_relation_candidates(candidate_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (earlier_mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (later_mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
     CHECK (earlier_mention_id <> later_mention_id)
 );
 CREATE INDEX IF NOT EXISTS topic_relation_edges_forward_idx
-    ON topic_relation_edges(workspace_id, version_id, earlier_mention_id, later_mention_id);
+    ON topic_relation_edges(version_id, earlier_mention_id, later_mention_id);
 CREATE INDEX IF NOT EXISTS topic_relation_edges_reverse_idx
-    ON topic_relation_edges(workspace_id, version_id, later_mention_id, earlier_mention_id);
+    ON topic_relation_edges(version_id, later_mention_id, earlier_mention_id);
 
 -- Episodes are not classifier output. The repository recreates these rows as
 -- the undirected connected components of supported edges; unconnected and
@@ -441,35 +490,32 @@ CREATE INDEX IF NOT EXISTS topic_relation_edges_reverse_idx
 CREATE TABLE IF NOT EXISTS topic_episodes (
     episode_id   UUID PRIMARY KEY,
     version_id   UUID NOT NULL,
-    workspace_id VARCHAR NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (episode_id, version_id, workspace_id),
-    FOREIGN KEY (version_id, workspace_id)
-        REFERENCES topic_graph_versions(version_id, workspace_id) ON DELETE CASCADE
+    UNIQUE (episode_id, version_id),
+    FOREIGN KEY (version_id)
+        REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS topic_episodes_version_idx
-    ON topic_episodes(workspace_id, version_id, episode_id);
+    ON topic_episodes(version_id, episode_id);
 
 CREATE TABLE IF NOT EXISTS topic_episode_memberships (
     episode_id   UUID NOT NULL,
     mention_id   UUID NOT NULL,
     version_id   UUID NOT NULL,
-    workspace_id VARCHAR NOT NULL,
     PRIMARY KEY (episode_id, mention_id),
-    FOREIGN KEY (episode_id, version_id, workspace_id)
-        REFERENCES topic_episodes(episode_id, version_id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (mention_id, version_id, workspace_id)
-        REFERENCES topic_mentions(mention_id, version_id, workspace_id) ON DELETE CASCADE
+    FOREIGN KEY (episode_id, version_id)
+        REFERENCES topic_episodes(episode_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (mention_id, version_id)
+        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS topic_episode_memberships_mention_idx
-    ON topic_episode_memberships(workspace_id, version_id, mention_id, episode_id);
+    ON topic_episode_memberships(version_id, mention_id, episode_id);
 
 -- Configuration and extraction metadata identify the evaluated build and are
 -- immutable. Only the closed lifecycle transitions below may update a version.
 CREATE OR REPLACE FUNCTION topic_graph_version_guard() RETURNS trigger AS $$
 BEGIN
     IF NEW.version_id IS DISTINCT FROM OLD.version_id
-       OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
        OR NEW.extraction_version IS DISTINCT FROM OLD.extraction_version
        OR NEW.config_version IS DISTINCT FROM OLD.config_version
        OR NEW.max_mentions_per_doc IS DISTINCT FROM OLD.max_mentions_per_doc
@@ -501,10 +547,10 @@ DECLARE
 BEGIN
     IF TG_OP = 'DELETE' THEN
         SELECT status INTO graph_status FROM topic_graph_versions
-        WHERE version_id = OLD.version_id AND workspace_id = OLD.workspace_id;
+        WHERE version_id = OLD.version_id;
     ELSE
         SELECT status INTO graph_status FROM topic_graph_versions
-        WHERE version_id = NEW.version_id AND workspace_id = NEW.workspace_id;
+        WHERE version_id = NEW.version_id;
     END IF;
     IF graph_status IS DISTINCT FROM 'BUILDING'
        AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
@@ -530,17 +576,14 @@ CREATE OR REPLACE FUNCTION topic_graph_derived_building_guard() RETURNS trigger 
 DECLARE
     graph_status VARCHAR;
     graph_version UUID;
-    graph_workspace VARCHAR;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         graph_version := OLD.version_id;
-        graph_workspace := OLD.workspace_id;
     ELSE
         graph_version := NEW.version_id;
-        graph_workspace := NEW.workspace_id;
     END IF;
     SELECT status INTO graph_status FROM topic_graph_versions
-    WHERE version_id = graph_version AND workspace_id = graph_workspace;
+    WHERE version_id = graph_version;
     IF graph_status IS DISTINCT FROM 'BUILDING'
        AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
         RAISE EXCEPTION 'topic graph derived state is mutable only while graph version is BUILDING';
@@ -584,15 +627,11 @@ DECLARE
     cycle_found BOOLEAN;
 BEGIN
     SELECT em.sent_at, tm.doc_id INTO earlier_sent, earlier_doc
-    FROM topic_mentions tm JOIN email_messages em
-      ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
-    WHERE tm.mention_id = NEW.earlier_mention_id
-      AND tm.version_id = NEW.version_id AND tm.workspace_id = NEW.workspace_id;
+    FROM topic_mentions tm JOIN email_messages em ON em.doc_id = tm.doc_id
+    WHERE tm.mention_id = NEW.earlier_mention_id AND tm.version_id = NEW.version_id;
     SELECT em.sent_at, tm.doc_id INTO later_sent, later_doc
-    FROM topic_mentions tm JOIN email_messages em
-      ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
-    WHERE tm.mention_id = NEW.later_mention_id
-      AND tm.version_id = NEW.version_id AND tm.workspace_id = NEW.workspace_id;
+    FROM topic_mentions tm JOIN email_messages em ON em.doc_id = tm.doc_id
+    WHERE tm.mention_id = NEW.later_mention_id AND tm.version_id = NEW.version_id;
     IF (earlier_sent IS NULL AND (later_sent IS NOT NULL OR earlier_doc >= later_doc))
        OR (earlier_sent IS NOT NULL AND later_sent IS NOT NULL
            AND (earlier_sent > later_sent OR (earlier_sent = later_sent AND earlier_doc >= later_doc))) THEN
@@ -603,7 +642,7 @@ BEGIN
         UNION
         SELECT e.later_mention_id
         FROM topic_relation_edges e JOIN reachable r ON e.earlier_mention_id = r.mention_id
-        WHERE e.version_id = NEW.version_id AND e.workspace_id = NEW.workspace_id
+        WHERE e.version_id = NEW.version_id
     )
     SELECT EXISTS (SELECT 1 FROM reachable WHERE mention_id = NEW.earlier_mention_id)
       INTO cycle_found;
@@ -659,8 +698,11 @@ func (d *DB) DropSearchIndex(ctx context.Context) error {
 	return nil
 }
 
-// SchemaMetadata records what the index was actually built for.
+// SchemaMetadata records what the index was actually built for, plus the one
+// workspace_id this database is dedicated to (deviation 34) — recorded here,
+// exactly once, rather than on every row of every other table.
 type SchemaMetadata struct {
+	WorkspaceID  string
 	EmbedModel   string
 	EmbedDim     int
 	TruncatedDim bool
@@ -671,6 +713,9 @@ type SchemaMetadata struct {
 func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 	if meta.EmbedDim <= 0 {
 		return fmt.Errorf("refusing to apply schema with dimension %d", meta.EmbedDim)
+	}
+	if meta.WorkspaceID == "" {
+		return fmt.Errorf("refusing to apply schema with no workspace id")
 	}
 
 	existing, err := d.LoadSchemaMetadata(ctx)
@@ -691,8 +736,25 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		if err := d.applyEmailSchema(ctx); err != nil {
 			return err
 		}
-		return d.applyTopicGraphSchema(ctx)
-	} else if !errors.Is(err, pgx.ErrNoRows) && !isUndefinedTable(err) {
+		if err := d.applyTopicGraphSchema(ctx); err != nil {
+			return err
+		}
+		// A database provisioned before workspace_id moved onto this row
+		// (deviation 34) has it empty; the configured id backfills it here,
+		// unconditionally, because it is the only value that was ever going
+		// to be correct for a database dedicated to one workspace.
+		if existing.WorkspaceID == "" {
+			if _, err := d.Pool.Exec(ctx,
+				`UPDATE schema_metadata SET workspace_id = $1 WHERE id`, meta.WorkspaceID); err != nil {
+				return fmt.Errorf("backfill schema metadata workspace id: %w", err)
+			}
+		} else if existing.WorkspaceID != meta.WorkspaceID {
+			return fmt.Errorf(
+				"database is scoped to workspace %q, refusing to apply schema for %q",
+				existing.WorkspaceID, meta.WorkspaceID)
+		}
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) && !IsUndefinedTable(err) {
 		return err
 	}
 
@@ -701,10 +763,10 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 	}
 
 	_, err = d.Pool.Exec(ctx, `
-        INSERT INTO schema_metadata (id, embed_model, embed_dim, truncated_dim)
-        VALUES (TRUE, $1, $2, $3)
+        INSERT INTO schema_metadata (id, workspace_id, embed_model, embed_dim, truncated_dim)
+        VALUES (TRUE, $1, $2, $3, $4)
         ON CONFLICT (id) DO NOTHING`,
-		meta.EmbedModel, meta.EmbedDim, meta.TruncatedDim)
+		meta.WorkspaceID, meta.EmbedModel, meta.EmbedDim, meta.TruncatedDim)
 	if err != nil {
 		return fmt.Errorf("record schema metadata: %w", err)
 	}
@@ -755,8 +817,9 @@ func (d *DB) ApplyTopicGraphSchema(ctx context.Context) error {
 func (d *DB) LoadSchemaMetadata(ctx context.Context) (SchemaMetadata, error) {
 	var m SchemaMetadata
 	err := d.Pool.QueryRow(ctx,
-		`SELECT embed_model, embed_dim, truncated_dim FROM schema_metadata WHERE id`).
-		Scan(&m.EmbedModel, &m.EmbedDim, &m.TruncatedDim)
+		`SELECT COALESCE(workspace_id, ''), embed_model, embed_dim, truncated_dim
+         FROM schema_metadata WHERE id`).
+		Scan(&m.WorkspaceID, &m.EmbedModel, &m.EmbedDim, &m.TruncatedDim)
 	return m, err
 }
 
@@ -777,7 +840,10 @@ func (d *DB) VerifyDimension(ctx context.Context, model string, dim int) error {
 	return nil
 }
 
-func isUndefinedTable(err error) bool {
+// IsUndefinedTable reports whether err is Postgres's "relation does not
+// exist" (42P01) — the shape LoadSchemaMetadata's caller sees against a
+// database that has never had ApplySchema run against it at all.
+func IsUndefinedTable(err error) bool {
 	return err != nil && (contains(err.Error(), "42P01") || contains(err.Error(), "does not exist"))
 }
 

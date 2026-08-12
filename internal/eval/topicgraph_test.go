@@ -16,10 +16,10 @@ type syntheticTopicGraphStore struct {
 	errs    map[string]error
 }
 
-func (s syntheticTopicGraphStore) TopicGraphEvaluation(context.Context, string, int) (topicgraph.EvaluationData, error) {
+func (s syntheticTopicGraphStore) TopicGraphEvaluation(context.Context, int) (topicgraph.EvaluationData, error) {
 	return s.data, nil
 }
-func (s syntheticTopicGraphStore) EvaluateTopicTimeline(_ context.Context, _ string, _, mentionID string, _ topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error) {
+func (s syntheticTopicGraphStore) EvaluateTopicTimeline(_ context.Context, _, mentionID string, _ topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error) {
 	if err := s.errs[mentionID]; err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func TestEvaluateTopicGraphAggregatesWithoutPrivateReferences(t *testing.T) {
 		results: map[string]*topicgraph.TimelineResult{privateMention: validSyntheticTimeline(2, 10, 1, topicgraph.WarnTimelineNodeLimit)},
 		errs:    map[string]error{"99999999-9999-5999-8999-999999999999": errors.New("synthetic failure")},
 	}
-	report, err := EvaluateTopicGraph(context.Background(), store, "private-workspace")
+	report, err := EvaluateTopicGraph(context.Background(), store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestEvaluateTopicGraphAggregatesWithoutPrivateReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{privateVersion, privateMention, "private-workspace", "99999999-9999-5999-8999-999999999999"} {
+	for _, private := range []string{privateVersion, privateMention, "99999999-9999-5999-8999-999999999999"} {
 		if strings.Contains(string(raw), private) {
 			t.Fatalf("private reference %q leaked in %s", private, raw)
 		}

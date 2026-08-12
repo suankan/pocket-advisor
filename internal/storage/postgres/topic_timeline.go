@@ -17,10 +17,7 @@ type TopicTimelineStore struct{ db *DB }
 
 func NewTopicTimelineStore(db *DB) *TopicTimelineStore { return &TopicTimelineStore{db: db} }
 
-func (s *TopicTimelineStore) BeginTimeline(ctx context.Context, workspace string) (topicgraph.TimelineReader, error) {
-	if workspace == "" {
-		return nil, topicgraph.ErrInvalidTimelineRequest
-	}
+func (s *TopicTimelineStore) BeginTimeline(ctx context.Context) (topicgraph.TimelineReader, error) {
 	tx, err := s.db.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return nil, fmt.Errorf("begin topic timeline snapshot: %w", err)
@@ -33,21 +30,20 @@ func (s *TopicTimelineStore) BeginTimeline(ctx context.Context, workspace string
 	err = tx.QueryRow(ctx, `
         SELECT version_id::text, now()
         FROM topic_graph_versions
-        WHERE workspace_id = $1 AND status = 'ACTIVE'
-        FOR SHARE`, workspace).Scan(&snapshot.VersionID, &snapshot.At)
+        WHERE status = 'ACTIVE'
+        FOR SHARE`).Scan(&snapshot.VersionID, &snapshot.At)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return rollback(topicgraph.ErrNoActiveTimeline)
 	}
 	if err != nil {
 		return rollback(fmt.Errorf("pin active topic graph: %w", err))
 	}
-	return &topicTimelineReader{tx: tx, workspace: workspace, snapshot: snapshot}, nil
+	return &topicTimelineReader{tx: tx, snapshot: snapshot}, nil
 }
 
 type topicTimelineReader struct {
-	tx        pgx.Tx
-	workspace string
-	snapshot  topicgraph.TimelineSnapshot
+	tx       pgx.Tx
+	snapshot topicgraph.TimelineSnapshot
 }
 
 func (r *topicTimelineReader) Snapshot() topicgraph.TimelineSnapshot { return r.snapshot }
@@ -62,23 +58,22 @@ func (r *topicTimelineReader) ResolveTimelineReference(ctx context.Context, ref 
 	switch ref.Kind {
 	case topicgraph.TimelineMentionRef:
 		rows, err = r.tx.Query(ctx, timelineRecordsSQL+`
-          WHERE tm.workspace_id = $1 AND tm.version_id = $2 AND tm.mention_id = $3::uuid
+          WHERE tm.version_id = $1 AND tm.mention_id = $2::uuid
             AND d.parent_doc_id IS NULL AND d.doc_type = 'email'
-          ORDER BY tm.mention_id, span.ordinal`, r.workspace, r.snapshot.VersionID, ref.ID)
+          ORDER BY tm.mention_id, span.ordinal`, r.snapshot.VersionID, ref.ID)
 	case topicgraph.TimelineEpisodeRef:
 		rows, err = r.tx.Query(ctx, `
           SELECT `+timelineRecordColumns+`
           FROM topic_episode_memberships membership
           JOIN topic_mentions tm ON tm.mention_id = membership.mention_id
-             AND tm.version_id = membership.version_id AND tm.workspace_id = membership.workspace_id
-          JOIN documents d ON d.doc_id = tm.doc_id AND d.workspace_id = tm.workspace_id
-          JOIN email_messages em ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
-          JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
-             AND span.workspace_id = tm.workspace_id AND span.doc_id = tm.doc_id
-          WHERE membership.workspace_id = $1 AND membership.version_id = $2
-            AND membership.episode_id = $3::uuid
+             AND tm.version_id = membership.version_id
+          JOIN documents d ON d.doc_id = tm.doc_id
+          JOIN email_messages em ON em.doc_id = tm.doc_id
+          JOIN topic_mention_spans span ON span.mention_id = tm.mention_id AND span.doc_id = tm.doc_id
+          WHERE membership.version_id = $1
+            AND membership.episode_id = $2::uuid
             AND d.parent_doc_id IS NULL AND d.doc_type = 'email'
-          ORDER BY tm.mention_id, span.ordinal`, r.workspace, r.snapshot.VersionID, ref.ID)
+          ORDER BY tm.mention_id, span.ordinal`, r.snapshot.VersionID, ref.ID)
 	default:
 		return nil, topicgraph.ErrUnknownTimelineReference
 	}
@@ -101,10 +96,9 @@ const timelineRecordColumns = `tm.mention_id::text, tm.doc_id::text, em.sent_at,
     span.end_byte, encode(span.normalized_text_sha256, 'hex'), encode(span.slice_sha256, 'hex')`
 const timelineRecordsSQL = `SELECT ` + timelineRecordColumns + `
     FROM topic_mentions tm
-    JOIN documents d ON d.doc_id = tm.doc_id AND d.workspace_id = tm.workspace_id
-    JOIN email_messages em ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
-    JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
-       AND span.workspace_id = tm.workspace_id AND span.doc_id = tm.doc_id`
+    JOIN documents d ON d.doc_id = tm.doc_id
+    JOIN email_messages em ON em.doc_id = tm.doc_id
+    JOIN topic_mention_spans span ON span.mention_id = tm.mention_id AND span.doc_id = tm.doc_id`
 
 func (r *topicTimelineReader) AdjacentTimeline(ctx context.Context, mentionID string, direction topicgraph.TimelineDirection, limit int) ([]topicgraph.TimelineStep, int, error) {
 	if limit < 1 {
@@ -113,9 +107,9 @@ func (r *topicTimelineReader) AdjacentTimeline(ctx context.Context, mentionID st
 	var predicate, target string
 	switch direction {
 	case topicgraph.TimelineForward:
-		predicate, target = "edge.earlier_mention_id = $3::uuid", "edge.later_mention_id"
+		predicate, target = "edge.earlier_mention_id = $2::uuid", "edge.later_mention_id"
 	case topicgraph.TimelineBackward:
-		predicate, target = "edge.later_mention_id = $3::uuid", "edge.earlier_mention_id"
+		predicate, target = "edge.later_mention_id = $2::uuid", "edge.earlier_mention_id"
 	default:
 		return nil, 0, topicgraph.ErrInvalidTimelineRequest
 	}
@@ -128,10 +122,9 @@ func (r *topicTimelineReader) AdjacentTimeline(ctx context.Context, mentionID st
                  target_message.sent_at AS target_sent_at, target_mention.doc_id AS target_doc_id
           FROM topic_relation_edges edge
           JOIN topic_mentions target_mention ON target_mention.mention_id = %s
-             AND target_mention.version_id = edge.version_id AND target_mention.workspace_id = edge.workspace_id
+             AND target_mention.version_id = edge.version_id
           JOIN email_messages target_message ON target_message.doc_id = target_mention.doc_id
-             AND target_message.workspace_id = target_mention.workspace_id
-          WHERE edge.workspace_id = $1 AND edge.version_id = $2 AND %s
+          WHERE edge.version_id = $1 AND %s
       ), target_nodes AS (
           SELECT DISTINCT ON (target_mention_id) target_mention_id, target_sent_at, target_doc_id
           FROM candidate_edges
@@ -140,7 +133,7 @@ func (r *topicTimelineReader) AdjacentTimeline(ctx context.Context, mentionID st
           SELECT target_mention_id, count(*) OVER () AS total_nodes
           FROM target_nodes
           ORDER BY target_sent_at ASC NULLS LAST, target_doc_id ASC, target_mention_id ASC
-          LIMIT $4
+          LIMIT $3
       ), selected_edges AS (
           SELECT edge.*, node.total_nodes
           FROM candidate_edges edge
@@ -149,16 +142,14 @@ func (r *topicTimelineReader) AdjacentTimeline(ctx context.Context, mentionID st
       SELECT edge.candidate_id::text, edge.earlier_mention_id::text, edge.later_mention_id::text,
              edge.relation_type, edge.confidence, edge.total_nodes, `+timelineRecordColumns+`
       FROM selected_edges edge
-      JOIN topic_mentions tm ON tm.mention_id = edge.target_mention_id
-         AND tm.version_id = $2 AND tm.workspace_id = $1
-      JOIN documents d ON d.doc_id = tm.doc_id AND d.workspace_id = tm.workspace_id
-      JOIN email_messages em ON em.doc_id = tm.doc_id AND em.workspace_id = tm.workspace_id
-      JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
-         AND span.workspace_id = tm.workspace_id AND span.doc_id = tm.doc_id
+      JOIN topic_mentions tm ON tm.mention_id = edge.target_mention_id AND tm.version_id = $1
+      JOIN documents d ON d.doc_id = tm.doc_id
+      JOIN email_messages em ON em.doc_id = tm.doc_id
+      JOIN topic_mention_spans span ON span.mention_id = tm.mention_id AND span.doc_id = tm.doc_id
       WHERE d.parent_doc_id IS NULL AND d.doc_type = 'email'
       ORDER BY edge.target_sent_at ASC NULLS LAST, edge.target_doc_id ASC,
                edge.target_mention_id ASC, edge.candidate_id ASC, span.ordinal`, target, target, predicate)
-	rows, err := r.tx.Query(ctx, query, r.workspace, r.snapshot.VersionID, mentionID, limit)
+	rows, err := r.tx.Query(ctx, query, r.snapshot.VersionID, mentionID, limit)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read topic timeline adjacency: %w", err)
 	}

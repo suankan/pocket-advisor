@@ -64,7 +64,7 @@ func runListen(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 
 	stats := telemetry.NewStats()
 	pipe, err := pipeline.New(ctx, a, stats, embedder,
-		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true, WorkspaceID: o.WorkspaceID})
+		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true})
 	if err != nil {
 		return err
 	}

@@ -8,22 +8,23 @@ import (
 )
 
 // BuildStore is the narrow persistence boundary for a bounded mention build.
-// The Builder owns the fixed workspace; callers cannot put a workspace in a
-// build request. Snapshot and CanonicalEmails use the database clock and a
-// doc-ID keyset so additions after the snapshot cannot enter this build.
+// Every workspace is its own database (deviation 34), so no method here takes
+// a workspace argument; callers cannot put one in a build request. Snapshot
+// and CanonicalEmails use the database clock and a doc-ID keyset so
+// additions after the snapshot cannot enter this build.
 type BuildStore interface {
-	CreateBuilding(context.Context, string, VersionSpec) error
-	ReplaceMentions(context.Context, string, ReplaceRequest) error
+	CreateBuilding(context.Context, VersionSpec) error
+	ReplaceMentions(context.Context, ReplaceRequest) error
 	Snapshot(context.Context) (time.Time, error)
-	CanonicalEmails(context.Context, string, time.Time, string, int) ([]CanonicalEmail, error)
+	CanonicalEmails(context.Context, time.Time, string, int) ([]CanonicalEmail, error)
 }
 
 // RelationBuildStore supplies only pre-bounded candidates selected from the
 // exact email reference graph. The builder never asks a model to discover a
 // candidate beyond this boundary.
 type RelationBuildStore interface {
-	RelationInputs(context.Context, string, string, int) ([]RelationInput, error)
-	ReplaceRelationCandidates(context.Context, string, ReplaceRelationCandidatesRequest) error
+	RelationInputs(context.Context, string, int) ([]RelationInput, error)
+	ReplaceRelationCandidates(context.Context, ReplaceRelationCandidatesRequest) error
 }
 
 // BuildOptions names an immutable version and caps one operator run. Limit is
@@ -68,7 +69,6 @@ const (
 // promote: evaluation and activation are distinct operator actions.
 type Builder struct {
 	store     BuildStore
-	workspace string
 	extractor Extractor
 	relations RelationClassifier
 }
@@ -76,14 +76,11 @@ type Builder struct {
 // NewBuilder optionally accepts a relation classifier. Leaving it absent keeps
 // the mention-only builder usable by tests and maintenance tools; the explicit
 // operator CLI always supplies it.
-func NewBuilder(store BuildStore, workspaceID string, extractor Extractor, relations ...RelationClassifier) (*Builder, error) {
+func NewBuilder(store BuildStore, extractor Extractor, relations ...RelationClassifier) (*Builder, error) {
 	if store == nil || extractor == nil || len(relations) > 1 || (len(relations) == 1 && relations[0] == nil) {
 		return nil, errors.New("topic graph builder requires a store and extractor")
 	}
-	if workspaceID == "" {
-		return nil, errors.New("topic graph builder requires a workspace scope")
-	}
-	b := &Builder{store: store, workspace: workspaceID, extractor: extractor}
+	b := &Builder{store: store, extractor: extractor}
 	if len(relations) == 1 {
 		b.relations = relations[0]
 	}
@@ -119,7 +116,7 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 	}
 	summary := BuildSummary{DryRun: o.DryRun}
 	if !o.DryRun {
-		if err := b.store.CreateBuilding(ctx, b.workspace, o.Spec); err != nil {
+		if err := b.store.CreateBuilding(ctx, o.Spec); err != nil {
 			return summary, err
 		}
 	}
@@ -137,7 +134,7 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 		if remaining := o.Limit - summary.Processed; size > remaining {
 			size = remaining
 		}
-		batch, err := b.store.CanonicalEmails(ctx, b.workspace, watermark, cursor, size)
+		batch, err := b.store.CanonicalEmails(ctx, watermark, cursor, size)
 		if err != nil {
 			return summary, fmt.Errorf("select topic graph sources: %w", err)
 		}
@@ -168,7 +165,7 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 			}
 			if !o.DryRun {
 				request := ReplaceRequest{VersionID: o.Spec.ID, TargetDocIDs: []string{email.DocID}, Mentions: result.Mentions}
-				if err := b.store.ReplaceMentions(ctx, b.workspace, request); err != nil {
+				if err := b.store.ReplaceMentions(ctx, request); err != nil {
 					if ctx.Err() != nil {
 						return summary, ctx.Err()
 					}
@@ -197,7 +194,7 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 		if bounded, ok := b.relations.(interface{ CandidateLimit() int }); ok {
 			relationLimit = bounded.CandidateLimit()
 		}
-		inputs, err := relationStore.RelationInputs(ctx, b.workspace, o.Spec.ID, relationLimit)
+		inputs, err := relationStore.RelationInputs(ctx, o.Spec.ID, relationLimit)
 		if err != nil {
 			summary.recordFailure(ReasonBuildRelationFailed)
 			return summary, fmt.Errorf("select topic relation candidates: %w", err)
@@ -207,7 +204,7 @@ func (b *Builder) Run(ctx context.Context, o BuildOptions) (BuildSummary, error)
 			summary.recordFailure(ReasonBuildRelationFailed)
 			return summary, fmt.Errorf("classify topic relations: %w", err)
 		}
-		if err := relationStore.ReplaceRelationCandidates(ctx, b.workspace, ReplaceRelationCandidatesRequest{VersionID: o.Spec.ID, Candidates: candidates}); err != nil {
+		if err := relationStore.ReplaceRelationCandidates(ctx, ReplaceRelationCandidatesRequest{VersionID: o.Spec.ID, Candidates: candidates}); err != nil {
 			summary.recordFailure(ReasonBuildRelationFailed)
 			return summary, fmt.Errorf("replace topic relation candidates: %w", err)
 		}

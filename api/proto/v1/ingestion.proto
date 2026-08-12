@@ -10,12 +10,16 @@ message DocumentMetadata {
   string doc_id = 1;
   // Empty for root documents. Only DiscoveryService mints those.
   string parent_doc_id = 2;
-  string workspace_id = 3;
   // A workspace is a single recursively walked directory with no further
   // subdivision (ingestion-design.md §3.1); field 4 named the collection
-  // that concept used to require and is retired rather than reused.
-  reserved 4;
-  reserved "collection_id";
+  // that concept used to require and is retired rather than reused. field 3
+  // named the workspace itself: every process in the pipeline already
+  // connects to that one workspace's own database and NATS stream
+  // (deviation 34), so nothing ever read this field for a decision — it was
+  // set at discovery and carried, unread, to wherever a command happened to
+  // travel. Retired rather than reused, like field 4.
+  reserved 3, 4;
+  reserved "workspace_id", "collection_id";
   string thread_id = 5;
   string source_filename = 6;
   string mime_type = 7;

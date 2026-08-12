@@ -142,33 +142,31 @@ var ErrOwnerIdentitiesRequired = errors.New("owner identities are required for d
 // documents it cannot otherwise see.
 var ErrUnknownReference = errors.New("reference does not name a message in this workspace")
 
-// Service answers browse and conversation queries for exactly one workspace.
+// Service answers browse and conversation queries for the one workspace its
+// Store is connected to.
 //
-// It holds no request state. The workspace is a construction argument and is
-// never read from a request, which is what makes cross-workspace access
-// unreachable rather than merely unimplemented (workspace-isolation.md §3).
+// It holds no request state. Which workspace that is comes from how the
+// Store was constructed, never from a request, which is what makes
+// cross-workspace access unreachable rather than merely unimplemented
+// (workspace-isolation.md §3).
 type Service struct {
 	store           Store
-	workspace       string
 	cfg             Config
 	log             *slog.Logger
 	ownerIdentities []string
 }
 
-// New wires a Service and refuses to build an unscoped one.
-func New(store Store, workspaceID string, cfg Config, log *slog.Logger) (*Service, error) {
-	return NewWithOwnerIdentities(store, workspaceID, nil, cfg, log)
+// New wires a Service.
+func New(store Store, cfg Config, log *slog.Logger) (*Service, error) {
+	return NewWithOwnerIdentities(store, nil, cfg, log)
 }
 
 // NewWithOwnerIdentities wires a service with the private, workspace-scoped
 // owner mailboxes resolved from workspace configuration. They are normalized at
 // this boundary so callers cannot accidentally compare display strings.
-func NewWithOwnerIdentities(store Store, workspaceID string, ownerIdentities []string, cfg Config, log *slog.Logger) (*Service, error) {
+func NewWithOwnerIdentities(store Store, ownerIdentities []string, cfg Config, log *slog.Logger) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("mailbox service requires a store")
-	}
-	if workspaceID == "" {
-		return nil, errors.New("mailbox service requires a workspace scope")
 	}
 	owners := make([]string, 0, len(ownerIdentities))
 	seen := make(map[string]struct{}, len(ownerIdentities))
@@ -186,7 +184,7 @@ func NewWithOwnerIdentities(store Store, workspaceID string, ownerIdentities []s
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{store: store, workspace: workspaceID, cfg: cfg.withDefaults(), log: log, ownerIdentities: owners}, nil
+	return &Service{store: store, cfg: cfg.withDefaults(), log: log, ownerIdentities: owners}, nil
 }
 
 func (s *Service) requireOwnerIdentities() error {
@@ -195,9 +193,6 @@ func (s *Service) requireOwnerIdentities() error {
 	}
 	return nil
 }
-
-// Workspace is the fixed scope this service serves, for diagnostics.
-func (s *Service) Workspace() string { return s.workspace }
 
 // warnings accumulates warnings in first-seen order, without repeating a code
 // for the same document.

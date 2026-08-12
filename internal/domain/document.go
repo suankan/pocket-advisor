@@ -80,7 +80,6 @@ const (
 type Document struct {
 	DocID       string
 	ParentDocID string // empty for root documents
-	WorkspaceID string
 	ThreadID    string
 	Status      Status
 	DocType     string
@@ -111,7 +110,6 @@ type EmailHeaders struct {
 type Chunk struct {
 	ChunkID   string
 	DocID     string
-	Workspace string
 	Index     int
 	StartChar int
 	EndChar   int

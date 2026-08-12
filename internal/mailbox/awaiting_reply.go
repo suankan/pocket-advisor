@@ -93,8 +93,8 @@ func (s *Service) AwaitingReplyCandidates(ctx context.Context, req AwaitingReply
 		return nil, err
 	}
 	messages, err := s.store.CandidateMessages(ctx, CandidateQuery{
-		WorkspaceID: s.workspace, OwnerIdentities: s.ownerIdentities,
-		Participant: filters.Participant, After: dereferenceTime(filters.After),
+		OwnerIdentities: s.ownerIdentities,
+		Participant:     filters.Participant, After: dereferenceTime(filters.After),
 		Before: dereferenceTime(filters.Before), Snapshot: snapshot,
 	})
 	if err != nil {

@@ -12,8 +12,8 @@ import (
 // traversal seeds. Neither source text nor graph identifiers are copied into
 // a report.
 type TopicGraphEvaluationStore interface {
-	TopicGraphEvaluation(context.Context, string, int) (topicgraph.EvaluationData, error)
-	EvaluateTopicTimeline(context.Context, string, string, string, topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error)
+	TopicGraphEvaluation(context.Context, int) (topicgraph.EvaluationData, error)
+	EvaluateTopicTimeline(context.Context, string, string, topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error)
 }
 
 // TopicGraphReport contains aggregate, private-safe graph evaluation results.
@@ -92,11 +92,11 @@ const topicGraphTimelineSampleLimit = 64
 
 // EvaluateTopicGraph converts private graph inputs into a report-safe summary
 // and probes a bounded deterministic sample of active-graph timelines.
-func EvaluateTopicGraph(ctx context.Context, store TopicGraphEvaluationStore, workspace string) (*TopicGraphReport, error) {
+func EvaluateTopicGraph(ctx context.Context, store TopicGraphEvaluationStore) (*TopicGraphReport, error) {
 	if store == nil {
 		return &TopicGraphReport{}, nil
 	}
-	data, err := store.TopicGraphEvaluation(ctx, workspace, topicGraphTimelineSampleLimit)
+	data, err := store.TopicGraphEvaluation(ctx, topicGraphTimelineSampleLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func EvaluateTopicGraph(ctx context.Context, store TopicGraphEvaluationStore, wo
 	report.Timelines.ValidityRate = 1
 	for _, mentionID := range data.TimelineMentionSeedIDs {
 		report.Timelines.Attempted++
-		result, err := store.EvaluateTopicTimeline(ctx, workspace, data.ActiveVersionID, mentionID, limits)
+		result, err := store.EvaluateTopicTimeline(ctx, data.ActiveVersionID, mentionID, limits)
 		if err != nil || !validTopicGraphTimeline(result, limits) {
 			report.Timelines.Invalid++
 			addCount(&report.Timelines.WarningCounts, "topic_timeline_invalid")

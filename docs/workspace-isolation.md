@@ -45,7 +45,7 @@ The binary resolves the configured workspace and constructs clients from its id 
 
 PostgreSQL grants `CONNECT` to `PUBLIC` on a new database by default. Pocket Advisor revokes that grant, so another workspace role cannot connect merely because it reaches the shared server. No cross-workspace role grants or shared application role are permitted. `trust` authentication removes the password check, not this one — Postgres's own privilege checks still confine a role to what it owns or was granted.
 
-Tables retain `workspace_id` as an identity and integrity field, but retrieval does not use it as the primary security boundary. The retrieval process connects directly to one database and `AssertScope` rejects stored chunks containing another or multiple workspace IDs. A per-query predicate would be weaker because it could hide contamination.
+No table carries a `workspace_id` column. One workspace, one database means a per-row workspace identity would always equal the same one value on every row — it could never disambiguate anything, and worse, a per-query predicate built from it would be a filter that is always true: false comfort that could silently *hide* foreign data rather than reveal that it should not be there. The workspace id is instead recorded exactly once, in `schema_metadata`, for the whole database. The retrieval process connects directly to one database and `AssertScope` checks that single recorded id against the one it was configured for, once, at startup, and refuses to serve a mismatch.
 
 The local deployment currently uses `sslmode: disable` and does not provision PostgreSQL TLS certificates. This is an explicit local single-machine constraint, not a suitable default for a remote or multi-user cluster.
 

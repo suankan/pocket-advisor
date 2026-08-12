@@ -19,9 +19,8 @@ import (
 const testSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type ingestCall struct {
-	workspaceID string
-	key         string
-	mode        string
+	key  string
+	mode string
 }
 
 type fakeIngester struct {
@@ -29,18 +28,21 @@ type fakeIngester struct {
 	calls []ingestCall
 }
 
-func (f *fakeIngester) Ingest(_ context.Context, workspaceID, key, mode string) error {
-	f.calls = append(f.calls, ingestCall{workspaceID: workspaceID, key: key, mode: mode})
+func (f *fakeIngester) Ingest(_ context.Context, key, mode string) error {
+	f.calls = append(f.calls, ingestCall{key: key, mode: mode})
 	return f.err
 }
 
-const testWorkspaceID = "matter-one"
+// testBucketName stands in for a workspace's own bucket name in the RustFS
+// notify payload fixtures below. It carries no meaning to the worker itself:
+// workspace identity comes from which bucket/database a whole process is
+// connected to (deviation 34), not from anything parsed out of an event.
+const testBucketName = "matter-one"
 
 func testNotifyWorker(svc Ingester) *RustFSNotifyWorker {
 	return &RustFSNotifyWorker{
-		Discovery:   svc,
-		WorkspaceID: testWorkspaceID,
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Discovery: svc,
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -60,12 +62,12 @@ func notificationMsg(t *testing.T, encodedKey string) *notifyFakeMsg {
 		"Records": []any{
 			map[string]any{
 				"object_name": encodedKey,
-				"bucket_name": testWorkspaceID,
+				"bucket_name": testBucketName,
 				"event_name":  "s3:ObjectCreated:Put",
 				"data": map[string]any{
 					"eventName": "s3:ObjectCreated:Put",
 					"s3": map[string]any{
-						"bucket": map[string]any{"name": testWorkspaceID},
+						"bucket": map[string]any{"name": testBucketName},
 						"object": map[string]any{"key": encodedKey},
 					},
 				},
@@ -147,11 +149,7 @@ func TestRustFSNotifyWorkerReportsEmptyRecords(t *testing.T) {
 
 // RustFS form-URL-encodes the forward slashes in an object key (live-
 // verified against beta.12, ingestion-design.md §5.2) — the worker must
-// decode that back before validating/using the key. Workspace identity
-// comes from the worker's own configured field now, not from the key (keys
-// carry no workspace segment since each workspace has its own bucket), so
-// this also confirms that field is what reaches Ingest, not anything parsed
-// from the payload.
+// decode that back before validating/using the key.
 func TestRustFSNotifyWorkerDecodesS3ObjectKey(t *testing.T) {
 	key := domain.RawObjectKey(testSHA256)
 	svc := &fakeIngester{}
@@ -163,7 +161,7 @@ func TestRustFSNotifyWorkerDecodesS3ObjectKey(t *testing.T) {
 	if len(svc.calls) != 1 {
 		t.Fatalf("expected one ingest call, got %d", len(svc.calls))
 	}
-	want := ingestCall{workspaceID: testWorkspaceID, key: key, mode: "notify"}
+	want := ingestCall{key: key, mode: "notify"}
 	if svc.calls[0] != want {
 		t.Fatalf("unexpected ingest call: got %+v want %+v", svc.calls[0], want)
 	}

@@ -17,7 +17,7 @@ import (
 // Service, the same reason the pre-4.0.0 webhook handler had its own
 // notifyIngester interface.
 type Ingester interface {
-	Ingest(ctx context.Context, workspaceID, key, mode string) error
+	Ingest(ctx context.Context, key, mode string) error
 }
 
 // RustFSNotifyWorker translates RustFS's native S3-shaped notify events
@@ -27,16 +27,13 @@ type Ingester interface {
 // internal/discovery because internal/worker already imports discovery
 // (EmailWorker uses discovery.Classify); the reverse import would cycle.
 //
-// WorkspaceID is set once at construction, not parsed per-event: object
-// keys carry no workspace segment (each workspace has its own bucket, which
-// already provides that scoping), and this worker is itself always built
-// scoped to one workspace's Vault/Docs/Bus (§5.2, pipeline.New's
-// opts.RustFSEvents). Workspace identity comes from which bucket you're
-// connected to, not a string embedded in a key.
+// This worker is always built scoped to one workspace's own Vault/Docs/Bus,
+// which are themselves already connected to that workspace's own bucket and
+// database (§5.2, pipeline.New's opts.RustFSEvents) — there is no workspace
+// identity to carry through an event or a call here.
 type RustFSNotifyWorker struct {
-	Discovery   Ingester
-	WorkspaceID string
-	Log         *slog.Logger
+	Discovery Ingester
+	Log       *slog.Logger
 }
 
 // bucketNotification mirrors what RustFS's NATS target actually publishes.
@@ -110,7 +107,7 @@ func (w *RustFSNotifyWorker) Handle(ctx context.Context, msg jetstream.Msg) erro
 			w.Log.Debug("ignoring notify event for a non-raw key", "key", key)
 			continue
 		}
-		if err := w.Discovery.Ingest(ctx, w.WorkspaceID, key, "notify"); err != nil {
+		if err := w.Discovery.Ingest(ctx, key, "notify"); err != nil {
 			// Not wrapped with WithDoc: Ingest can fail before a doc_id exists
 			// (e.g. Vault.Get), and one message may carry several Records, so
 			// there is no single document this failure belongs to. Retryable —

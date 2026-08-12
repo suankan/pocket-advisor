@@ -17,8 +17,8 @@ func NewTopicGraphEvaluationStore(db *DB) *TopicGraphEvaluationStore {
 	return &TopicGraphEvaluationStore{db: db}
 }
 
-func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, workspace string, seedLimit int) (topicgraph.EvaluationData, error) {
-	if workspace == "" || seedLimit < 1 {
+func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, seedLimit int) (topicgraph.EvaluationData, error) {
+	if seedLimit < 1 {
 		return topicgraph.EvaluationData{}, fmt.Errorf("invalid topic graph evaluation request")
 	}
 	var available bool
@@ -31,7 +31,7 @@ func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, wo
 	}
 	if err := s.db.Pool.QueryRow(ctx, `
         SELECT version_id::text FROM topic_graph_versions
-        WHERE workspace_id = $1 AND status = 'ACTIVE'`, workspace).Scan(&data.ActiveVersionID); err != nil {
+        WHERE status = 'ACTIVE'`).Scan(&data.ActiveVersionID); err != nil {
 		if err == pgx.ErrNoRows {
 			return data, nil
 		}
@@ -39,23 +39,22 @@ func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, wo
 	}
 	if err := s.db.Pool.QueryRow(ctx, `
         SELECT
-          (SELECT count(*) FROM documents d JOIN email_messages em
-             ON em.doc_id = d.doc_id AND em.workspace_id = d.workspace_id
-           WHERE d.workspace_id = $1 AND d.parent_doc_id IS NULL
+          (SELECT count(*) FROM documents d JOIN email_messages em ON em.doc_id = d.doc_id
+           WHERE d.parent_doc_id IS NULL
              AND d.doc_type = 'email' AND d.normalized_text IS NOT NULL
              AND d.normalized_text <> ''),
           (SELECT count(DISTINCT tm.doc_id) FROM topic_mentions tm
-           WHERE tm.workspace_id = $1 AND tm.version_id = $2),
+           WHERE tm.version_id = $1),
           (SELECT count(*) FROM topic_mentions tm
-           WHERE tm.workspace_id = $1 AND tm.version_id = $2),
+           WHERE tm.version_id = $1),
           (SELECT count(*) FROM topic_relation_candidates candidate
-           WHERE candidate.workspace_id = $1 AND candidate.version_id = $2),
+           WHERE candidate.version_id = $1),
           (SELECT count(*) FROM topic_relation_edges edge
-           WHERE edge.workspace_id = $1 AND edge.version_id = $2),
+           WHERE edge.version_id = $1),
           (SELECT count(*) FROM topic_episodes episode
-           WHERE episode.workspace_id = $1 AND episode.version_id = $2),
+           WHERE episode.version_id = $1),
           (SELECT count(DISTINCT membership.mention_id) FROM topic_episode_memberships membership
-           WHERE membership.workspace_id = $1 AND membership.version_id = $2)`, workspace, data.ActiveVersionID).Scan(
+           WHERE membership.version_id = $1)`, data.ActiveVersionID).Scan(
 		&data.EligibleDocuments, &data.MentionDocuments, &data.Mentions,
 		&data.RelationCandidates, &data.Edges, &data.Episodes, &data.EpisodeMemberships); err != nil {
 		return data, fmt.Errorf("count active topic graph: %w", err)
@@ -63,7 +62,7 @@ func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, wo
 	rows, err := s.db.Pool.Query(ctx, `
         SELECT relation_type, confidence, supported
         FROM topic_relation_candidates
-        WHERE workspace_id = $1 AND version_id = $2`, workspace, data.ActiveVersionID)
+        WHERE version_id = $1`, data.ActiveVersionID)
 	if err != nil {
 		return data, fmt.Errorf("read topic relation aggregates: %w", err)
 	}
@@ -90,8 +89,8 @@ func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, wo
 
 	seedRows, err := s.db.Pool.Query(ctx, `
         SELECT mention_id::text FROM topic_mentions
-        WHERE workspace_id = $1 AND version_id = $2
-        ORDER BY mention_id LIMIT $3`, workspace, data.ActiveVersionID, seedLimit)
+        WHERE version_id = $1
+        ORDER BY mention_id LIMIT $2`, data.ActiveVersionID, seedLimit)
 	if err != nil {
 		return data, fmt.Errorf("select topic timeline samples: %w", err)
 	}
@@ -109,8 +108,8 @@ func (s *TopicGraphEvaluationStore) TopicGraphEvaluation(ctx context.Context, wo
 	return data, nil
 }
 
-func (s *TopicGraphEvaluationStore) EvaluateTopicTimeline(ctx context.Context, workspace, versionID, mentionID string, limits topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error) {
-	service, err := topicgraph.NewTimelineService(NewTopicTimelineStore(s.db), workspace)
+func (s *TopicGraphEvaluationStore) EvaluateTopicTimeline(ctx context.Context, versionID, mentionID string, limits topicgraph.TimelineLimits) (*topicgraph.TimelineResult, error) {
+	service, err := topicgraph.NewTimelineService(NewTopicTimelineStore(s.db))
 	if err != nil {
 		return nil, err
 	}

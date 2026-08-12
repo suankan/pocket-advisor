@@ -244,7 +244,6 @@ func (p *EmailMetadataReprocessor) Run(ctx context.Context, o EmailReprocessOpti
 		}
 
 		batch, err := p.Docs.EmailDocuments(ctx, postgres.EmailDocumentQuery{
-			WorkspaceID: o.WorkspaceID,
 			After:       cursor,
 			Limit:       size,
 			OnlyMissing: o.OnlyMissing,
@@ -341,10 +340,7 @@ func (p *EmailMetadataReprocessor) reprocessOne(ctx context.Context, doc domain.
 		return nil
 	}
 
-	// The workspace comes from the run, not the row: the scope of this
-	// operation is fixed at the command line and nothing read from a table
-	// widens it.
-	conv, err := p.Emails.SaveEmailMessage(ctx, emailMessageOf(doc.DocID, o.WorkspaceID, parsed))
+	conv, err := p.Emails.SaveEmailMessage(ctx, emailMessageOf(doc.DocID, parsed))
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

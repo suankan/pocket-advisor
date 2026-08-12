@@ -43,10 +43,6 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	if strings.TrimSpace(loaded.Text) == "" {
 		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
-	workspace := loaded.Workspace
-	if workspace == "" {
-		workspace = meta.WorkspaceId
-	}
 
 	// Chunk first, then batch: the token budget must bound what leaves the
 	// process, and the chunker is what multiplies token count (§2.4).
@@ -71,7 +67,6 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 			batchChunks[i] = domain.Chunk{
 				ChunkID:    domain.NewChunkID(),
 				DocID:      meta.DocId,
-				Workspace:  workspace,
 				Index:      c.Index,
 				StartChar:  c.Start,
 				EndChar:    c.End,

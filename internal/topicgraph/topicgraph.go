@@ -38,7 +38,7 @@ var (
 	ErrInvalidVersion = errors.New("invalid topic graph version")
 	ErrInvalidMention = errors.New("invalid topic mention")
 	ErrInvalidRequest = errors.New("invalid topic mention replacement")
-	ErrUnknownVersion = errors.New("topic graph version is not in this workspace")
+	ErrUnknownVersion = errors.New("topic graph version is not known")
 	ErrVersionExists  = errors.New("topic graph version already exists")
 	ErrNotBuilding    = errors.New("topic graph version is not building")
 	ErrNotReady       = errors.New("topic graph version is not ready")
@@ -70,8 +70,7 @@ type VersionSpec struct {
 // Version is a stored graph-version record.
 type Version struct {
 	VersionSpec
-	WorkspaceID string
-	Status      Status
+	Status Status
 }
 
 // SourceSpan is an exact byte range in one document's normalized_text. Both
@@ -103,61 +102,55 @@ type ReplaceRequest struct {
 	Mentions     []Mention
 }
 
-// Store is the persistence boundary used by Service. The repository receives
-// the workspace separately because Service is the component that fixes it at
-// construction and never accepts it in a request.
+// Store is the persistence boundary used by Service. Every workspace is its
+// own database (deviation 34), so no method here takes a workspace argument.
 type Store interface {
-	CreateBuilding(context.Context, string, VersionSpec) error
-	ReplaceMentions(context.Context, string, ReplaceRequest) error
-	ReplaceRelationCandidates(context.Context, string, ReplaceRelationCandidatesRequest) error
-	Finalize(context.Context, string, string) error
-	Promote(context.Context, string, string) error
-	Retire(context.Context, string, string) error
-	Remove(context.Context, string, string) error
+	CreateBuilding(context.Context, VersionSpec) error
+	ReplaceMentions(context.Context, ReplaceRequest) error
+	ReplaceRelationCandidates(context.Context, ReplaceRelationCandidatesRequest) error
+	Finalize(context.Context, string) error
+	Promote(context.Context, string) error
+	Retire(context.Context, string) error
+	Remove(context.Context, string) error
 }
 
 // Service exposes the graph write operations without choosing an HTTP, MCP,
-// CLI, or worker transport. Its workspace cannot be selected by a caller.
+// CLI, or worker transport.
 type Service struct {
-	store     Store
-	workspace string
+	store Store
 }
 
-func New(store Store, workspaceID string) (*Service, error) {
+func New(store Store) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("topic graph service requires a store")
 	}
-	if workspaceID == "" {
-		return nil, errors.New("topic graph service requires a workspace scope")
-	}
-	return &Service{store: store, workspace: workspaceID}, nil
+	return &Service{store: store}, nil
 }
 
-func (s *Service) Workspace() string { return s.workspace }
 func (s *Service) CreateBuilding(ctx context.Context, spec VersionSpec) error {
-	return s.store.CreateBuilding(ctx, s.workspace, spec)
+	return s.store.CreateBuilding(ctx, spec)
 }
 func (s *Service) ReplaceMentions(ctx context.Context, request ReplaceRequest) error {
-	return s.store.ReplaceMentions(ctx, s.workspace, request)
+	return s.store.ReplaceMentions(ctx, request)
 }
 
 // ReplaceRelationCandidates accepts only explicit, already-validated inputs.
 // The local classifier is invoked by the explicit builder, never this service
 // boundary or a retrieval path.
 func (s *Service) ReplaceRelationCandidates(ctx context.Context, request ReplaceRelationCandidatesRequest) error {
-	return s.store.ReplaceRelationCandidates(ctx, s.workspace, request)
+	return s.store.ReplaceRelationCandidates(ctx, request)
 }
 func (s *Service) Finalize(ctx context.Context, versionID string) error {
-	return s.store.Finalize(ctx, s.workspace, versionID)
+	return s.store.Finalize(ctx, versionID)
 }
 func (s *Service) Promote(ctx context.Context, versionID string) error {
-	return s.store.Promote(ctx, s.workspace, versionID)
+	return s.store.Promote(ctx, versionID)
 }
 func (s *Service) Retire(ctx context.Context, versionID string) error {
-	return s.store.Retire(ctx, s.workspace, versionID)
+	return s.store.Retire(ctx, versionID)
 }
 func (s *Service) Remove(ctx context.Context, versionID string) error {
-	return s.store.Remove(ctx, s.workspace, versionID)
+	return s.store.Remove(ctx, versionID)
 }
 
 func ValidateVersionSpec(spec VersionSpec) error {

@@ -29,12 +29,10 @@ func timelineEdge(id, before, after string) TimelineEdge {
 }
 
 type fakeTimelineStore struct {
-	workspace string
-	reader    *fakeTimelineReader
+	reader *fakeTimelineReader
 }
 
-func (s *fakeTimelineStore) BeginTimeline(_ context.Context, workspace string) (TimelineReader, error) {
-	s.workspace = workspace
+func (s *fakeTimelineStore) BeginTimeline(_ context.Context) (TimelineReader, error) {
 	return s.reader, nil
 }
 
@@ -91,7 +89,7 @@ func TestTimelineReferenceIsClosedAndDocumentReferencesAreOutputOnly(t *testing.
 func TestTimelineCombinesIssuedSeedsUnderOneBudget(t *testing.T) {
 	at := time.Now().UTC()
 	reader := &fakeTimelineReader{snapshot: TimelineSnapshot{VersionID: timelineVersion, At: at}, seeds: []TimelineRecord{timelineRecord(timelineA, timelineDocA, "one", at)}}
-	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader}, "fixed")
+	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader})
 	out, err := service.Timeline(context.Background(), TimelineRequest{References: []string{
 		EncodeMentionReference(timelineVersion, timelineA),
 		EncodeMentionReference(timelineVersion, timelineB),
@@ -122,16 +120,13 @@ func TestTimelineFixedWorkspaceOrdersEvidenceAndGuardsCycles(t *testing.T) {
 		timelineKey(timelineC, TimelineForward): {{Node: a, Edge: timelineEdge(timelineEdgeCA, timelineC, timelineA)}},
 	}}
 	store := &fakeTimelineStore{reader: reader}
-	service, err := NewTimelineService(store, "fixed-workspace")
+	service, err := NewTimelineService(store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out, err := service.Timeline(context.Background(), TimelineRequest{Reference: EncodeMentionReference(timelineVersion, timelineA), Limits: TimelineLimits{ForwardDepth: 3, MaxNodes: 8, MaxBytes: 32, MaxLatency: time.Second}})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if store.workspace != "fixed-workspace" {
-		t.Fatalf("workspace escaped: %q", store.workspace)
 	}
 	if len(out.Nodes) != 3 || len(out.Relations) != 2 {
 		t.Fatalf("nodes/relations = %d/%d", len(out.Nodes), len(out.Relations))
@@ -152,7 +147,7 @@ func TestTimelineReportsNodeAndByteOmissions(t *testing.T) {
 	a := timelineRecord(timelineA, timelineDocA, "four", at)
 	b := timelineRecord(timelineB, timelineDocB, "five", at.Add(time.Hour))
 	reader := &fakeTimelineReader{snapshot: TimelineSnapshot{VersionID: timelineVersion, At: at}, seeds: []TimelineRecord{a}, steps: map[string][]TimelineStep{timelineKey(timelineA, TimelineForward): {{Node: b, Edge: timelineEdge(timelineEdgeAB, timelineA, timelineB)}}}}
-	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader}, "fixed")
+	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader})
 	out, err := service.Timeline(context.Background(), TimelineRequest{Reference: EncodeMentionReference(timelineVersion, timelineA), Limits: TimelineLimits{ForwardDepth: 1, MaxNodes: 1, MaxBytes: 4, MaxLatency: time.Second}})
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +171,7 @@ func TestTimelineRejectsDifferentActiveVersionAndInvalidEvidence(t *testing.T) {
 	bad := timelineRecord(timelineA, timelineDocA, "ok", at)
 	bad.Spans[0].SliceSHA256 = digest("wrong")
 	reader := &fakeTimelineReader{snapshot: TimelineSnapshot{VersionID: timelineVersion, At: at}, seeds: []TimelineRecord{bad}}
-	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader}, "fixed")
+	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader})
 	if _, err := service.Timeline(context.Background(), TimelineRequest{Reference: EncodeMentionReference("22222222-2222-5222-8222-222222222222", timelineA)}); !errors.Is(err, ErrUnknownTimelineReference) {
 		t.Fatalf("different graph = %v", err)
 	}
@@ -204,7 +199,7 @@ func TestTimelineReportsDepthAndLatencyBounds(t *testing.T) {
 	reader := &fakeTimelineReader{snapshot: TimelineSnapshot{VersionID: timelineVersion, At: at}, seeds: []TimelineRecord{a}, steps: map[string][]TimelineStep{
 		timelineKey(timelineA, TimelineForward): {{Node: b, Edge: timelineEdge(timelineEdgeAB, timelineA, timelineB)}},
 	}}
-	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader}, "fixed")
+	service, _ := NewTimelineService(&fakeTimelineStore{reader: reader})
 	out, err := service.Timeline(context.Background(), TimelineRequest{Reference: EncodeMentionReference(timelineVersion, timelineA), Limits: TimelineLimits{ForwardDepth: 0, MaxNodes: 4, MaxBytes: 16, MaxLatency: time.Second}})
 	if err != nil {
 		t.Fatal(err)

@@ -10,7 +10,7 @@ import (
 
 func ownerService(t *testing.T, store Store) *Service {
 	t.Helper()
-	s, err := NewWithOwnerIdentities(store, testWorkspace, []string{"Owner <OWNER@EXAMPLE.TEST>"}, Config{DefaultLimit: 5, MaxCandidates: 5, MaxLimit: 5}, nil)
+	s, err := NewWithOwnerIdentities(store, []string{"Owner <OWNER@EXAMPLE.TEST>"}, Config{DefaultLimit: 5, MaxCandidates: 5, MaxLimit: 5}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +18,7 @@ func ownerService(t *testing.T, store Store) *Service {
 }
 
 func TestListMessagesFiltersDirectionAgainstOwners(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	inbound := synthetic(1, 1, "sender@example.test", at(1, 9))
 	outbound := synthetic(2, 2, "owner@example.test", at(2, 9))
 	ownerToOwner := synthetic(3, 3, "owner@example.test", at(3, 9))
@@ -47,7 +47,7 @@ func TestListMessagesFiltersDirectionAgainstOwners(t *testing.T) {
 }
 
 func TestAwaitingReplyCandidatesAreExactAndEvidenceBacked(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	// This candidate has a later automatic event. It remains a candidate, and
 	// the event is retained with its stored class rather than called a reply.
 	inbound := synthetic(1, 1, "sender@example.test", at(1, 9))
@@ -83,7 +83,7 @@ func TestAwaitingReplyCandidatesAreExactAndEvidenceBacked(t *testing.T) {
 }
 
 func TestAwaitingReplyCandidateDisappearsOnlyForLinkedOwnerReply(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	inbound := synthetic(1, 1, "sender@example.test", at(1, 9))
 	inbound.MessageID = "question@example.test"
 	unlinkedOwner := synthetic(2, 1, "owner@example.test", at(2, 9))

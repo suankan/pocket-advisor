@@ -18,15 +18,14 @@ import (
 // SQL is generated from; the database-backed tests in mailbox_manual_test.go
 // are what prove the SQL agrees.
 type fakeStore struct {
-	workspace string
-	messages  []Message
+	messages []Message
 	// now advances only when a test says so, so "ingested after the snapshot"
 	// is a deliberate condition rather than a race.
 	now time.Time
 }
 
-func newFakeStore(workspace string) *fakeStore {
-	return &fakeStore{workspace: workspace, now: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+func newFakeStore() *fakeStore {
+	return &fakeStore{now: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
 }
 
 // ingest stores a message as if a worker had just written it.
@@ -41,9 +40,6 @@ func (f *fakeStore) Snapshot(context.Context) (time.Time, error) { return f.now,
 func (f *fakeStore) ListMessages(_ context.Context, q PageQuery) ([]Message, error) {
 	var matched []Message
 	for _, m := range f.messages {
-		if q.WorkspaceID != f.workspace {
-			continue
-		}
 		if m.IngestedAt.After(q.Snapshot) || !matches(m, q.Filters) || !matchesDirection(m, q.Filters.Direction, q.OwnerIdentities) {
 			continue
 		}
@@ -142,14 +138,14 @@ func matchesDirection(m Message, direction Direction, owners []string) bool {
 	return toOwner && !fromOwner
 }
 
-func (f *fakeStore) Summaries(_ context.Context, workspaceID string, ids []string, snapshot time.Time) (map[string]Aggregate, error) {
+func (f *fakeStore) Summaries(_ context.Context, ids []string, snapshot time.Time) (map[string]Aggregate, error) {
 	want := map[string]struct{}{}
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
 	out := map[string]Aggregate{}
 	for _, m := range f.messages {
-		if workspaceID != f.workspace || m.IngestedAt.After(snapshot) {
+		if m.IngestedAt.After(snapshot) {
 			continue
 		}
 		if _, ok := want[m.ConversationID]; !ok {
@@ -204,7 +200,7 @@ func (f *fakeStore) CandidateMessages(_ context.Context, q CandidateQuery) ([]Me
 		return false
 	}
 	for _, m := range f.messages {
-		if q.WorkspaceID != f.workspace || m.IngestedAt.After(q.Snapshot) ||
+		if m.IngestedAt.After(q.Snapshot) ||
 			m.ConversationMethod != domain.ConversationByReferences ||
 			m.AutomatedClass != domain.EmailAutomatedNone || isOwner(m.Sender) || !matchesParticipant(m) {
 			continue
@@ -224,7 +220,7 @@ func (f *fakeStore) CandidateMessages(_ context.Context, q CandidateQuery) ([]Me
 	}
 	var out []Message
 	for _, m := range f.messages {
-		if q.WorkspaceID == f.workspace && !m.IngestedAt.After(q.Snapshot) {
+		if !m.IngestedAt.After(q.Snapshot) {
 			if _, ok := conversationIDs[m.ConversationID]; ok {
 				out = append(out, m)
 			}
@@ -234,19 +230,19 @@ func (f *fakeStore) CandidateMessages(_ context.Context, q CandidateQuery) ([]Me
 	return out, nil
 }
 
-func (f *fakeStore) ConversationOf(_ context.Context, workspaceID, docID string) (string, error) {
+func (f *fakeStore) ConversationOf(_ context.Context, docID string) (string, error) {
 	for _, m := range f.messages {
-		if workspaceID == f.workspace && m.DocID == docID {
+		if m.DocID == docID {
 			return m.ConversationID, nil
 		}
 	}
 	return "", ErrUnknownReference
 }
 
-func (f *fakeStore) ConversationMessages(_ context.Context, workspaceID, conversationID string, snapshot time.Time) ([]Message, error) {
+func (f *fakeStore) ConversationMessages(_ context.Context, conversationID string, snapshot time.Time) ([]Message, error) {
 	var msgs []Message
 	for _, m := range f.messages {
-		if workspaceID != f.workspace || m.ConversationID != conversationID {
+		if m.ConversationID != conversationID {
 			continue
 		}
 		if m.IngestedAt.After(snapshot) {
@@ -265,8 +261,6 @@ func (f *fakeStore) ConversationMessages(_ context.Context, workspaceID, convers
 //
 // Every address is under .test, which cannot name a real mailbox, and every
 // identifier is invented here.
-
-const testWorkspace = "mailbox-unit"
 
 // docID mints a canonical identifier from a counter, so tests can name the
 // document they mean without depending on a hash.

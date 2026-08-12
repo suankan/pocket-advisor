@@ -110,43 +110,40 @@ func TestMentionIDIsStableAndSeparatesEvidence(t *testing.T) {
 }
 
 type recordingStore struct {
-	workspace       string
 	request         ReplaceRequest
 	relationRequest ReplaceRelationCandidatesRequest
+	retired         string
+	removed         string
 }
 
-func (s *recordingStore) CreateBuilding(_ context.Context, workspace string, _ VersionSpec) error {
-	s.workspace = workspace
+func (s *recordingStore) CreateBuilding(_ context.Context, _ VersionSpec) error {
 	return nil
 }
-func (s *recordingStore) ReplaceMentions(_ context.Context, workspace string, request ReplaceRequest) error {
-	s.workspace, s.request = workspace, request
+func (s *recordingStore) ReplaceMentions(_ context.Context, request ReplaceRequest) error {
+	s.request = request
 	return nil
 }
-func (s *recordingStore) ReplaceRelationCandidates(_ context.Context, workspace string, request ReplaceRelationCandidatesRequest) error {
-	s.workspace, s.relationRequest = workspace, request
+func (s *recordingStore) ReplaceRelationCandidates(_ context.Context, request ReplaceRelationCandidatesRequest) error {
+	s.relationRequest = request
 	return nil
 }
-func (s *recordingStore) Finalize(_ context.Context, workspace, _ string) error {
-	s.workspace = workspace
+func (s *recordingStore) Finalize(_ context.Context, _ string) error { return nil }
+func (s *recordingStore) Promote(_ context.Context, _ string) error  { return nil }
+func (s *recordingStore) Retire(_ context.Context, versionID string) error {
+	s.retired = versionID
 	return nil
 }
-func (s *recordingStore) Promote(_ context.Context, workspace, _ string) error {
-	s.workspace = workspace
-	return nil
-}
-func (s *recordingStore) Retire(_ context.Context, workspace, _ string) error {
-	s.workspace = workspace
-	return nil
-}
-func (s *recordingStore) Remove(_ context.Context, workspace, _ string) error {
-	s.workspace = workspace
+func (s *recordingStore) Remove(_ context.Context, versionID string) error {
+	s.removed = versionID
 	return nil
 }
 
-func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
+// TestServicePassesRequestsThrough proves the service is a thin, faithful
+// forward onto the store — no request field is dropped, substituted, or
+// otherwise touched on the way through.
+func TestServicePassesRequestsThrough(t *testing.T) {
 	store := &recordingStore{}
-	service, err := New(store, "workspace-a")
+	service, err := New(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,14 +151,14 @@ func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	if err := service.ReplaceMentions(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if store.workspace != "workspace-a" || store.request.VersionID != testVersionID {
-		t.Fatalf("store received workspace=%q request=%+v", store.workspace, store.request)
+	if store.request.VersionID != testVersionID {
+		t.Fatalf("store received request=%+v", store.request)
 	}
 	if err := service.ReplaceRelationCandidates(context.Background(), ReplaceRelationCandidatesRequest{VersionID: testVersionID}); err != nil {
 		t.Fatal(err)
 	}
-	if store.workspace != "workspace-a" || store.relationRequest.VersionID != testVersionID {
-		t.Fatalf("relation write escaped workspace: workspace=%q request=%+v", store.workspace, store.relationRequest)
+	if store.relationRequest.VersionID != testVersionID {
+		t.Fatalf("relation write did not reach the store: request=%+v", store.relationRequest)
 	}
 	if err := service.Retire(context.Background(), testVersionID); err != nil {
 		t.Fatal(err)
@@ -169,14 +166,11 @@ func TestServiceFixesWorkspaceOutsideRequests(t *testing.T) {
 	if err := service.Remove(context.Background(), testVersionID); err != nil {
 		t.Fatal(err)
 	}
-	if store.workspace != "workspace-a" {
-		t.Fatalf("lifecycle escaped workspace: %q", store.workspace)
+	if store.retired != testVersionID || store.removed != testVersionID {
+		t.Fatalf("lifecycle calls did not reach the store: retired=%q removed=%q", store.retired, store.removed)
 	}
-	if _, err := New(nil, "workspace-a"); err == nil {
+	if _, err := New(nil); err == nil {
 		t.Fatal("unscoped store accepted")
-	}
-	if _, err := New(store, ""); err == nil {
-		t.Fatal("empty workspace accepted")
 	}
 }
 

@@ -44,9 +44,6 @@ func (f *fakeSelector) EmailDocuments(_ context.Context, q postgres.EmailDocumen
 
 	var out []domain.Document
 	for _, d := range f.docs {
-		if d.WorkspaceID != q.WorkspaceID {
-			continue
-		}
 		if q.After != "" && d.DocID <= q.After {
 			continue
 		}
@@ -143,10 +140,9 @@ func synthetic(messageID, subject, from string) []byte {
 
 func emailDoc(docID, key string) domain.Document {
 	return domain.Document{
-		DocID:       docID,
-		WorkspaceID: testWorkspace,
-		MimeType:    "message/rfc822",
-		RawURI:      "s3://bucket/" + key,
+		DocID:    docID,
+		MimeType: "message/rfc822",
+		RawURI:   "s3://bucket/" + key,
 	}
 }
 
@@ -167,14 +163,11 @@ func fixture() (*EmailMetadataReprocessor, *fakeSelector, *fakeVault, *fakeWrite
 
 // ---- selection --------------------------------------------------------------
 
-// The walk is scoped to one workspace, ordered, and paged by doc_id: the
-// cursor of the next query is the last document of the previous batch, so an
-// interrupted run resumes over the same sequence rather than a reshuffled one.
-func TestReprocessSelectsTheWorkspaceInDeterministicPages(t *testing.T) {
+// The walk is ordered and paged by doc_id: the cursor of the next query is the
+// last document of the previous batch, so an interrupted run resumes over the
+// same sequence rather than a reshuffled one.
+func TestReprocessSelectsInDeterministicPages(t *testing.T) {
 	r, sel, _, writer := fixture()
-	sel.docs = append(sel.docs, domain.Document{
-		DocID: "doc-other", WorkspaceID: "ws-elsewhere", RawURI: "s3://bucket/raw/other",
-	})
 
 	summary, err := r.Run(context.Background(), EmailReprocessOptions{
 		WorkspaceID: testWorkspace, BatchSize: 2,
@@ -197,17 +190,13 @@ func TestReprocessSelectsTheWorkspaceInDeterministicPages(t *testing.T) {
 		if q.After != want {
 			t.Errorf("query %d cursor = %q, want %q", i, q.After, want)
 		}
-		if q.WorkspaceID != testWorkspace {
-			t.Errorf("query %d workspace = %q, want the fixed workspace", i, q.WorkspaceID)
-		}
 	}
 	// The selection is ordered; the writes inside a page are concurrent, so
-	// what is pinned here is the set — every in-workspace message and nothing
-	// from the workspace next door.
+	// what is pinned here is the set.
 	written := append([]string{}, writer.order...)
 	sort.Strings(written)
 	if got := strings.Join(written, ","); got != "doc-a,doc-b,doc-c" {
-		t.Errorf("wrote %q, want the three in-workspace documents", got)
+		t.Errorf("wrote %q, want the three documents", got)
 	}
 }
 
@@ -381,10 +370,10 @@ func TestReprocessClassifiesEachOutcome(t *testing.T) {
 	// Read cleanly, refused by the write path.
 	writer.failFor["doc-c"] = true
 	// A document whose row names no object at all.
-	sel.docs = append(sel.docs, domain.Document{DocID: "doc-d", WorkspaceID: testWorkspace})
-	// A row pointing outside the workspace's own bucket.
+	sel.docs = append(sel.docs, domain.Document{DocID: "doc-d"})
+	// A row pointing outside this workspace's own bucket.
 	sel.docs = append(sel.docs, domain.Document{
-		DocID: "doc-e", WorkspaceID: testWorkspace, RawURI: "s3://elsewhere/raw/e",
+		DocID: "doc-e", RawURI: "s3://elsewhere/raw/e",
 	})
 	// Bytes that are not a parsable message.
 	vault.objects["raw/f"] = []byte("not a message")
@@ -480,9 +469,9 @@ func TestReprocessWritesTheParsedMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := emailMessageOf("doc-a", testWorkspace, parsed)
+	want := emailMessageOf("doc-a", parsed)
 	if got.MessageID != want.MessageID || got.SubjectRaw != want.SubjectRaw ||
-		len(got.Addresses) != len(want.Addresses) || got.WorkspaceID != testWorkspace {
+		len(got.Addresses) != len(want.Addresses) {
 		t.Errorf("wrote %+v, want the parser's own mapping %+v", got, want)
 	}
 }

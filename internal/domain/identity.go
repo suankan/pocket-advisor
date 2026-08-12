@@ -54,22 +54,26 @@ func NewChunkID() string {
 // than random so that two messages of one conversation arriving in either order
 // converge on the same component: whichever arrives first seeds it from the
 // same smallest identifier, and a later merge keeps the smaller id anyway.
-func NewEmailComponentID(workspaceID, messageID string) string {
-	return deterministicUUID(Namespace, "email-component\x00"+workspaceID+"\x00"+messageID)
+//
+// Not scoped by workspace: each workspace is its own database (deviation
+// 34), so two identifier graphs never share a table to collide in.
+func NewEmailComponentID(messageID string) string {
+	return deterministicUUID(Namespace, "email-component\x00"+messageID)
 }
 
 // NewEmailSubjectConversationID is the conversation identity of the labelled
 // subject fallback. Messages with no identifiers at all group by normalized
-// subject *and* a participant, within one workspace and nowhere else.
+// subject *and* a participant, and nowhere else — each workspace is its own
+// database (deviation 34), so there is no wider scope to escape.
 //
 // The participant is what keeps the fallback conservative. Subjects like
 // "invoice" or "meeting" recur across unrelated correspondents, and grouping on
 // the subject alone would collapse strangers into one conversation on the
 // weakest signal the model has. Requiring the same sender means the guess is at
 // least about one person's mail.
-func NewEmailSubjectConversationID(workspaceID, subjectNormalized, participant string) string {
+func NewEmailSubjectConversationID(subjectNormalized, participant string) string {
 	return deterministicUUID(Namespace,
-		"email-subject\x00"+workspaceID+"\x00"+subjectNormalized+"\x00"+participant)
+		"email-subject\x00"+subjectNormalized+"\x00"+participant)
 }
 
 // NewEmailIsolatedConversationID is the conversation of a message that offers

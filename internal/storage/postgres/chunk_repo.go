@@ -104,7 +104,7 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 		n    int
 	)
 	cb.WriteString(`INSERT INTO chunks
-        (content_id, workspace_id, embed_model, content_hash, chunk_text, embedding)
+        (content_id, embed_model, content_hash, chunk_text, embedding)
         VALUES `)
 	hashes := make([][]byte, len(chunks))
 	for i, c := range chunks {
@@ -118,12 +118,12 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 		if n > 0 {
 			cb.WriteByte(',')
 		}
-		fmt.Fprintf(&cb, "(gen_random_uuid(),$%d,$%d,$%d,$%d,$%d::halfvec)",
-			n*5+1, n*5+2, n*5+3, n*5+4, n*5+5)
-		args = append(args, c.Workspace, c.EmbedModel, h, c.Text, formatVector(c.Embedding))
+		fmt.Fprintf(&cb, "(gen_random_uuid(),$%d,$%d,$%d,$%d::halfvec)",
+			n*4+1, n*4+2, n*4+3, n*4+4)
+		args = append(args, c.EmbedModel, h, c.Text, formatVector(c.Embedding))
 		n++
 	}
-	cb.WriteString(` ON CONFLICT (workspace_id, embed_model, content_hash) DO NOTHING`)
+	cb.WriteString(` ON CONFLICT (embed_model, content_hash) DO NOTHING`)
 	if n > 0 {
 		if _, err := tx.Exec(ctx, cb.String(), args...); err != nil {
 			return fmt.Errorf("insert %d passages: %w", n, err)
@@ -132,29 +132,28 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 
 	var pb strings.Builder
 	pb.WriteString(`INSERT INTO document_chunks
-        (chunk_id, doc_id, content_id, workspace_id, chunk_index,
+        (chunk_id, doc_id, content_id, chunk_index,
          start_char_offset, end_char_offset)
-        SELECT v.chunk_id, v.doc_id, c.content_id, v.workspace_id,
+        SELECT v.chunk_id, v.doc_id, c.content_id,
                v.chunk_index, v.start_char_offset, v.end_char_offset
         FROM (VALUES `)
-	pargs := make([]any, 0, len(chunks)*8)
+	pargs := make([]any, 0, len(chunks)*7)
 	for i, c := range chunks {
 		if i > 0 {
 			pb.WriteByte(',')
 		}
-		b := i * 8
-		fmt.Fprintf(&pb, "($%d::uuid,$%d::uuid,$%d,$%d,$%d::bytea,$%d::int,$%d::int,$%d::int)",
-			b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8)
-		pargs = append(pargs, c.ChunkID, c.DocID, c.Workspace, c.EmbedModel, hashes[i],
+		b := i * 7
+		fmt.Fprintf(&pb, "($%d::uuid,$%d::uuid,$%d,$%d::bytea,$%d::int,$%d::int,$%d::int)",
+			b+1, b+2, b+3, b+4, b+5, b+6, b+7)
+		pargs = append(pargs, c.ChunkID, c.DocID, c.EmbedModel, hashes[i],
 			c.Index, c.StartChar, c.EndChar)
 	}
 	// embed_model is part of the join, not just the insert: identity is scoped
 	// by model namespace, so a re-embed leaves the same hash present twice and
 	// a join without it would attach two placements to one chunk.
-	pb.WriteString(`) AS v(chunk_id, doc_id, workspace_id, embed_model, content_hash,
+	pb.WriteString(`) AS v(chunk_id, doc_id, embed_model, content_hash,
                           chunk_index, start_char_offset, end_char_offset)
-        JOIN chunks c ON c.workspace_id = v.workspace_id
-                     AND c.embed_model  = v.embed_model
+        JOIN chunks c ON c.embed_model  = v.embed_model
                      AND c.content_hash = v.content_hash`)
 	if _, err := tx.Exec(ctx, pb.String(), pargs...); err != nil {
 		return fmt.Errorf("insert %d placements: %w", len(chunks), err)

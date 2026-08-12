@@ -38,13 +38,13 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
 	var inserted bool
 	err = r.db.Pool.QueryRow(ctx, `
         INSERT INTO documents (
-            doc_id, parent_doc_id, workspace_id, thread_id,
+            doc_id, parent_doc_id, thread_id,
             processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
             source_filename, metadata_headers)
-        VALUES ($1,$2,$3,$4,'PENDING',$5,$6,$7,$8,$9,$10)
+        VALUES ($1,$2,$3,'PENDING',$4,$5,$6,$7,$8,$9)
         ON CONFLICT (raw_sha256) DO UPDATE SET raw_sha256 = EXCLUDED.raw_sha256
         RETURNING doc_id::text, (xmax = 0)`,
-		d.DocID, parent, d.WorkspaceID, d.ThreadID,
+		d.DocID, parent, d.ThreadID,
 		d.DocType, d.MimeType, d.RawURI, d.RawSHA256, d.SourceName, meta).Scan(&id, &inserted)
 
 	if err != nil {
@@ -128,31 +128,30 @@ func (r *DocumentRepo) SaveEmailText(
 	return nil
 }
 
-// LoadedText is what the embedding indexer needs to chunk and index a
-// document. Deliberately just the text and its owner: a chunk carries nothing
-// borrowed from the document it came from (§5.6).
+// LoadedText is what the embedding indexer needs to chunk a document.
+// Deliberately just the text: a chunk carries nothing borrowed from the
+// document it came from (§5.6).
 type LoadedText struct {
-	Text      string
-	Workspace string
+	Text string
 }
 
 // LoadText reads normalized_text back for the embedding indexer.
 func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, error) {
-	var text, workspace *string
+	var text *string
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT normalized_text, workspace_id FROM documents WHERE doc_id = $1`,
-		docID).Scan(&text, &workspace)
+		`SELECT normalized_text FROM documents WHERE doc_id = $1`,
+		docID).Scan(&text)
 	if err != nil {
 		return LoadedText{}, fmt.Errorf("load text %s: %w", docID, err)
 	}
-	return LoadedText{Text: deref(text), Workspace: deref(workspace)}, nil
+	return LoadedText{Text: deref(text)}, nil
 }
 
 // ClaimStalePending returns documents stuck PENDING past the threshold, for
 // the reconciliation sweep (§2.2).
 func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-        SELECT doc_id::text, workspace_id, mime_type,
+        SELECT doc_id::text, mime_type,
                rustfs_raw_uri, raw_sha256, source_filename,
                COALESCE(parent_doc_id::text, '')
         FROM documents
@@ -168,7 +167,7 @@ func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Dur
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.MimeType,
+		if err := rows.Scan(&d.DocID, &d.MimeType,
 			&d.RawURI, &d.RawSHA256, &d.SourceName, &d.ParentDocID); err != nil {
 			return nil, err
 		}
@@ -190,10 +189,9 @@ func (r *DocumentRepo) CountStalePending(ctx context.Context, olderThan time.Dur
 
 // KnownRawURIs returns the set of Tier 1 URIs already represented in Tier 2,
 // for the bucket-scan anti-join (§5.2).
-func (r *DocumentRepo) KnownRawURIs(ctx context.Context, workspaceID string) (map[string]struct{}, error) {
+func (r *DocumentRepo) KnownRawURIs(ctx context.Context) (map[string]struct{}, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT rustfs_raw_uri FROM documents WHERE workspace_id = $1 AND rustfs_raw_uri <> ''`,
-		workspaceID)
+		`SELECT rustfs_raw_uri FROM documents WHERE rustfs_raw_uri <> ''`)
 	if err != nil {
 		return nil, fmt.Errorf("known raw uris: %w", err)
 	}
@@ -210,30 +208,28 @@ func (r *DocumentRepo) KnownRawURIs(ctx context.Context, workspaceID string) (ma
 	return out, rows.Err()
 }
 
-// DeleteWorkspace removes every document in a workspace; chunks cascade.
-// This is the Tier 2 half of `uploader --wipe`, which must not leave the
-// database populated against an emptied bucket (§5.1).
-func (r *DocumentRepo) DeleteWorkspace(ctx context.Context, workspaceID string) (int64, error) {
-	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM documents WHERE workspace_id = $1`, workspaceID)
+// DeleteWorkspace empties this workspace's database: every document, with
+// chunks cascading. This is the Tier 2 half of `uploader --wipe`, which must
+// not leave the database populated against an emptied bucket (§5.1).
+func (r *DocumentRepo) DeleteWorkspace(ctx context.Context) (int64, error) {
+	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM documents`)
 	if err != nil {
-		return 0, fmt.Errorf("delete workspace %s: %w", workspaceID, err)
+		return 0, fmt.Errorf("delete workspace: %w", err)
 	}
 	// The identifier graph does not cascade: its nodes outlive the documents
 	// they name, which is exactly how a conversation survives a missing
 	// ancestor. That makes them the one thing a wipe would leave behind — a
 	// graph of placeholders for a corpus that no longer exists — so they are
 	// removed explicitly (§2.5).
-	if _, err := r.db.Pool.Exec(ctx,
-		`DELETE FROM email_identifier_nodes WHERE workspace_id = $1`, workspaceID); err != nil {
-		return tag.RowsAffected(), fmt.Errorf("delete workspace %s identifier graph: %w", workspaceID, err)
+	if _, err := r.db.Pool.Exec(ctx, `DELETE FROM email_identifier_nodes`); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("delete workspace identifier graph: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
 
 // DeleteBySHA removes one document and its descendants, for --forget.
-func (r *DocumentRepo) DeleteBySHA(ctx context.Context, workspaceID, sha string) (int64, error) {
-	tag, err := r.db.Pool.Exec(ctx,
-		`DELETE FROM documents WHERE workspace_id = $1 AND raw_sha256 = $2`, workspaceID, sha)
+func (r *DocumentRepo) DeleteBySHA(ctx context.Context, sha string) (int64, error) {
+	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM documents WHERE raw_sha256 = $1`, sha)
 	if err != nil {
 		return 0, fmt.Errorf("delete %s: %w", sha, err)
 	}

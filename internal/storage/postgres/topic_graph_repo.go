@@ -24,6 +24,13 @@ type TopicGraphRepo struct{ db *DB }
 
 func NewTopicGraphRepo(db *DB) *TopicGraphRepo { return &TopicGraphRepo{db: db} }
 
+// topicGraphLockKey is a fixed advisory lock key naming what is serialised —
+// competing promotions of the one topic graph this database holds — rather
+// than which workspace, since each workspace is its own database (deviation
+// 34) and an advisory lock is already scoped to the connection's own
+// database.
+const topicGraphLockKey = "topic-graph-promotion"
+
 // Snapshot returns the database clock used by email_messages.ingested_at.
 // One build holds this watermark for every keyset page, so later ingestion
 // cannot silently enter a version half way through its construction.
@@ -39,23 +46,22 @@ func (r *TopicGraphRepo) Snapshot(ctx context.Context) (time.Time, error) {
 // source must be a root, parsed email message with nonempty persisted body
 // text. Attachments, children, header-only messages, and late arrivals are
 // never admitted to an operator build.
-func (r *TopicGraphRepo) CanonicalEmails(ctx context.Context, workspaceID string, watermark time.Time, after string, limit int) ([]topicgraph.CanonicalEmail, error) {
-	if workspaceID == "" || watermark.IsZero() || limit <= 0 {
+func (r *TopicGraphRepo) CanonicalEmails(ctx context.Context, watermark time.Time, after string, limit int) ([]topicgraph.CanonicalEmail, error) {
+	if watermark.IsZero() || limit <= 0 {
 		return nil, topicgraph.ErrInvalidRequest
 	}
 	rows, err := r.db.Pool.Query(ctx, `
         SELECT d.doc_id::text, d.normalized_text
         FROM documents d
-        JOIN email_messages em ON em.doc_id = d.doc_id AND em.workspace_id = d.workspace_id
-        WHERE d.workspace_id = $1
-          AND d.parent_doc_id IS NULL
+        JOIN email_messages em ON em.doc_id = d.doc_id
+        WHERE d.parent_doc_id IS NULL
           AND d.doc_type = 'email'
           AND d.normalized_text IS NOT NULL
           AND d.normalized_text <> ''
-          AND em.ingested_at <= $2
-          AND d.doc_id::text > $3
+          AND em.ingested_at <= $1
+          AND d.doc_id::text > $2
         ORDER BY d.doc_id
-        LIMIT $4`, workspaceID, watermark, after, limit)
+        LIMIT $3`, watermark, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select topic graph sources: %w", err)
 	}
@@ -76,20 +82,17 @@ func (r *TopicGraphRepo) CanonicalEmails(ctx context.Context, workspaceID string
 
 // CreateBuilding records a new immutable build specification. A version always
 // begins BUILDING; callers cannot insert an already-ready or active graph.
-func (r *TopicGraphRepo) CreateBuilding(ctx context.Context, workspaceID string, spec topicgraph.VersionSpec) error {
-	if workspaceID == "" {
-		return topicgraph.ErrInvalidVersion
-	}
+func (r *TopicGraphRepo) CreateBuilding(ctx context.Context, spec topicgraph.VersionSpec) error {
 	if err := topicgraph.ValidateVersionSpec(spec); err != nil {
 		return err
 	}
 	tag, err := r.db.Pool.Exec(ctx, `
         INSERT INTO topic_graph_versions (
-            version_id, workspace_id, status, extraction_version, config_version,
+            version_id, status, extraction_version, config_version,
             max_mentions_per_doc, max_spans_per_mention, max_display_label_bytes)
-        VALUES ($1, $2, 'BUILDING', $3, $4, $5, $6, $7)
+        VALUES ($1, 'BUILDING', $2, $3, $4, $5, $6)
         ON CONFLICT (version_id) DO NOTHING`,
-		spec.ID, workspaceID, spec.ExtractionVersion, spec.ConfigVersion,
+		spec.ID, spec.ExtractionVersion, spec.ConfigVersion,
 		spec.Limits.MaxMentionsPerDocument, spec.Limits.MaxSpansPerMention,
 		spec.Limits.MaxDisplayLabelBytes)
 	if err != nil {
@@ -105,8 +108,8 @@ func (r *TopicGraphRepo) CreateBuilding(ctx context.Context, workspaceID string,
 // documents. An empty Mentions list is meaningful: it deletes stale mentions
 // for TargetDocIDs. It never repairs a range, digest, text encoding, or source
 // eligibility defect — all such output is rejected before deletion occurs.
-func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string, request topicgraph.ReplaceRequest) error {
-	if workspaceID == "" || request.VersionID == "" || len(request.TargetDocIDs) == 0 {
+func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, request topicgraph.ReplaceRequest) error {
+	if request.VersionID == "" || len(request.TargetDocIDs) == 0 {
 		return topicgraph.ErrInvalidRequest
 	}
 	tx, err := r.db.Pool.Begin(ctx)
@@ -115,14 +118,14 @@ func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	spec, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, request.VersionID, true)
+	spec, status, err := loadTopicGraphVersion(ctx, tx, request.VersionID, true)
 	if err != nil {
 		return err
 	}
 	if status != topicgraph.StatusBuilding {
 		return topicgraph.ErrNotBuilding
 	}
-	texts, err := loadTopicSourceTexts(ctx, tx, workspaceID, request.TargetDocIDs)
+	texts, err := loadTopicSourceTexts(ctx, tx, request.TargetDocIDs)
 	if err != nil {
 		return err
 	}
@@ -133,26 +136,26 @@ func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string
 	// A mention replacement changes the evidence set on which every relation
 	// and component depends. Conservatively discard the entire relation layer;
 	// a trusted deterministic writer must replace it again after mention build.
-	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1`, request.VersionID); err != nil {
 		return fmt.Errorf("clear topic episodes before mention replacement: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1`, request.VersionID); err != nil {
 		return fmt.Errorf("clear topic relations before mention replacement: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
         DELETE FROM topic_mentions
-        WHERE version_id = $1 AND workspace_id = $2 AND doc_id = ANY($3::uuid[])`,
-		request.VersionID, workspaceID, request.TargetDocIDs); err != nil {
+        WHERE version_id = $1 AND doc_id = ANY($2::uuid[])`,
+		request.VersionID, request.TargetDocIDs); err != nil {
 		return fmt.Errorf("clear topic mentions: %w", err)
 	}
 	for _, mention := range request.Mentions {
 		mentionID := topicgraph.MentionID(request.VersionID, mention)
 		if _, err := tx.Exec(ctx, `
             INSERT INTO topic_mentions
-                (mention_id, version_id, workspace_id, doc_id, display_label, extraction_version)
-            VALUES ($1, $2, $3, $4, $5, $6)`,
-			mentionID, request.VersionID, workspaceID, mention.DocID,
+                (mention_id, version_id, doc_id, display_label, extraction_version)
+            VALUES ($1, $2, $3, $4, $5)`,
+			mentionID, request.VersionID, mention.DocID,
 			mention.DisplayLabel, mention.ExtractionVersion); err != nil {
 			return fmt.Errorf("insert topic mention: %w", err)
 		}
@@ -161,10 +164,10 @@ func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string
 			sliceHash, _ := hex.DecodeString(span.SliceSHA256)
 			if _, err := tx.Exec(ctx, `
                 INSERT INTO topic_mention_spans
-                    (mention_id, workspace_id, doc_id, ordinal, start_byte, end_byte,
+                    (mention_id, doc_id, ordinal, start_byte, end_byte,
                      normalized_text_sha256, slice_sha256)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-				mentionID, workspaceID, mention.DocID, ordinal, span.StartByte,
+                VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				mentionID, mention.DocID, ordinal, span.StartByte,
 				span.EndByte, fullHash, sliceHash); err != nil {
 				return fmt.Errorf("insert topic mention span: %w", err)
 			}
@@ -179,13 +182,13 @@ func (r *TopicGraphRepo) ReplaceMentions(ctx context.Context, workspaceID string
 // Finalize seals a complete BUILDING graph for evaluation. Repeating a
 // successful finalization is a no-op, which makes a retry after a lost commit
 // acknowledgement safe; no other state can be finalized.
-func (r *TopicGraphRepo) Finalize(ctx context.Context, workspaceID, versionID string) error {
+func (r *TopicGraphRepo) Finalize(ctx context.Context, versionID string) error {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin topic graph finalization: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	_, status, err := loadTopicGraphVersion(ctx, tx, versionID, true)
 	if err != nil {
 		return err
 	}
@@ -197,7 +200,7 @@ func (r *TopicGraphRepo) Finalize(ctx context.Context, workspaceID, versionID st
 	}
 	if _, err := tx.Exec(ctx, `
         UPDATE topic_graph_versions SET status = 'READY'
-        WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+        WHERE version_id = $1`, versionID); err != nil {
 		return fmt.Errorf("finalize topic graph version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -207,10 +210,10 @@ func (r *TopicGraphRepo) Finalize(ctx context.Context, workspaceID, versionID st
 }
 
 // Promote atomically retires the old active graph, if any, and activates the
-// evaluated READY target. The workspace advisory lock serializes competing
-// promotions; no reader can commit-observe a period with no active version.
-func (r *TopicGraphRepo) Promote(ctx context.Context, workspaceID, versionID string) error {
-	if workspaceID == "" || versionID == "" {
+// evaluated READY target. The advisory lock serializes competing promotions;
+// no reader can commit-observe a period with no active version.
+func (r *TopicGraphRepo) Promote(ctx context.Context, versionID string) error {
+	if versionID == "" {
 		return topicgraph.ErrUnknownVersion
 	}
 	tx, err := r.db.Pool.Begin(ctx)
@@ -218,10 +221,10 @@ func (r *TopicGraphRepo) Promote(ctx context.Context, workspaceID, versionID str
 		return fmt.Errorf("begin topic graph promotion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, topicGraphLockKey); err != nil {
 		return fmt.Errorf("lock topic graph promotion: %w", err)
 	}
-	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	_, status, err := loadTopicGraphVersion(ctx, tx, versionID, true)
 	if err != nil {
 		return err
 	}
@@ -233,12 +236,12 @@ func (r *TopicGraphRepo) Promote(ctx context.Context, workspaceID, versionID str
 	}
 	if _, err := tx.Exec(ctx, `
         UPDATE topic_graph_versions SET status = 'RETIRED'
-        WHERE workspace_id = $1 AND status = 'ACTIVE'`, workspaceID); err != nil {
+        WHERE status = 'ACTIVE'`); err != nil {
 		return fmt.Errorf("retire active topic graph: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
         UPDATE topic_graph_versions SET status = 'ACTIVE'
-        WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+        WHERE version_id = $1`, versionID); err != nil {
 		return fmt.Errorf("activate topic graph: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -250,13 +253,13 @@ func (r *TopicGraphRepo) Promote(ctx context.Context, workspaceID, versionID str
 // Retire deactivates the active version without destroying its evidence
 // annotations. BUILDING versions are incomplete and READY versions remain
 // evaluation candidates, so neither can be retired.
-func (r *TopicGraphRepo) Retire(ctx context.Context, workspaceID, versionID string) error {
+func (r *TopicGraphRepo) Retire(ctx context.Context, versionID string) error {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin topic graph retirement: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	_, status, err := loadTopicGraphVersion(ctx, tx, versionID, true)
 	if err != nil {
 		return err
 	}
@@ -266,7 +269,7 @@ func (r *TopicGraphRepo) Retire(ctx context.Context, workspaceID, versionID stri
 	if status != topicgraph.StatusActive {
 		return topicgraph.ErrNotRetirable
 	}
-	if _, err := tx.Exec(ctx, `UPDATE topic_graph_versions SET status = 'RETIRED' WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE topic_graph_versions SET status = 'RETIRED' WHERE version_id = $1`, versionID); err != nil {
 		return fmt.Errorf("retire topic graph version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -277,13 +280,13 @@ func (r *TopicGraphRepo) Retire(ctx context.Context, workspaceID, versionID stri
 
 // Remove deletes an inactive build and its derived annotations. An ACTIVE
 // version can only change through Promote or an explicit Retire first.
-func (r *TopicGraphRepo) Remove(ctx context.Context, workspaceID, versionID string) error {
+func (r *TopicGraphRepo) Remove(ctx context.Context, versionID string) error {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin topic graph removal: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, versionID, true)
+	_, status, err := loadTopicGraphVersion(ctx, tx, versionID, true)
 	if err != nil {
 		return err
 	}
@@ -293,7 +296,7 @@ func (r *TopicGraphRepo) Remove(ctx context.Context, workspaceID, versionID stri
 	if _, err := tx.Exec(ctx, `SELECT set_config('pocket_advisor.topic_graph_remove', 'on', true)`); err != nil {
 		return fmt.Errorf("authorize topic graph removal: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM topic_graph_versions WHERE version_id = $1 AND workspace_id = $2`, versionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_graph_versions WHERE version_id = $1`, versionID); err != nil {
 		return fmt.Errorf("remove topic graph version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -302,18 +305,18 @@ func (r *TopicGraphRepo) Remove(ctx context.Context, workspaceID, versionID stri
 	return nil
 }
 
-func loadTopicGraphVersion(ctx context.Context, tx pgx.Tx, workspaceID, versionID string, lock bool) (topicgraph.VersionSpec, topicgraph.Status, error) {
+func loadTopicGraphVersion(ctx context.Context, tx pgx.Tx, versionID string, lock bool) (topicgraph.VersionSpec, topicgraph.Status, error) {
 	var spec topicgraph.VersionSpec
 	var status topicgraph.Status
 	query := `
         SELECT extraction_version, config_version, max_mentions_per_doc,
                max_spans_per_mention, max_display_label_bytes, status
         FROM topic_graph_versions
-        WHERE version_id = $1 AND workspace_id = $2`
+        WHERE version_id = $1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
-	err := tx.QueryRow(ctx, query, versionID, workspaceID).Scan(
+	err := tx.QueryRow(ctx, query, versionID).Scan(
 		&spec.ExtractionVersion, &spec.ConfigVersion,
 		&spec.Limits.MaxMentionsPerDocument, &spec.Limits.MaxSpansPerMention,
 		&spec.Limits.MaxDisplayLabelBytes, &status)
@@ -327,20 +330,18 @@ func loadTopicGraphVersion(ctx context.Context, tx pgx.Tx, workspaceID, versionI
 	return spec, status, nil
 }
 
-// loadTopicSourceTexts selects only root email documents in the fixed
-// workspace. The email_messages existence check excludes a document merely
-// labelled email but not parsed as a message; parent_doc_id excludes extracted
-// attachments and other children even if someone tried to attach email rows.
-func loadTopicSourceTexts(ctx context.Context, tx pgx.Tx, workspaceID string, docIDs []string) (map[string]string, error) {
+// loadTopicSourceTexts selects only root email documents. The email_messages
+// existence check excludes a document merely labelled email but not parsed as
+// a message; parent_doc_id excludes extracted attachments and other children
+// even if someone tried to attach email rows.
+func loadTopicSourceTexts(ctx context.Context, tx pgx.Tx, docIDs []string) (map[string]string, error) {
 	rows, err := tx.Query(ctx, `
         SELECT d.doc_id::text, COALESCE(d.normalized_text, '')
         FROM documents d
         WHERE d.doc_id = ANY($1::uuid[])
-          AND d.workspace_id = $2
           AND d.parent_doc_id IS NULL
           AND d.doc_type = 'email'
-          AND EXISTS (SELECT 1 FROM email_messages em WHERE em.doc_id = d.doc_id
-                      AND em.workspace_id = d.workspace_id)`, docIDs, workspaceID)
+          AND EXISTS (SELECT 1 FROM email_messages em WHERE em.doc_id = d.doc_id)`, docIDs)
 	if err != nil {
 		return nil, fmt.Errorf("load topic mention sources: %w", err)
 	}
@@ -367,8 +368,8 @@ func loadTopicSourceTexts(ctx context.Context, tx pgx.Tx, workspaceID string, do
 // subjects, embeddings, chronology neighbourhoods, or semantic retrieval.
 // The model receives only validated source spans for these already-admitted
 // pairs; it cannot create a cross-message candidate of its own.
-func (r *TopicGraphRepo) RelationInputs(ctx context.Context, workspaceID, versionID string, limit int) ([]topicgraph.RelationInput, error) {
-	if workspaceID == "" || !validTopicGraphUUID(versionID) || limit <= 0 || limit > topicgraph.AbsoluteMaxRelationCandidates {
+func (r *TopicGraphRepo) RelationInputs(ctx context.Context, versionID string, limit int) ([]topicgraph.RelationInput, error) {
+	if !validTopicGraphUUID(versionID) || limit <= 0 || limit > topicgraph.AbsoluteMaxRelationCandidates {
 		return nil, topicgraph.ErrInvalidRequest
 	}
 	rows, err := r.db.Pool.Query(ctx, `
@@ -376,17 +377,14 @@ func (r *TopicGraphRepo) RelationInputs(ctx context.Context, workspaceID, versio
                earlier.doc_id::text, later.doc_id::text, early_message.sent_at, late_message.sent_at
         FROM topic_mentions later
         JOIN email_messages late_message ON late_message.doc_id = later.doc_id
-                                     AND late_message.workspace_id = later.workspace_id
         JOIN email_references reference ON reference.doc_id = later.doc_id
-        JOIN email_messages early_message ON early_message.workspace_id = later.workspace_id
-                                      AND early_message.message_id <> ''
+        JOIN email_messages early_message ON early_message.message_id <> ''
                                       AND early_message.message_id = reference.message_id
-        JOIN topic_mentions earlier ON earlier.workspace_id = later.workspace_id
-                                  AND earlier.version_id = later.version_id
+        JOIN topic_mentions earlier ON earlier.version_id = later.version_id
                                   AND earlier.doc_id = early_message.doc_id
-        WHERE later.workspace_id = $1 AND later.version_id = $2
+        WHERE later.version_id = $1
         ORDER BY earlier.mention_id, later.mention_id
-        LIMIT $3`, workspaceID, versionID, limit)
+        LIMIT $2`, versionID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select exact topic relation candidates: %w", err)
 	}
@@ -427,7 +425,7 @@ func (r *TopicGraphRepo) RelationInputs(ctx context.Context, workspaceID, versio
 		}
 	}
 	sort.Strings(ids)
-	evidence, err := r.relationEvidence(ctx, workspaceID, versionID, ids)
+	evidence, err := r.relationEvidence(ctx, versionID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -449,16 +447,15 @@ func (r *TopicGraphRepo) RelationInputs(ctx context.Context, workspaceID, versio
 	return out, nil
 }
 
-func (r *TopicGraphRepo) relationEvidence(ctx context.Context, workspaceID, versionID string, ids []string) (map[string][]string, error) {
+func (r *TopicGraphRepo) relationEvidence(ctx context.Context, versionID string, ids []string) (map[string][]string, error) {
 	rows, err := r.db.Pool.Query(ctx, `
         SELECT tm.mention_id::text, d.normalized_text, span.start_byte, span.end_byte,
                span.normalized_text_sha256, span.slice_sha256
         FROM topic_mentions tm
-        JOIN documents d ON d.doc_id = tm.doc_id AND d.workspace_id = tm.workspace_id
-        JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
-                                  AND span.workspace_id = tm.workspace_id AND span.doc_id = tm.doc_id
-        WHERE tm.workspace_id = $1 AND tm.version_id = $2 AND tm.mention_id = ANY($3::uuid[])
-        ORDER BY tm.mention_id, span.ordinal`, workspaceID, versionID, ids)
+        JOIN documents d ON d.doc_id = tm.doc_id
+        JOIN topic_mention_spans span ON span.mention_id = tm.mention_id AND span.doc_id = tm.doc_id
+        WHERE tm.version_id = $1 AND tm.mention_id = ANY($2::uuid[])
+        ORDER BY tm.mention_id, span.ordinal`, versionID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("select topic relation source spans: %w", err)
 	}
@@ -500,10 +497,7 @@ func topicGraphByteBoundary(text string, offset int) bool {
 // explicit builder classifies the exact-reference candidates before this write
 // boundary. Supported candidates project to chronological edges, and the
 // resulting undirected edge components are the only source of episodes.
-func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspaceID string, request topicgraph.ReplaceRelationCandidatesRequest) error {
-	if workspaceID == "" {
-		return topicgraph.ErrInvalidRequest
-	}
+func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, request topicgraph.ReplaceRelationCandidatesRequest) error {
 	if err := topicgraph.ValidateRelationCandidates(request); err != nil {
 		return err
 	}
@@ -513,14 +507,14 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	_, status, err := loadTopicGraphVersion(ctx, tx, workspaceID, request.VersionID, true)
+	_, status, err := loadTopicGraphVersion(ctx, tx, request.VersionID, true)
 	if err != nil {
 		return err
 	}
 	if status != topicgraph.StatusBuilding {
 		return topicgraph.ErrNotBuilding
 	}
-	mentions, err := loadTopicRelationMentions(ctx, tx, workspaceID, request)
+	mentions, err := loadTopicRelationMentions(ctx, tx, request)
 	if err != nil {
 		return err
 	}
@@ -533,10 +527,10 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 	// Clear the derived projection before the candidates. Both deletes are
 	// BUILDING-only database operations, so a stray writer cannot mutate an
 	// evaluated graph behind this deterministic replacement API.
-	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_episodes WHERE version_id = $1`, request.VersionID); err != nil {
 		return fmt.Errorf("clear topic episodes: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1 AND workspace_id = $2`, request.VersionID, workspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM topic_relation_candidates WHERE version_id = $1`, request.VersionID); err != nil {
 		return fmt.Errorf("clear topic relation candidates: %w", err)
 	}
 
@@ -545,11 +539,11 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 		candidateID := topicgraph.RelationCandidateID(request.VersionID, candidate)
 		if _, err := tx.Exec(ctx, `
             INSERT INTO topic_relation_candidates
-                (candidate_id, version_id, workspace_id, earlier_mention_id,
+                (candidate_id, version_id, earlier_mention_id,
                  later_mention_id, relation_type, confidence, method,
                  method_version, supported)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			candidateID, request.VersionID, workspaceID, candidate.EarlierMentionID,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			candidateID, request.VersionID, candidate.EarlierMentionID,
 			candidate.LaterMentionID, candidate.Type, candidate.Confidence,
 			candidate.Method, candidate.MethodVersion, candidate.Supported); err != nil {
 			return fmt.Errorf("insert topic relation candidate: %w", err)
@@ -559,8 +553,8 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 		for _, mentionID := range supporting {
 			if _, err := tx.Exec(ctx, `
                 INSERT INTO topic_relation_candidate_supports
-                    (candidate_id, version_id, workspace_id, supporting_mention_id)
-                VALUES ($1, $2, $3, $4)`, candidateID, request.VersionID, workspaceID, mentionID); err != nil {
+                    (candidate_id, version_id, supporting_mention_id)
+                VALUES ($1, $2, $3)`, candidateID, request.VersionID, mentionID); err != nil {
 				return fmt.Errorf("insert topic relation support: %w", err)
 			}
 		}
@@ -569,10 +563,10 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 		}
 		if _, err := tx.Exec(ctx, `
             INSERT INTO topic_relation_edges
-                (candidate_id, version_id, workspace_id, earlier_mention_id,
+                (candidate_id, version_id, earlier_mention_id,
                  later_mention_id, relation_type, confidence)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			candidateID, request.VersionID, workspaceID, candidate.EarlierMentionID,
+            VALUES ($1, $2, $3, $4, $5, $6)`,
+			candidateID, request.VersionID, candidate.EarlierMentionID,
 			candidate.LaterMentionID, candidate.Type, candidate.Confidence); err != nil {
 			return fmt.Errorf("insert topic relation edge: %w", err)
 		}
@@ -581,15 +575,15 @@ func (r *TopicGraphRepo) ReplaceRelationCandidates(ctx context.Context, workspac
 	for _, memberIDs := range components.groups() {
 		episodeID := topicgraph.EpisodeID(request.VersionID, memberIDs)
 		if _, err := tx.Exec(ctx, `
-            INSERT INTO topic_episodes (episode_id, version_id, workspace_id)
-            VALUES ($1, $2, $3)`, episodeID, request.VersionID, workspaceID); err != nil {
+            INSERT INTO topic_episodes (episode_id, version_id)
+            VALUES ($1, $2)`, episodeID, request.VersionID); err != nil {
 			return fmt.Errorf("insert topic episode: %w", err)
 		}
 		for _, mentionID := range memberIDs {
 			if _, err := tx.Exec(ctx, `
                 INSERT INTO topic_episode_memberships
-                    (episode_id, mention_id, version_id, workspace_id)
-                VALUES ($1, $2, $3, $4)`, episodeID, mentionID, request.VersionID, workspaceID); err != nil {
+                    (episode_id, mention_id, version_id)
+                VALUES ($1, $2, $3)`, episodeID, mentionID, request.VersionID); err != nil {
 				return fmt.Errorf("insert topic episode membership: %w", err)
 			}
 		}
@@ -606,9 +600,9 @@ type topicRelationMention struct {
 }
 
 // loadTopicRelationMentions proves every endpoint and source mention belongs
-// to the requested graph version and fixed workspace. Chronology comes from
-// exact email metadata, never a generated label or candidate confidence.
-func loadTopicRelationMentions(ctx context.Context, tx pgx.Tx, workspaceID string, request topicgraph.ReplaceRelationCandidatesRequest) (map[string]topicRelationMention, error) {
+// to the requested graph version. Chronology comes from exact email metadata,
+// never a generated label or candidate confidence.
+func loadTopicRelationMentions(ctx context.Context, tx pgx.Tx, request topicgraph.ReplaceRelationCandidatesRequest) (map[string]topicRelationMention, error) {
 	ids := make([]string, 0, len(request.Candidates)*3)
 	seen := make(map[string]struct{}, len(request.Candidates)*3)
 	for _, candidate := range request.Candidates {
@@ -626,9 +620,8 @@ func loadTopicRelationMentions(ctx context.Context, tx pgx.Tx, workspaceID strin
         SELECT tm.mention_id::text, tm.doc_id::text, em.sent_at
         FROM topic_mentions tm
         JOIN email_messages em ON em.doc_id = tm.doc_id
-                            AND em.workspace_id = tm.workspace_id
-        WHERE tm.workspace_id = $1 AND tm.version_id = $2
-          AND tm.mention_id = ANY($3::uuid[])`, workspaceID, request.VersionID, ids)
+        WHERE tm.version_id = $1
+          AND tm.mention_id = ANY($2::uuid[])`, request.VersionID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("load topic relation mentions: %w", err)
 	}

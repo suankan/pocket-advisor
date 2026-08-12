@@ -111,24 +111,21 @@ func (s *Service) topicGraphSeeds(ctx context.Context, picked []scored) ([]strin
 	}
 	rows, err := s.DB.Pool.Query(ctx, `
         SELECT DISTINCT tm.version_id::text, tm.mention_id::text
-        FROM topic_graph_versions graph_version
-        JOIN topic_mentions tm ON tm.workspace_id = graph_version.workspace_id
-                             AND tm.version_id = graph_version.version_id
-        JOIN topic_mention_spans span ON span.mention_id = tm.mention_id
-                                   AND span.workspace_id = tm.workspace_id
-                                   AND span.doc_id = tm.doc_id
-        JOIN unnest($2::uuid[], $3::int[], $4::int[]) AS hit(doc_id, start_byte, end_byte)
+        FROM topic_graph_versions version
+        JOIN topic_mentions tm ON tm.version_id = version.version_id
+        JOIN topic_mention_spans span ON span.mention_id = tm.mention_id AND span.doc_id = tm.doc_id
+        JOIN unnest($1::uuid[], $2::int[], $3::int[]) AS hit(doc_id, start_byte, end_byte)
           ON hit.doc_id = tm.doc_id
          AND span.start_byte < hit.end_byte
          AND span.end_byte > hit.start_byte
-        WHERE version.workspace_id = $1 AND version.status = 'ACTIVE'
+        WHERE version.status = 'ACTIVE'
           AND EXISTS (
               SELECT 1 FROM topic_relation_edges edge
-              WHERE edge.workspace_id = tm.workspace_id AND edge.version_id = tm.version_id
+              WHERE edge.version_id = tm.version_id
                 AND (edge.earlier_mention_id = tm.mention_id OR edge.later_mention_id = tm.mention_id)
-                AND edge.confidence >= $5)
+                AND edge.confidence >= $4)
         ORDER BY tm.version_id, tm.mention_id
-        LIMIT $6`, s.workspace, docIDs, starts, ends, s.cfg.TopicGraphMinConfidence, limit)
+        LIMIT $5`, docIDs, starts, ends, s.cfg.TopicGraphMinConfidence, limit)
 	if err != nil {
 		return nil, err
 	}

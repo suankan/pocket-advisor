@@ -11,7 +11,7 @@ import (
 
 func testService(t *testing.T, store Store) *Service {
 	t.Helper()
-	s, err := New(store, testWorkspace, Config{DefaultLimit: 2, MaxLimit: 3, MaxParticipants: 2}, nil)
+	s, err := New(store, Config{DefaultLimit: 2, MaxLimit: 3, MaxParticipants: 2}, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -19,7 +19,7 @@ func testService(t *testing.T, store Store) *Service {
 }
 
 func TestListMessagesFiltersAndOrder(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	a := synthetic(1, 1, "ada@example.test", at(1, 9))
 	b := synthetic(2, 2, "ada@example.test", at(3, 9))
 	c := synthetic(3, 3, "bob@example.test", at(2, 9))
@@ -63,7 +63,7 @@ func TestListMessagesFiltersAndOrder(t *testing.T) {
 }
 
 func TestListMessagesSenderDomain(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	first := synthetic(1, 1, "ada@advisers.example.test", at(1, 9))
 	second := synthetic(2, 2, "tanya@advisers.example.test", at(2, 9))
 	other := synthetic(3, 3, "other@example.test", at(3, 9))
@@ -91,7 +91,7 @@ func TestListMessagesSenderDomain(t *testing.T) {
 }
 
 func TestListMessagesDateBoundsExcludeUndatedWithWarning(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	inside := synthetic(1, 1, "ada@example.test", at(2, 9))
 	before := synthetic(2, 2, "ada@example.test", at(1, 9))
 	undated := synthetic(3, 3, "ada@example.test", zeroTime())
@@ -112,7 +112,7 @@ func TestListMessagesDateBoundsExcludeUndatedWithWarning(t *testing.T) {
 }
 
 func TestListMessagesPaginationHasAStableSnapshot(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	first := synthetic(1, 1, "ada@example.test", at(4, 9))
 	second := synthetic(2, 2, "ada@example.test", at(3, 9))
 	third := synthetic(3, 3, "ada@example.test", at(2, 9))
@@ -151,7 +151,7 @@ func TestListMessagesPaginationHasAStableSnapshot(t *testing.T) {
 }
 
 func TestListMessagesRejectsCursorChanges(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	store.ingest(synthetic(1, 1, "ada@example.test", at(3, 9)))
 	store.ingest(synthetic(2, 2, "ada@example.test", at(2, 9)))
 	store.ingest(synthetic(3, 3, "ada@example.test", at(1, 9)))
@@ -171,7 +171,7 @@ func TestListMessagesRejectsCursorChanges(t *testing.T) {
 }
 
 func TestListMessagesCollapsesConversations(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	old := synthetic(1, 1, "ada@example.test", at(1, 9))
 	latest := synthetic(2, 1, "bob@example.test", at(3, 9))
 	other := synthetic(3, 2, "carol@example.test", at(2, 9))
@@ -196,7 +196,7 @@ func TestListMessagesCollapsesConversations(t *testing.T) {
 }
 
 func TestFetchConversationIsChronologicalAndComplete(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	parent := synthetic(1, 1, "ada@example.test", at(2, 9))
 	parent.MessageID = "parent@mail.example.test"
 	reply := synthetic(2, 1, "owner@example.test", at(3, 9))
@@ -231,7 +231,7 @@ func TestFetchConversationIsChronologicalAndComplete(t *testing.T) {
 }
 
 func TestFetchConversationHidesReferenceExistence(t *testing.T) {
-	store := newFakeStore(testWorkspace)
+	store := newFakeStore()
 	s := testService(t, store)
 	_, err := s.FetchConversation(context.Background(), ConversationRequest{Ref: encodeRef(refMessage, docID(3))})
 	if !errors.Is(err, ErrUnknownReference) {

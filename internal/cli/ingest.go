@@ -129,7 +129,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	stats := telemetry.NewStats()
 
 	pipe, err := pipeline.New(ctx, a, stats, embedder,
-		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true, WorkspaceID: o.WorkspaceID})
+		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true})
 	if err != nil {
 		return err
 	}
@@ -225,7 +225,7 @@ func feed(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats) e
 	// bucket notifications is what makes an interrupted run resumable: it
 	// compares Tier 1 against Tier 2 and enqueues the difference, so whatever
 	// the previous run did not finish is simply still missing.
-	n, err := svc.Scan(ctx, o.WorkspaceID, o.HighWater, o.LowWater)
+	n, err := svc.Scan(ctx, o.HighWater, o.LowWater)
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
@@ -272,8 +272,8 @@ const uploadConcurrency = 8
 // reconcile re-publishes documents whose stub committed but whose command never
 // reached the broker.
 //
-// Safe to repeat: doc_id is deterministic and every worker is idempotent on it,
-// so a duplicate delivery redoes work rather than creating a second document.
+// Safe to repeat: every worker is idempotent on doc_id, so a duplicate
+// delivery redoes work rather than creating a second document.
 func reconcile(ctx context.Context, o *Options, a *app.App, svc *discovery.Service) error {
 	docs, err := a.Docs.ClaimStalePending(ctx, o.StaleAfter, 500)
 	if err != nil {
@@ -289,7 +289,7 @@ func reconcile(ctx context.Context, o *Options, a *app.App, svc *discovery.Servi
 			a.Log.Error("bad raw uri", "doc_id", d.DocID, "uri", d.RawURI, "error", err)
 			continue
 		}
-		if err := svc.Ingest(ctx, d.WorkspaceID, key, "reconcile"); err != nil {
+		if err := svc.Ingest(ctx, key, "reconcile"); err != nil {
 			a.Log.Error("republish failed", "doc_id", d.DocID, "error", err)
 			continue
 		}

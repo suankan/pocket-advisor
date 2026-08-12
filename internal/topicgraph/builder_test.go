@@ -12,25 +12,21 @@ type fakeBuildStore struct {
 	replaced           []ReplaceRequest
 	emails             []CanonicalEmail
 	watermark          time.Time
-	workspaces         []string
 	relationInputs     []RelationInput
 	relationInputLimit int
 	relationRequests   []ReplaceRelationCandidatesRequest
 }
 
-func (s *fakeBuildStore) CreateBuilding(_ context.Context, workspace string, spec VersionSpec) error {
-	s.workspaces = append(s.workspaces, workspace)
+func (s *fakeBuildStore) CreateBuilding(_ context.Context, spec VersionSpec) error {
 	s.created = append(s.created, spec)
 	return nil
 }
-func (s *fakeBuildStore) ReplaceMentions(_ context.Context, workspace string, request ReplaceRequest) error {
-	s.workspaces = append(s.workspaces, workspace)
+func (s *fakeBuildStore) ReplaceMentions(_ context.Context, request ReplaceRequest) error {
 	s.replaced = append(s.replaced, request)
 	return nil
 }
 func (s *fakeBuildStore) Snapshot(_ context.Context) (time.Time, error) { return s.watermark, nil }
-func (s *fakeBuildStore) CanonicalEmails(_ context.Context, workspace string, _ time.Time, after string, limit int) ([]CanonicalEmail, error) {
-	s.workspaces = append(s.workspaces, workspace)
+func (s *fakeBuildStore) CanonicalEmails(_ context.Context, _ time.Time, after string, limit int) ([]CanonicalEmail, error) {
 	var out []CanonicalEmail
 	for _, email := range s.emails {
 		if email.DocID > after && len(out) < limit {
@@ -40,13 +36,11 @@ func (s *fakeBuildStore) CanonicalEmails(_ context.Context, workspace string, _ 
 	return out, nil
 }
 
-func (s *fakeBuildStore) RelationInputs(_ context.Context, workspace, _ string, limit int) ([]RelationInput, error) {
-	s.workspaces = append(s.workspaces, workspace)
+func (s *fakeBuildStore) RelationInputs(_ context.Context, _ string, limit int) ([]RelationInput, error) {
 	s.relationInputLimit = limit
 	return s.relationInputs, nil
 }
-func (s *fakeBuildStore) ReplaceRelationCandidates(_ context.Context, workspace string, request ReplaceRelationCandidatesRequest) error {
-	s.workspaces = append(s.workspaces, workspace)
+func (s *fakeBuildStore) ReplaceRelationCandidates(_ context.Context, request ReplaceRelationCandidatesRequest) error {
 	s.relationRequests = append(s.relationRequests, request)
 	return nil
 }
@@ -77,7 +71,7 @@ func buildResult(docID, text string) ExtractionResult {
 func TestBuilderCreatesAndReplacesAtStableBoundedSnapshot(t *testing.T) {
 	store := &fakeBuildStore{watermark: time.Unix(7, 0), emails: []CanonicalEmail{{DocID: "a", NormalizedText: "alpha"}, {DocID: "b", NormalizedText: "beta"}, {DocID: "c", NormalizedText: "gamma"}}}
 	extractor := &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha"), "b": {Metadata: ExtractionMetadata{ExtractionVersion: "extract-v1", ConfigVersion: "config-v1"}}}}
-	builder, err := NewBuilder(store, "fixed-workspace", extractor)
+	builder, err := NewBuilder(store, extractor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,17 +88,12 @@ func TestBuilderCreatesAndReplacesAtStableBoundedSnapshot(t *testing.T) {
 	if store.replaced[0].TargetDocIDs[0] != "a" || store.replaced[1].TargetDocIDs[0] != "b" {
 		t.Fatalf("targets = %+v", store.replaced)
 	}
-	for _, workspace := range store.workspaces {
-		if workspace != "fixed-workspace" {
-			t.Fatalf("workspace escaped fixed scope: %q", workspace)
-		}
-	}
 }
 
 func TestBuilderDryRunDoesNotCreateOrReplace(t *testing.T) {
 	store := &fakeBuildStore{emails: []CanonicalEmail{{DocID: "a", NormalizedText: "alpha"}}}
 	extractor := &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha")}}
-	builder, _ := NewBuilder(store, "fixed-workspace", extractor)
+	builder, _ := NewBuilder(store, extractor)
 	summary, err := builder.Run(context.Background(), BuildOptions{Spec: buildSpec(), Limit: 1, DryRun: true})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +106,7 @@ func TestBuilderDryRunDoesNotCreateOrReplace(t *testing.T) {
 func TestBuilderReportsSafeAggregateFailuresAndLeavesFailedTargetUntouched(t *testing.T) {
 	store := &fakeBuildStore{emails: []CanonicalEmail{{DocID: "a", NormalizedText: "alpha"}, {DocID: "b", NormalizedText: "beta"}}}
 	extractor := &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha")}, errs: map[string]error{"b": errors.New("model response included private body")}}
-	builder, _ := NewBuilder(store, "fixed-workspace", extractor)
+	builder, _ := NewBuilder(store, extractor)
 	summary, err := builder.Run(context.Background(), BuildOptions{Spec: buildSpec(), Limit: 2})
 	if err == nil || err.Error() != "topic graph build incomplete" {
 		t.Fatalf("error = %v", err)
@@ -128,7 +117,7 @@ func TestBuilderReportsSafeAggregateFailuresAndLeavesFailedTargetUntouched(t *te
 }
 
 func TestBuilderRejectsUnboundedBuild(t *testing.T) {
-	builder, _ := NewBuilder(&fakeBuildStore{}, "fixed-workspace", &fakeExtractor{})
+	builder, _ := NewBuilder(&fakeBuildStore{}, &fakeExtractor{})
 	if _, err := builder.Run(context.Background(), BuildOptions{Spec: buildSpec()}); err == nil {
 		t.Fatal("unbounded build accepted")
 	}
@@ -151,7 +140,7 @@ func (c *fakeRelationClassifier) Classify(_ context.Context, inputs []RelationIn
 func TestBuilderClassifiesOnlyExplicitStoreCandidatesAfterMentions(t *testing.T) {
 	store := &fakeBuildStore{emails: []CanonicalEmail{{DocID: "a", NormalizedText: "alpha"}}, relationInputs: []RelationInput{{EarlierMentionID: testMentionA, LaterMentionID: testMentionB, EarlierSpans: []string{"earlier"}, LaterSpans: []string{"later"}}}}
 	classifier := &fakeRelationClassifier{result: []RelationCandidate{testRelation(testMentionA, testMentionB)}, limit: 3}
-	builder, err := NewBuilder(store, "fixed-workspace", &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha")}}, classifier)
+	builder, err := NewBuilder(store, &fakeExtractor{results: map[string]ExtractionResult{"a": buildResult("a", "alpha")}}, classifier)
 	if err != nil {
 		t.Fatal(err)
 	}

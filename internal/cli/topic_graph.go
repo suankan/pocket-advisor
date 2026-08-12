@@ -34,7 +34,7 @@ func runTopicGraph(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	repo := postgres.NewTopicGraphRepo(a.DB)
-	service, err := topicgraph.New(repo, o.WorkspaceID)
+	service, err := topicgraph.New(repo)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func runTopicGraph(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		if err != nil {
 			return err
 		}
-		builder, err := topicgraph.NewBuilder(repo, o.WorkspaceID, extractor, relations)
+		builder, err := topicgraph.NewBuilder(repo, extractor, relations)
 		if err != nil {
 			return err
 		}

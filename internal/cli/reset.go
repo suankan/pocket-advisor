@@ -55,7 +55,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return nil
 	}
 
-	counts, err := describe(ctx, a.Docs, ws.ID)
+	counts, err := describe(ctx, a.Docs)
 	if err != nil {
 		// A summary is a courtesy; failing to produce one is not a reason to
 		// refuse the operation, but the prompt must not imply it counted.
@@ -82,8 +82,8 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	return nil
 }
 
-func describe(ctx context.Context, docs *postgres.DocumentRepo, workspaceID string) (string, error) {
-	known, err := docs.KnownRawURIs(ctx, workspaceID)
+func describe(ctx context.Context, docs *postgres.DocumentRepo) (string, error) {
+	known, err := docs.KnownRawURIs(ctx)
 	if err != nil {
 		return "", err
 	}

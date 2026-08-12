@@ -63,7 +63,7 @@ Dense and lexical candidates are combined with a full outer join. Each candidate
 
 A missing leg contributes zero. The default `rrf_k` is 60. Fusion retains candidates found by only one leg, which is necessary for exact identifiers, paraphrases, and cross-language queries.
 
-The fusion query has no `workspace_id` predicate. Every workspace has a separate database, so such a predicate would normally match every row and could conceal contamination. `AssertScope` instead inspects distinct workspace IDs at process startup and refuses to serve a database containing a different or multiple workspace scopes.
+The fusion query has no `workspace_id` predicate, and no table it reads carries that column at all: every workspace has a separate database, so a per-row workspace identity would always equal the same one value and could never disambiguate anything. `AssertScope` instead checks the single workspace id `schema_metadata` records for the whole database, once, at process startup, and refuses to serve a database recorded for a different workspace.
 
 ### Query decomposition
 

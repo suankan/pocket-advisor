@@ -54,12 +54,12 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 		db.Close()
 		return nil, nil, nil, err
 	}
-	mailboxService, err := mailbox.NewWithOwnerIdentities(mailbox.NewPostgresStore(db), o.WorkspaceID, resolved.OwnerIdentities, mailbox.DefaultConfig(), log)
+	mailboxService, err := mailbox.NewWithOwnerIdentities(mailbox.NewPostgresStore(db), resolved.OwnerIdentities, mailbox.DefaultConfig(), log)
 	if err != nil {
 		db.Close()
 		return nil, nil, nil, err
 	}
-	timelineService, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db), o.WorkspaceID)
+	timelineService, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db))
 	if err != nil {
 		db.Close()
 		return nil, nil, nil, err

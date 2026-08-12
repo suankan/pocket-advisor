@@ -56,13 +56,13 @@ func (p *PostgresStore) ListMessages(ctx context.Context, q PageQuery) ([]Messag
 		return nil, errUnsupportedOrder(q.Order)
 	}
 
-	args := []any{q.WorkspaceID, q.Snapshot}
+	args := []any{q.Snapshot}
 	var where strings.Builder
 	// The snapshot bound is not an optimisation. Without it a page taken
 	// minutes after the cursor was issued would include messages ingested in
 	// between, which is how a paginated read starts repeating and skipping
 	// rows while a worker is running.
-	where.WriteString("m.workspace_id = $1 AND m.ingested_at <= $2")
+	where.WriteString("m.ingested_at <= $1")
 
 	if q.Filters.Sender != "" {
 		args = append(args, q.Filters.Sender)
@@ -231,7 +231,7 @@ func keysetPredicate(o Order, k key, sentArg, docArg string) string {
 
 // Summaries aggregates whole conversations, under the same snapshot the page
 // was drawn at.
-func (p *PostgresStore) Summaries(ctx context.Context, workspaceID string, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error) {
+func (p *PostgresStore) Summaries(ctx context.Context, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error) {
 	ids := distinct(conversationIDs)
 	out := make(map[string]Aggregate, len(ids))
 	if len(ids) == 0 {
@@ -242,8 +242,8 @@ func (p *PostgresStore) Summaries(ctx context.Context, workspaceID string, conve
         SELECT conversation_id::text, min(conversation_method), count(*),
                min(sent_at), max(sent_at)
         FROM email_messages
-        WHERE workspace_id = $1 AND ingested_at <= $2 AND conversation_id = ANY($3::uuid[])
-        GROUP BY conversation_id`, workspaceID, snapshot, ids)
+        WHERE ingested_at <= $1 AND conversation_id = ANY($2::uuid[])
+        GROUP BY conversation_id`, snapshot, ids)
 	if err != nil {
 		return nil, fmt.Errorf("summarize conversations: %w", err)
 	}
@@ -276,10 +276,10 @@ func (p *PostgresStore) Summaries(ctx context.Context, workspaceID string, conve
         SELECT DISTINCT m.conversation_id::text, a.address
         FROM email_messages m
         JOIN email_addresses a ON a.doc_id = m.doc_id
-        WHERE m.workspace_id = $1 AND m.ingested_at <= $2
-          AND m.conversation_id = ANY($3::uuid[])
+        WHERE m.ingested_at <= $1
+          AND m.conversation_id = ANY($2::uuid[])
           AND a.kind = 'from' AND a.valid AND a.address <> ''
-        ORDER BY 1, 2`, workspaceID, snapshot, ids)
+        ORDER BY 1, 2`, snapshot, ids)
 	if err != nil {
 		return nil, fmt.Errorf("summarize participants: %w", err)
 	}
@@ -311,16 +311,16 @@ func (p *PostgresStore) CandidateMessages(ctx context.Context, q CandidateQuery)
 	if len(q.OwnerIdentities) == 0 {
 		return nil, ErrOwnerIdentitiesRequired
 	}
-	args := []any{q.WorkspaceID, q.Snapshot, q.OwnerIdentities}
+	args := []any{q.Snapshot, q.OwnerIdentities}
 	var eligible strings.Builder
-	eligible.WriteString(`m.workspace_id = $1 AND m.ingested_at <= $2
+	eligible.WriteString(`m.ingested_at <= $1
           AND m.conversation_method = 'references' AND m.automated_class = ''
           AND EXISTS (SELECT 1 FROM email_addresses a
                       WHERE a.doc_id = m.doc_id AND a.kind IN ('to','cc','bcc')
-                        AND a.valid AND a.address = ANY($3::text[]))
+                        AND a.valid AND a.address = ANY($2::text[]))
           AND NOT EXISTS (SELECT 1 FROM email_addresses a
                           WHERE a.doc_id = m.doc_id AND a.kind = 'from'
-                            AND a.valid AND a.address = ANY($3::text[]))`)
+                            AND a.valid AND a.address = ANY($2::text[]))`)
 	if q.Participant != "" {
 		args = append(args, q.Participant)
 		fmt.Fprintf(&eligible, ` AND EXISTS (SELECT 1 FROM email_addresses a
@@ -341,7 +341,7 @@ WITH eligible_conversations AS (
 SELECT %s, 0
 FROM email_messages m
 JOIN eligible_conversations e ON e.conversation_id = m.conversation_id
-WHERE m.workspace_id = $1 AND m.ingested_at <= $2
+WHERE m.ingested_at <= $1
 ORDER BY m.conversation_id, m.sent_at ASC NULLS LAST, m.doc_id ASC`, eligible.String(), messageColumns)
 	rows, err := p.db.Pool.Query(ctx, query, args...)
 	if err != nil {
@@ -361,11 +361,11 @@ ORDER BY m.conversation_id, m.sent_at ASC NULLS LAST, m.doc_id ASC`, eligible.St
 }
 
 // ConversationOf resolves a message document to its conversation.
-func (p *PostgresStore) ConversationOf(ctx context.Context, workspaceID, docID string) (string, error) {
+func (p *PostgresStore) ConversationOf(ctx context.Context, docID string) (string, error) {
 	var conversationID string
 	err := p.db.Pool.QueryRow(ctx, `
         SELECT conversation_id::text FROM email_messages
-        WHERE workspace_id = $1 AND doc_id = $2::uuid`, workspaceID, docID).Scan(&conversationID)
+        WHERE doc_id = $1::uuid`, docID).Scan(&conversationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrUnknownReference
 	}
@@ -381,12 +381,12 @@ func (p *PostgresStore) ConversationOf(ctx context.Context, workspaceID, docID s
 // doc_id ASC as the tiebreak, so an undated message sits at the end where it is
 // visibly unplaced rather than at the front pretending to have started the
 // thread.
-func (p *PostgresStore) ConversationMessages(ctx context.Context, workspaceID, conversationID string, snapshot time.Time) ([]Message, error) {
+func (p *PostgresStore) ConversationMessages(ctx context.Context, conversationID string, snapshot time.Time) ([]Message, error) {
 	rows, err := p.db.Pool.Query(ctx, fmt.Sprintf(`
         SELECT %s, 0
         FROM email_messages m
-        WHERE m.workspace_id = $1 AND m.conversation_id = $2::uuid AND m.ingested_at <= $3
-        ORDER BY m.sent_at ASC NULLS LAST, m.doc_id ASC`, messageColumns), workspaceID, conversationID, snapshot)
+        WHERE m.conversation_id = $1::uuid AND m.ingested_at <= $2
+        ORDER BY m.sent_at ASC NULLS LAST, m.doc_id ASC`, messageColumns), conversationID, snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("read conversation: %w", err)
 	}

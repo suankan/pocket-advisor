@@ -46,7 +46,7 @@ func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 		return fmt.Errorf("refusing to wipe: no workspace specified")
 	}
 
-	rows, err := r.docs.DeleteWorkspace(ctx, workspaceID)
+	rows, err := r.docs.DeleteWorkspace(ctx)
 	if err != nil {
 		return fmt.Errorf("wipe aborted, bucket untouched: %w", err)
 	}
@@ -84,7 +84,7 @@ func (r *Resetter) Forget(ctx context.Context, workspaceID, sha string) error {
 		return fmt.Errorf("--forget expects a 64-character sha256, got %d characters", len(sha))
 	}
 
-	rows, err := r.docs.DeleteBySHA(ctx, workspaceID, sha)
+	rows, err := r.docs.DeleteBySHA(ctx, sha)
 	if err != nil {
 		return fmt.Errorf("forget aborted, bucket untouched: %w", err)
 	}

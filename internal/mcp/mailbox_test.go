@@ -30,13 +30,13 @@ func (s *syntheticMailboxStore) ListMessages(_ context.Context, q mailbox.PageQu
 	}
 	return out, nil
 }
-func (s *syntheticMailboxStore) Summaries(context.Context, string, []string, time.Time) (map[string]mailbox.Aggregate, error) {
+func (s *syntheticMailboxStore) Summaries(context.Context, []string, time.Time) (map[string]mailbox.Aggregate, error) {
 	return map[string]mailbox.Aggregate{}, nil
 }
 func (s *syntheticMailboxStore) CandidateMessages(context.Context, mailbox.CandidateQuery) ([]mailbox.Message, error) {
 	return append([]mailbox.Message(nil), s.messages...), nil
 }
-func (s *syntheticMailboxStore) ConversationOf(_ context.Context, _ string, docID string) (string, error) {
+func (s *syntheticMailboxStore) ConversationOf(_ context.Context, docID string) (string, error) {
 	for _, m := range s.messages {
 		if m.DocID == docID {
 			return m.ConversationID, nil
@@ -44,7 +44,7 @@ func (s *syntheticMailboxStore) ConversationOf(_ context.Context, _ string, docI
 	}
 	return "", mailbox.ErrUnknownReference
 }
-func (s *syntheticMailboxStore) ConversationMessages(_ context.Context, _ string, conversationID string, _ time.Time) ([]mailbox.Message, error) {
+func (s *syntheticMailboxStore) ConversationMessages(_ context.Context, conversationID string, _ time.Time) ([]mailbox.Message, error) {
 	var out []mailbox.Message
 	for _, m := range s.messages {
 		if m.ConversationID == conversationID {
@@ -64,7 +64,7 @@ func syntheticMailboxTool(t *testing.T, owners []string) *MailboxTool {
 	parent := mailbox.Message{DocID: "00000000-0000-4000-8000-000000000001", MessageID: "parent@example.test", ConversationID: conversation, ConversationMethod: domain.ConversationByReferences, Subject: "Synthetic request", SentAt: base, Sender: "sender@example.test", Recipients: []string{"owner@example.test"}}
 	followup := mailbox.Message{DocID: "00000000-0000-4000-8000-000000000002", MessageID: "followup@example.test", ConversationID: conversation, ConversationMethod: domain.ConversationByReferences, Subject: "Synthetic follow-up", SentAt: base.Add(time.Hour), Sender: "sender@example.test", Recipients: []string{"owner@example.test"}, References: []domain.EmailReference{{Kind: domain.EmailReferenceInReplyTo, MessageID: parent.MessageID}}}
 	store := &syntheticMailboxStore{messages: []mailbox.Message{parent, followup}, now: base.Add(2 * time.Hour)}
-	service, err := mailbox.NewWithOwnerIdentities(store, "synthetic", owners, mailbox.DefaultConfig(), nil)
+	service, err := mailbox.NewWithOwnerIdentities(store, owners, mailbox.DefaultConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

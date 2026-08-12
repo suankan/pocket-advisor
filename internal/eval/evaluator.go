@@ -136,7 +136,7 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 	// aggregate-only. A missing graph is still represented when graph gates are
 	// configured, so a mandatory active-graph requirement cannot be bypassed.
 	if e.TopicGraphStore != nil {
-		graph, err := EvaluateTopicGraph(ctx, e.TopicGraphStore, evalCfg.WorkspaceID)
+		graph, err := EvaluateTopicGraph(ctx, e.TopicGraphStore)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate topic graph: %w", err)
 		}

@@ -16,12 +16,11 @@ import (
 // on the way to the database.
 
 // emailMessageOf builds the durable metadata for one parsed message.
-func emailMessageOf(docID, workspaceID string, p *email.Parsed) domain.EmailMessage {
+func emailMessageOf(docID string, p *email.Parsed) domain.EmailMessage {
 	h := p.Headers
 
 	m := domain.EmailMessage{
 		DocID:             docID,
-		WorkspaceID:       workspaceID,
 		MessageID:         h.MessageID,
 		SubjectRaw:        p.Subject,
 		SubjectNormalized: email.NormalizeSubject(p.Subject),

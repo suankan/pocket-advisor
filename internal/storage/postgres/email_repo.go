@@ -17,6 +17,12 @@ type EmailRepo struct{ db *DB }
 
 func NewEmailRepo(db *DB) *EmailRepo { return &EmailRepo{db: db} }
 
+// emailGraphLockKey is a fixed advisory lock key naming what is serialised —
+// the one identifier graph this database holds — rather than which
+// workspace, since each workspace is its own database (deviation 34) and an
+// advisory lock is already scoped to the connection's own database.
+const emailGraphLockKey = "email-identifier-graph"
+
 // SaveEmailMessage persists one message's browse metadata and reports the
 // conversation it was assigned to.
 //
@@ -42,12 +48,11 @@ func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage)
 	// Component maintenance reads the graph, decides a merge, and rewrites
 	// rows the decision was based on. Two workers folding messages of one
 	// conversation in concurrently would each plan against a graph the other
-	// is changing, so the whole decision is serialised per workspace. It is a
-	// transaction-scoped lock on the workspace id alone: nothing outside this
-	// workspace ever waits on it, and it is released by commit or rollback.
+	// is changing, so the whole decision is serialised. It is a
+	// transaction-scoped lock, released by commit or rollback.
 	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext($1))`, m.WorkspaceID); err != nil {
-		return conv, fmt.Errorf("lock email graph %s: %w", m.WorkspaceID, err)
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, emailGraphLockKey); err != nil {
+		return conv, fmt.Errorf("lock email graph: %w", err)
 	}
 
 	conv, err = assignConversation(ctx, tx, m)
@@ -83,12 +88,11 @@ func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage)
 	// caller has already seen reappear at the head of the next page.
 	if _, err := tx.Exec(ctx, `
         INSERT INTO email_messages (
-            doc_id, workspace_id, message_id, subject_raw, subject_normalized,
+            doc_id, message_id, subject_raw, subject_normalized,
             sent_at, automated_class, list_id, conversation_id,
             conversation_method, parse_warnings, parse_version)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)
         ON CONFLICT (doc_id) DO UPDATE SET
-            workspace_id        = EXCLUDED.workspace_id,
             message_id          = EXCLUDED.message_id,
             subject_raw         = EXCLUDED.subject_raw,
             subject_normalized  = EXCLUDED.subject_normalized,
@@ -99,7 +103,7 @@ func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage)
             conversation_method = EXCLUDED.conversation_method,
             parse_warnings      = EXCLUDED.parse_warnings,
             parse_version       = EXCLUDED.parse_version`,
-		m.DocID, m.WorkspaceID, m.MessageID, m.SubjectRaw, m.SubjectNormalized,
+		m.DocID, m.MessageID, m.SubjectRaw, m.SubjectNormalized,
 		sentAt, string(m.AutomatedClass), m.ListID, conv.ConversationID,
 		string(conv.Method), string(encoded), domain.EmailParseVersion,
 	); err != nil {
@@ -133,7 +137,7 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 		if sender := m.PrimarySender(); m.SubjectNormalized != "" && sender != "" {
 			return domain.EmailConversation{
 				ConversationID: domain.NewEmailSubjectConversationID(
-					m.WorkspaceID, m.SubjectNormalized, sender),
+					m.SubjectNormalized, sender),
 				Method: domain.ConversationBySubject,
 			}, nil
 		}
@@ -143,11 +147,11 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 		}, nil
 	}
 
-	existing, err := loadIdentifierNodes(ctx, tx, m.WorkspaceID, ids)
+	existing, err := loadIdentifierNodes(ctx, tx, ids)
 	if err != nil {
 		return domain.EmailConversation{}, err
 	}
-	seed := domain.NewEmailComponentID(m.WorkspaceID, smallestIdentifier(ids))
+	seed := domain.NewEmailComponentID(smallestIdentifier(ids))
 	plan := planComponent(m.DocID, m.MessageID, ids, existing, seed)
 
 	if len(plan.MergeFrom) > 0 {
@@ -156,14 +160,14 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 		// ancestors neither of these two messages mentioned.
 		if _, err := tx.Exec(ctx, `
             UPDATE email_identifier_nodes SET component_id = $1
-            WHERE workspace_id = $2 AND component_id = ANY($3::uuid[])`,
-			plan.ComponentID, m.WorkspaceID, plan.MergeFrom); err != nil {
+            WHERE component_id = ANY($2::uuid[])`,
+			plan.ComponentID, plan.MergeFrom); err != nil {
 			return domain.EmailConversation{}, fmt.Errorf("merge identifier components: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
             UPDATE email_messages SET conversation_id = $1
-            WHERE workspace_id = $2 AND conversation_id = ANY($3::uuid[])`,
-			plan.ComponentID, m.WorkspaceID, plan.MergeFrom); err != nil {
+            WHERE conversation_id = ANY($2::uuid[])`,
+			plan.ComponentID, plan.MergeFrom); err != nil {
 			return domain.EmailConversation{}, fmt.Errorf("merge conversations: %w", err)
 		}
 	}
@@ -178,11 +182,11 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 		// the message behind it is not. NULLIF keeps that as a NULL reference
 		// rather than an invented document.
 		if _, err := tx.Exec(ctx, `
-            INSERT INTO email_identifier_nodes (workspace_id, message_id, doc_id, component_id)
-            SELECT $1, v.message_id, NULLIF(v.doc_id, '')::uuid, $2::uuid
-            FROM unnest($3::text[], $4::text[]) AS v(message_id, doc_id)
-            ON CONFLICT (workspace_id, message_id) DO NOTHING`,
-			m.WorkspaceID, plan.ComponentID, msgIDs, docIDs); err != nil {
+            INSERT INTO email_identifier_nodes (message_id, doc_id, component_id)
+            SELECT v.message_id, NULLIF(v.doc_id, '')::uuid, $1::uuid
+            FROM unnest($2::text[], $3::text[]) AS v(message_id, doc_id)
+            ON CONFLICT (message_id) DO NOTHING`,
+			plan.ComponentID, msgIDs, docIDs); err != nil {
 			return domain.EmailConversation{}, fmt.Errorf("insert identifier nodes: %w", err)
 		}
 	}
@@ -193,8 +197,8 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 		// backed by a document is never retargeted.
 		if _, err := tx.Exec(ctx, `
             UPDATE email_identifier_nodes SET doc_id = $1
-            WHERE workspace_id = $2 AND message_id = $3 AND doc_id IS NULL`,
-			m.DocID, m.WorkspaceID, m.MessageID); err != nil {
+            WHERE message_id = $2 AND doc_id IS NULL`,
+			m.DocID, m.MessageID); err != nil {
 			return domain.EmailConversation{}, fmt.Errorf("adopt placeholder node: %w", err)
 		}
 	}
@@ -206,11 +210,11 @@ func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (
 	}, nil
 }
 
-func loadIdentifierNodes(ctx context.Context, tx pgx.Tx, workspaceID string, ids []string) (map[string]identifierNode, error) {
+func loadIdentifierNodes(ctx context.Context, tx pgx.Tx, ids []string) (map[string]identifierNode, error) {
 	rows, err := tx.Query(ctx, `
         SELECT message_id, COALESCE(doc_id::text, ''), component_id::text
         FROM email_identifier_nodes
-        WHERE workspace_id = $1 AND message_id = ANY($2::text[])`, workspaceID, ids)
+        WHERE message_id = ANY($1::text[])`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("load identifier nodes: %w", err)
 	}
@@ -293,17 +297,16 @@ func replaceReferences(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) er
 	return nil
 }
 
-// EmailDocumentQuery selects the email message documents of one workspace for
-// a metadata reprocessing pass (ingestion-design.md §2.5).
+// EmailDocumentQuery selects the workspace's email message documents for a
+// metadata reprocessing pass (ingestion-design.md §2.5).
 //
 // After is the exclusive lower bound of a keyset walk, empty on the first
-// batch. Ordering is by doc_id, which is content-derived and stable, so a run
+// batch. Ordering is by doc_id, which is stable once assigned, so a run
 // interrupted at any point resumes over the same sequence rather than a
 // re-shuffled one.
 type EmailDocumentQuery struct {
-	WorkspaceID string
-	After       string
-	Limit       int
+	After string
+	Limit int
 	// OnlyMissing restricts the walk to documents that have no email_messages
 	// row yet — the cheap pass after an interrupted rebuild. It is a selection
 	// narrowing, never a correctness one: a full pass rewrites every message
@@ -311,8 +314,8 @@ type EmailDocumentQuery struct {
 	OnlyMissing bool
 }
 
-// EmailDocuments lists a workspace's email message documents in deterministic
-// doc_id order.
+// EmailDocuments lists the workspace's email message documents in
+// deterministic doc_id order.
 //
 // Only doc_type = 'email' is returned. An archive is a container routed to the
 // same worker but is not a message and has no metadata of its own, and a
@@ -320,16 +323,14 @@ type EmailDocumentQuery struct {
 // report it as unreadable rather than silently losing the missing metadata.
 func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([]domain.Document, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-        SELECT d.doc_id::text, d.workspace_id, d.mime_type,
-               d.rustfs_raw_uri, d.raw_sha256
+        SELECT d.doc_id::text, d.mime_type, d.rustfs_raw_uri, d.raw_sha256
         FROM documents d
-        WHERE d.workspace_id = $1
-          AND d.doc_type = 'email'
-          AND ($2::text = '' OR d.doc_id > $2::uuid)
-          AND (NOT $3::bool OR NOT EXISTS (
+        WHERE d.doc_type = 'email'
+          AND ($1::text = '' OR d.doc_id > $1::uuid)
+          AND (NOT $2::bool OR NOT EXISTS (
                 SELECT 1 FROM email_messages m WHERE m.doc_id = d.doc_id))
         ORDER BY d.doc_id
-        LIMIT $4`, q.WorkspaceID, q.After, q.OnlyMissing, q.Limit)
+        LIMIT $3`, q.After, q.OnlyMissing, q.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("list email documents: %w", err)
 	}
@@ -338,8 +339,7 @@ func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.WorkspaceID, &d.MimeType,
-			&d.RawURI, &d.RawSHA256); err != nil {
+		if err := rows.Scan(&d.DocID, &d.MimeType, &d.RawURI, &d.RawSHA256); err != nil {
 			return nil, fmt.Errorf("list email documents: %w", err)
 		}
 		out = append(out, d)

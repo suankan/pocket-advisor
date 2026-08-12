@@ -15,8 +15,10 @@ import (
 // in the way. The PostgreSQL implementation lives in store_postgres.go and is
 // exercised by the manual, database-backed tests.
 //
-// Every method takes the workspace explicitly, and the Service is the only
-// caller: it passes its own fixed scope, which no request can reach.
+// Every workspace is its own database (deviation 34), so no method here takes
+// a workspace argument: the Store is already connected to the one database a
+// request could ever reach, and a parameter repeating that would be a
+// predicate that is always true.
 type Store interface {
 	// Snapshot returns the ingestion watermark a new page series is taken
 	// against. It comes from the store rather than the process clock because
@@ -31,7 +33,7 @@ type Store interface {
 	// Summaries aggregates whole conversations for the collapse view. The
 	// snapshot applies here too: a summary must describe the same set of
 	// messages the page was drawn from.
-	Summaries(ctx context.Context, workspaceID string, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error)
+	Summaries(ctx context.Context, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error)
 
 	// CandidateMessages returns complete exact-reference conversations that have
 	// at least one potentially eligible inbound human message. It returns every
@@ -41,12 +43,12 @@ type Store interface {
 
 	// ConversationOf resolves one message document to its conversation.
 	// Returns ErrUnknownReference when the workspace holds no such message.
-	ConversationOf(ctx context.Context, workspaceID, docID string) (string, error)
+	ConversationOf(ctx context.Context, docID string) (string, error)
 
 	// ConversationMessages returns every message of a conversation in
 	// chronological order. Returns ErrUnknownReference for a conversation with
 	// no messages in scope.
-	ConversationMessages(ctx context.Context, workspaceID, conversationID string, snapshot time.Time) ([]Message, error)
+	ConversationMessages(ctx context.Context, conversationID string, snapshot time.Time) ([]Message, error)
 }
 
 // PageQuery is one page request as the store receives it.
@@ -56,11 +58,10 @@ type Store interface {
 // is what makes "callers cannot inject a filter expression" a property of the
 // type rather than of the input validation.
 type PageQuery struct {
-	WorkspaceID string
-	Filters     Filters
-	Order       Order
-	Limit       int
-	Snapshot    time.Time
+	Filters  Filters
+	Order    Order
+	Limit    int
+	Snapshot time.Time
 	// After is the exclusive page boundary, nil for the first page.
 	After *key
 	// OwnerIdentities is set only for an explicit direction filter.
@@ -122,7 +123,6 @@ type Aggregate struct {
 // Date and participant bounds select possible inbound messages; they never
 // prune later events from a selected conversation.
 type CandidateQuery struct {
-	WorkspaceID     string
 	OwnerIdentities []string
 	Participant     string
 	After           time.Time

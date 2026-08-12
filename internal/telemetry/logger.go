@@ -41,23 +41,17 @@ type Logs struct {
 	dir   string
 	level slog.Level
 
-	stderr  bool
-	mu      sync.Mutex
-	files   []io.Closer
-	loggers map[string]*slog.Logger
+	stderr    bool
+	teeStderr bool
+	mu        sync.Mutex
+	files     []io.Closer
+	loggers   map[string]*slog.Logger
 }
 
 // StderrLogs sends every role to stderr and touches no files.
 //
 // For the read path this is the right destination, not a fallback: --query is
-// a one-shot command whose operator is watching the terminal. The mcp
-// stdio/start subcommands are not one-shot — an MCP client keeps a stdio
-// child running for a whole session, and mcp start is a long-lived daemon —
-// so both use the file-backed RoleMCP logger (logs/mcp.log) instead, the same
-// as any other long-running role. cfg.LogDir is anchored to the directory of
-// the config file that named it, not to the process's working directory (see
-// config.applyFile), so this is safe even when a client launches the server
-// from a directory it cannot itself write to.
+// a one-shot command whose operator is watching the terminal.
 func StderrLogs(level string) *Logs {
 	return &Logs{
 		dir:     "",
@@ -71,6 +65,26 @@ func StderrLogs(level string) *Logs {
 // asked for, and appended to rather than truncated so a resumed run does not
 // erase the record of the run it is resuming.
 func OpenLogs(dir, level string) (*Logs, error) {
+	return openLogs(dir, level, false)
+}
+
+// OpenLogsTeeStderr is OpenLogs plus a copy of every record to stderr.
+//
+// mcp stdio is the one caller: an MCP client keeps a stdio child running for
+// a whole session and typically captures the child's stderr into its own log
+// view (this is how Claude Desktop's per-connector log worked before
+// logs/mcp.log existed), which remains useful for a client-side operator even
+// though logs/mcp.log is now the durable, complete record. mcp start has no
+// such reader — it is a detached daemon with no controlling terminal, and its
+// own stdout/stderr are already redirected into the same log file by the
+// wrapper that forks it — so it uses plain OpenLogs instead; tee-ing there
+// would duplicate every line into that file rather than reach a second
+// destination.
+func OpenLogsTeeStderr(dir, level string) (*Logs, error) {
+	return openLogs(dir, level, true)
+}
+
+func openLogs(dir, level string, teeStderr bool) (*Logs, error) {
 	if dir == "" {
 		dir = "logs"
 	}
@@ -78,9 +92,10 @@ func OpenLogs(dir, level string) (*Logs, error) {
 		return nil, fmt.Errorf("create log dir %s: %w", dir, err)
 	}
 	return &Logs{
-		dir:     dir,
-		level:   parseLevel(level),
-		loggers: make(map[string]*slog.Logger),
+		dir:       dir,
+		level:     parseLevel(level),
+		teeStderr: teeStderr,
+		loggers:   make(map[string]*slog.Logger),
 	}, nil
 }
 
@@ -110,10 +125,14 @@ func (l *Logs) Logger(role string) *slog.Logger {
 	f, err := os.OpenFile(
 		filepath.Join(l.dir, role+".log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "warning: log file for %s unavailable (%v); logging to stderr\n", role, err)
 		w = os.Stderr
-	} else {
+	case l.teeStderr:
+		l.files = append(l.files, f)
+		w = io.MultiWriter(f, os.Stderr)
+	default:
 		w = f
 		l.files = append(l.files, f)
 	}

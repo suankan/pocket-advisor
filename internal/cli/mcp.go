@@ -165,12 +165,14 @@ func mcpStdioCmd(cfg *config.Config, args []string) error {
 	}
 
 	// stdio is the protocol channel. Nothing here may print to stdout: the
-	// dashboard is never started, and every log goes to logs/mcp.log instead
-	// (RoleMCP), the same file mcp start writes to.
+	// dashboard is never started, and stdout is reserved for JSON-RPC frames.
+	// Logs go to both logs/mcp.log (RoleMCP, the same file mcp start writes
+	// to) and stderr, which an MCP client typically captures into its own log
+	// view — the durable record and the client-visible one, at once.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	logs, err := telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
+	logs, err := telemetry.OpenLogsTeeStderr(cfg.LogDir, cfg.LogLevel)
 	if err != nil {
 		return err
 	}

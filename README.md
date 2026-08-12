@@ -266,7 +266,7 @@ Zero packets is a valid result when nothing relevant exists in the workspace.
 
 The MCP server exposes retrieval evidence through stdio and Streamable HTTP, both run locally by the same binary. HTTP authentication is optional (§ [HTTP MCP](#http-mcp) below). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
 
-Both transports log to the same file, `<log_dir>/mcp.log` (`logs/mcp.log` by default), rather than to the client's own captured stderr — useful for a stdio client whose own log view is hard to reach, and essential for `mcp start`, which runs as a background daemon with no controlling terminal to capture.
+Both transports log to `<log_dir>/mcp.log` (`logs/mcp.log` by default). `mcp stdio` also copies every log line to stderr, so a client that captures its child's stderr into its own log view (as Claude Desktop does) keeps seeing it there too — logs/mcp.log is the durable, complete record either way. `mcp start` logs to the file only, since it runs as a detached background daemon with no controlling terminal to capture; its own raw stdout/stderr are redirected into the same file instead.
 
 Run one stdio MCP server per workspace:
 

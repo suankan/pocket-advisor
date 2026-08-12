@@ -42,8 +42,9 @@ func ensureSchema(ctx context.Context, cfg *config.Config, id string, info embed
 	}
 
 	if err := db.ApplySchema(ctx, postgres.SchemaMetadata{
-		EmbedModel: model,
-		EmbedDim:   info.Dimension,
+		WorkspaceID: id,
+		EmbedModel:  model,
+		EmbedDim:    info.Dimension,
 	}); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}

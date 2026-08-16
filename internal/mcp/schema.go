@@ -112,8 +112,10 @@ func documentSchema() map[string]any {
 			"title": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"},
 			"date":          map[string]any{"oneOf": []any{map[string]any{"type": "string", "format": "date-time"}, map[string]any{"type": "null"}}},
 			"source_sha256": map[string]any{"type": "string", "minLength": 1}, "tier1_uri": map[string]any{"type": "string", "minLength": 1},
+			"workspace_relative_path":           nullableStringSchema(),
+			"container_workspace_relative_path": nullableStringSchema(),
 		},
-		"required": []string{"document_id", "parent_document_id", "thread_id", "document_type", "title", "from", "to", "date", "source_sha256", "tier1_uri"},
+		"required": []string{"document_id", "parent_document_id", "thread_id", "document_type", "title", "from", "to", "date", "source_sha256", "tier1_uri", "workspace_relative_path", "container_workspace_relative_path"},
 	}
 }
 

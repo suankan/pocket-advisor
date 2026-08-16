@@ -52,6 +52,8 @@ The fixed-workspace mailbox tools provide deterministic email evidence alongside
 
 `awaiting_reply_candidates` accepts bounded participant and date filters and requires configured owner identities. It returns candidates whose latest relevant human inbound message has no later human owner-authored exact-reply descendant. A candidate is evidence for review, not a conclusion that action is required. Subject grouping, semantic similarity, and an unlinked outbound message never prove that a reply occurred. Automated, list, delivery, and third-party events remain labelled context rather than silently closing a candidate.
 
+Every returned message reports where to find it, exactly as retrieval evidence does: `source_path` is the message's own staged file, and `container_source_path` names the file it was extracted from when it has none of its own, such as a message nested inside another message or an archive. Both are workspace-relative, for the caller to relay to the user, never to fetch or infer.
+
 Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
 
 ## Topic timelines
@@ -70,6 +72,7 @@ Every successful page contains structured and readable representations derived f
 - budget used and allowed with explicit UTF-8 byte unit;
 - document and chunk identifiers;
 - source hash and Tier 1 URI;
+- the document's own staged file path, or the file it was extracted from when it has none of its own — workspace-relative, for the caller to relay to the user rather than fetch or infer;
 - matched snippet and admitted-text availability;
 - start and end offsets with explicit UTF-8 byte unit;
 - relevance score and contributing search legs;

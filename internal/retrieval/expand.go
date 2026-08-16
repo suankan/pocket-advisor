@@ -19,6 +19,20 @@ type Document struct {
 	RawURI    string     `json:"raw_uri"`
 	SHA256    string     `json:"raw_sha256"`
 	CharCount int        `json:"char_count"`
+	// SourcePath is the document's original path relative to the workspace's
+	// local staging directory, exactly as the uploader recorded it
+	// (ingestion-design.md's Provenance.SourcePath, stored in
+	// documents.metadata_headers). It is empty for a document that was never
+	// its own file on disk — a child created by a container worker, such as
+	// an email attachment or an extracted Office part.
+	SourcePath string `json:"source_path,omitempty"`
+	// ContainerPath is the staged file that contains this document, resolved
+	// as the nearest ancestor with a SourcePath of its own. It is empty
+	// exactly when SourcePath is set: a document either is a staged file or
+	// lives inside one, never both. Together they answer "where do I find
+	// this" for every document, without inferring a location the corpus does
+	// not record — an attachment's siblings are not evidence of where it is.
+	ContainerPath string `json:"container_source_path,omitempty"`
 }
 
 // Relation labels how a related document reaches a packet.
@@ -63,17 +77,50 @@ type Packet struct {
 	Related []Related `json:"related,omitempty"`
 }
 
+// containerAncestrySQL resolves, for a set of origin documents, the nearest
+// ancestor that is itself a staged file. A document created by a container
+// worker never had a path of its own, and its siblings are not evidence of
+// where it lives, so the only honest location it can be given is the file it
+// was extracted from. The walk stops at the first ancestor with a path and is
+// depth-bounded so malformed lineage cannot spin.
+const containerAncestrySQL = `
+ancestry AS (
+    SELECT DISTINCT origin.doc_id AS origin, source.parent_doc_id,
+           NULLIF(source.metadata_headers->>'source_path', '') AS source_path, 0 AS hops
+    FROM origins origin
+    JOIN documents source ON source.doc_id = origin.doc_id
+    UNION ALL
+    SELECT walk.origin, parent.parent_doc_id,
+           NULLIF(parent.metadata_headers->>'source_path', ''), walk.hops + 1
+    FROM documents parent
+    JOIN ancestry walk ON walk.parent_doc_id = parent.doc_id
+    WHERE walk.source_path IS NULL AND walk.hops < 16
+),
+container AS (
+    SELECT DISTINCT ON (origin) origin, source_path
+    FROM ancestry
+    WHERE source_path IS NOT NULL AND hops > 0
+    ORDER BY origin, hops
+)`
+
 const documentsSQL = `
-SELECT doc_id::text,
-       COALESCE(parent_doc_id::text, ''),
-       thread_id, doc_type,
-       COALESCE(NULLIF(email_subject, ''), source_filename),
-       email_from, email_to, email_date,
-       rustfs_raw_uri, raw_sha256,
-       COALESCE(length(normalized_text), 0),
-       COALESCE(normalized_text, '')
-FROM documents
-WHERE doc_id = ANY($1::uuid[])`
+WITH RECURSIVE origins AS (
+    SELECT unnest($1::uuid[]) AS doc_id
+),
+` + containerAncestrySQL + `
+SELECT d.doc_id::text,
+       COALESCE(d.parent_doc_id::text, ''),
+       d.thread_id, d.doc_type,
+       COALESCE(NULLIF(d.email_subject, ''), d.source_filename),
+       d.email_from, d.email_to, d.email_date,
+       d.rustfs_raw_uri, d.raw_sha256,
+       COALESCE(length(d.normalized_text), 0),
+       COALESCE(d.normalized_text, ''),
+       COALESCE(d.metadata_headers->>'source_path', ''),
+       COALESCE(c.source_path, '')
+FROM documents d
+LEFT JOIN container c ON c.origin = d.doc_id
+WHERE d.doc_id = ANY($1::uuid[])`
 
 func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]Document, map[string]string, error) {
 	docs := make(map[string]Document, len(ids))
@@ -91,7 +138,8 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 		var text string
 		var date *time.Time
 		if err := rows.Scan(&d.DocID, &d.ParentID, &d.ThreadID, &d.DocType, &d.Title,
-			&d.From, &d.To, &date, &d.RawURI, &d.SHA256, &d.CharCount, &text); err != nil {
+			&d.From, &d.To, &date, &d.RawURI, &d.SHA256, &d.CharCount, &text,
+			&d.SourcePath, &d.ContainerPath); err != nil {
 			return nil, nil, err
 		}
 		d.Date = date
@@ -109,6 +157,25 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 // *part of* is an exact stored fact rather than a similarity problem
 // (ingestion-design.md deviation 13). Recovering it is a join.
 const neighbourSQL = `
+WITH RECURSIVE neighbours AS (
+    SELECT d.doc_id,
+           CASE
+             WHEN d.doc_id = m.parent_doc_id THEN 'parent'
+             WHEN d.parent_doc_id = m.doc_id THEN 'attachment'
+             ELSE 'same-thread'
+           END AS relation
+    FROM documents d
+    JOIN documents m ON m.doc_id = ANY($1::uuid[])
+    WHERE d.doc_id <> m.doc_id
+      AND d.processing_status = 'COMPLETED'
+      AND (d.doc_id = m.parent_doc_id
+           OR d.parent_doc_id = m.doc_id
+           OR (m.thread_id <> '' AND d.thread_id = m.thread_id))
+),
+origins AS (
+    SELECT DISTINCT doc_id FROM neighbours
+),
+` + containerAncestrySQL + `
 SELECT d.doc_id::text,
        COALESCE(d.parent_doc_id::text, ''),
        d.thread_id, d.doc_type,
@@ -117,18 +184,12 @@ SELECT d.doc_id::text,
        d.rustfs_raw_uri, d.raw_sha256,
        COALESCE(length(d.normalized_text), 0),
        COALESCE(d.normalized_text, ''),
-       CASE
-         WHEN d.doc_id = m.parent_doc_id THEN 'parent'
-         WHEN d.parent_doc_id = m.doc_id THEN 'attachment'
-         ELSE 'same-thread'
-       END AS relation
-FROM documents d
-JOIN documents m ON m.doc_id = ANY($1::uuid[])
-WHERE d.doc_id <> m.doc_id
-  AND d.processing_status = 'COMPLETED'
-  AND (d.doc_id = m.parent_doc_id
-       OR d.parent_doc_id = m.doc_id
-       OR (m.thread_id <> '' AND d.thread_id = m.thread_id))
+       COALESCE(d.metadata_headers->>'source_path', ''),
+       COALESCE(c.source_path, ''),
+       n.relation
+FROM neighbours n
+JOIN documents d ON d.doc_id = n.doc_id
+LEFT JOIN container c ON c.origin = n.doc_id
 ORDER BY d.email_date NULLS LAST, d.doc_id`
 
 type neighbour struct {
@@ -153,7 +214,8 @@ func (s *Service) loadNeighbours(ctx context.Context, matched []string) ([]neigh
 		var date *time.Time
 		var rel string
 		if err := rows.Scan(&n.DocID, &n.ParentID, &n.ThreadID, &n.DocType, &n.Title,
-			&n.From, &n.To, &date, &n.RawURI, &n.SHA256, &n.CharCount, &n.text, &rel); err != nil {
+			&n.From, &n.To, &date, &n.RawURI, &n.SHA256, &n.CharCount, &n.text,
+			&n.SourcePath, &n.ContainerPath, &rel); err != nil {
 			return nil, err
 		}
 		if _, dup := seen[n.DocID]; dup {

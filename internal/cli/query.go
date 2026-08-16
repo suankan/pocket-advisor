@@ -117,6 +117,12 @@ func renderResult(res *retrieval.Result, elapsed time.Duration) {
 			fmt.Printf("   via: %s\n", p.Match.SubQuery)
 		}
 		fmt.Printf("   cite: %s\n", p.RawURI)
+		switch {
+		case p.SourcePath != "":
+			fmt.Printf("   file: workspaces/data/<workspace-id>/%s\n", p.SourcePath)
+		case p.ContainerPath != "":
+			fmt.Printf("   file: extracted from workspaces/data/<workspace-id>/%s\n", p.ContainerPath)
+		}
 		fmt.Printf("   \"%s\"\n", p.Match.Snippet)
 		if n := len(p.Related); n > 0 {
 			fmt.Printf("   related: %s\n", summariseRelated(p.Related))

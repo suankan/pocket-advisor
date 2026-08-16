@@ -243,8 +243,9 @@ The result shows:
 - the query or subqueries actually searched;
 - warnings for degraded retrieval;
 - the shared evidence budget;
-- ranked passages with document metadata, UTF-8 byte offsets, and Tier 1 citations; and
-- lineage context such as parent documents, attachments, and same-thread messages.
+- ranked passages with document metadata, UTF-8 byte offsets, and Tier 1 citations;
+- lineage context such as parent documents, attachments, and same-thread messages; and
+- where to find each result, printed relative to `workspaces/data/<workspace-id>/` — the directory the workspace was staged from — as either the document's own file or, for something extracted like an email attachment, the file it came out of, so you can open it yourself.
 
 Useful query options:
 

@@ -34,10 +34,15 @@ func NewPostgresStore(db *postgres.DB) *PostgresStore { return &PostgresStore{db
 
 // messageColumns is the projection every message read shares. Explicit and
 // identical everywhere, so a scan cannot silently bind to a different column.
+// source_path is the original file's location relative to the workspace's
+// local staging directory (ingestion-design.md's Provenance.SourcePath,
+// stored in documents.metadata_headers); every caller of this projection
+// joins in the owning documents row to supply it.
 const messageColumns = `
     m.doc_id::text, m.message_id, m.subject_raw, m.sent_at, m.ingested_at,
     m.conversation_id::text, m.conversation_method, m.automated_class,
-    m.list_id, m.parse_warnings::text`
+    m.list_id, m.parse_warnings::text,
+    COALESCE(d.metadata_headers->>'source_path', '') AS source_path`
 
 // Snapshot reads the watermark from the database clock, which is the clock
 // ingested_at is written by. A process clock would drift against it and either
@@ -140,6 +145,7 @@ WITH matched AS (
     SELECT %s,
            count(*) OVER (PARTITION BY m.conversation_id) AS conversation_matches
     FROM email_messages m
+    JOIN documents d ON d.doc_id = m.doc_id
     WHERE %s
 )`, messageColumns, where.String())
 
@@ -161,7 +167,7 @@ representatives AS (
 
 	fmt.Fprintf(&sql, `
 SELECT doc_id, message_id, subject_raw, sent_at, ingested_at, conversation_id,
-       conversation_method, automated_class, list_id, parse_warnings,
+       conversation_method, automated_class, list_id, parse_warnings, source_path,
        conversation_matches
 FROM %s`, source)
 
@@ -188,6 +194,9 @@ FROM %s`, source)
 		return nil, err
 	}
 	if err := p.hydrateAddresses(ctx, msgs); err != nil {
+		return nil, err
+	}
+	if err := p.hydrateContainerPaths(ctx, msgs); err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -340,6 +349,7 @@ WITH eligible_conversations AS (
 )
 SELECT %s, 0
 FROM email_messages m
+JOIN documents d ON d.doc_id = m.doc_id
 JOIN eligible_conversations e ON e.conversation_id = m.conversation_id
 WHERE m.ingested_at <= $1
 ORDER BY m.conversation_id, m.sent_at ASC NULLS LAST, m.doc_id ASC`, eligible.String(), messageColumns)
@@ -355,6 +365,9 @@ ORDER BY m.conversation_id, m.sent_at ASC NULLS LAST, m.doc_id ASC`, eligible.St
 		return nil, err
 	}
 	if err := p.hydrateReferences(ctx, msgs); err != nil {
+		return nil, err
+	}
+	if err := p.hydrateContainerPaths(ctx, msgs); err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -385,6 +398,7 @@ func (p *PostgresStore) ConversationMessages(ctx context.Context, conversationID
 	rows, err := p.db.Pool.Query(ctx, fmt.Sprintf(`
         SELECT %s, 0
         FROM email_messages m
+        JOIN documents d ON d.doc_id = m.doc_id
         WHERE m.conversation_id = $1::uuid AND m.ingested_at <= $2
         ORDER BY m.sent_at ASC NULLS LAST, m.doc_id ASC`, messageColumns), conversationID, snapshot)
 	if err != nil {
@@ -401,6 +415,9 @@ func (p *PostgresStore) ConversationMessages(ctx context.Context, conversationID
 		return nil, err
 	}
 	if err := p.hydrateReferences(ctx, msgs); err != nil {
+		return nil, err
+	}
+	if err := p.hydrateContainerPaths(ctx, msgs); err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -422,7 +439,7 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 		if err := rows.Scan(
 			&m.DocID, &m.MessageID, &m.Subject, &sentAt, &m.IngestedAt,
 			&m.ConversationID, &method, &automated, &m.ListID, &warningsJS,
-			&matches,
+			&m.SourcePath, &matches,
 		); err != nil {
 			return nil, fmt.Errorf("read message row: %w", err)
 		}
@@ -443,6 +460,68 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 		return nil, fmt.Errorf("read message rows: %w", err)
 	}
 	return out, nil
+}
+
+// hydrateContainerPaths fills ContainerPath for the rows that have no staged
+// file of their own — a message nested inside another message or an archive.
+//
+// A second round trip rather than a join, for the same reason hydrateAddresses
+// is one: the walk is recursive and per-document, and folding it into the page
+// query would multiply the keyset the limit is applied to. Rows that already
+// carry SourcePath are skipped, so a page of ordinary staged mail issues no
+// query at all.
+func (p *PostgresStore) hydrateContainerPaths(ctx context.Context, msgs []Message) error {
+	var needed []string
+	for i := range msgs {
+		if msgs[i].SourcePath == "" {
+			needed = append(needed, msgs[i].DocID)
+		}
+	}
+	if len(needed) == 0 {
+		return nil
+	}
+	rows, err := p.db.Pool.Query(ctx, `
+        WITH RECURSIVE origins AS (
+            SELECT unnest($1::uuid[]) AS doc_id
+        ),
+        ancestry AS (
+            SELECT DISTINCT origin.doc_id AS origin, source.parent_doc_id,
+                   NULLIF(source.metadata_headers->>'source_path', '') AS source_path, 0 AS hops
+            FROM origins origin
+            JOIN documents source ON source.doc_id = origin.doc_id
+            UNION ALL
+            SELECT walk.origin, parent.parent_doc_id,
+                   NULLIF(parent.metadata_headers->>'source_path', ''), walk.hops + 1
+            FROM documents parent
+            JOIN ancestry walk ON walk.parent_doc_id = parent.doc_id
+            WHERE walk.source_path IS NULL AND walk.hops < 16
+        )
+        SELECT DISTINCT ON (origin) origin::text, source_path
+        FROM ancestry
+        WHERE source_path IS NOT NULL AND hops > 0
+        ORDER BY origin, hops`, needed)
+	if err != nil {
+		return fmt.Errorf("resolve message container paths: %w", err)
+	}
+	defer rows.Close()
+
+	paths := make(map[string]string, len(needed))
+	for rows.Next() {
+		var docID, path string
+		if err := rows.Scan(&docID, &path); err != nil {
+			return fmt.Errorf("read message container path: %w", err)
+		}
+		paths[docID] = path
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read message container paths: %w", err)
+	}
+	for i := range msgs {
+		if msgs[i].SourcePath == "" {
+			msgs[i].ContainerPath = paths[msgs[i].DocID]
+		}
+	}
+	return nil
 }
 
 // hydrateAddresses attaches the sender and recipients of the rows on this page.

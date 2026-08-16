@@ -59,6 +59,10 @@ The object metadata carries the provenance that a content-addressed key cannot:
 
 Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on read before names are compared.
 
+Discovery mirrors `source-path` into the owning `documents` row as a Tier 2 fact, alongside `uploaded-at` and `uploader-run-id`. [Retrieval](retrieval-design.md) and [MCP](mcp.md) surface it read-only, as the file's location relative to the workspace's local staging directory, so a caller can point the operator at the original file. Only a root document discovered from that directory has one: a child created by a container worker — an email attachment, an extracted Office part — was never a file of its own. The read path gives such a document the nearest ancestor that does have a path, so every document reports either its own staged file or the file it was extracted from. Neither is ever inferred from where similar documents live; a plausible guess is frequently wrong, and stating one as fact is the failure this distinction exists to prevent.
+
+No absolute host path is recorded anywhere. The stored value is always workspace-relative, and the root that completes it lives only in the workspace registry the uploader reads, so Tier 2 remains rebuildable on another machine and no evidence packet can disclose the operator's filesystem layout.
+
 ### 2.2 Tier 2: PostgreSQL documents
 
 doc_id and raw_sha256 are two independent identities on the same row, not one value serving both purposes:

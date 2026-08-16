@@ -143,6 +143,14 @@ func (t *QueryTool) Describe() ToolDefinition {
 			"such as [R0123456789ab:E1]. When complete=false, call the named continuation_tool " +
 			"with exactly next_cursor and continue until complete=true before claiming complete " +
 			"coverage. Never invent a cursor, byte range, document identifier, or workspace.\n\n" +
+			"Every document reports where to find it, relative to the workspace's local staging " +
+			"directory on the operator's machine. document.workspace_relative_path is the " +
+			"document's own file. When that is null, document.container_workspace_relative_path " +
+			"is the file it was extracted from — say it has no file of its own and name that " +
+			"container, such as the email holding an attachment. Exactly one of the two is " +
+			"always present. Report the path the tool gave you and do not try to open, read, or " +
+			"fetch it yourself. Never infer a location from where similar or sibling documents " +
+			"live; a plausible guess is frequently wrong.\n\n" +
 			"If packets is empty and complete=true, say that the corpus supplied no supporting " +
 			"evidence rather than answering from general knowledge. The corpus may contain " +
 			"English and Russian; ask in either language.",

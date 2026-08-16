@@ -78,6 +78,20 @@ type EvidenceDocument struct {
 	Date             *string `json:"date"`
 	SourceSHA256     string  `json:"source_sha256"`
 	Tier1URI         string  `json:"tier1_uri"`
+	// WorkspaceRelativePath is the document's original file location relative
+	// to the workspace's local staging directory, exactly as recorded at
+	// upload time. It is informational only, for the human operator to open
+	// the original file themselves — the agent must not treat it as
+	// fetchable or resolve it on the agent's own filesystem. It is absent
+	// when the document was never its own file on disk, such as an email
+	// attachment.
+	WorkspaceRelativePath *string `json:"workspace_relative_path"`
+	// ContainerWorkspaceRelativePath is the staged file this document was
+	// extracted from, present exactly when WorkspaceRelativePath is absent.
+	// It exists so an extracted document can still be located honestly:
+	// without it a caller can only guess from sibling documents, which is
+	// how a confident wrong location gets reported.
+	ContainerWorkspaceRelativePath *string `json:"container_workspace_relative_path"`
 }
 
 type EvidenceMatch struct {
@@ -198,6 +212,8 @@ func evidenceDocument(document retrieval.Document) EvidenceDocument {
 		ThreadID: nullableString(document.ThreadID), DocumentType: document.DocType,
 		Title: document.Title, From: document.From, To: document.To, Date: date,
 		SourceSHA256: document.SHA256, Tier1URI: document.RawURI,
+		WorkspaceRelativePath:          nullableString(document.SourcePath),
+		ContainerWorkspaceRelativePath: nullableString(document.ContainerPath),
 	}
 }
 
@@ -443,6 +459,13 @@ func renderEvidencePage(page *EvidencePage) string {
 			fmt.Fprintln(&builder, strings.Join(metadata, " · "))
 			fmt.Fprintf(&builder, "cite: %s (doc %s, UTF-8 bytes %d-%d, relevance %+.3f)\n",
 				packet.Document.Tier1URI, shortID(packet.Document.DocumentID), packet.Match.Start, packet.Match.End, packet.Match.Score)
+			if packet.Document.WorkspaceRelativePath != nil {
+				fmt.Fprintf(&builder, "local file: %s (tell the user this location; do not fetch it yourself)\n",
+					*packet.Document.WorkspaceRelativePath)
+			} else if packet.Document.ContainerWorkspaceRelativePath != nil {
+				fmt.Fprintf(&builder, "local file: none of its own; extracted from %s (report it this way; do not guess a path from other documents)\n",
+					*packet.Document.ContainerWorkspaceRelativePath)
+			}
 			fmt.Fprintf(&builder, "matched snippet:\n%s\n", packet.Match.Snippet)
 			switch {
 			case packet.TextAvailable:

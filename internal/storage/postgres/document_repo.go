@@ -187,6 +187,61 @@ func (r *DocumentRepo) CountStalePending(ctx context.Context, olderThan time.Dur
 	return n, err
 }
 
+// StagedRoot is one root document that records where it was staged from.
+// Only these can be judged against the staging directory: a child created by
+// a container worker was never a file there, and is removed with its root.
+type StagedRoot struct {
+	DocID       string
+	SHA256      string
+	SourcePath  string
+	DocType     string
+	Descendants int
+}
+
+// StagedRoots lists every root document carrying a staged source path,
+// with the number of documents that would be removed along with it.
+//
+// The descendant count is reported rather than assumed: deleting one staged
+// file can remove a whole extracted tree, and an operator confirming a
+// deletion needs to see that before agreeing to it, not after.
+func (r *DocumentRepo) StagedRoots(ctx context.Context) ([]StagedRoot, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+        WITH RECURSIVE tree AS (
+            SELECT doc_id AS root, doc_id
+            FROM documents
+            WHERE parent_doc_id IS NULL
+              AND NULLIF(metadata_headers->>'source_path', '') IS NOT NULL
+            UNION ALL
+            SELECT t.root, d.doc_id
+            FROM documents d JOIN tree t ON d.parent_doc_id = t.doc_id
+        ),
+        sizes AS (
+            SELECT root, count(*) - 1 AS descendants FROM tree GROUP BY root
+        )
+        SELECT d.doc_id::text, d.raw_sha256,
+               d.metadata_headers->>'source_path', d.doc_type,
+               COALESCE(s.descendants, 0)
+        FROM documents d
+        LEFT JOIN sizes s ON s.root = d.doc_id
+        WHERE d.parent_doc_id IS NULL
+          AND NULLIF(d.metadata_headers->>'source_path', '') IS NOT NULL
+        ORDER BY d.metadata_headers->>'source_path'`)
+	if err != nil {
+		return nil, fmt.Errorf("list staged roots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StagedRoot
+	for rows.Next() {
+		var s StagedRoot
+		if err := rows.Scan(&s.DocID, &s.SHA256, &s.SourcePath, &s.DocType, &s.Descendants); err != nil {
+			return nil, fmt.Errorf("read staged root: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // KnownRawURIs returns the set of Tier 1 URIs already represented in Tier 2,
 // for the bucket-scan anti-join (§5.2).
 func (r *DocumentRepo) KnownRawURIs(ctx context.Context) (map[string]struct{}, error) {

@@ -517,6 +517,14 @@ Remove one selected document by content hash:
 ./bin/pocket-advisor --forget <sha256> --workspace-id example
 ```
 
+Remove documents whose file you deleted from the workspace directory:
+
+```sh
+./bin/pocket-advisor --reconcile-deletions --workspace-id example
+```
+
+Ingestion is additive, so deleting a staged file normally leaves its document in place. This command reconciles that: it reports every document whose content is no longer staged anywhere, along with the extracted children that would go with it, and changes nothing unless you add `--yes`. Candidates are matched by content rather than filename, so deleting one of two identical files does not remove a document still staged under the other name, and renaming a file is not read as deleting it. It refuses to run against an empty or unmounted directory rather than treat that as a request to delete everything. `--json` emits the plan for review.
+
 Delete all content while leaving the workspace infrastructure ready for reuse:
 
 ```sh

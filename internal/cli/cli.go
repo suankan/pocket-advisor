@@ -38,6 +38,12 @@ type Options struct {
 	Forget     string
 	Query      string
 
+	// ReconcileDeletions removes documents whose staged file is gone. It is
+	// the one operator-driven exception to the staging directory being a
+	// feed rather than an authority, so it plans by default and applies
+	// only with --yes.
+	ReconcileDeletions bool
+
 	TopK        int
 	JSON        bool
 	NoRerank    bool
@@ -128,6 +134,11 @@ Modes (exactly one):
                       --json emits machine-readable output.
   --delete-data       purge the workspace from Tier 1 and Tier 2
   --forget <sha256>   remove one document by content hash
+  --reconcile-deletions
+                      remove documents whose staged file is no longer in the
+                      workspace directory. Compares content, not filenames, and
+                      refuses if the directory is empty. Reports the plan and
+                      changes nothing unless --yes is supplied.
 
 MCP (a subcommand, not a mode flag):
   mcp stdio --workspace-id <id>
@@ -265,6 +276,8 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Listen, "listen", false, "run the pipeline indefinitely on RustFS's live notify events")
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
+	fs.BoolVar(&o.ReconcileDeletions, "reconcile-deletions", false,
+		"remove documents whose staged file is gone (plans unless --yes)")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
@@ -323,6 +336,7 @@ func (o *Options) modes() []string {
 		{o.Listen, "--listen"},
 		{o.DeleteData, "--delete-data"},
 		{o.Forget != "", "--forget"},
+		{o.ReconcileDeletions, "--reconcile-deletions"},
 		{o.Query != "", "--query"},
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
@@ -471,6 +485,8 @@ func Run(o *Options) error {
 	switch {
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
+	case o.ReconcileDeletions:
+		return runReconcileDeletions(o, cfg, logs)
 	case o.Evaluate:
 		eo := evaluateOptions{
 			CaseSet:    o.EvalCases,

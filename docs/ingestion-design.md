@@ -8,7 +8,7 @@ Ingestion is a bounded host process. One `pocket-advisor` binary contains the up
 
 The central invariants are:
 
-1. RustFS is the sole authoritative store for document bytes. A workspace's local directory is a staging feed used only by the uploader.
+1. RustFS is the sole authoritative store for document bytes. A workspace's local directory is a staging feed used only by the uploader, with one deliberate exception: the explicit `--reconcile-deletions` operator command described in §6.5 lets a removal from that directory propagate into the stores. Nothing else infers intent from the staging directory, and nothing does so automatically.
 2. Document identity (doc_id) and content identity (raw_sha256) are deliberately independent: doc_id is an opaque, randomly generated cross-reference key, and raw_sha256 — enforced unique per workspace database — is what deduplication and idempotency actually depend on. Neither depends on a workspace, a path, or which subdirectory of a workspace's single recursively walked directory currently holds the file.
 3. Discovery is the only component that creates root documents. Container workers create children with explicit lineage.
 4. Every worker is idempotent under at-least-once delivery.
@@ -299,6 +299,16 @@ Expected declines set `SKIPPED` and never create DLQ entries.
 ### 6.4 Current recovery boundary
 
 Reconciliation republishes stale `PENDING` rows only. Rows left `PROCESSING` by an interrupted handler and rows marked `FAILED` require an explicit reset or forget-and-ingest workflow. Automated redrive needs a durable distinction between transient and terminal failures and remains an open design decision.
+
+### 6.5 Deletion reconciliation
+
+Ingestion is additive: removing a file from a workspace's directory normally changes nothing, because Tier 1 owns the bytes and that directory is a feed. `--reconcile-deletions` is the single operator-driven exception. It reports which documents no longer have a staged file and, only with `--yes` and a confirmation, deletes them through the same content-hash path `--forget` uses, so removal stays idempotent and a rerun after partial failure converges.
+
+Candidacy is decided by content, never by filename. Documents are deduplicated on `raw_sha256`, so one document records only the first path its bytes were staged at, while the same bytes commonly sit under several names; judging by path would call a document deleted while its content is still present, and the next ingest would re-upload it under a new `doc_id`, invalidating anything that referenced the old one. Comparing content also makes the check immune to the filename-normalisation differences a path comparison would have to handle. The command therefore hashes the staging directory each run.
+
+Only root documents carrying a staged path are candidates. A child created by a container worker was never a file in that directory and is removed with the root it came from; the plan reports how many such descendants each candidate carries, because a single deleted file can remove an extracted tree.
+
+An empty staging directory is refused outright. An absent, unmounted, or partially synchronised directory is indistinguishable from a deliberately emptied one, and reading either as a deletion request would remove the whole corpus; a workspace that genuinely should be emptied is served by `--delete-data`, which states what it does. Removing a document also invalidates any evaluation case referencing its identifier, since document UUIDs are not reissued.
 
 ## 7. Chunking and embedding
 

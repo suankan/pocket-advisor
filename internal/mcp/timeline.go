@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 
@@ -32,6 +33,15 @@ type TimelineTool struct {
 	Service   TimelineRetriever
 	Workspace string
 	Title     string
+	// Log traces every topic_timeline call. Nil-safe, see QueryTool.Log.
+	Log *slog.Logger
+}
+
+func (t *TimelineTool) logger() *slog.Logger {
+	if t.Log != nil {
+		return t.Log
+	}
+	return slog.Default()
 }
 
 func (t *TimelineTool) Name() string { return "topic_timeline" }
@@ -95,8 +105,11 @@ func (t *TimelineTool) Call(ctx context.Context, raw json.RawMessage) (CallToolR
 	}
 	result, err := t.Service.Timeline(ctx, topicgraph.TimelineRequest{Reference: args.Ref, Limits: limits})
 	if err != nil {
+		t.logger().Info("topic_timeline", "ref", args.Ref, "error", err.Error())
 		return CallToolResult{}, timelineArgumentError(err)
 	}
+	t.logger().Info("topic_timeline", "ref", args.Ref, "nodes", len(result.Nodes),
+		"relations", len(result.Relations), "omitted_nodes", result.OmittedNodes)
 	return finalizeTimelineResult(result)
 }
 

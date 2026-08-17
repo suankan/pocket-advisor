@@ -65,9 +65,9 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 		return nil, nil, nil, err
 	}
 	title, corpus := describeCorpus(o)
-	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title}
-	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title}
-	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool}, svc, db.Close, nil
+	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title, Log: log}
+	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title, Log: log}
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool, Log: log}, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {

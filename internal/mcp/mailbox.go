@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +27,16 @@ type MailboxTool struct {
 	Service   *mailbox.Service
 	Workspace string
 	Title     string
+	// Log traces every list_messages/fetch_conversation/awaiting_reply_candidates
+	// call: the filters applied and what came back. Nil-safe, see QueryTool.Log.
+	Log *slog.Logger
+}
+
+func (t *MailboxTool) logger() *slog.Logger {
+	if t.Log != nil {
+		return t.Log
+	}
+	return slog.Default()
 }
 
 func (t *MailboxTool) normalizedWorkspace() string {
@@ -128,8 +139,13 @@ func (t *MailboxTool) Call(ctx context.Context, raw json.RawMessage) (CallToolRe
 		}
 		result, err := t.Service.ListMessages(ctx, mailbox.ListRequest{Sender: args.Sender, Recipient: args.Recipient, After: after, Before: before, Order: args.Order, Limit: args.Limit, CollapseConversations: args.Collapse, Cursor: cursor, Direction: args.Direction})
 		if err != nil {
+			t.logger().Info("list_messages", "sender", args.Sender, "recipient", args.Recipient,
+				"direction", args.Direction, "limit", args.Limit, "cursor_set", cursor != "", "error", err.Error())
 			return CallToolResult{}, mailboxArgumentError(err)
 		}
+		t.logger().Info("list_messages", "sender", args.Sender, "recipient", args.Recipient,
+			"direction", args.Direction, "limit", args.Limit, "cursor_set", cursor != "",
+			"returned", len(result.Messages), "has_more", result.Page.HasMore)
 		return finalizeMailboxResult("message_list", result)
 	case t.ConversationName():
 		var args mailboxConversationArguments
@@ -141,8 +157,10 @@ func (t *MailboxTool) Call(ctx context.Context, raw json.RawMessage) (CallToolRe
 		}
 		result, err := t.Service.FetchConversation(ctx, mailbox.ConversationRequest{Ref: args.Ref})
 		if err != nil {
+			t.logger().Info("fetch_conversation", "ref", args.Ref, "error", err.Error())
 			return CallToolResult{}, mailboxArgumentError(err)
 		}
+		t.logger().Info("fetch_conversation", "ref", args.Ref, "messages", len(result.Messages))
 		return finalizeMailboxResult("conversation", result)
 	case t.AwaitingReplyName():
 		var args mailboxAwaitingReplyArguments
@@ -165,8 +183,10 @@ func (t *MailboxTool) Call(ctx context.Context, raw json.RawMessage) (CallToolRe
 		}
 		result, err := t.Service.AwaitingReplyCandidates(ctx, mailbox.AwaitingReplyRequest{Participant: args.Participant, After: after, Before: before, Limit: args.Limit})
 		if err != nil {
+			t.logger().Info("awaiting_reply_candidates", "participant", args.Participant, "limit", args.Limit, "error", err.Error())
 			return CallToolResult{}, mailboxArgumentError(err)
 		}
+		t.logger().Info("awaiting_reply_candidates", "participant", args.Participant, "limit", args.Limit, "candidates", len(result.Candidates))
 		return finalizeMailboxResult("awaiting_reply_candidates", result)
 	default:
 		return CallToolResult{}, &unknownToolError{}

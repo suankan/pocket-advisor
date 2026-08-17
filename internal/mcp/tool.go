@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,12 @@ type QueryTool struct {
 	// Timeline, when configured, follows source-backed topic mentions from
 	// the active graph in this same fixed workspace.
 	Timeline *TimelineTool
+	// Log traces every tool call this process serves — over both stdio and
+	// HTTP, since both transports dispatch through Call (§ package doc:
+	// transport-agnostic). Nil-safe: falls back to slog.Default(), the same
+	// pattern mailbox.Service already uses, so callers that construct a tool
+	// literal without one (every existing test) do not have to change.
+	Log *slog.Logger
 
 	stateMu          sync.Mutex
 	store            *snapshotStore
@@ -69,6 +76,7 @@ func (t *QueryTool) forCaller() *QueryTool {
 		Corpus:           append([]string(nil), t.Corpus...),
 		Mailbox:          t.Mailbox,
 		Timeline:         t.Timeline,
+		Log:              t.Log,
 		now:              t.now,
 		random:           t.random,
 		snapshotTTL:      t.snapshotTTL,
@@ -91,6 +99,13 @@ type ToolAnnotations struct {
 	DestructiveHint bool `json:"destructiveHint"`
 	IdempotentHint  bool `json:"idempotentHint"`
 	OpenWorldHint   bool `json:"openWorldHint"`
+}
+
+func (t *QueryTool) logger() *slog.Logger {
+	if t.Log != nil {
+		return t.Log
+	}
+	return slog.Default()
 }
 
 func (t *QueryTool) normalizedWorkspace() string {
@@ -209,7 +224,32 @@ type cursorArguments struct {
 
 // Call validates a tools/call request and dispatches either a fresh retrieval
 // or a read from the immutable session-local snapshot created by that search.
+//
+// It is the one entry point both transports share (stdio's server.go calls it
+// directly; HTTP's SDK adapter in http.go calls it from every registered
+// tool's handler), so logging here traces every tool call this process
+// serves regardless of transport.
 func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResult, error) {
+	start := time.Now()
+	var peek rawCallParams
+	_ = json.Unmarshal(raw, &peek) // best-effort, for the log line only; dispatch below validates for real
+	result, err := t.dispatch(ctx, raw)
+	t.logger().Info("mcp tool call",
+		"tool", peek.Name,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"ok", err == nil,
+		"error", errMessage(err))
+	return result, err
+}
+
+func errMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (t *QueryTool) dispatch(ctx context.Context, raw json.RawMessage) (CallToolResult, error) {
 	var params rawCallParams
 	if err := decodeStrict(raw, &params); err != nil {
 		return CallToolResult{}, &argumentError{message: "tools/call params must be a valid object"}
@@ -238,7 +278,10 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 		if args.Cursor == "" || len(args.Cursor) > maxCursorBytes {
 			return CallToolResult{}, &argumentError{message: "cursor must be a non-empty opaque token returned by this session"}
 		}
-		return t.readEvidencePage(ctx, args.Cursor)
+		result, err := t.readEvidencePage(ctx, args.Cursor)
+		attrs := append([]any{"cursor", args.Cursor}, logResultAttrs(result, err)...)
+		t.logger().Info("read_evidence", attrs...)
+		return result, err
 	}
 
 	var args queryArguments
@@ -265,6 +308,7 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 	}
 	res, err := t.Service.Query(ctx, retrieval.Request{Question: question, TopK: topK})
 	if err != nil {
+		t.logger().Info("search", "question", question, "top_k", topK, "error", err.Error())
 		return CallToolResult{}, err
 	}
 	resultID, err := t.newResultID()
@@ -276,7 +320,24 @@ func (t *QueryTool) Call(ctx context.Context, raw json.RawMessage) (CallToolResu
 		t.releaseResultID(resultID)
 		return CallToolResult{}, fmt.Errorf("build evidence result: %w", err)
 	}
+	t.logger().Info("search", "question", question, "top_k", topK,
+		"result_id", resultID, "packets", len(evidence.Packets), "warnings", len(evidence.Warnings))
 	return t.storeSearchResult(evidence)
+}
+
+// logResultAttrs renders a CallToolResult/error pair as slog key-value pairs,
+// pulling packet/segment counts and completion out of StructuredContent when
+// present so the log line says what was actually delivered, not just that a
+// call happened.
+func logResultAttrs(result CallToolResult, err error) []any {
+	if err != nil {
+		return []any{"error", err.Error()}
+	}
+	page, ok := result.StructuredContent.(*EvidencePage)
+	if !ok || page == nil {
+		return []any{"ok", true}
+	}
+	return []any{"ok", true, "packets", len(page.Packets), "segments", len(page.Segments), "complete", page.Complete}
 }
 
 type argumentError struct{ message string }

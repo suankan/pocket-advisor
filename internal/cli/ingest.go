@@ -257,7 +257,19 @@ func upload(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats)
 	}
 	log.Info("upload complete",
 		"uploaded", res.Uploaded, "duplicate", res.Duplicate,
-		"failed", res.Failed, "bytes", res.Bytes)
+		"failed", res.Failed, "moved", len(res.Moved), "bytes", res.Bytes)
+
+	// The uploader owns Tier 1 only (package doc: "the only writer to the
+	// raw/ prefix"); Tier 2's metadata_headers.source_path is this package's
+	// job to keep in sync once the uploader reports what moved. Skipped in
+	// dry runs: res.Moved there describes what would move, not what did.
+	if !o.DryRun {
+		for _, m := range res.Moved {
+			if err := a.Docs.UpdateSourcePath(ctx, m.SHA256, m.NewPath); err != nil {
+				return fmt.Errorf("sync moved path for %s: %w", m.SHA256, err)
+			}
+		}
+	}
 
 	if res.Failed > 0 {
 		return fmt.Errorf("%d file(s) failed to upload", res.Failed)

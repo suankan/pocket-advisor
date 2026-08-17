@@ -291,6 +291,24 @@ func (r *DocumentRepo) DeleteBySHA(ctx context.Context, sha string) (int64, erro
 	return tag.RowsAffected(), nil
 }
 
+// UpdateSourcePath refreshes the recorded staging location for the document
+// with this content hash. Identity here is raw_sha256, never doc_id or the
+// old path (reconcile.go): a document's source_path is set once, at first
+// upload, and otherwise never revisited, so a same-content move leaves it
+// pointing at a file that no longer exists until this is called explicitly
+// (the uploader does so when it finds existing content at a new path).
+func (r *DocumentRepo) UpdateSourcePath(ctx context.Context, sha, path string) error {
+	_, err := r.db.Pool.Exec(ctx, `
+        UPDATE documents
+        SET metadata_headers = jsonb_set(metadata_headers, '{source_path}', to_jsonb($2::text)),
+            updated_at       = now()
+        WHERE raw_sha256 = $1`, sha, path)
+	if err != nil {
+		return fmt.Errorf("update source path %s: %w", sha, err)
+	}
+	return nil
+}
+
 func orEmpty(m map[string]string) map[string]string {
 	if m == nil {
 		return map[string]string{}

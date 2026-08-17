@@ -44,6 +44,19 @@ type Result struct {
 	Duplicate int64
 	Failed    int64
 	Bytes     int64
+	// Moved is content the uploader found under a new path in staging. The
+	// documents in Tier 2 that share this content still record the old,
+	// now-nonexistent path (source_path is set once, at first upload) — the
+	// caller is expected to propagate these into Tier 2 via
+	// DocumentRepo.UpdateSourcePath.
+	Moved []PathMove
+}
+
+// PathMove is one piece of content whose recorded staging path no longer
+// matches where it was found.
+type PathMove struct {
+	SHA256  string
+	NewPath string
 }
 
 // Add accumulates a result into a run total.
@@ -52,6 +65,7 @@ func (r *Result) Add(o Result) {
 	r.Duplicate += o.Duplicate
 	r.Failed += o.Failed
 	r.Bytes += o.Bytes
+	r.Moved = append(r.Moved, o.Moved...)
 }
 
 type Uploader struct {
@@ -109,6 +123,8 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	var uploaded, duplicate, failed, bytes int64
+	var movedMu sync.Mutex
+	var moved []PathMove
 
 	for _, f := range files {
 		select {
@@ -123,7 +139,12 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			n, outcome, err := u.one(ctx, path, opts, &seen)
+			n, outcome, move, err := u.one(ctx, path, opts, &seen)
+			if move != nil {
+				movedMu.Lock()
+				moved = append(moved, *move)
+				movedMu.Unlock()
+			}
 			switch {
 			case err != nil:
 				atomic.AddInt64(&failed, 1)
@@ -156,21 +177,22 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 		Duplicate: atomic.LoadInt64(&duplicate),
 		Failed:    atomic.LoadInt64(&failed),
 		Bytes:     atomic.LoadInt64(&bytes),
+		Moved:     moved,
 	}
 	u.log.Info("upload complete",
 		"workspace_id", opts.WorkspaceID,
 		"uploaded", res.Uploaded, "duplicate", res.Duplicate,
-		"failed", res.Failed, "bytes", res.Bytes)
+		"failed", res.Failed, "moved", len(res.Moved), "bytes", res.Bytes)
 	return res, nil
 }
 
 // one uploads a single file. The sequence is hash → key → StatObject →
 // PutObject: skip-if-present is exact rather than heuristic, because the key
 // is the content hash.
-func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *sync.Map) (int64, string, error) {
+func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *sync.Map) (int64, string, *PathMove, error) {
 	sum, size, err := hashFile(path)
 	if err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
 
 	key := domain.RawObjectKey(sum)
@@ -178,60 +200,76 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *syn
 	if err != nil {
 		rel = filepath.Base(path)
 	}
+	rel = filepath.ToSlash(rel)
 	name := filepath.Base(path)
 
 	// Same content already handled in this run, under another name.
 	if _, dup := seen.LoadOrStore(sum, struct{}{}); dup {
 		if !opts.DryRun {
 			if err := u.vault.AddAlias(ctx, key, name); err != nil {
-				return 0, "", err
+				return 0, "", nil, err
 			}
 		}
 		u.log.Debug("duplicate content in this run", "path", path, "sha256", sum)
-		return 0, "duplicate", nil
+		return 0, "duplicate", nil, nil
 	}
 
 	exists, prov, err := u.vault.Exists(ctx, key)
 	if err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
 	if exists {
 		// Present from an earlier run: record the alias if this name is new,
 		// but never re-upload.
 		if !opts.DryRun && prov.SourceFilename != name {
 			if err := u.vault.AddAlias(ctx, key, name); err != nil {
-				return 0, "", err
+				return 0, "", nil, err
 			}
 		}
+		var move *PathMove
+		if prov.SourcePath != rel {
+			// The staged file was found at a new path (a rename or a move
+			// like correspondence/2026-01/ -> emails/) — content
+			// identity doesn't change, but the recorded location is now
+			// stale and would otherwise stay wrong forever (source_path is
+			// set once, at first upload, and nothing else revisits it).
+			if !opts.DryRun {
+				if err := u.vault.UpdatePath(ctx, key, rel); err != nil {
+					return 0, "", nil, err
+				}
+			}
+			move = &PathMove{SHA256: sum, NewPath: rel}
+			u.log.Info("staged content moved", "sha256", sum, "old_path", prov.SourcePath, "new_path", rel)
+		}
 		u.log.Debug("already in tier 1", "path", path, "sha256", sum)
-		return 0, "duplicate", nil
+		return 0, "duplicate", move, nil
 	}
 
 	if opts.DryRun {
 		u.log.Info("would upload", "path", path, "sha256", sum, "size", size)
-		return size, "uploaded", nil
+		return size, "uploaded", nil, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, "", fmt.Errorf("open %s: %w", path, err)
+		return 0, "", nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	prov = rustfs.Provenance{
 		SourceFilename: name,
-		SourcePath:     filepath.ToSlash(rel),
+		SourcePath:     rel,
 		UploadedAt:     time.Now().UTC().Format(time.RFC3339),
 		UploaderRunID:  opts.RunID,
 	}
 	// The uploader does not sniff formats — it is a byte mover. All format
 	// knowledge lives in discovery, in one place (§5.1).
 	if err := u.vault.Put(ctx, key, f, size, "application/octet-stream", prov); err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
 
 	u.log.Debug("uploaded", "path", path, "sha256", sum, "size", size)
-	return size, "uploaded", nil
+	return size, "uploaded", nil, nil
 }
 
 func collect(root string) ([]string, error) {

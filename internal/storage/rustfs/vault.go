@@ -320,6 +320,35 @@ func (v *Vault) AddAlias(ctx context.Context, key, filename string) error {
 	return nil
 }
 
+// UpdatePath records where content already stored was found again, when that
+// differs from the path recorded at first upload. Unlike AddAlias, this
+// overwrites rather than accumulates: source_path is "where this content
+// currently lives in staging", and a stale entry there is actively
+// misleading (it names a file that no longer exists) rather than merely
+// incomplete the way a missing alias is.
+func (v *Vault) UpdatePath(ctx context.Context, key, path string) error {
+	exists, p, err := v.Exists(ctx, key)
+	if err != nil || !exists {
+		return err
+	}
+	if path == "" || path == p.SourcePath {
+		return nil
+	}
+	p.SourcePath = path
+
+	src := minio.CopySrcOptions{Bucket: v.bucket, Object: key}
+	dst := minio.CopyDestOptions{
+		Bucket:          v.bucket,
+		Object:          key,
+		UserMetadata:    p.toUserMetadata(),
+		ReplaceMetadata: true,
+	}
+	if _, err := v.c.CopyObject(ctx, dst, src); err != nil {
+		return fmt.Errorf("update path of %q: %w", key, err)
+	}
+	return nil
+}
+
 // Get reads an object fully into memory. Every consumer of Tier 1 in this
 // system processes in RAM, so there is no streaming variant by design.
 func (v *Vault) Get(ctx context.Context, key string) ([]byte, Provenance, error) {

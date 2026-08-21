@@ -47,6 +47,10 @@ type QueryTool struct {
 	// Timeline, when configured, follows source-backed topic mentions from
 	// the active graph in this same fixed workspace.
 	Timeline *TimelineTool
+	// Document, when configured, deterministically fetches one document by
+	// an exact attribute (sender+date, subject+date, or filename), complete
+	// with its location, email attribution, body text, and attachments.
+	Document *DocumentTool
 	// Log traces every tool call this process serves — over both stdio and
 	// HTTP, since both transports dispatch through Call (§ package doc:
 	// transport-agnostic). Nil-safe: falls back to slog.Default(), the same
@@ -76,6 +80,7 @@ func (t *QueryTool) forCaller() *QueryTool {
 		Corpus:           append([]string(nil), t.Corpus...),
 		Mailbox:          t.Mailbox,
 		Timeline:         t.Timeline,
+		Document:         t.Document,
 		Log:              t.Log,
 		now:              t.now,
 		random:           t.random,
@@ -203,6 +208,9 @@ func (t *QueryTool) DescribeAll() []ToolDefinition {
 	if t.Timeline != nil {
 		definitions = append(definitions, t.Timeline.Describe())
 	}
+	if t.Document != nil {
+		definitions = append(definitions, t.Document.Describe())
+	}
 	return definitions
 }
 
@@ -262,6 +270,9 @@ func (t *QueryTool) dispatch(ctx context.Context, raw json.RawMessage) (CallTool
 	}
 	if t.Timeline != nil && params.Name == t.Timeline.Name() {
 		return t.Timeline.Call(ctx, raw)
+	}
+	if t.Document != nil && params.Name == t.Document.Name() {
+		return t.Document.Call(ctx, raw)
 	}
 	if params.Name != t.Name() && params.Name != t.ReadName() {
 		return CallToolResult{}, &unknownToolError{}

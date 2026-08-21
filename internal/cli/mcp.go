@@ -67,7 +67,8 @@ func newMCPTool(ctx context.Context, o *Options, cfg *config.Config, logs *telem
 	title, corpus := describeCorpus(o)
 	mailboxTool := &mcp.MailboxTool{Service: mailboxService, Workspace: o.WorkspaceID, Title: title, Log: log}
 	timelineTool := &mcp.TimelineTool{Service: timelineService, Workspace: o.WorkspaceID, Title: title, Log: log}
-	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool, Log: log}, svc, db.Close, nil
+	documentTool := &mcp.DocumentTool{Docs: postgres.NewDocumentRepo(db), Workspace: o.WorkspaceID, Title: title, Log: log}
+	return &mcp.QueryTool{Service: svc, Workspace: o.WorkspaceID, Title: title, Corpus: corpus, Mailbox: mailboxTool, Timeline: timelineTool, Document: documentTool, Log: log}, svc, db.Close, nil
 }
 
 func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {

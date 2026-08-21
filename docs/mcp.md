@@ -19,13 +19,14 @@ The stdio adapter is the default local integration, started with `mcp stdio`. Th
 
 ### Tools
 
-Each workspace-bound MCP server exposes retrieval, deterministic mailbox, and topic-timeline tools:
+Each workspace-bound MCP server exposes retrieval, deterministic mailbox, deterministic document lookup, and topic-timeline tools:
 
 - `search` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
 - `list_messages` — lists exact email messages with a bounded normalized sender mailbox or sender-domain filter, recipient, date, direction, order, collapse, and cursor filters.
 - `fetch_conversation` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
 - `awaiting_reply_candidates` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
+- `fetch_document` — accepts exactly one of filename, sender+date, or subject+date and deterministically returns every matching document complete with its location, email attribution, bounded body text, and attachments.
 - `topic_timeline` — accepts only a server-issued topic mention or episode reference and bounded traversal direction, depth, node, and source-span byte limits. It returns the active graph version's cited chronological subgraph, derived relations, warnings, omissions, and budgets.
 
 No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, graph version, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
@@ -55,6 +56,14 @@ The fixed-workspace mailbox tools provide deterministic email evidence alongside
 Every returned message reports where to find it, exactly as retrieval evidence does: `source_path` is the message's own staged file, and `container_source_path` names the file it was extracted from when it has none of its own, such as a message nested inside another message or an archive. Both are workspace-relative, for the caller to relay to the user, never to fetch or infer.
 
 Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
+
+## Deterministic document lookup
+
+`fetch_document` answers "what is this one document" completely in a single call, using an exact attribute a caller already has — from `list_messages`, `search`, or an earlier `fetch_document` call — rather than a similarity search. It accepts exactly one of: `filename` (a document's original filename); `sender` plus `date` (an email's exact normalized sender mailbox and the day it was sent); or `subject` plus `date` (an email's exact subject text and the day it was sent). `date` accepts an RFC 3339 timestamp or a `YYYY-MM-DD` date and is always matched by day, never by exact instant.
+
+Every match reports its location the same way search and the mailbox tools do (`source_path` or `container_source_path`, workspace-relative, never fetched or inferred), an email's `from`/`to`/`cc` and body text (`text`, truncated and flagged `text_truncated` past a fixed size), and its direct attachments — each with their own location but no text of their own; fetch one by its filename for that. If more than one document matches, every match is returned rather than a guess at which one was meant. Zero matches means the attribute or date was not exact, not that the corpus holds nothing related — the caller must not substitute a different message found by `search` and present it as this one.
+
+`fetch_document` uses the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as the other tools in this contract.
 
 ## Topic timelines
 

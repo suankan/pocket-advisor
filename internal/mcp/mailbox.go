@@ -273,13 +273,24 @@ func finalizeMailboxResult(kind string, value any) (CallToolResult, error) {
 	return result, nil
 }
 
+// formatSentAt renders the exact date sent_at always carries in
+// structuredContent into the human-readable text block too — clients
+// commonly summarize from the prose rather than parse structured content, so
+// a date present only there tends to be lost or vaguely paraphrased.
+func formatSentAt(t *time.Time) string {
+	if t == nil {
+		return "undated"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 func renderMailboxResult(page *mailboxResult) string {
 	switch result := page.Result.(type) {
 	case *mailbox.ListResult:
 		var b strings.Builder
 		fmt.Fprintf(&b, "Mailbox message list: %d message(s), %s order.\n", len(result.Messages), result.Order)
 		for _, m := range result.Messages {
-			fmt.Fprintf(&b, "[%s] %s — %s\n", m.Ref, m.Subject, m.Sender)
+			fmt.Fprintf(&b, "[%s] %s — %s — %s\n", m.Ref, formatSentAt(m.SentAt), m.Subject, m.Sender)
 		}
 		if result.Page.HasMore {
 			fmt.Fprintf(&b, "More messages are available. Call this tool again with exactly {\"cursor\":%q} and the same filters.\n", result.Page.NextCursor)
@@ -290,7 +301,7 @@ func renderMailboxResult(page *mailboxResult) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Conversation [%s]: %d message(s) in chronological order.\n", result.ConversationRef, len(result.Messages))
 		for _, m := range result.Messages {
-			fmt.Fprintf(&b, "[%s] %s — %s (%s)\n", m.Ref, m.Subject, m.Sender, m.Relationship.Method)
+			fmt.Fprintf(&b, "[%s] %s — %s — %s (%s)\n", m.Ref, formatSentAt(m.SentAt), m.Subject, m.Sender, m.Relationship.Method)
 		}
 		fmt.Fprintf(&b, "Snapshot: %s. Response budget: %d of %d UTF-8 bytes.\n", result.Snapshot.Format(time.RFC3339), page.ResponseBudget.Used, page.ResponseBudget.Allowed)
 		return b.String()
@@ -298,7 +309,7 @@ func renderMailboxResult(page *mailboxResult) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Awaiting-reply candidates: %d. These are candidates, not action conclusions.\n", len(result.Candidates))
 		for _, c := range result.Candidates {
-			fmt.Fprintf(&b, "[%s] latest inbound [%s] %s\n", c.ConversationRef, c.LatestInbound.Ref, c.LatestInbound.Subject)
+			fmt.Fprintf(&b, "[%s] latest inbound [%s] %s — %s\n", c.ConversationRef, c.LatestInbound.Ref, formatSentAt(c.LatestInbound.SentAt), c.LatestInbound.Subject)
 		}
 		fmt.Fprintf(&b, "Snapshot: %s. Response budget: %d of %d UTF-8 bytes.\n", result.Snapshot.Format(time.RFC3339), page.ResponseBudget.Used, page.ResponseBudget.Allowed)
 		return b.String()

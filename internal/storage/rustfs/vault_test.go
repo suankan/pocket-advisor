@@ -15,7 +15,7 @@ func TestAliasEncodingSurvivesHTTPHeaders(t *testing.T) {
 	defer srv.Close()
 
 	aliases := []string{
-		"Re_ Про твою поездку - John Doe.eml",
+		"Re_ Про встречу - John Doe.eml",
 		"plain.pdf",
 		"tab\tand\x1fcontrol.txt",
 		`quotes "and" backslash\.eml`,

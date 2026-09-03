@@ -285,6 +285,10 @@ Publishing waits for a JetStream acknowledgement and retries with bounded backof
 
 Consumers use explicit acknowledgements, `MaxDeliver = 3`, and a five-minute `AckWait`. While a handler runs, the runtime sends `InProgress` heartbeats so legitimate long OCR work does not expire its acknowledgement window.
 
+Both the heartbeat and the handler are bounded by one budget, `maxHandlerRuntime` (one hour, against a worst legitimate document of roughly fifteen minutes of OCR). A heartbeat that renews without end reports a wedged handler as healthy indefinitely, and the broker will not reassign work it believes is in hand: an overloaded embedding endpoint once wedged eighteen handlers whose heartbeats held eighteen messages against a 49,000-message backlog, and only killing the process cleared it. Past the budget the runtime stops renewing, `AckWait` lapses, and the message is redelivered; the handler's own context expires with it, so the lane is released rather than occupied for the life of the process. Workers are idempotent, so a redelivery overlapping a handler that is still alive is safe.
+
+A transient failure requests redelivery after a jittered backoff rather than immediately. An immediate request only helps when the next attempt has some reason to succeed, and under a failing dependency it has none — the embedding breaker refuses instantly for thirty seconds after tripping, so an undelayed retry spends all three delivery attempts inside one cooldown and dead-letters work that was never broken. The backoff starts above that cooldown, doubles per delivery to a five-minute ceiling, and spreads half its width randomly so a batch that fails together does not return together.
+
 Terminal failure handling:
 
 1. marks the message terminal rather than requesting another delivery;

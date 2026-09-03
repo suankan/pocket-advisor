@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -201,13 +202,43 @@ func (r *Runtime) fetchLoop(
 // being slow, and the punishment made it slower.
 //
 // InProgress resets the timer, so a handler that is still running keeps its
-// message. A handler that is stuck holds it forever, which is the same
-// exposure a long AckWait has and the reason this is a heartbeat rather than a
-// larger constant: when the process dies, the heartbeats stop with it and
-// redelivery happens on schedule.
+// message — but only up to maxHandlerRuntime. An unbounded heartbeat answers
+// "is this worker alive?" with "yes" forever, including for a handler that
+// will never finish, and a wedged handler then holds its message for as long
+// as the process lives. That is not theoretical either: an overloaded
+// embedding endpoint wedged eighteen handlers, whose heartbeats went on
+// renewing eighteen ack deadlines while the broker, correctly believing the
+// work was in hand, redelivered nothing. The stage stopped permanently with
+// 49,000 messages queued behind it and only SIGKILL cleared it, because
+// killing the process was the one thing that stopped the heartbeats.
+//
+// So the claim is now bounded at both ends: the handler gets a deadline (see
+// handle) and the heartbeat gets the same budget. Whichever gives out first,
+// the message stops being renewed, AckWait elapses, and the broker hands it
+// to someone else — the recovery an unbounded heartbeat quietly prevented.
 func (r *Runtime) heartbeat(msg jetstream.Msg) (stop func()) {
-	return r.heartbeatEvery(msg, heartbeatInterval())
+	return r.heartbeatFor(msg, heartbeatInterval(), maxHandlerRuntime)
 }
+
+// maxHandlerRuntime is the longest one message may be worked on before the
+// runtime concludes nothing is happening and lets the broker reassign it.
+//
+// It is sized off the slowest work this corpus actually contains, not off a
+// round number: a 208-page scanned PDF takes ~15 minutes to OCR, so an hour
+// leaves roughly fourfold headroom over the worst legitimate document. The
+// number only has to be large enough that no real document reaches it and
+// finite enough that a wedged handler cannot hold its message forever, and a
+// wide band between those two makes the choice uncritical.
+const maxHandlerRuntime = time.Hour
+
+// nakBackoffBase exceeds the embedding breaker's 30s cooldown, so a retry
+// that waits at least half of it still finds the breaker willing to try
+// rather than certain to refuse. nakBackoffMax keeps the wait bounded for
+// the slower failures, where redelivering promptly costs more than it saves.
+const (
+	nakBackoffBase = 60 * time.Second
+	nakBackoffMax  = 5 * time.Minute
+)
 
 // heartbeatInterval sits comfortably inside the ack window, so a tick scheduled
 // late under load still lands before the deadline. The traffic is negligible —
@@ -220,8 +251,18 @@ func heartbeatInterval() time.Duration {
 	return 30 * time.Second
 }
 
+// heartbeatEvery renews indefinitely. Kept for the tests that exercise the
+// ticking itself; production goes through heartbeat, which always sets a
+// budget.
 func (r *Runtime) heartbeatEvery(msg jetstream.Msg, interval time.Duration) (stop func()) {
+	return r.heartbeatFor(msg, interval, 0)
+}
+
+// heartbeatFor renews a message's ack deadline every interval, for at most
+// budget. A budget of zero renews without limit.
+func (r *Runtime) heartbeatFor(msg jetstream.Msg, interval, budget time.Duration) (stop func()) {
 	done := make(chan struct{})
+	start := time.Now()
 
 	go func() {
 		t := time.NewTicker(interval)
@@ -231,6 +272,18 @@ func (r *Runtime) heartbeatEvery(msg jetstream.Msg, interval time.Duration) (sto
 			case <-done:
 				return
 			case <-t.C:
+				// Giving up here is deliberate, and the opposite of the failure
+				// case below: the handler is past any runtime this corpus can
+				// justify, so the honest report to the broker is silence. The
+				// message's deadline then lapses and someone else gets to try,
+				// which is exactly what should happen to work nobody is making
+				// progress on. Workers are idempotent, so a redelivery racing a
+				// handler that is somehow still alive is safe.
+				if budget > 0 && time.Since(start) >= budget {
+					r.Log.Warn("handler exceeded its ack budget; releasing the message for redelivery",
+						"worker_type", r.Name, "budget", budget)
+					return
+				}
 				// Keep trying after a failure rather than returning. InProgress
 				// is a network call, and one blip must not silently disable the
 				// heartbeat for the rest of a document that needs twenty
@@ -274,7 +327,16 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	// dead worker (see heartbeat).
 	stopHeartbeat := r.heartbeat(msg)
 	start := time.Now()
-	err := r.invoke(ctx, msg, h)
+	// The handler's own deadline, kept separate from ctx because everything
+	// below still has bookkeeping to do — marking the row FAILED, publishing to
+	// the DLQ — and handing those an expired context would break the failure
+	// path exactly when it is needed. Bounding the handler is what frees a lane
+	// again: releasing the message alone would leave a wedged handler occupying
+	// one of a pool's lanes for the life of the process, so the queue would
+	// move while the pool it moves through slowly narrowed to nothing.
+	handlerCtx, cancelHandler := context.WithTimeout(ctx, maxHandlerRuntime)
+	err := r.invoke(handlerCtx, msg, h)
+	cancelHandler()
 	stopHeartbeat()
 	telemetry.IngestionDuration.WithLabelValues(r.Name, r.Subject).Observe(time.Since(start).Seconds())
 
@@ -332,9 +394,40 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 
 	telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
 	r.stat((*telemetry.Queue).Retried)
+	delay := nakBackoff(deliveries)
 	r.Log.Warn("transient failure, will redeliver",
-		"error", err, "delivery", deliveries, "max", bus.MaxDeliver)
-	_ = msg.Nak()
+		"error", err, "delivery", deliveries, "max", bus.MaxDeliver, "retry_in", delay)
+	_ = msg.NakWithDelay(delay)
+}
+
+// nakBackoff spaces a redelivery out instead of asking for it immediately.
+//
+// An immediate Nak is only the right answer when the next attempt has some
+// reason to go better, and under a failing dependency it has none. The
+// breaker in front of the embedding endpoint refuses instantly for thirty
+// seconds after it trips, so a message naked without delay is redelivered,
+// refused and naked again in the time it takes to make three round trips.
+// MaxDeliver then reads three refusals in a few milliseconds as a document
+// that cannot be processed, which is how 494 perfectly good documents
+// reached the DLQ during one overloaded half hour — the failure was in front
+// of them, and they were punished for arriving during it.
+//
+// The delay therefore has to outlast the cooldown of whatever is failing.
+// The jitter is not decoration at this corpus's scale: 49,000 messages that
+// fail together would otherwise come back together and re-overload the thing
+// they were waiting for, which is the stampede that tripped the breaker in
+// the first place.
+func nakBackoff(deliveries uint64) time.Duration {
+	d := nakBackoffBase
+	for i := uint64(1); i < deliveries && d < nakBackoffMax; i++ {
+		d *= 2
+	}
+	if d > nakBackoffMax {
+		d = nakBackoffMax
+	}
+	// Half fixed, half spread: every retry waits out the cooldown, and no two
+	// arrive at the same instant.
+	return d/2 + time.Duration(rand.Int64N(int64(d/2)))
 }
 
 // stat applies a counter method when the dashboard is attached.

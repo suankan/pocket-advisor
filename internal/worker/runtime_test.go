@@ -261,13 +261,22 @@ func (m *fakeMsg) Headers() nats.Header { return nats.Header{} }
 func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
 }
-func (m *fakeMsg) Ack() error                       { m.c.acked.Add(1); return nil }
-func (m *fakeMsg) DoubleAck(context.Context) error  { m.c.acked.Add(1); return nil }
-func (m *fakeMsg) Nak() error                       { m.c.naked.Add(1); return nil }
-func (m *fakeMsg) NakWithDelay(time.Duration) error { m.c.naked.Add(1); return nil }
-func (m *fakeMsg) InProgress() error                { m.c.inProgress.Add(1); return nil }
-func (m *fakeMsg) Term() error                      { m.c.termed.Add(1); return nil }
-func (m *fakeMsg) TermWithReason(string) error      { m.c.termed.Add(1); return nil }
+func (m *fakeMsg) Ack() error                      { m.c.acked.Add(1); return nil }
+func (m *fakeMsg) DoubleAck(context.Context) error { m.c.acked.Add(1); return nil }
+func (m *fakeMsg) Nak() error                      { m.c.naked.Add(1); return nil }
+
+// Counted apart from Nak: whether a redelivery was asked for immediately or
+// after a delay is the difference between pacing a failing dependency and
+// spinning against it.
+func (m *fakeMsg) NakWithDelay(d time.Duration) error {
+	m.c.naked.Add(1)
+	m.c.nakedWithDelay.Add(1)
+	m.c.lastNakDelay.Store(int64(d))
+	return nil
+}
+func (m *fakeMsg) InProgress() error           { m.c.inProgress.Add(1); return nil }
+func (m *fakeMsg) Term() error                 { m.c.termed.Add(1); return nil }
+func (m *fakeMsg) TermWithReason(string) error { m.c.termed.Add(1); return nil }
 
 type fakeBatch struct{ ch chan jetstream.Msg }
 
@@ -277,12 +286,14 @@ func (b *fakeBatch) Error() error                   { return nil }
 // fakeConsumer serves a bounded supply of messages, then empty batches — the
 // shape a real pull consumer presents once its queue drains.
 type fakeConsumer struct {
-	remaining  atomic.Int64
-	acked      atomic.Int64
-	naked      atomic.Int64
-	termed     atomic.Int64
-	inProgress atomic.Int64
-	onFetch    func(batch int)
+	remaining      atomic.Int64
+	acked          atomic.Int64
+	naked          atomic.Int64
+	nakedWithDelay atomic.Int64
+	lastNakDelay   atomic.Int64
+	termed         atomic.Int64
+	inProgress     atomic.Int64
+	onFetch        func(batch int)
 }
 
 func newFakeConsumer(n int) *fakeConsumer {
@@ -400,6 +411,138 @@ func TestHeartbeatKeepsGoingAfterAFailedExtension(t *testing.T) {
 	if got := m.succeeded.Load(); got < 2 {
 		t.Fatalf("after %d failures the heartbeat stopped; %d later attempts succeeded, want it to keep trying",
 			m.failUntil, got)
+	}
+}
+
+// The other half of the heartbeat's job is knowing when to stop. Renewing
+// without end answers "is this worker alive?" with "yes" on behalf of a
+// handler that will never finish: eighteen wedged embed handlers once held
+// eighteen messages open against a 49,000-message backlog, and because the
+// broker was told the work was in hand it redelivered none of them. Only
+// killing the process — the one thing that stops a heartbeat — cleared it.
+func TestHeartbeatStopsRenewingAtItsBudget(t *testing.T) {
+	c := newFakeConsumer(0)
+	r := &Runtime{Name: "test", Log: quietLogger()}
+
+	stop := r.heartbeatFor(&fakeMsg{c: c}, time.Millisecond, 25*time.Millisecond)
+	defer stop()
+
+	// Well past the budget, then a second look: the count must have frozen.
+	time.Sleep(250 * time.Millisecond)
+	settled := c.inProgress.Load()
+	time.Sleep(100 * time.Millisecond)
+
+	if settled == 0 {
+		t.Fatal("heartbeat never renewed; the budget must bound renewal, not disable it")
+	}
+	if got := c.inProgress.Load(); got != settled {
+		t.Errorf("heartbeat renewed %d more times after its budget elapsed; a wedged handler would hold its message for the life of the process",
+			got-settled)
+	}
+}
+
+// A budget of zero is the unbounded form, which the tests above rely on.
+func TestHeartbeatWithoutABudgetRenewsIndefinitely(t *testing.T) {
+	c := newFakeConsumer(0)
+	r := &Runtime{Name: "test", Log: quietLogger()}
+
+	stop := r.heartbeatFor(&fakeMsg{c: c}, time.Millisecond, 0)
+	defer stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for c.inProgress.Load() < 5 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := c.inProgress.Load(); got < 5 {
+		t.Errorf("InProgress called %d times, want an unbudgeted heartbeat to keep renewing", got)
+	}
+}
+
+// The budget has to clear the slowest work that legitimately exists, or it
+// re-creates the very cascade the heartbeat was introduced to stop.
+func TestHandlerBudgetClearsTheSlowestKnownDocument(t *testing.T) {
+	const slowestKnownWork = 15 * time.Minute // 208-page scanned PDF, ~4.5s/page
+
+	if maxHandlerRuntime <= slowestKnownWork {
+		t.Fatalf("budget %v does not clear the %v a real document needs; healthy work would be abandoned mid-flight",
+			maxHandlerRuntime, slowestKnownWork)
+	}
+	if maxHandlerRuntime > 6*time.Hour {
+		t.Errorf("budget %v is so large it is unbounded in practice", maxHandlerRuntime)
+	}
+}
+
+// Redelivering into a breaker that is still open guarantees another refusal
+// and spends one of only three delivery attempts to learn nothing.
+func TestNakBackoffOutlastsTheBreakerCooldown(t *testing.T) {
+	const breakerCooldown = 30 * time.Second // embedding.NewBreaker(5, 30s)
+
+	for deliveries := uint64(1); deliveries <= bus.MaxDeliver; deliveries++ {
+		for i := 0; i < 200; i++ {
+			if got := nakBackoff(deliveries); got < breakerCooldown {
+				t.Fatalf("delivery %d waits %v, inside the %v cooldown: the retry is certain to be refused",
+					deliveries, got, breakerCooldown)
+			}
+		}
+	}
+}
+
+func TestNakBackoffGrowsThenStaysBounded(t *testing.T) {
+	// Jitter bands for successive deliveries do not overlap, so samples can be
+	// compared directly rather than statistically.
+	if first, second := nakBackoff(1), nakBackoff(2); second <= first {
+		t.Errorf("delivery 2 waited %v, no longer than delivery 1's %v", second, first)
+	}
+	for _, deliveries := range []uint64{4, 8, 64, 1 << 20} {
+		got := nakBackoff(deliveries)
+		if got > nakBackoffMax {
+			t.Errorf("delivery %d waited %v, past the %v ceiling", deliveries, got, nakBackoffMax)
+		}
+		if got <= 0 {
+			t.Errorf("delivery %d waited %v; a large count must saturate, not overflow", deliveries, got)
+		}
+	}
+}
+
+// 49,000 messages failing together must not come back together and re-break
+// what they were waiting for.
+func TestNakBackoffIsJittered(t *testing.T) {
+	seen := make(map[time.Duration]bool)
+	for i := 0; i < 100; i++ {
+		seen[nakBackoff(1)] = true
+	}
+	if len(seen) < 10 {
+		t.Errorf("only %d distinct delays in 100 draws; a batch that failed together would return together", len(seen))
+	}
+}
+
+// The pacing is worth nothing if the retry path does not actually use it.
+func TestTransientFailureIsRedeliveredWithADelay(t *testing.T) {
+	consumer := newFakeConsumer(1)
+	rt := &Runtime{
+		Name: "test", Subject: "test.subject", Log: quietLogger(),
+		Lanes: 1, Bus: &fakeDLQ{},
+	}
+
+	fetchCtx, stopFetch := context.WithCancel(context.Background())
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for consumer.naked.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		stopFetch()
+	}()
+
+	_ = rt.Consume(fetchCtx, context.Background(), consumer,
+		func(context.Context, jetstream.Msg) error {
+			return errors.New("dependency unavailable")
+		})
+
+	if consumer.nakedWithDelay.Load() == 0 {
+		t.Fatal("a transient failure asked for immediate redelivery; under a failing dependency that spends all three attempts in milliseconds")
+	}
+	if got := time.Duration(consumer.lastNakDelay.Load()); got <= 0 {
+		t.Errorf("redelivery delay was %v, want a positive backoff", got)
 	}
 }
 

@@ -28,10 +28,12 @@ import (
 
 type Options struct {
 	WorkspaceID string
-	// AbsPath is the single directory the workspace registry resolved for
-	// this workspace. Every file under it, at any depth, is a candidate
-	// document — there is no further subdivision to iterate (§5.1).
-	AbsPath     string
+	// AbsPaths holds the one or more directories the workspace registry
+	// resolved for this workspace. Every file under any of them, at any
+	// depth, is a candidate document — there is no further subdivision to
+	// iterate (§5.1). workspace.Load guarantees their basenames are distinct
+	// when there is more than one.
+	AbsPaths    []string
 	Concurrency int
 	DryRun      bool
 	RunID       string
@@ -95,11 +97,11 @@ var skipNames = map[string]bool{
 func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 	u.log.Info("upload starting",
 		"workspace_id", opts.WorkspaceID,
-		"path", opts.AbsPath,
+		"paths", opts.AbsPaths,
 		"dry_run", opts.DryRun,
 		"uploader_run_id", opts.RunID)
 
-	files, err := collect(opts.AbsPath)
+	files, err := collect(opts.AbsPaths)
 	if err != nil {
 		return Result{}, err
 	}
@@ -135,11 +137,11 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(path string) {
+		go func(f stagedFile) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			n, outcome, move, err := u.one(ctx, path, opts, &seen)
+			n, outcome, move, err := u.one(ctx, f, opts, &seen)
 			if move != nil {
 				movedMu.Lock()
 				moved = append(moved, *move)
@@ -152,7 +154,7 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 				if opts.Progress != nil {
 					opts.Progress.Failed()
 				}
-				u.log.Error("upload failed", "path", path, "error", err)
+				u.log.Error("upload failed", "path", f.Path, "error", err)
 			case outcome == "duplicate":
 				atomic.AddInt64(&duplicate, 1)
 				telemetry.UploaderFiles.WithLabelValues("duplicate").Inc()
@@ -189,18 +191,26 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 // one uploads a single file. The sequence is hash → key → StatObject →
 // PutObject: skip-if-present is exact rather than heuristic, because the key
 // is the content hash.
-func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *sync.Map) (int64, string, *PathMove, error) {
+func (u *Uploader) one(ctx context.Context, sf stagedFile, opts Options, seen *sync.Map) (int64, string, *PathMove, error) {
+	path := sf.Path
 	sum, size, err := hashFile(path)
 	if err != nil {
 		return 0, "", nil, err
 	}
 
 	key := domain.RawObjectKey(sum)
-	rel, err := filepath.Rel(opts.AbsPath, path)
+	rel, err := filepath.Rel(sf.Root, path)
 	if err != nil {
 		rel = filepath.Base(path)
 	}
 	rel = filepath.ToSlash(rel)
+	// A recorded source path is meaningless unless it says which configured
+	// directory it came from; that only takes saying anything when there is
+	// more than one, and workspace.Load already guarantees the basenames of
+	// multiple paths cannot collide.
+	if len(opts.AbsPaths) > 1 {
+		rel = filepath.ToSlash(filepath.Base(sf.Root)) + "/" + rel
+	}
 	name := filepath.Base(path)
 
 	// Same content already handled in this run, under another name.
@@ -272,37 +282,48 @@ func (u *Uploader) one(ctx context.Context, path string, opts Options, seen *syn
 	return size, "uploaded", nil, nil
 }
 
-func collect(root string) ([]string, error) {
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, fmt.Errorf("source directory: %w", err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("source %q is not a directory", root)
-	}
+// stagedFile is one candidate document found under one of a workspace's
+// configured directories. Root is kept alongside Path so the source path
+// recorded for it can be computed relative to the directory it actually came
+// from, not guessed from among several.
+type stagedFile struct {
+	Root string
+	Path string
+}
 
-	var out []string
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func collect(roots []string) ([]stagedFile, error) {
+	var out []stagedFile
+	for _, root := range roots {
+		info, err := os.Stat(root)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("source directory: %w", err)
 		}
-		if d.IsDir() {
+		if !info.IsDir() {
+			return nil, fmt.Errorf("source %q is not a directory", root)
+		}
+
+		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			name := d.Name()
+			if skipNames[name] || strings.HasPrefix(name, "._") {
+				return nil
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			out = append(out, stagedFile{Root: root, Path: path})
 			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk %s: %w", root, err)
 		}
-		name := d.Name()
-		if skipNames[name] || strings.HasPrefix(name, "._") {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		out = append(out, path)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("walk %s: %w", root, err)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
 

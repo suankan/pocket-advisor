@@ -121,24 +121,32 @@ func splitCSV(raw string) []string {
 // and nothing else.
 //
 // A workspace no longer carries per-directory registry descriptions — it is
-// one recursively walked tree with no further subdivision (§3.1) — so the
-// contents hint is instead the workspace's own top-level directory names, a
-// cheap single-level read rather than the full recursive walk ingestion
-// itself performs.
+// one or more recursively walked trees with no further subdivision (§3.1) —
+// so the contents hint is instead the top-level directory names across all of
+// the workspace's configured paths, a cheap single-level read rather than the
+// full recursive walk ingestion itself performs.
 func describeCorpus(o *Options) (title string, corpus []string) {
 	ws, err := workspace.Load(o.WorkspaceConfig, o.WorkspaceID)
 	if err != nil {
 		return "", nil
 	}
-	entries, err := os.ReadDir(ws.AbsPath)
-	if err != nil {
-		return ws.Title, nil
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
+	seen := make(map[string]bool)
+	for _, root := range ws.AbsPaths {
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			continue
 		}
-		corpus = append(corpus, strings.ReplaceAll(e.Name(), "-", " "))
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := strings.ReplaceAll(e.Name(), "-", " ")
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			corpus = append(corpus, name)
+		}
 	}
 	return ws.Title, corpus
 }

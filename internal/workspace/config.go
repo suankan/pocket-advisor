@@ -1,12 +1,13 @@
 // Package workspace reads the user's workspace registry —
 // `workspaces/workspaces.yaml`.
 //
-// A workspace is a single recursively walked directory: the uploader
-// resolves it rather than being told a path, so "what belongs to this
+// A workspace is one or more recursively walked directories: the uploader
+// resolves them rather than being told a path, so "what belongs to this
 // matter" has a single definition instead of one per invocation
 // (ingestion-design.md §5.1). There is no further subdivision inside a
 // workspace — no collection, no per-subdirectory metadata — the ingestion
-// pipeline processes every file under a workspace's path the same way.
+// pipeline processes every file under every one of a workspace's paths the
+// same way.
 package workspace
 
 import (
@@ -22,9 +23,9 @@ import (
 )
 
 type workspaceEntry struct {
-	ID    string `yaml:"id"`
-	Path  string `yaml:"path"`
-	Title string `yaml:"title"`
+	ID    string   `yaml:"id"`
+	Paths []string `yaml:"paths"`
+	Title string   `yaml:"title"`
 	// The owner's own mailboxes, workspace-scoped and optional.
 	OwnerIdentities []string `yaml:"owner-identities"`
 }
@@ -34,14 +35,17 @@ type registry struct {
 	Workspaces    []workspaceEntry `yaml:"workspaces"`
 }
 
-// Resolved is a workspace with its path made absolute and checked.
+// Resolved is a workspace with its paths made absolute and checked.
 type Resolved struct {
 	ID    string
 	Title string
-	// AbsPath is the single directory the ingestion pipeline walks
-	// recursively for this workspace. Every file found under it, at any
-	// depth, is a candidate document.
-	AbsPath string
+	// AbsPaths holds the one or more directories the ingestion pipeline
+	// walks recursively for this workspace, in registry order. Every file
+	// found under any of them, at any depth, is a candidate document. When
+	// there is more than one, their basenames are guaranteed distinct (Load
+	// rejects a registry where they collide) so a document's recorded
+	// source path can always be traced back to the directory it came from.
+	AbsPaths []string
 	// OwnerIdentities holds the mailboxes this workspace's owner writes from,
 	// normalized and in registry order. Empty when the registry does not
 	// configure any, which is the ordinary case for a workspace that is never
@@ -72,8 +76,8 @@ func (r Resolved) IsOwnerIdentity(addr string) bool {
 
 // Load reads the registry and resolves one workspace.
 //
-// A workspace's path is relative to the registry file's own directory, which
-// is how v2 addressed collection paths and still addresses this single path
+// A workspace's paths are relative to the registry file's own directory,
+// which is how v2 addressed collection paths and still addresses these paths
 // (the registry and the corpus sit side by side under `workspaces/`).
 func Load(configPath, workspaceID string) (*Resolved, error) {
 	raw, err := os.ReadFile(configPath)
@@ -108,8 +112,8 @@ func Load(configPath, workspaceID string) (*Resolved, error) {
 		return nil, fmt.Errorf("workspace %q not found in %s; available: %s",
 			workspaceID, configPath, strings.Join(workspaceIDs(reg), ", "))
 	}
-	if ws.Path == "" {
-		return nil, fmt.Errorf("workspace %q has no path", workspaceID)
+	if len(ws.Paths) == 0 {
+		return nil, fmt.Errorf("workspace %q has no paths", workspaceID)
 	}
 
 	// Only the requested workspace's identities are checked. A typo in a
@@ -120,19 +124,55 @@ func Load(configPath, workspaceID string) (*Resolved, error) {
 		return nil, fmt.Errorf("workspace %q: %w", workspaceID, err)
 	}
 
-	abs := ws.Path
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(root, ws.Path)
-	}
-	info, err := os.Stat(abs)
+	abs, err := resolvePaths(root, ws.Paths, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("workspace %q path %s: %w", workspaceID, abs, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("workspace %q path %s is not a directory", workspaceID, abs)
+		return nil, err
 	}
 
-	return &Resolved{ID: ws.ID, Title: ws.Title, AbsPath: abs, OwnerIdentities: owners}, nil
+	return &Resolved{ID: ws.ID, Title: ws.Title, AbsPaths: abs, OwnerIdentities: owners}, nil
+}
+
+// resolvePaths turns one workspace's configured paths into absolute,
+// existing directories, and rejects anything that would leave a document's
+// recorded source path ambiguous about which directory it came from.
+func resolvePaths(root string, paths []string, workspaceID string) ([]string, error) {
+	abs := make([]string, 0, len(paths))
+	seenPath := make(map[string]int, len(paths))
+	seenBase := make(map[string]int, len(paths))
+	for i, p := range paths {
+		resolved := p
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(root, p)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("workspace %q path %s: %w", workspaceID, resolved, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("workspace %q path %s is not a directory", workspaceID, resolved)
+		}
+		if first, dup := seenPath[resolved]; dup {
+			return nil, fmt.Errorf("workspace %q paths entry %d repeats entry %d (%s)",
+				workspaceID, i+1, first+1, resolved)
+		}
+		seenPath[resolved] = i
+		// A document's source path is recorded relative to whichever configured
+		// directory it was found under, and disambiguated by that directory's
+		// basename only when there is more than one — nothing else identifies
+		// which directory a stored path came from. Two directories sharing a
+		// basename would make that disambiguation meaningless.
+		if len(paths) > 1 {
+			base := filepath.Base(resolved)
+			if first, dup := seenBase[base]; dup {
+				return nil, fmt.Errorf(
+					"workspace %q paths entry %d and entry %d both have basename %q; source paths could not tell them apart",
+					workspaceID, first+1, i+1, base)
+			}
+			seenBase[base] = i
+		}
+		abs = append(abs, resolved)
+	}
+	return abs, nil
 }
 
 // normalizeOwnerIdentities canonicalizes the configured mailboxes and rejects a

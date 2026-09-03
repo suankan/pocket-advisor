@@ -241,12 +241,12 @@ func upload(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats)
 
 	log := a.Logger(telemetry.RoleUploader)
 	log.Info("workspace resolved",
-		"workspace_id", ws.ID, "title", ws.Title, "path", ws.AbsPath)
+		"workspace_id", ws.ID, "title", ws.Title, "paths", ws.AbsPaths)
 
 	up := uploader.New(a.Uploads, log)
 	res, err := up.Run(ctx, uploader.Options{
 		WorkspaceID: ws.ID,
-		AbsPath:     ws.AbsPath,
+		AbsPaths:    ws.AbsPaths,
 		Concurrency: uploadConcurrency,
 		DryRun:      o.DryRun,
 		RunID:       time.Now().UTC().Format("20060102T150405Z"),

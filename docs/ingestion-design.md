@@ -8,8 +8,8 @@ Ingestion is a bounded host process. One `pocket-advisor` binary contains the up
 
 The central invariants are:
 
-1. RustFS is the sole authoritative store for document bytes. A workspace's local directory is a staging feed used only by the uploader, with one deliberate exception: the explicit `--reconcile-deletions` operator command described in §6.5 lets a removal from that directory propagate into the stores. Nothing else infers intent from the staging directory, and nothing does so automatically.
-2. Document identity (doc_id) and content identity (raw_sha256) are deliberately independent: doc_id is an opaque, randomly generated cross-reference key, and raw_sha256 — enforced unique per workspace database — is what deduplication and idempotency actually depend on. Neither depends on a workspace, a path, or which subdirectory of a workspace's single recursively walked directory currently holds the file.
+1. RustFS is the sole authoritative store for document bytes. A workspace's local directories are a staging feed used only by the uploader, with one deliberate exception: the explicit `--reconcile-deletions` operator command described in §6.5 lets a removal from those directories propagate into the stores. Nothing else infers intent from the staging directories, and nothing does so automatically.
+2. Document identity (doc_id) and content identity (raw_sha256) are deliberately independent: doc_id is an opaque, randomly generated cross-reference key, and raw_sha256 — enforced unique per workspace database — is what deduplication and idempotency actually depend on. Neither depends on a workspace, a path, or which of a workspace's recursively walked directories, or which subdirectory of one, currently holds the file.
 3. Discovery is the only component that creates root documents. Container workers create children with explicit lineage.
 4. Every worker is idempotent under at-least-once delivery.
 5. Indexed text is extracted source text only. No generated summaries or answers enter Tier 2 or Tier 3.
@@ -52,14 +52,14 @@ The object metadata carries the provenance that a content-addressed key cannot:
 | Metadata | Purpose |
 | --- | --- |
 | `source-filename` | original basename |
-| `source-path` | path relative to the workspace's own directory |
+| `source-path` | path relative to the workspace's configured directory the file was found under (prefixed with that directory's basename when the workspace configures more than one) |
 | `uploaded-at` | upload timestamp |
 | `uploader-run-id` | upload run correlation |
 | `alias-filenames` | additional names observed for identical content |
 
 Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on read before names are compared.
 
-Discovery mirrors `source-path` into the owning `documents` row as a Tier 2 fact, alongside `uploaded-at` and `uploader-run-id`. [Retrieval](retrieval-design.md) and [MCP](mcp.md) surface it read-only, as the file's location relative to the workspace's local staging directory, so a caller can point the operator at the original file. Only a root document discovered from that directory has one: a child created by a container worker — an email attachment, an extracted Office part — was never a file of its own. The read path gives such a document the nearest ancestor that does have a path, so every document reports either its own staged file or the file it was extracted from. Neither is ever inferred from where similar documents live; a plausible guess is frequently wrong, and stating one as fact is the failure this distinction exists to prevent.
+Discovery mirrors `source-path` into the owning `documents` row as a Tier 2 fact, alongside `uploaded-at` and `uploader-run-id`. [Retrieval](retrieval-design.md) and [MCP](mcp.md) surface it read-only, as the file's location relative to whichever of the workspace's local staging directories it was found under, so a caller can point the operator at the original file. Only a root document discovered from one of those directories has one: a child created by a container worker — an email attachment, an extracted Office part — was never a file of its own. The read path gives such a document the nearest ancestor that does have a path, so every document reports either its own staged file or the file it was extracted from. Neither is ever inferred from where similar documents live; a plausible guess is frequently wrong, and stating one as fact is the failure this distinction exists to prevent.
 
 No absolute host path is recorded anywhere. The stored value is always workspace-relative, and the root that completes it lives only in the workspace registry the uploader reads, so Tier 2 remains rebuildable on another machine and no evidence packet can disclose the operator's filesystem layout.
 
@@ -149,13 +149,13 @@ Topic relations and episodes are a second replaceable BUILDING-only layer in the
 
 ### 3.1 Workspace resolution
 
-`--ingest-all` resolves the named workspace's single directory from `workspaces/workspaces.yaml`, or the configured override, before touching a store. An unknown workspace id is an error, as is a configured path that does not exist or is not a directory.
+`--ingest-all` resolves the named workspace's one or more directories from `workspaces/workspaces.yaml`, or the configured override, before touching a store. An unknown workspace id is an error, as is a configured path that does not exist or is not a directory, or a repeated path.
 
-A workspace's path is resolved relative to the registry file. Only the uploader reads it; workers and retrieval never do. There is no further subdivision inside a workspace — no collection, no per-subdirectory registry metadata — the uploader walks the whole directory recursively and every regular file found, at any depth, is a candidate document.
+A workspace's paths are resolved relative to the registry file. Only the uploader reads them; workers and retrieval never do. There is no further subdivision inside a workspace — no collection, no per-subdirectory registry metadata — the uploader walks each configured directory recursively and every regular file found under any of them, at any depth, is a candidate document. When a workspace configures more than one path, their basenames must be distinct: a document's recorded source path is relative to whichever directory it came from, disambiguated by that directory's basename, and the registry is rejected at load time if two configured paths would make that disambiguation ambiguous.
 
 ### 3.2 Upload
 
-For every regular file found under the workspace's directory, at any depth, the uploader:
+For every regular file found under any of the workspace's directories, at any depth, the uploader:
 
 1. streams the file and computes SHA-256;
 2. forms the canonical `raw/` key;
@@ -304,11 +304,11 @@ Reconciliation republishes stale `PENDING` rows only. Rows left `PROCESSING` by 
 
 Ingestion is additive: removing a file from a workspace's directory normally changes nothing, because Tier 1 owns the bytes and that directory is a feed. `--reconcile-deletions` is the single operator-driven exception. It reports which documents no longer have a staged file and, only with `--yes` and a confirmation, deletes them through the same content-hash path `--forget` uses, so removal stays idempotent and a rerun after partial failure converges.
 
-Candidacy is decided by content, never by filename. Documents are deduplicated on `raw_sha256`, so one document records only the first path its bytes were staged at, while the same bytes commonly sit under several names; judging by path would call a document deleted while its content is still present, and the next ingest would re-upload it under a new `doc_id`, invalidating anything that referenced the old one. Comparing content also makes the check immune to the filename-normalisation differences a path comparison would have to handle. The command therefore hashes the staging directory each run.
+Candidacy is decided by content, never by filename. Documents are deduplicated on `raw_sha256`, so one document records only the first path its bytes were staged at, while the same bytes commonly sit under several names; judging by path would call a document deleted while its content is still present, and the next ingest would re-upload it under a new `doc_id`, invalidating anything that referenced the old one. Comparing content also makes the check immune to the filename-normalisation differences a path comparison would have to handle. The command therefore hashes every one of the workspace's staging directories each run.
 
 Only root documents carrying a staged path are candidates. A child created by a container worker was never a file in that directory and is removed with the root it came from; the plan reports how many such descendants each candidate carries, because a single deleted file can remove an extracted tree.
 
-An empty staging directory is refused outright. An absent, unmounted, or partially synchronised directory is indistinguishable from a deliberately emptied one, and reading either as a deletion request would remove the whole corpus; a workspace that genuinely should be emptied is served by `--delete-data`, which states what it does. Removing a document also invalidates any evaluation case referencing its identifier, since document UUIDs are not reissued.
+A workspace whose staging directories yield no files at all is refused outright. An absent, unmounted, or partially synchronised directory is indistinguishable from a deliberately emptied one, and reading either as a deletion request would remove the whole corpus; a workspace that genuinely should be emptied is served by `--delete-data`, which states what it does. Removing a document also invalidates any evaluation case referencing its identifier, since document UUIDs are not reissued.
 
 ## 7. Chunking and embedding
 

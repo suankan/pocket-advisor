@@ -42,7 +42,7 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, log)
 	reconciler := uploader.NewReconciler(a.Docs, reset, log)
 
-	report, err := reconciler.Plan(ctx, ws.AbsPath)
+	report, err := reconciler.Plan(ctx, ws.AbsPaths)
 	if err != nil {
 		return err
 	}

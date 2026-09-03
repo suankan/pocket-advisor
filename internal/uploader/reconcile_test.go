@@ -21,7 +21,7 @@ func quietLogger() *slog.Logger {
 func TestPlanRefusesEmptyStagingDirectory(t *testing.T) {
 	empty := t.TempDir()
 
-	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), empty)
+	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), []string{empty})
 	if !errors.Is(err, ErrStagingEmpty) {
 		t.Fatalf("expected ErrStagingEmpty for an empty directory, got %v", err)
 	}
@@ -35,7 +35,7 @@ func TestPlanRefusesDirectoryWithNoRegularFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), root)
+	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), []string{root})
 	if !errors.Is(err, ErrStagingEmpty) {
 		t.Fatalf("expected ErrStagingEmpty, got %v", err)
 	}
@@ -44,7 +44,7 @@ func TestPlanRefusesDirectoryWithNoRegularFiles(t *testing.T) {
 // A missing directory is an error, never an empty walk.
 func TestPlanFailsOnMissingDirectory(t *testing.T) {
 	_, err := NewReconciler(nil, nil, quietLogger()).Plan(
-		context.Background(), filepath.Join(t.TempDir(), "absent"))
+		context.Background(), []string{filepath.Join(t.TempDir(), "absent")})
 	if err == nil {
 		t.Fatal("expected an error for a missing staging directory")
 	}
@@ -69,7 +69,7 @@ func TestStagedContentsIsContentAddressedNotPathAddressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	contents, files, err := stagedContents(root)
+	contents, files, err := stagedContents([]string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestStagedContentsIsContentAddressedNotPathAddressed(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "original.txt")); err != nil {
 		t.Fatal(err)
 	}
-	after, files, err := stagedContents(root)
+	after, files, err := stagedContents([]string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestStagedContentsWalksNestedDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	contents, files, err := stagedContents(root)
+	contents, files, err := stagedContents([]string{root})
 	if err != nil {
 		t.Fatal(err)
 	}

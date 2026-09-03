@@ -27,10 +27,12 @@ const twoWorkspaces = `
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/matter
+    paths:
+      - data/matter
     title: The Matter
   - id: other
-    path: data/other
+    paths:
+      - data/other
 `
 
 func TestLoadResolvesTheNamedWorkspace(t *testing.T) {
@@ -43,10 +45,13 @@ func TestLoadResolvesTheNamedWorkspace(t *testing.T) {
 	if ws.ID != "matter" || ws.Title != "The Matter" {
 		t.Errorf("workspace identity wrong: %+v", ws)
 	}
-	if !filepath.IsAbs(ws.AbsPath) {
-		t.Errorf("path not absolute: %s", ws.AbsPath)
+	if len(ws.AbsPaths) != 1 {
+		t.Fatalf("expected 1 resolved path, got %d", len(ws.AbsPaths))
 	}
-	if _, err := os.Stat(ws.AbsPath); err != nil {
+	if !filepath.IsAbs(ws.AbsPaths[0]) {
+		t.Errorf("path not absolute: %s", ws.AbsPaths[0])
+	}
+	if _, err := os.Stat(ws.AbsPaths[0]); err != nil {
 		t.Errorf("resolved path does not exist: %v", err)
 	}
 }
@@ -58,8 +63,8 @@ func TestLoadDoesNotResolveOtherWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(ws.AbsPath, "other") {
-		t.Errorf("resolved the wrong workspace's path: %s", ws.AbsPath)
+	if strings.Contains(strings.Join(ws.AbsPaths, ","), "other") {
+		t.Errorf("resolved the wrong workspace's path: %v", ws.AbsPaths)
 	}
 }
 
@@ -83,7 +88,8 @@ func TestMissingWorkspacePathIsAnError(t *testing.T) {
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/gone
+    paths:
+      - data/gone
 `
 	p := fixture(t, y) // directory deliberately not created
 	if _, err := Load(p, "matter"); err == nil {
@@ -103,6 +109,68 @@ workspaces:
 	}
 }
 
+func TestLoadResolvesMultiplePaths(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+    paths:
+      - data/one
+      - data/two
+`
+	p := fixture(t, y, "data/one", "data/two")
+	ws, err := Load(p, "matter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.AbsPaths) != 2 {
+		t.Fatalf("expected 2 resolved paths, got %d: %v", len(ws.AbsPaths), ws.AbsPaths)
+	}
+	if !strings.HasSuffix(ws.AbsPaths[0], filepath.Join("data", "one")) {
+		t.Errorf("path 0 = %s, want it to end in data/one", ws.AbsPaths[0])
+	}
+	if !strings.HasSuffix(ws.AbsPaths[1], filepath.Join("data", "two")) {
+		t.Errorf("path 1 = %s, want it to end in data/two", ws.AbsPaths[1])
+	}
+}
+
+func TestRepeatedPathIsAnError(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+    paths:
+      - data/one
+      - data/one
+`
+	p := fixture(t, y, "data/one")
+	_, err := Load(p, "matter")
+	if err == nil {
+		t.Fatal("expected a repeated path to be rejected")
+	}
+}
+
+// Two configured directories that share a basename would make a document's
+// recorded source path unable to say which one it came from.
+func TestCollidingPathBasenamesIsAnError(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+    paths:
+      - data/a/shared
+      - data/b/shared
+`
+	p := fixture(t, y, "data/a/shared", "data/b/shared")
+	_, err := Load(p, "matter")
+	if err == nil {
+		t.Fatal("expected colliding basenames to be rejected")
+	}
+	if !strings.Contains(err.Error(), "shared") {
+		t.Errorf("error does not name the colliding basename: %v", err)
+	}
+}
+
 func TestWrongSchemaVersionRejected(t *testing.T) {
 	y := "schema_version: 1\nworkspaces: []\n"
 	p := fixture(t, y)
@@ -119,14 +187,16 @@ const withOwnerIdentities = `
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/matter
+    paths:
+      - data/matter
     title: The Matter
     owner-identities:
       - Owner Person <Owner@Example.com>
       - "  alias@example.NET  "
       - <third@example.org>
   - id: other
-    path: data/other
+    paths:
+      - data/other
 `
 
 func TestWorkspaceWithoutOwnerIdentitiesLoadsUnchanged(t *testing.T) {
@@ -196,7 +266,8 @@ func TestSingleOwnerIdentity(t *testing.T) {
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/matter
+    paths:
+      - data/matter
     owner-identities:
       - sole@example.com
 `
@@ -217,7 +288,8 @@ func TestDuplicateOwnerIdentityIsAnError(t *testing.T) {
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/matter
+    paths:
+      - data/matter
     owner-identities:
       - owner@example.com
       - alias@example.net
@@ -253,7 +325,8 @@ func TestMalformedOwnerIdentityIsAnError(t *testing.T) {
 schema_version: 2
 workspaces:
   - id: matter
-    path: data/matter
+    paths:
+      - data/matter
     owner-identities:
       - good@example.com
       - ` + entry + `

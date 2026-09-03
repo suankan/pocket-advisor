@@ -344,8 +344,27 @@ func renderDocumentResult(page *documentResult) string {
 		case d.ContainerSourcePath != "":
 			fmt.Fprintf(&b, "  extracted from: %s\n", d.ContainerSourcePath)
 		}
+		if len(d.To) > 0 {
+			fmt.Fprintf(&b, "  to: %s\n", strings.Join(d.To, ", "))
+		}
+		if len(d.Cc) > 0 {
+			fmt.Fprintf(&b, "  cc: %s\n", strings.Join(d.Cc, ", "))
+		}
 		if len(d.Attachments) > 0 {
-			fmt.Fprintf(&b, "  %d attachment(s)\n", len(d.Attachments))
+			fmt.Fprintf(&b, "  %d attachment(s):\n", len(d.Attachments))
+			for _, a := range d.Attachments {
+				fmt.Fprintf(&b, "    - %s", a.SourceFilename)
+				switch {
+				case a.SourcePath != "":
+					fmt.Fprintf(&b, " (%s)", a.SourcePath)
+				case a.ContainerSourcePath != "":
+					fmt.Fprintf(&b, " (extracted from %s)", a.ContainerSourcePath)
+				}
+				b.WriteString("\n")
+			}
+		}
+		if d.Text != "" {
+			fmt.Fprintf(&b, "  text:\n%s\n", d.Text)
 		}
 		if d.TextTruncated {
 			b.WriteString("  text truncated to the response size bound\n")

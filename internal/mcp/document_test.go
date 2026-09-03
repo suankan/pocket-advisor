@@ -176,7 +176,10 @@ func TestFinalizeDocumentResultIsBoundedAndSchemaValid(t *testing.T) {
 	}
 
 	fallback := toolResult.Content[0].Text
-	for _, want := range []string{"Quarterly review", "ada@example.test", "1 attachment", "workspaces/data/main/emails/message.eml"} {
+	for _, want := range []string{
+		"Quarterly review", "ada@example.test", "1 attachment", "workspaces/data/main/emails/message.eml",
+		"bob@example.test", "carol@example.test", "attachment.pdf", "Hello",
+	} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback should contain %q: %s", want, fallback)
 		}

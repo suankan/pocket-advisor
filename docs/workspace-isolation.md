@@ -31,7 +31,7 @@ There is no per-workspace Kubernetes namespace or per-workspace storage server i
 
 ## Private configuration
 
-One gitignored file describes local workspaces: `workspaces/workspaces.yaml` contains each workspace's id and the single local directory it recursively walks for documents. There is no separate credentials file — every per-workspace resource name and (for PostgreSQL) role is the workspace id itself, or derived from it by fixed convention, computed wherever it's needed rather than stored.
+One gitignored file describes local workspaces: `workspaces/workspaces.yaml` contains each workspace's id and the `paths` list of local directories it recursively walks for documents, with optional workspace-scoped `ignore` rules. There is no separate credentials file — every per-workspace resource name and (for PostgreSQL) role is the workspace id itself, or derived from it by fixed convention, computed wherever it's needed rather than stored.
 
 A workspace entry may also carry `owner-identities:`, the list of mailboxes the workspace owner writes from. It is optional and workspace-scoped; `internal/workspace` lowercases each entry, strips display names and angle brackets, rejects a syntactically invalid or repeated mailbox, and exposes the result as `Resolved.OwnerIdentities` with an `IsOwnerIdentity` membership test. The identities exist to classify message direction inside one workspace and nothing else: they are never echoed in errors, health output, or logs, no request may supply or replace them, and an address configured for one workspace has no meaning in another.
 

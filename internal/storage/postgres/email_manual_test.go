@@ -163,8 +163,8 @@ func TestEmailSchemaUpgradesAnExistingWorkspace(t *testing.T) {
 		t.Fatalf("apply legacy schema: %v", err)
 	}
 	if _, err := db.Pool.Exec(ctx, `
-        INSERT INTO schema_metadata (id, embed_model, embed_dim, truncated_dim)
-        VALUES (TRUE, $1, $2, FALSE)`, "stage-b-manual", stageBDim); err != nil {
+        INSERT INTO schema_metadata (id, workspace_id, embed_model, embed_dim, truncated_dim)
+        VALUES (TRUE, $1, $1, $2, FALSE)`, "stage-b-manual", stageBDim); err != nil {
 		t.Fatalf("record legacy metadata: %v", err)
 	}
 	for _, table := range emailTables {
@@ -178,6 +178,12 @@ func TestEmailSchemaUpgradesAnExistingWorkspace(t *testing.T) {
 	}
 	assertEmailSchema(t, db, schema)
 
+	var indexesBefore int
+	if err := db.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = ANY($2)`,
+		schema, emailTables).Scan(&indexesBefore); err != nil {
+		t.Fatal(err)
+	}
 	// Repeated runs are the normal case — every worker start applies the
 	// schema — so a second and third pass must be silent no-ops.
 	for i := 0; i < 2; i++ {
@@ -193,9 +199,8 @@ func TestEmailSchemaUpgradesAnExistingWorkspace(t *testing.T) {
 		schema, emailTables).Scan(&indexes); err != nil {
 		t.Fatal(err)
 	}
-	// Eight named indexes plus four primary keys.
-	if indexes != 12 {
-		t.Errorf("%d indexes on the email tables, want 12: repeated runs duplicated one", indexes)
+	if indexes != indexesBefore {
+		t.Errorf("index count changed from %d to %d after repeated upgrades", indexesBefore, indexes)
 	}
 }
 

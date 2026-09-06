@@ -24,7 +24,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	// NATS as well as the two stores: a wipe now empties the queues too, and
 	// requiring the connection up front means an unreachable broker refuses the
 	// whole operation rather than leaving purged stores behind populated ones.
-	a, err := app.New(ctx, cfg, logs, app.Needs{Uploader: true, Postgres: true, NATS: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true, Uploader: true, Postgres: true, NATS: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -44,9 +44,13 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		if !o.Yes && !confirm(fmt.Sprintf(
 			"Remove document %s from workspace %q?\n"+
 				"  - deletes its Tier 1 raw and extracted objects\n"+
-				"  - deletes its documents row and every chunk derived from it",
+				"  - deletes its row, exclusively held descendants, and their chunks\n"+
+				"  - retains descendants still staged independently or held by another container",
 			sha, ws.ID)) {
 			return errAborted
+		}
+		if err := ensureContainment(ctx, a, a.Logger(telemetry.RoleUploader)); err != nil {
+			return err
 		}
 		if err := reset.Forget(ctx, ws.ID, sha); err != nil {
 			return err

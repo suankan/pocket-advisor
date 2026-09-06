@@ -18,7 +18,6 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -60,10 +59,21 @@ type DeadLetterer interface {
 	ToDLQ(ctx context.Context, origSubject, worker, reason, traceparent string, deliveries uint64, payload []byte) error
 }
 
+// DocumentStore is the half of Tier 2 the runtime itself touches: recording a
+// decline against a document, and asking whether one is still there. Narrowed
+// for the same reason DeadLetterer is — these are failure paths, and a failure
+// path that can only be exercised against a live database is a failure path
+// that goes untested. *postgres.DocumentRepo is the only production
+// implementation.
+type DocumentStore interface {
+	UpdateStatus(ctx context.Context, docID string, s domain.Status, reason domain.FailureReason) error
+	Exists(ctx context.Context, docID string) (bool, error)
+}
+
 type Runtime struct {
 	Name    string
 	Bus     DeadLetterer
-	Docs    *postgres.DocumentRepo
+	Docs    DocumentStore
 	Log     *slog.Logger
 	Subject string
 
@@ -361,6 +371,26 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		r.Log.Info("declined", "reason", d.Reason, "doc_id", d.DocID)
 		_ = msg.Ack()
 		return
+	}
+
+	// A message can outlive its document. Pruning removes what the workspace
+	// no longer stages, and the queues are not transactional with it, so work
+	// enqueued before a sweep can name a document the sweep has since deleted.
+	// Everything downstream then fails for a reason that is not the work's
+	// fault — a chunk placement has nothing left to reference — and
+	// dead-lettering it would fill the DLQ with entries whose documents an
+	// operator cannot go and look at, because they are gone. Asked only here,
+	// on a path that has already failed, so the ordinary case pays nothing.
+	if id := docIDOf(err); id != "" && r.Docs != nil {
+		if exists, cerr := r.Docs.Exists(ctx, id); cerr == nil && !exists {
+			telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
+			telemetry.Skipped.WithLabelValues(string(domain.ReasonDocumentPruned)).Inc()
+			r.stat((*telemetry.Queue).Skipped)
+			r.Log.Info("work discarded: its document was pruned",
+				"doc_id", id, "worker_type", r.Name)
+			_ = msg.Ack()
+			return
+		}
 	}
 
 	meta, _ := msg.Metadata()

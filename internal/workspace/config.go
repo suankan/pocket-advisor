@@ -26,6 +26,8 @@ type workspaceEntry struct {
 	ID    string   `yaml:"id"`
 	Paths []string `yaml:"paths"`
 	Title string   `yaml:"title"`
+	// Glob patterns for staged files that are not documents. Optional.
+	Ignore []string `yaml:"ignore"`
 	// The owner's own mailboxes, workspace-scoped and optional.
 	OwnerIdentities []string `yaml:"owner-identities"`
 }
@@ -46,6 +48,10 @@ type Resolved struct {
 	// rejects a registry where they collide) so a document's recorded
 	// source path can always be traced back to the directory it came from.
 	AbsPaths []string
+	// Ignore excludes staged files this workspace does not consider documents.
+	// It is applied wherever the staging directories are read, so uploading and
+	// deletion reconciliation agree on what belongs to the corpus.
+	Ignore Ignore
 	// OwnerIdentities holds the mailboxes this workspace's owner writes from,
 	// normalized and in registry order. Empty when the registry does not
 	// configure any, which is the ordinary case for a workspace that is never
@@ -129,7 +135,18 @@ func Load(configPath, workspaceID string) (*Resolved, error) {
 		return nil, err
 	}
 
-	return &Resolved{ID: ws.ID, Title: ws.Title, AbsPaths: abs, OwnerIdentities: owners}, nil
+	ignore, err := CompileIgnore(ws.Ignore)
+	if err != nil {
+		return nil, fmt.Errorf("workspace %q: %w", workspaceID, err)
+	}
+
+	return &Resolved{
+		ID:              ws.ID,
+		Title:           ws.Title,
+		AbsPaths:        abs,
+		Ignore:          ignore,
+		OwnerIdentities: owners,
+	}, nil
 }
 
 // resolvePaths turns one workspace's configured paths into absolute,

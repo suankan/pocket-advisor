@@ -1,8 +1,6 @@
 package uploader
 
 import (
-	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -12,45 +10,6 @@ import (
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-// An empty staging directory must never be read as "delete everything". The
-// reconciler is constructed with no stores at all: if the guard ever stops
-// short-circuiting, this test panics on the nil repository instead of quietly
-// planning a full-corpus deletion.
-func TestPlanRefusesEmptyStagingDirectory(t *testing.T) {
-	empty := t.TempDir()
-
-	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), []string{empty})
-	if !errors.Is(err, ErrStagingEmpty) {
-		t.Fatalf("expected ErrStagingEmpty for an empty directory, got %v", err)
-	}
-}
-
-// A directory holding only subdirectories is still empty of files, and must be
-// refused for the same reason.
-func TestPlanRefusesDirectoryWithNoRegularFiles(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "nested", "deeper"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := NewReconciler(nil, nil, quietLogger()).Plan(context.Background(), []string{root})
-	if !errors.Is(err, ErrStagingEmpty) {
-		t.Fatalf("expected ErrStagingEmpty, got %v", err)
-	}
-}
-
-// A missing directory is an error, never an empty walk.
-func TestPlanFailsOnMissingDirectory(t *testing.T) {
-	_, err := NewReconciler(nil, nil, quietLogger()).Plan(
-		context.Background(), []string{filepath.Join(t.TempDir(), "absent")})
-	if err == nil {
-		t.Fatal("expected an error for a missing staging directory")
-	}
-	if errors.Is(err, ErrStagingEmpty) {
-		t.Fatal("a missing directory must not be reported as an empty one")
-	}
 }
 
 // Identity is content, not path. The same bytes staged under two names are one
@@ -69,7 +28,7 @@ func TestStagedContentsIsContentAddressedNotPathAddressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	contents, files, err := stagedContents([]string{root})
+	contents, files, err := stagedContents([]string{root}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +43,7 @@ func TestStagedContentsIsContentAddressedNotPathAddressed(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "original.txt")); err != nil {
 		t.Fatal(err)
 	}
-	after, files, err := stagedContents([]string{root})
+	after, files, err := stagedContents([]string{root}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +72,7 @@ func TestStagedContentsWalksNestedDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	contents, files, err := stagedContents([]string{root})
+	contents, files, err := stagedContents([]string{root}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

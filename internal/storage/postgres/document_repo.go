@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
@@ -41,7 +43,8 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
             doc_id, parent_doc_id, thread_id,
             processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
             source_filename, metadata_headers)
-        VALUES ($1,$2,$3,'PENDING',$4,$5,$6,$7,$8,$9)
+        SELECT $1::uuid,$2::uuid,$3,'PENDING',$4,$5,$6,$7::varchar,$8,$9::jsonb
+        WHERE NOT EXISTS (SELECT 1 FROM pending_object_deletions WHERE raw_sha256 = $7::varchar)
         ON CONFLICT (raw_sha256) DO UPDATE SET raw_sha256 = EXCLUDED.raw_sha256
         RETURNING doc_id::text, (xmax = 0)`,
 		d.DocID, parent, d.ThreadID,
@@ -282,13 +285,48 @@ func (r *DocumentRepo) DeleteWorkspace(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// DeleteBySHA removes one document and its descendants, for --forget.
+// DeleteBySHA forgets the selected document and exclusively held descendants.
+// Other roots and containers retain shared content, including nested children.
 func (r *DocumentRepo) DeleteBySHA(ctx context.Context, sha string) (int64, error) {
-	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM documents WHERE raw_sha256 = $1`, sha)
+	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("delete %s: %w", sha, err)
+		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+        WITH RECURSIVE target AS (
+            SELECT doc_id FROM documents WHERE raw_sha256 = $1
+        ), descendants AS (
+            SELECT doc_id FROM target
+            UNION
+            SELECT p.contained_doc_id FROM document_placements p
+            JOIN descendants d ON p.container_doc_id = d.doc_id
+        ), retained AS (
+            SELECT d.doc_id FROM documents d
+            WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.doc_id = d.doc_id)
+              AND (NOT EXISTS (SELECT 1 FROM descendants s WHERE s.doc_id = d.doc_id)
+                   OR COALESCE(d.metadata_headers->>'source_path', '') <> '')
+            UNION
+            SELECT p.contained_doc_id FROM document_placements p
+            JOIN retained r ON p.container_doc_id = r.doc_id
+            WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.doc_id = p.contained_doc_id)
+        )
+        SELECT d.doc_id::text FROM descendants d
+        WHERE NOT EXISTS (SELECT 1 FROM retained r WHERE r.doc_id = d.doc_id)`, sha)
+	if err != nil {
+		return 0, fmt.Errorf("plan forget: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, err
+	}
+	// Also handles an object whose document was never discovered, and retries
+	// after an older deletion removed its row before cleaning up its objects.
+	if _, err := tx.Exec(ctx, `INSERT INTO pending_object_deletions (raw_sha256)
+        VALUES ($1) ON CONFLICT DO NOTHING`, sha); err != nil {
+		return 0, err
+	}
+	return deleteDocuments(ctx, tx, ids)
 }
 
 // UpdateSourcePath refreshes the recorded staging location for the document

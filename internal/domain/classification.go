@@ -33,7 +33,8 @@ func ClassifyReason(r FailureReason) FailureClass {
 	case ReasonUnsupportedFormat,
 		ReasonRecursionLimit,
 		ReasonImageNotViable,
-		ReasonOCRUnavailable:
+		ReasonOCRUnavailable,
+		ReasonDocumentPruned:
 		return ClassExpectedDecline
 
 	// Retryable infrastructure or transient failures.

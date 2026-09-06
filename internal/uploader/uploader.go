@@ -33,7 +33,12 @@ type Options struct {
 	// depth, is a candidate document — there is no further subdivision to
 	// iterate (§5.1). workspace.Load guarantees their basenames are distinct
 	// when there is more than one.
-	AbsPaths    []string
+	AbsPaths []string
+	// Ignore reports whether a staged file — named relative to the configured
+	// directory it was found under — is excluded from the corpus. Nil ignores
+	// nothing, which is the behaviour of a workspace that configures no
+	// patterns.
+	Ignore      func(rel string) bool
 	Concurrency int
 	DryRun      bool
 	RunID       string
@@ -46,6 +51,8 @@ type Result struct {
 	Duplicate int64
 	Failed    int64
 	Bytes     int64
+	// Ignored is how many staged files the workspace's patterns excluded.
+	Ignored int64
 	// Moved is content the uploader found under a new path in staging. The
 	// documents in Tier 2 that share this content still record the old,
 	// now-nonexistent path (source_path is set once, at first upload) — the
@@ -67,6 +74,7 @@ func (r *Result) Add(o Result) {
 	r.Duplicate += o.Duplicate
 	r.Failed += o.Failed
 	r.Bytes += o.Bytes
+	r.Ignored += o.Ignored
 	r.Moved = append(r.Moved, o.Moved...)
 }
 
@@ -101,11 +109,15 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 		"dry_run", opts.DryRun,
 		"uploader_run_id", opts.RunID)
 
-	files, err := collect(opts.AbsPaths)
+	files, ignored, err := collect(opts.AbsPaths, opts.Ignore)
 	if err != nil {
 		return Result{}, err
 	}
-	u.log.Info("workspace files found", "workspace_id", opts.WorkspaceID, "files", len(files))
+	// The ignored count is reported even when it is zero. A pattern that
+	// silently matches nothing is the likeliest way to misconfigure this, and
+	// the only way to notice is to be told what it excluded.
+	u.log.Info("workspace files found",
+		"workspace_id", opts.WorkspaceID, "files", len(files), "ignored", ignored)
 
 	if opts.Progress != nil {
 		opts.Progress.Start(int64(len(files)))
@@ -179,12 +191,14 @@ func (u *Uploader) Run(ctx context.Context, opts Options) (Result, error) {
 		Duplicate: atomic.LoadInt64(&duplicate),
 		Failed:    atomic.LoadInt64(&failed),
 		Bytes:     atomic.LoadInt64(&bytes),
+		Ignored:   int64(ignored),
 		Moved:     moved,
 	}
 	u.log.Info("upload complete",
 		"workspace_id", opts.WorkspaceID,
 		"uploaded", res.Uploaded, "duplicate", res.Duplicate,
-		"failed", res.Failed, "moved", len(res.Moved), "bytes", res.Bytes)
+		"failed", res.Failed, "ignored", res.Ignored,
+		"moved", len(res.Moved), "bytes", res.Bytes)
 	return res, nil
 }
 
@@ -291,15 +305,16 @@ type stagedFile struct {
 	Path string
 }
 
-func collect(roots []string) ([]stagedFile, error) {
+func collect(roots []string, ignore func(rel string) bool) ([]stagedFile, int, error) {
 	var out []stagedFile
+	ignored := 0
 	for _, root := range roots {
 		info, err := os.Stat(root)
 		if err != nil {
-			return nil, fmt.Errorf("source directory: %w", err)
+			return nil, 0, fmt.Errorf("source directory: %w", err)
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("source %q is not a directory", root)
+			return nil, 0, fmt.Errorf("source %q is not a directory", root)
 		}
 
 		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -316,15 +331,38 @@ func collect(roots []string) ([]stagedFile, error) {
 			if !d.Type().IsRegular() {
 				return nil
 			}
+			if ignoredBy(ignore, root, path) {
+				ignored++
+				return nil
+			}
 			out = append(out, stagedFile{Root: root, Path: path})
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("walk %s: %w", root, err)
+			return nil, 0, fmt.Errorf("walk %s: %w", root, err)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out, ignored, nil
+}
+
+// ignoredBy applies a workspace's ignore patterns to one walked file.
+//
+// The path is offered relative to the directory it was found under, never
+// absolute: a pattern is written against the shape of a workspace's own
+// directory, and would otherwise have to know where that directory is mounted
+// on this particular machine.
+func ignoredBy(ignore func(rel string) bool, root, path string) bool {
+	if ignore == nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		// Unrelatable to its own root is not a case a pattern can speak to, so
+		// the file stays in rather than being silently dropped.
+		return false
+	}
+	return ignore(filepath.ToSlash(rel))
 }
 
 func hashFile(path string) (string, int64, error) {

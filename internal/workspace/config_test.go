@@ -356,3 +356,78 @@ func assertNoAddress(t *testing.T, err error) {
 		t.Errorf("error message echoes a domain: %v", err)
 	}
 }
+
+// Patterns are per workspace, and reach the caller compiled and validated.
+func TestLoadCompilesIgnorePatterns(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+    paths:
+      - data/matter
+    ignore:
+      - "*.msf"
+      - "!keep.msf"
+  - id: other
+    paths:
+      - data/other
+`
+	p := fixture(t, y, "data/matter", "data/other")
+
+	ws, err := Load(p, "matter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.Ignore.Match("INBOX.msf") || !ws.Ignore.Match("[Gmail].sbd/Drafts.msf") {
+		t.Error("configured pattern did not reach the resolved workspace")
+	}
+	if ws.Ignore.Match("keep.msf") {
+		t.Error("negation did not survive the registry")
+	}
+	if ws.Ignore.Match("INBOX/cur/1781.eml") {
+		t.Error("mail was ignored by a pattern meant for index files")
+	}
+
+	// Patterns belong to one workspace, never to the registry.
+	other, err := Load(p, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !other.Ignore.Empty() {
+		t.Error("ignore patterns leaked into a workspace that configures none")
+	}
+}
+
+// A registry without the key must load exactly as it did before it existed.
+func TestWorkspaceWithoutIgnoreLoadsUnchanged(t *testing.T) {
+	p := fixture(t, twoWorkspaces, "data/matter", "data/other")
+	ws, err := Load(p, "matter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.Ignore.Empty() {
+		t.Error("a workspace configuring no patterns reports some")
+	}
+}
+
+// A bad pattern must stop the run at startup, naming the workspace, rather
+// than half-ingesting a directory first.
+func TestMalformedIgnorePatternFailsLoad(t *testing.T) {
+	y := `
+schema_version: 2
+workspaces:
+  - id: matter
+    paths:
+      - data/matter
+    ignore:
+      - "log[0-9.txt"
+`
+	p := fixture(t, y, "data/matter")
+	_, err := Load(p, "matter")
+	if err == nil {
+		t.Fatal("expected a malformed ignore pattern to be rejected")
+	}
+	if !strings.Contains(err.Error(), "matter") {
+		t.Errorf("error does not name the workspace: %v", err)
+	}
+}

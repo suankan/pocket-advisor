@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -560,4 +561,95 @@ func (m *flakyMsg) InProgress() error {
 	}
 	m.succeeded.Add(1)
 	return nil
+}
+
+// fakeDocs answers the two questions the runtime asks Tier 2.
+type fakeDocs struct {
+	missing   map[string]bool
+	statuses  atomic.Int64
+	existsErr error
+}
+
+func (f *fakeDocs) UpdateStatus(context.Context, string, domain.Status, domain.FailureReason) error {
+	f.statuses.Add(1)
+	return nil
+}
+func (f *fakeDocs) Exists(_ context.Context, docID string) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	return !f.missing[docID], nil
+}
+
+// Pruning and the queues are not transactional with each other, so work
+// enqueued before a sweep can name a document the sweep has since deleted.
+// That is not a failure of the work and must not reach the DLQ: an operator
+// cannot go and inspect a document that was deliberately removed.
+func TestWorkForAPrunedDocumentIsDiscardedNotDeadLettered(t *testing.T) {
+	consumer := newFakeConsumer(1)
+	dlq := &fakeDLQ{}
+	docs := &fakeDocs{missing: map[string]bool{"gone-doc": true}}
+	rt := &Runtime{
+		Name: "test", Subject: "test.subject", Log: quietLogger(),
+		Lanes: 1, Bus: dlq, Docs: docs,
+	}
+
+	fetchCtx, stopFetch := context.WithCancel(context.Background())
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for consumer.acked.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		stopFetch()
+	}()
+
+	_ = rt.Consume(fetchCtx, context.Background(), consumer,
+		func(context.Context, jetstream.Msg) error {
+			// What a worker actually reports once its document is gone: the
+			// write it attempted had nothing left to reference.
+			return WithDoc("gone-doc", errors.New("insert chunk placement: violates foreign key"))
+		})
+
+	if consumer.acked.Load() == 0 {
+		t.Error("work for a pruned document was not acked; it will be redelivered forever")
+	}
+	if dlq.count.Load() != 0 {
+		t.Errorf("dead-lettered %d message(s) for a document that no longer exists", dlq.count.Load())
+	}
+	if consumer.termed.Load() != 0 {
+		t.Errorf("terminated %d message(s) instead of discarding", consumer.termed.Load())
+	}
+}
+
+// The same failure against a document that still exists must keep its ordinary
+// route, or the discard would swallow real breakage.
+func TestWorkForALiveDocumentStillFails(t *testing.T) {
+	consumer := newFakeConsumer(1)
+	dlq := &fakeDLQ{}
+	docs := &fakeDocs{missing: map[string]bool{}} // everything still present
+	rt := &Runtime{
+		Name: "test", Subject: "test.subject", Log: quietLogger(),
+		Lanes: 1, Bus: dlq, Docs: docs,
+	}
+
+	fetchCtx, stopFetch := context.WithCancel(context.Background())
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for consumer.naked.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		stopFetch()
+	}()
+
+	_ = rt.Consume(fetchCtx, context.Background(), consumer,
+		func(context.Context, jetstream.Msg) error {
+			return WithDoc("live-doc", errors.New("dependency unavailable"))
+		})
+
+	if consumer.naked.Load() == 0 {
+		t.Error("a transient failure on a live document was not retried")
+	}
+	if consumer.acked.Load() != 0 {
+		t.Error("a live document's failure was discarded as if it had been pruned")
+	}
 }

@@ -80,6 +80,18 @@ func TestParseValidatesForgetHash(t *testing.T) {
 	}
 }
 
+func TestDryRunRejectsModesWithoutAReadOnlyPreview(t *testing.T) {
+	for _, args := range [][]string{
+		{"--forget", strings.Repeat("a", 64)},
+		{"--delete-data"}, {"--scan"}, {"--reconcile"}, {"--listen"},
+	} {
+		args = append(args, "--dry-run", "--workspace-id", "synthetic")
+		if _, err := Parse(args); err == nil {
+			t.Errorf("accepted unsupported preview: %v", args)
+		}
+	}
+}
+
 // Every mode that enqueues must also drain it: nothing else is listening, so a
 // mode that enqueued without running the pools would publish into a void.
 func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {

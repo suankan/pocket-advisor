@@ -48,6 +48,15 @@ type Service struct {
 // Discovery reads Tier 1; it never writes it and never sees a user filesystem.
 // The bytes were put there by the uploader (§5.1).
 func (s *Service) Ingest(ctx context.Context, key, mode string) error {
+	sha, err := domain.SHA256FromKey(key)
+	if err != nil {
+		return err
+	}
+	if pending, err := s.Docs.ObjectDeletionPending(ctx, sha); err != nil {
+		return err
+	} else if pending {
+		return nil // A durable deletion takes precedence over queued intake.
+	}
 	data, prov, err := s.Vault.Get(ctx, key)
 	if err != nil {
 		telemetry.DiscoveryFiles.WithLabelValues(mode, "error").Inc()

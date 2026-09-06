@@ -13,6 +13,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/pipeline"
 	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/uploader"
 )
 
 // runListen is the live-event test mode (§5.2): it starts the same pipeline
@@ -23,7 +24,7 @@ import (
 func runListen(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
-	a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true, Postgres: true, NATS: true, Metrics: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true, Uploader: true, Postgres: true, NATS: true, Metrics: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -46,6 +47,9 @@ func runListen(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	// Before VerifyDimension, which reads the schema this creates. Given the
 	// probe rather than repeating it (deviation 24).
 	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
+		return err
+	}
+	if err := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, a.Log).DrainPending(ctx); err != nil {
 		return err
 	}
 

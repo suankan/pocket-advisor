@@ -34,8 +34,8 @@ func TestTopicGraphSchemaFreshAndUpgrade(t *testing.T) {
 					t.Fatalf("apply legacy core: %v", err)
 				}
 				if _, err := db.Pool.Exec(ctx, `
-                    INSERT INTO schema_metadata (id, embed_model, embed_dim, truncated_dim)
-                    VALUES (TRUE, $1, $2, FALSE)`, "stage-b-manual", stageBDim); err != nil {
+                    INSERT INTO schema_metadata (id, workspace_id, embed_model, embed_dim, truncated_dim)
+                    VALUES (TRUE, $1, $1, $2, FALSE)`, "stage-b-manual", stageBDim); err != nil {
 					t.Fatal(err)
 				}
 			}

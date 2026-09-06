@@ -1,6 +1,6 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local, Kubernetes-deployed RAG engine over personal content: a Go microservice pipeline (RustFS Tier 1 → Postgres/pgvector Tier 2/3), driven by NATS JetStream, deployed via a single Helm chart.
+Pocket Advisor is a local RAG engine over personal content. One host Go binary runs ingestion, retrieval, and MCP; a single Helm chart deploys the shared RustFS Tier 1, PostgreSQL/pgvector Tier 2/3, and NATS JetStream stores.
 
 `retired-v2/` is a frozen prior implementation (Python, single-process). It is history, not a reference architecture — do not build on it, and do not treat anything under it as current design.
 
@@ -70,4 +70,4 @@ Treat a history rewrite as exceptional: make a bundle backup, prove the procedur
 
 ## Verification
 
-Use the supported commands in [README.md §9, “Verification”](README.md#9-verification).
+Use the supported commands in [README.md §10, “Verification”](README.md#10-verification).

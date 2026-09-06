@@ -18,7 +18,7 @@ import (
 // bootstrap. Every statement in that half is IF NOT EXISTS, so the two paths
 // are the same statements run under different circumstances rather than two
 // descriptions of one schema that could drift apart.
-const schemaSQL = coreSchemaSQL + emailSchemaSQL + topicGraphSchemaSQL
+const schemaSQL = coreSchemaSQL + placementSchemaSQL + emailSchemaSQL + topicGraphSchemaSQL
 
 const coreSchemaSQL = `
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -169,6 +169,76 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 
 CREATE INDEX IF NOT EXISTS chunks_doc_idx        ON document_chunks(doc_id);
 CREATE INDEX IF NOT EXISTS chunks_chunk_idx      ON document_chunks(chunk_id);
+`
+
+// placementSchemaSQL is containment tracking and the deletion semantics that
+// depend on it (ingestion-design.md §6.5). Structural apart from one seed from
+// documents.parent_doc_id, which is a floor rather than the truth — see
+// applyPlacementSchema.
+const placementSchemaSQL = `
+-- Durable object cleanup survives deletion of the document rows themselves.
+CREATE TABLE IF NOT EXISTS pending_object_deletions (
+    raw_sha256 VARCHAR PRIMARY KEY,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Which documents contain which, one row per containment.
+--
+-- documents.parent_doc_id cannot answer this and was never meant to. It is a
+-- single column, and content identity is unique per workspace
+-- (documents_raw_sha256_key), so an attachment carried by two emails is one
+-- row whose parent points at whichever email happened to be processed first;
+-- the second email's containment was discarded. That is harmless for
+-- provenance — "where did this come from" wants one answer — and fatal for
+-- deletion, which needs the other question: is anything still carrying this?
+-- Pruning a container used to cascade through parent_doc_id and take a shared
+-- attachment with it, silently stripping it from an email nobody asked to
+-- remove, and leaving no record that it had ever been there.
+--
+-- So this table answers containment and parent_doc_id keeps answering
+-- provenance. Extra rows here are safe and missing rows are not: an edge too
+-- many retains a document that could have gone, an edge too few deletes one
+-- that something still holds. Everything that writes here errs toward more.
+CREATE TABLE IF NOT EXISTS document_placements (
+    container_doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    contained_doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    first_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (container_doc_id, contained_doc_id)
+);
+
+-- The reverse direction is the one pruning asks: who still contains this?
+CREATE INDEX IF NOT EXISTS document_placements_contained_idx
+    ON document_placements(contained_doc_id);
+
+-- Every parent link that exists is a containment that is certainly real, so
+-- it seeds the table. This is a floor, not the truth: it reproduces exactly
+-- the single-parent under-counting described above, which is why pruning
+-- additionally requires the backfill below to have re-derived the rest.
+INSERT INTO document_placements (container_doc_id, contained_doc_id)
+SELECT parent_doc_id, doc_id FROM documents WHERE parent_doc_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+-- Deleting a container must not delete what it contains — that is the whole
+-- point of the table above, and a CASCADE here would overrule it before the
+-- sweep ever ran. Survivors are repointed at a container that remains.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'documents_parent_doc_id_fkey'
+          AND conrelid = 'documents'::regclass
+          AND confdeltype <> 'n'
+    ) THEN
+        ALTER TABLE documents DROP CONSTRAINT documents_parent_doc_id_fkey;
+        ALTER TABLE documents
+            ADD CONSTRAINT documents_parent_doc_id_fkey
+            FOREIGN KEY (parent_doc_id) REFERENCES documents(doc_id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- When the containment backfill last completed. Pruning refuses to run while
+-- this is NULL: on un-backfilled data the placement table is the parent_doc_id
+-- floor, and sweeping against a floor deletes shared attachments.
+ALTER TABLE schema_metadata ADD COLUMN IF NOT EXISTS placements_backfilled_at TIMESTAMPTZ;
 `
 
 // emailSchemaSQL is the durable email browse and conversation model
@@ -671,6 +741,9 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		}
 		// An already-provisioned workspace never re-runs the DDL above, so
 		// structural changes reach it here or not at all.
+		if err := d.applyPlacementSchema(ctx); err != nil {
+			return err
+		}
 		if err := d.applyEmailSchema(ctx); err != nil {
 			return err
 		}
@@ -703,10 +776,39 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 	// A no-op here — schemaSQL already carried these statements — and run
 	// anyway, so every bootstrap proves the upgrade path is idempotent instead
 	// of leaving that only to workspaces old enough to need it.
+	if err := d.applyPlacementSchema(ctx); err != nil {
+		return err
+	}
 	if err := d.applyEmailSchema(ctx); err != nil {
 		return err
 	}
 	return d.applyTopicGraphSchema(ctx)
+}
+
+// applyPlacementSchema upgrades a workspace with containment tracking.
+//
+// Structural, plus one seed: every parent_doc_id that exists is a containment
+// that certainly happened, so it becomes a placement. That seed is a floor and
+// not the truth — it reproduces the single-parent under-count the table exists
+// to fix — which is why placements_backfilled_at stays NULL until the
+// containment backfill has re-derived the rest from Tier 1, and why pruning
+// refuses to run while it is.
+//
+// It also converts documents.parent_doc_id from ON DELETE CASCADE to SET NULL.
+// Cascade would overrule the whole point of the table: deleting a container
+// would take a shared attachment with it before the sweep ever judged whether
+// anything else still held it.
+func (d *DB) applyPlacementSchema(ctx context.Context) error {
+	if _, err := d.Pool.Exec(ctx, placementSchemaSQL); err != nil {
+		return fmt.Errorf("apply placement schema: %w", err)
+	}
+	return nil
+}
+
+// ApplyPlacementSchema upgrades containment and deletion state without an
+// embedding probe. Maintenance commands use the existing workspace schema.
+func (d *DB) ApplyPlacementSchema(ctx context.Context) error {
+	return d.applyPlacementSchema(ctx)
 }
 
 // applyEmailSchema creates the email browse and conversation tables on a

@@ -196,6 +196,17 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	if err != nil {
 		return err
 	}
+
+	// Before the early return below, never after it. This containment is a
+	// fact about this email whether or not this email is the one that
+	// introduced the content, and the case that matters most for deletion is
+	// exactly the one that returns early: the second email to carry an
+	// attachment is the reason the first email's copy must not be swept away
+	// with it. Recording only on creation is what left that unrecoverable.
+	if err := w.Docs.RecordPlacement(ctx, parent.DocId, childID); err != nil {
+		return err
+	}
+
 	if !created {
 		return nil // same content already known in this workspace
 	}

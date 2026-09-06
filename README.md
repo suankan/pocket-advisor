@@ -25,10 +25,10 @@ The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The 
 
 - Every command is scoped to one workspace with `--workspace-id`.
 - The stores are shared processes, but each workspace has its own PostgreSQL database and role, RustFS bucket, and NATS subject/stream namespace — no per-workspace identity in RustFS or NATS, isolation is naming, not a credential (see [§3](#3-configuration)).
-- RustFS is the source of truth. A workspace's local directory is a staging input used only by the uploader.
+- RustFS is authoritative for document bytes. A workspace's configured staging directories and ignore patterns determine which content a full ingest retains.
 - Ingestion is reconciled. Re-running it skips objects already present, finds Tier 1 objects without Tier 2 rows, and drains durable queued work.
 - PostgreSQL is derived state. If a workspace database is lost, its schema and index can be rebuilt from Tier 1 by ingesting again.
-- Removing content is always explicit. A file disappearing from a workspace's local directory does not delete its Tier 1 object.
+- Full ingestion prunes documents no longer reachable from staged content before starting its workers. `--no-prune` disables this sweep; `--reconcile-deletions` previews it separately.
 - Retrieval returns cited evidence packets, not generated prose.
 
 The authoritative designs are:
@@ -80,7 +80,7 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
 `infra.topic_graph` fixes the bounded local-LLM topic-mention extraction and exact-reference relation-classification contracts: opaque extraction, configuration, relation, and prompt versions plus input, output, mention, candidate, and confidence limits. Change `config_version` before changing the configured model, prompt, threshold, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
 
-`workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the single local directory it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
+`workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the local directories it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
 - **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
 - **RustFS**: the root identity is the literal `admin`/`admin` (used only by `./pocket-advisor.sh deploy-workspaces` to provision buckets). The application itself connects anonymously — a workspace's bucket carries a public policy scoped to itself, so isolation is the bucket name, not a credential.
@@ -94,13 +94,19 @@ schema_version: 2
 workspaces:
   - id: example
     title: Example Workspace
-    path: data/example
+    paths:
+      - data/example
+    ignore:
+      - "caches/"
+      - "*.tmp"
     # Optional private mailbox identities used only for email direction.
     owner-identities:
       - owner@example.test
 ```
 
-A workspace's `path` is the single directory the ingestion pipeline walks recursively; every regular file found under it, at any depth, is a candidate document. There is no further subdivision — no collection, no per-subdirectory registry metadata.
+A workspace's nonempty `paths` list contains the directories the ingestion pipeline walks recursively. Use `paths: [data/example]` for a single directory; the singular `path` key is unsupported. Relative paths resolve against the registry directory. Multiple roots must have distinct basenames; recorded source paths then include that basename. Every regular file is a candidate unless excluded by `ignore`.
+
+Ignore rules match slash-separated paths relative to each configured root. A bare pattern such as `*.tmp` matches filenames at any depth; a path pattern such as `build/*.log` is anchored to the root. `**` spans directory segments. A trailing slash excludes a directory's descendants, so `caches/` excludes caches at any depth. Rules apply in order and `!` re-includes a match. Upload and pruning use the same rules.
 
 `owner-identities` is optional and private, scoped to one workspace. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
 
@@ -149,11 +155,16 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 
 `--ingest-all`:
 
-1. resolves the workspace's directory;
-2. uploads new content-addressed objects to Tier 1;
-3. reconciles Tier 1 objects missing from Tier 2;
-4. runs every worker pool until the queues remain idle for the settling period; and
-5. rebuilds the BM25 index after the full ingest.
+1. resolves the workspace's directories and ignore rules;
+2. upgrades its schema and finishes any pending object deletions;
+3. backfills containment if needed and prunes unreachable documents, unless `--no-prune` is set;
+4. uploads new content-addressed objects and reconciles Tier 1 objects missing from Tier 2;
+5. runs every worker pool until the queues remain idle for the settling period; and
+6. rebuilds the BM25 index after the full ingest.
+
+Pruning refuses an empty staging set or incomplete containment. Its default deletion threshold is 10% of the indexed documents. Exceeding that threshold prints the plan and continues ingestion without deleting; inspect the complete plan with `--reconcile-deletions --json` before applying it or using `--prune-max-share 1`. Run only one ingestion or deletion process per workspace at a time.
+
+`--ingest-all --dry-run` previews uploads using read access to Tier 1 only. It does not connect to PostgreSQL, NATS, or models; provision schemas; backfill containment; prune; or start workers. Use the separate deletion plan to inspect pruning.
 
 Useful modes:
 
@@ -245,7 +256,7 @@ The result shows:
 - the shared evidence budget;
 - ranked passages with document metadata, UTF-8 byte offsets, and Tier 1 citations;
 - lineage context such as parent documents, attachments, and same-thread messages; and
-- where to find each result, printed relative to `workspaces/data/<workspace-id>/` — the directory the workspace was staged from — as either the document's own file or, for something extracted like an email attachment, the file it came out of, so you can open it yourself.
+- where to find each result, relative to its configured staging directory (prefixed with the root's basename when there are several), either as the document's own file or the container it was extracted from.
 
 Useful query options:
 
@@ -523,7 +534,9 @@ Remove documents whose file you deleted from the workspace directory:
 ./bin/pocket-advisor --reconcile-deletions --workspace-id example
 ```
 
-Ingestion is additive, so deleting a staged file normally leaves its document in place. This command reconciles that: it reports every document whose content is no longer staged anywhere, along with the extracted children that would go with it, and changes nothing unless you add `--yes`. Candidates are matched by content rather than filename, so deleting one of two identical files does not remove a document still staged under the other name, and renaming a file is not read as deleting it. It refuses to run against an empty or unmounted directory rather than treat that as a request to delete everything. `--json` emits the plan for review.
+`--reconcile-deletions` reports documents unreachable from the currently staged, non-ignored content. It prepares the containment schema and backfill when needed, including on an older workspace, but deletes no documents unless `--yes` is supplied and the displayed confirmation is accepted. `--json` emits the complete plan. Matching is by content, so another staged copy retains the document and renaming alone does not delete it. Empty staging is refused. Shared attachments remain when another retained container carries them. This explicit command has no percentage limit.
+
+Object deletion requests are persisted in the same transaction that removes document rows. If RustFS cleanup fails, the command fails and retains the unfinished requests. Rerun the deletion command, or run ingestion, scan, reconciliation, or the listener to finish pending cleanup before intake. Even `--no-prune` finishes previously committed deletions; it only disables new pruning. Pending content cannot be rediscovered until cleanup completes.
 
 Delete all content while leaving the workspace infrastructure ready for reuse:
 
@@ -531,7 +544,7 @@ Delete all content while leaving the workspace infrastructure ready for reuse:
 ./bin/pocket-advisor --delete-data --workspace-id example
 ```
 
-Both commands prompt unless `--yes` is supplied. `--forget` deletes matching document rows and their document-specific descendants, then deletes the `raw/` and `extracted/` objects whose own key uses the selected hash. Extracted child objects with different hashes are not traversed and may remain in Tier 1. `--delete-data` removes Tier 1 objects, document-related PostgreSQL rows, and all three workspace streams. Shared passage rows released by either operation are currently retained until an explicit storage cleanup is introduced. Store changes are ordered rather than transactional; after a partial failure, rerun the same command to converge.
+`--forget` and `--delete-data` prompt unless `--yes` is supplied. Forget removes the selected document and its exclusively held descendants, preserving descendants recorded as independently staged or still held by another container. It removes both raw and extracted objects for every deleted content hash through the same durable cleanup mechanism as pruning. Re-ingesting retained source files can add forgotten content again. `--delete-data` removes Tier 1 objects, document-related PostgreSQL rows, pending cleanup records, and all three workspace streams' messages. Shared passage rows released by these operations remain until an explicit storage cleanup is introduced. Store changes are ordered rather than transactional across stores; rerun after a partial failure to finish cleanup.
 
 Destroy the workspace infrastructure itself:
 

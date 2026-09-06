@@ -28,6 +28,17 @@ const settle = 3 * time.Second
 // run the pools until everything drains.
 func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
+	if o.DryRun {
+		// Preview needs only read access to Tier 1. In particular, do not
+		// provision, backfill, prune, start consumers, or rebuild indexes.
+		a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true}, o.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		defer a.Close()
+		a.Uploads = a.Vault
+		return upload(ctx, o, a, telemetry.NewStats())
+	}
 
 	// Probe the embedding endpoint while the stores are being connected. Its
 	// first request on a fresh connection costs ~650ms even warm — the server
@@ -63,7 +74,7 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	// workspace's own credentials and nothing more (deviation 24).
 	// --scan needs the uploader role as much as --ingest-all does: it triggers
 	// work by touching raw/ objects, which only that role may do (§5.1).
-	if o.IngestAll || o.Scan {
+	if o.IngestAll || o.Scan || o.Reconcile {
 		needs.Uploader = true
 	}
 
@@ -93,6 +104,9 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
 		return err
 	}
+	if err := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, a.Log).DrainPending(ctx); err != nil {
+		return err
+	}
 
 	if err := a.DB.VerifyDimension(ctx, cfg.Embedding.Model, info.Dimension); err != nil {
 		return fmt.Errorf("dimension check failed (endpoint reports %d for %s): %w",
@@ -106,6 +120,36 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	a.Log.Info("embedding endpoint verified",
 		"model", cfg.Embedding.Model, "dimension", info.Dimension,
 		"sessions", embedder.Concurrency(), "probe_ms", probeTook.Milliseconds())
+
+	stats := telemetry.NewStats()
+
+	pipe, err := pipeline.New(ctx, a, stats, embedder,
+		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true})
+	if err != nil {
+		return err
+	}
+	defer pipe.Close()
+
+	fetchCtx, workCtx, stopSignals := interrupts(ctx, a.Log)
+	defer stopSignals()
+
+	// Before the pools, deliberately. The sweep asks what nothing stages any
+	// more, and that question only has a stable answer while nothing is being
+	// extracted: a child's row exists for the moment between being stubbed and
+	// having its containment recorded, and a sweep landing in that window would
+	// read it as unheld. Running here rather than after the drain is also what
+	// stops the pipeline spending an hour finishing a document this run is
+	// about to delete — residue from previous runs, and anything a new ignore
+	// pattern has just disowned, dies before it costs anything.
+	//
+	// The cost of being early is one run's lag: a file deleted while this run
+	// is walking is swept by the next one. Pruning converges, so a lag is the
+	// cheap direction to be wrong in.
+	if o.IngestAll && !o.NoPrune {
+		if err := prune(fetchCtx, o, a); err != nil {
+			return err
+		}
+	}
 
 	// The BM25 lexical index is dropped before a full ingest run's writes
 	// begin and rebuilt once after they all land (below, after WaitDrained) —
@@ -125,18 +169,6 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 				"error", err)
 		}
 	}
-
-	stats := telemetry.NewStats()
-
-	pipe, err := pipeline.New(ctx, a, stats, embedder,
-		pipeline.Options{OCRLangs: o.OCRLangs, RustFSEvents: true})
-	if err != nil {
-		return err
-	}
-	defer pipe.Close()
-
-	fetchCtx, workCtx, stopSignals := interrupts(ctx, a.Log)
-	defer stopSignals()
 
 	// The pools come up before any work is enqueued, so the first document is
 	// being extracted while the rest are still being discovered.
@@ -247,6 +279,7 @@ func upload(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats)
 	res, err := up.Run(ctx, uploader.Options{
 		WorkspaceID: ws.ID,
 		AbsPaths:    ws.AbsPaths,
+		Ignore:      ws.Ignore.Match,
 		Concurrency: uploadConcurrency,
 		DryRun:      o.DryRun,
 		RunID:       time.Now().UTC().Format("20060102T150405Z"),
@@ -257,7 +290,12 @@ func upload(ctx context.Context, o *Options, a *app.App, stats *telemetry.Stats)
 	}
 	log.Info("upload complete",
 		"uploaded", res.Uploaded, "duplicate", res.Duplicate,
-		"failed", res.Failed, "moved", len(res.Moved), "bytes", res.Bytes)
+		"failed", res.Failed, "ignored", res.Ignored,
+		"moved", len(res.Moved), "bytes", res.Bytes)
+	if o.DryRun {
+		fmt.Printf("upload preview: new=%d duplicate=%d ignored=%d moved=%d failed=%d bytes=%d\n",
+			res.Uploaded, res.Duplicate, res.Ignored, len(res.Moved), res.Failed, res.Bytes)
+	}
 
 	// The uploader owns Tier 1 only (package doc: "the only writer to the
 	// raw/ prefix"); Tier 2's metadata_headers.source_path is this package's

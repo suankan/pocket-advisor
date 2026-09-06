@@ -19,6 +19,7 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
 		ReasonHandlerPanic,
+		ReasonDocumentPruned,
 		ReasonUnclassified,
 	}
 	seen := make(map[FailureReason]bool)

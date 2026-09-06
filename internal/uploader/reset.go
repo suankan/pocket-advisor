@@ -60,6 +60,9 @@ func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 			"(re-run --wipe to converge): %w", err)
 	}
 	r.log.Info("tier 1 purged", "workspace_id", workspaceID)
+	if err := r.docs.ClearObjectDeletions(ctx); err != nil {
+		return fmt.Errorf("clear completed object deletions after wipe: %w", err)
+	}
 
 	// Last, and deliberately after both stores: a command still in flight names
 	// an object and a row that no longer exist, so leaving the queues populated
@@ -89,6 +92,54 @@ func (r *Resetter) Forget(ctx context.Context, workspaceID, sha string) error {
 		return fmt.Errorf("forget aborted, bucket untouched: %w", err)
 	}
 
+	if err := r.DrainPending(ctx); err != nil {
+		return err
+	}
+
+	r.log.Info("forgotten", "workspace_id", workspaceID, "sha256", sha, "documents_deleted", rows)
+	return nil
+}
+
+// ObjectDeletionStore owns cleanup requests independently of document rows.
+type ObjectDeletionStore interface {
+	PendingObjectDeletions(context.Context, int) ([]string, error)
+	CompleteObjectDeletion(context.Context, string) error
+}
+
+// DrainPending resumes committed deletions before intake can recreate content.
+// A failed object removal or completion write leaves the request durable.
+func (r *Resetter) DrainPending(ctx context.Context) error {
+	return drainObjectDeletions(ctx, r.docs, r.ForgetObjects)
+}
+
+func drainObjectDeletions(ctx context.Context, store ObjectDeletionStore, remove func(context.Context, string) error) error {
+	for {
+		shas, err := store.PendingObjectDeletions(ctx, 200)
+		if err != nil {
+			return err
+		}
+		if len(shas) == 0 {
+			return nil
+		}
+		for _, sha := range shas {
+			if err := remove(ctx, sha); err != nil {
+				return fmt.Errorf("object deletion pending; rerun to resume: %w", err)
+			}
+			if err := store.CompleteObjectDeletion(ctx, sha); err != nil {
+				return fmt.Errorf("complete object deletion: %w", err)
+			}
+		}
+	}
+}
+
+// ForgetObjects removes one content's Tier 1 objects, leaving Tier 2 alone.
+//
+// Split out of Forget for the sweep, which deletes its whole candidate set in
+// one transaction and only then has objects to clear. Both prefixes are tried
+// because the same content can have arrived either way — staged as a file, or
+// extracted out of a container — and which one it was is not worth a lookup
+// when a missing key is already a no-op.
+func (r *Resetter) ForgetObjects(ctx context.Context, sha string) error {
 	for _, key := range []string{
 		domain.RawObjectKey(sha),
 		domain.ExtractedObjectKey(sha),
@@ -103,7 +154,5 @@ func (r *Resetter) Forget(ctx context.Context, workspaceID, sha string) error {
 			}
 		}
 	}
-
-	r.log.Info("forgotten", "workspace_id", workspaceID, "sha256", sha, "documents_deleted", rows)
 	return nil
 }

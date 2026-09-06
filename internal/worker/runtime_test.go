@@ -260,7 +260,11 @@ func (m *fakeMsg) Subject() string      { return "test.subject" }
 func (m *fakeMsg) Reply() string        { return "" }
 func (m *fakeMsg) Headers() nats.Header { return nats.Header{} }
 func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
-	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
+	n := m.c.deliveries.Load()
+	if n == 0 {
+		n = 1
+	}
+	return &jetstream.MsgMetadata{NumDelivered: uint64(n)}, nil
 }
 func (m *fakeMsg) Ack() error                      { m.c.acked.Add(1); return nil }
 func (m *fakeMsg) DoubleAck(context.Context) error { m.c.acked.Add(1); return nil }
@@ -287,6 +291,8 @@ func (b *fakeBatch) Error() error                   { return nil }
 // fakeConsumer serves a bounded supply of messages, then empty batches — the
 // shape a real pull consumer presents once its queue drains.
 type fakeConsumer struct {
+	// deliveries is what Metadata reports as NumDelivered; 0 means "first".
+	deliveries     atomic.Int64
 	remaining      atomic.Int64
 	acked          atomic.Int64
 	naked          atomic.Int64
@@ -368,8 +374,12 @@ func TestHeartbeatExtendsUntilStopped(t *testing.T) {
 	}
 
 	stop()
-	settled := c.inProgress.Load()
+	// A tick already selected when stop() ran still completes, so sample after
+	// letting one land. The claim under test is that renewal ceases, not that
+	// it ceases between two instructions.
 	time.Sleep(20 * time.Millisecond)
+	settled := c.inProgress.Load()
+	time.Sleep(50 * time.Millisecond)
 	if got := c.inProgress.Load(); got != settled {
 		t.Errorf("InProgress called %d more times after stop; a finished handler must release the message", got-settled)
 	}
@@ -651,5 +661,50 @@ func TestWorkForALiveDocumentStillFails(t *testing.T) {
 	}
 	if consumer.acked.Load() != 0 {
 		t.Error("a live document's failure was discarded as if it had been pruned")
+	}
+}
+
+// Shutdown bypasses the application's failure threshold. The real-broker
+// regression additionally proves that this NAK remains deliverable.
+func TestShutdownCancellationIsNotADeadLetter(t *testing.T) {
+	consumer := newFakeConsumer(1)
+	// The third interrupted run: two attempts already spent, so without the
+	// guard this delivery is the one that dead-letters.
+	consumer.deliveries.Store(int64(bus.MaxDeliver))
+	dlq := &fakeDLQ{}
+	rt := &Runtime{
+		Name: "test", Subject: "test.subject", Log: quietLogger(),
+		Lanes: 1, Bus: dlq,
+	}
+
+	// A work context that is already cancelled: what a handler sees once the
+	// run is being torn down around it.
+	workCtx, cancelWork := context.WithCancel(context.Background())
+	cancelWork()
+
+	fetchCtx, stopFetch := context.WithCancel(context.Background())
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for consumer.naked.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		stopFetch()
+	}()
+
+	_ = rt.Consume(fetchCtx, workCtx, consumer,
+		func(context.Context, jetstream.Msg) error {
+			// What a store reports when everything under it is cancelled.
+			return errors.New(`stat "raw/69/6934": context canceled`)
+		})
+
+	if dlq.count.Load() != 0 {
+		t.Errorf("dead-lettered %d message(s) during shutdown; three such runs lose a good document",
+			dlq.count.Load())
+	}
+	if consumer.termed.Load() != 0 {
+		t.Errorf("terminated %d message(s) during shutdown", consumer.termed.Load())
+	}
+	if consumer.naked.Load() == 0 {
+		t.Error("the message was not handed back for the next run")
 	}
 }

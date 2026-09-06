@@ -44,8 +44,12 @@ const (
 	// the 2-minute default. 10m leaves headroom.
 	RustFSEventsDedupWindow = 10 * time.Minute
 
-	// MaxDeliver bounds redelivery; the third attempt routes to the DLQ.
+	// MaxDeliver is the application's failure threshold. Errors on the third
+	// or a later delivery go to the DLQ, except shutdown cancellations.
 	MaxDeliver = 3
+	// ConsumerMaxDeliver leaves the broker retryable after cancellations and
+	// crashes. A broker limit would strand the final NAK without a DLQ record.
+	ConsumerMaxDeliver = -1
 	// AckWait is how long the broker waits before concluding a worker died.
 	//
 	// It no longer has to cover the slowest document as well. It used to, and
@@ -279,7 +283,7 @@ func (b *Bus) PullConsumer(ctx context.Context, stream, durable, subject string)
 		Durable:       durable,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxDeliver:    MaxDeliver,
+		MaxDeliver:    ConsumerMaxDeliver,
 		AckWait:       AckWait,
 	})
 	if err != nil {

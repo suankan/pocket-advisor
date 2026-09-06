@@ -285,7 +285,7 @@ Publishing waits for a JetStream acknowledgement and retries with bounded backof
 
 ### 6.3 Delivery and dead letters
 
-Consumers use explicit acknowledgements, `MaxDeliver = 3`, and a five-minute `AckWait`. While a handler runs, the runtime sends `InProgress` heartbeats so legitimate long OCR work does not expire its acknowledgement window.
+Consumers use explicit acknowledgements, unlimited broker redelivery (`MaxDeliver = -1`), and a five-minute `AckWait`. The application sends terminal failures, or non-shutdown errors on the third or any later delivery, to the DLQ. Shutdown cancellation requests redelivery without a DLQ verdict. NAK does not reset the delivery count; unlimited broker delivery keeps work resumable after repeated cancellations or crashes. Consumer startup updates existing durable consumers to this configuration. While a handler runs, the runtime sends `InProgress` heartbeats so legitimate long OCR work does not expire its acknowledgement window.
 
 Both the heartbeat and the handler are bounded by one budget, `maxHandlerRuntime` (one hour, against a worst legitimate document of roughly fifteen minutes of OCR). A heartbeat that renews without end reports a wedged handler as healthy indefinitely, and the broker will not reassign work it believes is in hand: an overloaded embedding endpoint once wedged eighteen handlers whose heartbeats held eighteen messages against a 49,000-message backlog, and only killing the process cleared it. Past the budget the runtime stops renewing, `AckWait` lapses, and the message is redelivered; the handler's own context expires with it, so the lane is released rather than occupied for the life of the process. Workers are idempotent, so a redelivery overlapping a handler that is still alive is safe.
 

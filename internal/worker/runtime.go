@@ -373,6 +373,18 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		return
 	}
 
+	// Cancellation is not a verdict about the document. The broker permits
+	// unlimited redelivery, so this NAK remains deliverable even after the
+	// application's usual failure threshold. NAK does not reset NumDelivered.
+	if ctx.Err() != nil {
+		telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
+		r.stat((*telemetry.Queue).Retried)
+		r.Log.Info("work returned unfinished: the run was shutting down",
+			"worker_type", r.Name, "error", err)
+		_ = msg.Nak()
+		return
+	}
+
 	// A message can outlive its document. Pruning removes what the workspace
 	// no longer stages, and the queues are not transactional with it, so work
 	// enqueued before a sweep can name a document the sweep has since deleted.
@@ -401,9 +413,8 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 
 	terminal := isTerminal(err)
 	if terminal || deliveries >= bus.MaxDeliver {
-		// The worker performs the DLQ hop itself rather than relying on the
-		// MaxDeliveries advisory, which is a backstop for crashed workers that
-		// never reach their own error path (§2.5).
+		// The application owns the failure limit; the broker stays retryable
+		// when a process crashes or returns work during shutdown.
 		reason := reasonOf(err)
 		if derr := r.Bus.ToDLQ(ctx, r.Subject, r.Name, string(reason),
 			msg.Headers().Get(bus.HdrTraceparent), deliveries, msg.Data()); derr != nil {

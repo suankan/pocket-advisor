@@ -8,15 +8,18 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"log/slog"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/limits"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 type App struct {
@@ -24,13 +27,9 @@ type App struct {
 	Logs *telemetry.Logs
 	Log  *slog.Logger
 
-	// Two Vaults over the same workspace-scoped RustFS identity and bucket
-	// (workspace-isolation.md §2.2). Vault is constructed with RoleWorker and
-	// Uploads with RoleUploader — the raw/-vs-extracted/ write-authority
-	// split (§5.1) that used to be two separate RustFS identities is now
-	// enforced by that Role field in application code (workspace-isolation.md §9).
-	Vault   *rustfs.Vault
-	Uploads *rustfs.Vault
+	Sources   *source.Resolver
+	Inventory *postgres.SourceRepo
+	Jobs      *postgres.Jobs
 
 	DB     *postgres.DB
 	Docs   *postgres.DocumentRepo
@@ -46,8 +45,7 @@ type App struct {
 }
 
 type Needs struct {
-	RustFS   bool
-	Uploader bool
+	Sources  bool
 	Postgres bool
 	NATS     bool
 	Metrics  bool
@@ -55,7 +53,7 @@ type Needs struct {
 
 // New builds what the requested modes need and nothing more.
 //
-// workspaceID selects whose Postgres database, RustFS bucket, and NATS
+// workspaceID selects whose Postgres database, source roots, and NATS
 // account to connect to (workspace-isolation.md §2) — every store this
 // process touches is scoped to one workspace, never a shared identity.
 // Required whenever any Need is set; New returns an error otherwise.
@@ -84,29 +82,8 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		}
 	}
 
-	if (needs.RustFS || needs.Uploader || needs.Postgres || needs.NATS) && workspaceID == "" {
+	if (needs.Sources || needs.Postgres || needs.NATS) && workspaceID == "" {
 		return nil, fmt.Errorf("a workspace id is required")
-	}
-
-	if needs.RustFS {
-		v, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, rustfs.RoleWorker)
-		if err != nil {
-			return nil, err
-		}
-		a.Vault = v
-	}
-
-	if needs.Uploader {
-		u, err := rustfs.NewForWorkspaceAt(w.RustFSEndpoint, cfg.RustFS.UseSSL, w.BucketName, rustfs.RoleUploader)
-		if err != nil {
-			return nil, err
-		}
-		// deploy-workspaces creates the bucket; this is a harmless, idempotent
-		// safety net, not the primary creation path.
-		if err := u.EnsureBucket(ctx); err != nil {
-			return nil, err
-		}
-		a.Uploads = u
 	}
 
 	if needs.Postgres {
@@ -118,11 +95,36 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		if err != nil {
 			return nil, err
 		}
+		meta, scopeErr := db.LoadSchemaMetadata(ctx)
+		if scopeErr == nil && meta.WorkspaceID != workspaceID {
+			db.Close()
+			return nil, fmt.Errorf("database workspace scope mismatch")
+		}
+		if scopeErr != nil && !errors.Is(scopeErr, pgx.ErrNoRows) && !postgres.IsUndefinedTable(scopeErr) {
+			db.Close()
+			return nil, scopeErr
+		}
 		a.DB = db
 		a.Docs = postgres.NewDocumentRepo(db)
 		a.Chunks = postgres.NewChunkRepo(db)
 		a.Emails = postgres.NewEmailRepo(db)
+		a.Inventory = postgres.NewSourceRepo(db)
+		a.Jobs = postgres.NewJobs(db)
 		a.stopFns = append(a.stopFns, db.Close)
+	}
+
+	if needs.Sources {
+		ws, err := workspace.Load(cfg.WorkspacesConfigPath, workspaceID)
+		if err != nil {
+			a.Close()
+			return nil, err
+		}
+		a.Sources, err = source.New(ws.AbsPaths, ws.Ignore.Match, a.Inventory)
+		if err != nil {
+			a.Close()
+			return nil, err
+		}
+		a.stopFns = append(a.stopFns, a.Sources.Close)
 	}
 
 	if needs.NATS {
@@ -141,7 +143,6 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
-		"rustfs", w.RustFSEndpoint,
 		"nats", w.NATSURL,
 		"metrics_port", cfg.MetricsPort)
 	return a, nil

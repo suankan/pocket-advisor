@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"context"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -93,11 +94,12 @@ type Message struct {
 	ListID         string
 
 	// SourcePath is the message's original file location relative to the
-	// workspace's local staging directory, exactly as the uploader recorded
+	// workspace's local source directory, exactly as the scan recorded
 	// it (ingestion-design.md's Provenance.SourcePath). Empty for a message
 	// that was never a staged file of its own — one nested inside another
 	// message or an archive — which carries ContainerPath instead.
-	SourcePath string
+	SourceLocations []source.Location
+	SourcePath      string
 	// ContainerPath is the staged file this message was extracted from,
 	// resolved as the nearest ancestor holding a path. It is set exactly
 	// when SourcePath is empty, so every message can state where it lives

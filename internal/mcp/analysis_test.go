@@ -49,7 +49,7 @@ func analysisSyntheticResult() *retrieval.Result {
 				From:      "alice@test.com",
 				Date:      &date,
 				SHA256:    sha,
-				RawURI:    "s3://test/raw/doc1",
+				SourceRef: "source:doc1",
 				CharCount: 50,
 			},
 			Match: retrieval.Match{

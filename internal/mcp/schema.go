@@ -66,7 +66,7 @@ func evidencePageOutputSchema() map[string]any {
 			"match": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
-					"chunk_id": map[string]any{"type": "string", "minLength": 1}, "start": map[string]any{"type": "integer", "minimum": 0},
+					"slice_sha256": map[string]any{"type": "string"}, "chunk_id": map[string]any{"type": "string", "minLength": 1}, "start": map[string]any{"type": "integer", "minimum": 0},
 					"end": map[string]any{"type": "integer", "minimum": 0}, "offset_unit": map[string]any{"const": utf8ByteUnit},
 					"score": map[string]any{"type": "number"}, "legs": map[string]any{"enum": []string{"dense", "lexical", "both"}},
 					"sub_query": nullableStringSchema(), "snippet": map[string]any{"type": "string"},
@@ -110,12 +110,14 @@ func documentSchema() map[string]any {
 			"document_id": map[string]any{"type": "string", "minLength": 1}, "parent_document_id": nullableStringSchema(),
 			"thread_id": nullableStringSchema(), "document_type": map[string]any{"type": "string", "minLength": 1},
 			"title": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"},
-			"date":          map[string]any{"oneOf": []any{map[string]any{"type": "string", "format": "date-time"}, map[string]any{"type": "null"}}},
-			"source_sha256": map[string]any{"type": "string", "minLength": 1}, "tier1_uri": map[string]any{"type": "string", "minLength": 1},
+			"date":              map[string]any{"oneOf": []any{map[string]any{"type": "string", "format": "date-time"}, map[string]any{"type": "null"}}},
+			"source_locations":  map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+			"extraction_sha256": map[string]any{"type": "string"}, "extraction_version": map[string]any{"type": "string"},
+			"source_sha256": map[string]any{"type": "string", "minLength": 1}, "source_ref": map[string]any{"type": "string", "minLength": 1},
 			"workspace_relative_path":           nullableStringSchema(),
 			"container_workspace_relative_path": nullableStringSchema(),
 		},
-		"required": []string{"document_id", "parent_document_id", "thread_id", "document_type", "title", "from", "to", "date", "source_sha256", "tier1_uri", "workspace_relative_path", "container_workspace_relative_path"},
+		"required": []string{"document_id", "parent_document_id", "thread_id", "document_type", "title", "from", "to", "date", "source_sha256", "source_ref", "workspace_relative_path", "container_workspace_relative_path"},
 	}
 }
 

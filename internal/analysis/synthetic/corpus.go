@@ -32,13 +32,13 @@ var (
 
 // Message is a synthetic email message.
 type Message struct {
-	ID        string
-	From      Participant
-	To        Participant
-	Subject   string
-	Date      time.Time
-	ThreadID  string
-	Body      string
+	ID          string
+	From        Participant
+	To          Participant
+	Subject     string
+	Date        time.Time
+	ThreadID    string
+	Body        string
 	HasQuestion bool
 }
 
@@ -77,29 +77,29 @@ func buildBudgetThread() Thread {
 			{
 				ID: "msg-budget-001", From: Alice, To: Bob,
 				Subject: "Q2 Budget Review", Date: time.Date(2025, 3, 1, 9, 0, 0, 0, time.UTC),
-				ThreadID: "thread-budget-review",
-				Body:     "Hi Bob, I've prepared the Q2 budget review. The total allocation is $500K with $120K for engineering and $80K for marketing.",
+				ThreadID:    "thread-budget-review",
+				Body:        "Hi Bob, I've prepared the Q2 budget review. The total allocation is $500K with $120K for engineering and $80K for marketing.",
 				HasQuestion: false,
 			},
 			{
 				ID: "msg-budget-002", From: Bob, To: Alice,
 				Subject: "Re: Q2 Budget Review", Date: time.Date(2025, 3, 2, 14, 30, 0, 0, time.UTC),
-				ThreadID: "thread-budget-review",
-				Body:     "Thanks Alice. I think the engineering allocation should be higher given our hiring plans. Can we increase it to $150K?",
+				ThreadID:    "thread-budget-review",
+				Body:        "Thanks Alice. I think the engineering allocation should be higher given our hiring plans. Can we increase it to $150K?",
 				HasQuestion: true,
 			},
 			{
 				ID: "msg-budget-003", From: Carol, To: Alice,
 				Subject: "Re: Q2 Budget Review", Date: time.Date(2025, 3, 3, 10, 0, 0, 0, time.UTC),
-				ThreadID: "thread-budget-review",
-				Body:     "I agree with Bob. Marketing can work with $60K if engineering gets more. The priority should be technical capacity.",
+				ThreadID:    "thread-budget-review",
+				Body:        "I agree with Bob. Marketing can work with $60K if engineering gets more. The priority should be technical capacity.",
 				HasQuestion: false,
 			},
 			{
 				ID: "msg-budget-004", From: Alice, To: Bob,
 				Subject: "Re: Q2 Budget Review", Date: time.Date(2025, 3, 5, 11, 0, 0, 0, time.UTC),
-				ThreadID: "thread-budget-review",
-				Body:     "After reviewing, I've approved $145K for engineering and $75K for marketing. Total remains $500K with remaining $280K for operations.",
+				ThreadID:    "thread-budget-review",
+				Body:        "After reviewing, I've approved $145K for engineering and $75K for marketing. Total remains $500K with remaining $280K for operations.",
 				HasQuestion: false,
 			},
 		},
@@ -115,22 +115,22 @@ func buildProjectTimelineThread() Thread {
 			{
 				ID: "msg-timeline-001", From: Dave, To: Alice,
 				Subject: "Project Alpha Timeline", Date: time.Date(2025, 2, 15, 9, 0, 0, 0, time.UTC),
-				ThreadID: "thread-project-timeline",
-				Body:     "Project Alpha is on track for a June delivery. All milestones are being met.",
+				ThreadID:    "thread-project-timeline",
+				Body:        "Project Alpha is on track for a June delivery. All milestones are being met.",
 				HasQuestion: false,
 			},
 			{
 				ID: "msg-timeline-002", From: Alice, To: Dave,
 				Subject: "Re: Project Alpha Timeline", Date: time.Date(2025, 3, 10, 16, 0, 0, 0, time.UTC),
-				ThreadID: "thread-project-timeline",
-				Body:     "We've encountered some delays. The new estimated delivery is August. The testing phase needs two additional weeks.",
+				ThreadID:    "thread-project-timeline",
+				Body:        "We've encountered some delays. The new estimated delivery is August. The testing phase needs two additional weeks.",
 				HasQuestion: false,
 			},
 			{
 				ID: "msg-timeline-003", From: Dave, To: Alice,
 				Subject: "Re: Project Alpha Timeline", Date: time.Date(2025, 4, 1, 10, 0, 0, 0, time.UTC),
-				ThreadID: "thread-project-timeline",
-				Body:     "Understood. I've updated the stakeholder communication. Do we need to adjust the resource allocation as well?",
+				ThreadID:    "thread-project-timeline",
+				Body:        "Understood. I've updated the stakeholder communication. Do we need to adjust the resource allocation as well?",
 				HasQuestion: true,
 			},
 		},
@@ -146,15 +146,15 @@ func buildOutboxActionRequired() Thread {
 			{
 				ID: "msg-outbox-action-001", From: Bob, To: Alice,
 				Subject: "Contract Review Needed", Date: time.Date(2025, 4, 10, 9, 0, 0, 0, time.UTC),
-				ThreadID: "thread-outbox-action",
-				Body:     "Hi Alice, the vendor contract expires next week. Can you review the renewal terms and provide your recommendation by Friday?",
+				ThreadID:    "thread-outbox-action",
+				Body:        "Hi Alice, the vendor contract expires next week. Can you review the renewal terms and provide your recommendation by Friday?",
 				HasQuestion: true,
 			},
 			{
 				ID: "msg-outbox-action-002", From: Alice, To: Bob,
 				Subject: "Re: Contract Review Needed", Date: time.Date(2025, 4, 11, 14, 0, 0, 0, time.UTC),
-				ThreadID: "thread-outbox-action",
-				Body:     "I'll take a look at it. Do you have the updated terms from the vendor?",
+				ThreadID:    "thread-outbox-action",
+				Body:        "I'll take a look at it. Do you have the updated terms from the vendor?",
 				HasQuestion: true,
 			},
 		},
@@ -170,8 +170,8 @@ func buildOutboxNoAction() Thread {
 			{
 				ID: "msg-outbox-noaction-001", From: Carol, To: Alice,
 				Subject: "Monthly Report Update", Date: time.Date(2025, 4, 8, 10, 0, 0, 0, time.UTC),
-				ThreadID: "thread-outbox-noaction",
-				Body:     "Hi Alice, just wanted to let you know that the monthly report has been uploaded to the shared drive. No action needed from your side.",
+				ThreadID:    "thread-outbox-noaction",
+				Body:        "Hi Alice, just wanted to let you know that the monthly report has been uploaded to the shared drive. No action needed from your side.",
 				HasQuestion: false,
 			},
 		},
@@ -187,8 +187,8 @@ func buildOutboxUncertain() Thread {
 			{
 				ID: "msg-outbox-uncertain-001", From: Dave, To: Alice,
 				Subject: "Team Building Ideas", Date: time.Date(2025, 4, 12, 15, 0, 0, 0, time.UTC),
-				ThreadID: "thread-outbox-uncertain",
-				Body:     "Hey Alice, I was thinking about organizing a team lunch next week. What do you think? Maybe Thursday?",
+				ThreadID:    "thread-outbox-uncertain",
+				Body:        "Hey Alice, I was thinking about organizing a team lunch next week. What do you think? Maybe Thursday?",
 				HasQuestion: true,
 			},
 		},
@@ -204,15 +204,15 @@ func buildContradictionThread() Thread {
 			{
 				ID: "msg-contradiction-001", From: Alice, To: Bob,
 				Subject: "Policy Interpretation", Date: time.Date(2025, 3, 20, 9, 0, 0, 0, time.UTC),
-				ThreadID: "thread-contradiction",
-				Body:     "Our remote work policy allows three days per week in the office as the standard arrangement.",
+				ThreadID:    "thread-contradiction",
+				Body:        "Our remote work policy allows three days per week in the office as the standard arrangement.",
 				HasQuestion: false,
 			},
 			{
 				ID: "msg-contradiction-002", From: Alice, To: Bob,
 				Subject: "Re: Policy Interpretation", Date: time.Date(2025, 4, 15, 11, 0, 0, 0, time.UTC),
-				ThreadID: "thread-contradiction",
-				Body:     "After reconsidering, I believe the remote work policy should be interpreted as two days per week maximum to ensure collaboration.",
+				ThreadID:    "thread-contradiction",
+				Body:        "After reconsidering, I believe the remote work policy should be interpreted as two days per week maximum to ensure collaboration.",
 				HasQuestion: false,
 			},
 		},
@@ -228,8 +228,8 @@ func buildSparseParticipantThread() Thread {
 			{
 				ID: "msg-sparse-001", From: Bob, To: Alice,
 				Subject: "Quick Update", Date: time.Date(2025, 4, 5, 9, 0, 0, 0, time.UTC),
-				ThreadID: "thread-sparse",
-				Body:     "Just a quick note: the server migration is complete. Everything is running smoothly.",
+				ThreadID:    "thread-sparse",
+				Body:        "Just a quick note: the server migration is complete. Everything is running smoothly.",
 				HasQuestion: false,
 			},
 		},
@@ -248,13 +248,13 @@ func buildLongThread() Thread {
 			to = Alice
 		}
 		msgs = append(msgs, Message{
-			ID:        fmt.Sprintf("msg-long-%03d", i),
-			From:      from,
-			To:        to,
-			Subject:   "Long Discussion",
-			Date:      date,
-			ThreadID:  "thread-long",
-			Body:      fmt.Sprintf("Message %d in the long discussion thread about project coordination and resource sharing.", i),
+			ID:          fmt.Sprintf("msg-long-%03d", i),
+			From:        from,
+			To:          to,
+			Subject:     "Long Discussion",
+			Date:        date,
+			ThreadID:    "thread-long",
+			Body:        fmt.Sprintf("Message %d in the long discussion thread about project coordination and resource sharing.", i),
 			HasQuestion: i%5 == 0,
 		})
 	}
@@ -267,12 +267,12 @@ func buildLongThread() Thread {
 
 // ConversationFixture represents a synthetic awaiting-reply candidate.
 type ConversationFixture struct {
-	ConversationID   string
-	Subject          string
-	ExpectedClass    string
-	EvidenceRefs     []string
-	Reasoning        string
-	Messages         []Message
+	ConversationID string
+	Subject        string
+	ExpectedClass  string
+	EvidenceRefs   []string
+	Reasoning      string
+	Messages       []Message
 }
 
 // BuildOutboxFixtures returns synthetic outbox candidates for evaluation.
@@ -309,8 +309,8 @@ func BuildOutboxFixtures() []ConversationFixture {
 // multiple research passes and exceed one result page.
 func MultiPageParticipantRequest() map[string]any {
 	return map[string]any{
-		"question":       "What are the current positions on the budget allocation?",
-		"participants":   []string{"alice@example.test", "bob@example.test", "carol@example.test"},
+		"question":        "What are the current positions on the budget allocation?",
+		"participants":    []string{"alice@example.test", "bob@example.test", "carol@example.test"},
 		"evidence_budget": 250000,
 	}
 }

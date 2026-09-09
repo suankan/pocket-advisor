@@ -7,8 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/suankan/pocket-advisor/internal/app"
+	"github.com/suankan/pocket-advisor/internal/retention"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
-	"github.com/suankan/pocket-advisor/internal/uploader"
 	"github.com/suankan/pocket-advisor/internal/worker"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
@@ -23,22 +23,22 @@ func prune(ctx context.Context, o *Options, a *app.App) error {
 	if err != nil {
 		return err
 	}
-	log := a.Logger(telemetry.RoleUploader)
+	log := a.Logger(telemetry.RoleRetention)
 
 	if err := ensureContainment(ctx, a, log); err != nil {
 		return err
 	}
 
-	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, log)
-	pruner := uploader.NewPruner(a.Docs, reset, log)
+	reset := retention.NewResetter(a.Docs, a.Bus, log)
+	pruner := retention.NewPruner(a.Docs, reset, log)
 
-	report, err := pruner.Plan(ctx, uploader.PruneOptions{
+	report, err := pruner.Plan(ctx, retention.PruneOptions{
 		AbsPaths: ws.AbsPaths,
 		Ignore:   ws.Ignore.Match,
 		MaxShare: o.PruneMaxShare,
 	})
 	switch {
-	case errors.Is(err, uploader.ErrBlastRadius):
+	case errors.Is(err, retention.ErrBlastRadius):
 		// Report the refusal and continue with the additive intake phase.
 		renderPrunePlan(report, ws.ID)
 		fmt.Printf("\n%v\n", err)
@@ -69,7 +69,7 @@ func prune(ctx context.Context, o *Options, a *app.App) error {
 // It runs at most once per workspace, and only because the alternative is
 // worse: pruning against the parent_doc_id floor deletes attachments that
 // other messages still carry, silently and unrecoverably. The cost is one
-// pass over every container's Tier 1 bytes, paid the first time a sweep would
+// pass over every container's original bytes, paid the first time a sweep would
 // otherwise have been unsafe.
 func ensureContainment(ctx context.Context, a *app.App, log *slog.Logger) error {
 	if err := a.DB.ApplyPlacementSchema(ctx); err != nil {
@@ -85,18 +85,18 @@ func ensureContainment(ctx context.Context, a *app.App, log *slog.Logger) error 
 
 	// A caller that built its app without Tier 1 cannot re-derive anything, and
 	// a nil vault would only announce itself as a panic several frames down.
-	if a.Vault == nil {
-		return fmt.Errorf("containment backfill needs Tier 1 access: this command " +
+	if a.Sources == nil {
+		return fmt.Errorf("containment backfill needs original-source access: this command " +
 			"was built without it, which is a wiring mistake rather than a workspace problem")
 	}
 
 	log.Info("containment backfill starting: re-deriving what each container " +
 		"holds, so pruning can tell a shared attachment from an unheld one")
 	b := &worker.PlacementBackfiller{
-		Docs:  a.Docs,
-		Write: a.Docs,
-		Vault: a.Vault,
-		Log:   log,
+		Docs:    a.Docs,
+		Write:   a.Docs,
+		Sources: a.Sources,
+		Log:     log,
 	}
 	s, err := b.Run(ctx, 0)
 	if err != nil {
@@ -119,7 +119,7 @@ func ensureContainment(ctx context.Context, a *app.App, log *slog.Logger) error 
 // renderPrunePlan prints what is about to be removed, or was refused. Paths
 // and filenames are the operator's own, on the operator's own terminal, and
 // never leave the process.
-func renderPrunePlan(report *uploader.PruneReport, workspaceID string) {
+func renderPrunePlan(report *retention.PruneReport, workspaceID string) {
 	if report == nil {
 		return
 	}

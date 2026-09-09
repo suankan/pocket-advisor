@@ -1,6 +1,6 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local RAG engine over personal content. One host Go binary runs ingestion, retrieval, and MCP; a single Helm chart deploys the shared RustFS Tier 1, PostgreSQL/pgvector Tier 2/3, and NATS JetStream stores.
+Pocket Advisor is a local RAG engine over personal content. One host Go binary runs ingestion, retrieval, and MCP; a single Helm chart deploys the shared PostgreSQL/pgvector and NATS JetStream stores; ingestion reads configured original files without an intermediate byte store.
 
 `retired-v2/` is a frozen prior implementation (Python, single-process). It is history, not a reference architecture — do not build on it, and do not treat anything under it as current design.
 
@@ -62,7 +62,7 @@ Treat a history rewrite as exceptional: make a bundle backup, prove the procedur
 
 1. **Workspace material is private.** Never copy names, paths, content, credentials, identifiers, or other material from `./workspaces` into version-controlled code, documentation, comments, examples, tests, or commit messages.
 2. **Source corpora are read-only.** Never write, rename, or delete anything under `workspaces/corpora`. Use temporary fixtures for tests; do not modify real corpus files to construct them.
-3. **Workspace isolation is end-to-end.** A workspace's data, credentials, and request path must remain confined to that workspace across RustFS, Postgres, NATS, retrieval, generation, and transport adapters. Do not add a shared fallback credential, cross-workspace query, or client-selectable workspace scope that bypasses this boundary.
+3. **Workspace isolation is end-to-end.** A workspace's data, credentials, and request path must remain confined to that workspace across source files, Postgres, NATS, retrieval, generation, and transport adapters. Do not add a shared fallback credential, cross-workspace query, or client-selectable workspace scope that bypasses this boundary.
 4. **Design documentation records current and target state only.** Keep one authoritative design document per major concern. Do not retain or add changelogs, implementation-deviation logs, superseded designs, or migration narratives; Git history owns the historical record.
 5. **History rewrites require explicit authority.** Never rewrite published or local history merely for convenience. When explicitly authorised, follow the backup, disposable-clone, timestamp, and tree-identity checks in the commit-message cleanup guidance above.
 6. **Project knowledge must be harness-agnostic.** Agents and harnesses may use their native context, memory, plans, or bookkeeping, but project-relevant current and target design must not exist only there. Prioritise recording durable decisions and implementation knowledge in this repository according to [Documentation philosophy — current and target state](#documentation-philosophy--current-and-target-state), then reconcile it with the relevant design document before handoff.

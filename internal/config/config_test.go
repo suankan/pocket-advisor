@@ -10,12 +10,10 @@ import (
 // validInfra supplies every field requireInfra checks — none of them has a
 // Go-side default any more (deviation 41), so a test about something else
 // entirely (path anchoring, env overrides) would otherwise fail on an
-// unrelated "missing infra.rustfs.endpoint" rather than testing what it
+// unrelated "missing infra.postgres.host" rather than testing what it
 // means to test. Each test below adds its own workspaces: block on top.
 const validInfra = `
 infra:
-  rustfs:
-    endpoint: rustfs.example:9000
   nats:
     url: nats://nats.example:4222
   postgres:
@@ -201,27 +199,27 @@ func TestMissingConfigFileIsAConfigurationError(t *testing.T) {
 
 func TestConfigExpandsRequiredEnvironmentPlaceholders(t *testing.T) {
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${TEST_RUSTFS_ENDPOINT}", 1)+`
+	path := writeConfig(t, tmp, strings.Replace(validInfra, "postgres.example", "${TEST_POSTGRES_HOST}", 1)+`
 workspaces:
   config: workspaces/workspaces.yaml
 `)
-	t.Setenv("TEST_RUSTFS_ENDPOINT", "rustfs.from-env:9000")
+	t.Setenv("TEST_POSTGRES_HOST", "postgres.from-env")
 
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RustFS.Endpoint != "rustfs.from-env:9000" {
-		t.Errorf("RustFS.Endpoint = %q, want expanded value", c.RustFS.Endpoint)
+	if c.Postgres.Host != "postgres.from-env" {
+		t.Errorf("Postgres.Host = %q, want expanded value", c.Postgres.Host)
 	}
 }
 
 func TestConfigRejectsUnsetEnvironmentPlaceholder(t *testing.T) {
 	tmp := t.TempDir()
-	path := writeConfig(t, tmp, strings.Replace(validInfra, "rustfs.example:9000", "${UNSET_RUSTFS_ENDPOINT}", 1))
+	path := writeConfig(t, tmp, strings.Replace(validInfra, "postgres.example", "${UNSET_POSTGRES_HOST}", 1))
 
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "UNSET_RUSTFS_ENDPOINT") {
+	if err == nil || !strings.Contains(err.Error(), "UNSET_POSTGRES_HOST") {
 		t.Fatalf("Load error = %v, want unset placeholder error", err)
 	}
 }

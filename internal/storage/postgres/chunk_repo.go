@@ -23,7 +23,7 @@ func NewChunkRepo(db *DB) *ChunkRepo { return &ChunkRepo{db: db} }
 // document will eventually be processed twice, and appending would duplicate
 // chunks and quietly corrupt retrieval ranking (§2.3).
 func (r *ChunkRepo) ReplaceChunks(ctx context.Context, docID string, chunks []domain.Chunk) error {
-	tx, err := r.db.Pool.Begin(ctx)
+	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -133,26 +133,26 @@ func insertChunks(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk) error {
 	var pb strings.Builder
 	pb.WriteString(`INSERT INTO document_chunks
         (placement_id, doc_id, chunk_id, chunk_index,
-         start_char_offset, end_char_offset)
+         start_char_offset, end_char_offset,slice_sha256)
         SELECT v.placement_id, v.doc_id, c.chunk_id,
-               v.chunk_index, v.start_char_offset, v.end_char_offset
+               v.chunk_index, v.start_char_offset, v.end_char_offset,sha256(convert_to(v.exact_text,'UTF8'))
         FROM (VALUES `)
-	pargs := make([]any, 0, len(chunks)*7)
+	pargs := make([]any, 0, len(chunks)*8)
 	for i, c := range chunks {
 		if i > 0 {
 			pb.WriteByte(',')
 		}
-		b := i * 7
-		fmt.Fprintf(&pb, "($%d::uuid,$%d::uuid,$%d,$%d::bytea,$%d::int,$%d::int,$%d::int)",
-			b+1, b+2, b+3, b+4, b+5, b+6, b+7)
+		b := i * 8
+		fmt.Fprintf(&pb, "($%d::uuid,$%d::uuid,$%d,$%d::bytea,$%d::int,$%d::int,$%d::int,$%d::text)",
+			b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8)
 		pargs = append(pargs, c.ChunkID, c.DocID, c.EmbedModel, hashes[i],
-			c.Index, c.StartChar, c.EndChar)
+			c.Index, c.StartChar, c.EndChar, c.Text)
 	}
 	// embed_model is part of the join, not just the insert: identity is scoped
 	// by model namespace, so a re-embed leaves the same hash present twice and
 	// a join without it would attach two placements to one chunk.
 	pb.WriteString(`) AS v(placement_id, doc_id, embed_model, raw_sha256,
-                          chunk_index, start_char_offset, end_char_offset)
+                          chunk_index, start_char_offset, end_char_offset,exact_text)
         JOIN chunks c ON c.embed_model = v.embed_model
                      AND c.raw_sha256 = v.raw_sha256`)
 	if _, err := tx.Exec(ctx, pb.String(), pargs...); err != nil {

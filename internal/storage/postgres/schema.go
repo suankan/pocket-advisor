@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS documents (
     processing_status processing_status NOT NULL DEFAULT 'PENDING',
     doc_type          VARCHAR NOT NULL DEFAULT '',
     mime_type         VARCHAR NOT NULL DEFAULT '',
-    rustfs_raw_uri    TEXT    NOT NULL DEFAULT '',
+    source_ref    TEXT    NOT NULL DEFAULT '',
     raw_sha256        VARCHAR NOT NULL DEFAULT '',
     source_filename   TEXT    NOT NULL DEFAULT '',
     -- Body prose only. RFC822 headers live in the columns below, not inline
@@ -107,8 +107,6 @@ EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 -- Drives the stale-PENDING reconciliation sweep (§2.2).
 CREATE INDEX IF NOT EXISTS documents_pending_idx
     ON documents(updated_at) WHERE processing_status = 'PENDING';
--- Drives the bucket-scan anti-join (§5.2).
-CREATE INDEX IF NOT EXISTS documents_raw_uri_idx    ON documents(rustfs_raw_uri);
 -- Chronological ordering and date-range filters over messages (§5.3).
 CREATE INDEX IF NOT EXISTS documents_email_date_idx
     ON documents(email_date DESC NULLS LAST);
@@ -176,11 +174,6 @@ CREATE INDEX IF NOT EXISTS chunks_chunk_idx      ON document_chunks(chunk_id);
 // documents.parent_doc_id, which is a floor rather than the truth — see
 // applyPlacementSchema.
 const placementSchemaSQL = `
--- Durable object cleanup survives deletion of the document rows themselves.
-CREATE TABLE IF NOT EXISTS pending_object_deletions (
-    raw_sha256 VARCHAR PRIMARY KEY,
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 -- Which documents contain which, one row per containment.
 --
 -- documents.parent_doc_id cannot answer this and was never meant to. It is a
@@ -731,6 +724,11 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 
 	existing, err := d.LoadSchemaMetadata(ctx)
 	if err == nil {
+		if existing.WorkspaceID != meta.WorkspaceID {
+			return fmt.Errorf(
+				"database is scoped to workspace %q, refusing to apply schema for %q",
+				existing.WorkspaceID, meta.WorkspaceID)
+		}
 		// A dimension change is a re-embed, not a migration: ALTER TABLE
 		// cannot reinterpret existing vectors (§4.4).
 		if existing.EmbedDim != meta.EmbedDim {
@@ -750,12 +748,8 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		if err := d.applyTopicGraphSchema(ctx); err != nil {
 			return err
 		}
-		if existing.WorkspaceID != meta.WorkspaceID {
-			return fmt.Errorf(
-				"database is scoped to workspace %q, refusing to apply schema for %q",
-				existing.WorkspaceID, meta.WorkspaceID)
-		}
-		return nil
+
+		return d.ApplySourceSchema(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) && !IsUndefinedTable(err) {
 		return err
 	}
@@ -782,7 +776,10 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 	if err := d.applyEmailSchema(ctx); err != nil {
 		return err
 	}
-	return d.applyTopicGraphSchema(ctx)
+	if err := d.applyTopicGraphSchema(ctx); err != nil {
+		return err
+	}
+	return d.ApplySourceSchema(ctx)
 }
 
 // applyPlacementSchema upgrades a workspace with containment tracking.
@@ -791,7 +788,7 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 // that certainly happened, so it becomes a placement. That seed is a floor and
 // not the truth — it reproduces the single-parent under-count the table exists
 // to fix — which is why placements_backfilled_at stays NULL until the
-// containment backfill has re-derived the rest from Tier 1, and why pruning
+// containment backfill has re-derived the rest from verified originals, and why pruning
 // refuses to run while it is.
 //
 // It also converts documents.parent_doc_id from ON DELETE CASCADE to SET NULL.
@@ -816,7 +813,7 @@ func (d *DB) ApplyPlacementSchema(ctx context.Context) error {
 //
 // Purely structural: it adds tables and indexes and rewrites nothing, so there
 // is no partial state to guard against and no backfill to sequence. Existing
-// rows gain email metadata when their messages are re-ingested from Tier 1,
+// rows gain email metadata when their messages are re-ingested from verified originals,
 // which is the supported reprocessing path — this migration deliberately does
 // not synthesise metadata for documents whose bytes it has not read.
 func (d *DB) applyEmailSchema(ctx context.Context) error {

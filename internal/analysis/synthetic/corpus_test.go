@@ -60,8 +60,8 @@ func TestBuildOutboxFixtures(t *testing.T) {
 	}
 
 	expected := map[string]string{
-		"thread-outbox-action":   "likely_action_required",
-		"thread-outbox-noaction": "likely_no_action_required",
+		"thread-outbox-action":    "likely_action_required",
+		"thread-outbox-noaction":  "likely_no_action_required",
 		"thread-outbox-uncertain": "uncertain",
 	}
 

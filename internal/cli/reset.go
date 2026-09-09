@@ -7,28 +7,32 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/retention"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
-	"github.com/suankan/pocket-advisor/internal/uploader"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
-// runReset handles --delete-data and --forget.
-//
-// Both need the uploader identity, the only one permitted to delete, and both
-// cascade into Tier 2 — Tier 2 and Tier 3 are derivatives, so purging the
-// bucket alone would leave every citation resolving to nothing (§5.1).
+// runReset removes derived state while leaving all original files untouched.
 func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
 	// NATS as well as the two stores: a wipe now empties the queues too, and
 	// requiring the connection up front means an unreachable broker refuses the
 	// whole operation rather than leaving purged stores behind populated ones.
-	a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true, Uploader: true, Postgres: true, NATS: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true, NATS: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
+	unlock, err := a.DB.LockMaintenance(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := a.DB.ApplySourceSchema(ctx); err != nil {
+		return err
+	}
 
 	// Resolve the registry first: a typo in the workspace id should fail before
 	// anything is deleted, not after.
@@ -37,19 +41,22 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return err
 	}
 
-	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, a.Logger(telemetry.RoleUploader))
+	reset := retention.NewResetter(a.Docs, a.Bus, a.Logger(telemetry.RoleRetention))
 
 	if o.Forget != "" {
+		if err := discoveryService(a).BindExisting(ctx); err != nil {
+			return err
+		}
 		sha := strings.ToLower(o.Forget)
 		if !o.Yes && !confirm(fmt.Sprintf(
 			"Remove document %s from workspace %q?\n"+
-				"  - deletes its Tier 1 raw and extracted objects\n"+
+				"  - preserves every original file\n"+
 				"  - deletes its row, exclusively held descendants, and their chunks\n"+
 				"  - retains descendants still staged independently or held by another container",
 			sha, ws.ID)) {
 			return errAborted
 		}
-		if err := ensureContainment(ctx, a, a.Logger(telemetry.RoleUploader)); err != nil {
+		if err := ensureContainment(ctx, a, a.Logger(telemetry.RoleRetention)); err != nil {
 			return err
 		}
 		if err := reset.Forget(ctx, ws.ID, sha); err != nil {
@@ -69,11 +76,11 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	if !o.Yes && !confirm(fmt.Sprintf(
 		"DELETE ALL DATA for workspace %q?\n"+
 			"  - %s\n"+
-			"  - deletes every object in this workspace's bucket\n"+
+			"  - preserves every original file\n"+
 			"  - deletes every documents row and every chunk for the workspace\n"+
 			"  - purges its queues, the dead letter queue included: every message\n"+
-			"    names an object and a row that will no longer exist\n"+
-			"This cannot be undone. Tier 1 is the source of truth; re-ingesting\n"+
+			"    names a row that will no longer exist\n"+
+			"This cannot be undone. Rebuilding derived state\n"+
 			"requires the original files still being on disk.",
 		ws.ID, counts)) {
 		return errAborted
@@ -87,11 +94,11 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 }
 
 func describe(ctx context.Context, docs *postgres.DocumentRepo) (string, error) {
-	known, err := docs.KnownRawURIs(ctx)
+	n, err := docs.CountDocuments(ctx)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%d document(s) currently indexed", len(known)), nil
+	return fmt.Sprintf("%d document(s) currently indexed", n), nil
 }
 
 // --bootstrap-schema lived here and was removed. It duplicated the schema step

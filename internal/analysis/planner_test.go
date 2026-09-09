@@ -48,7 +48,7 @@ func TestBuildPlanWithParticipants(t *testing.T) {
 	planner := NewPlanner(now)
 
 	req := TopicRequest{
-		Question:   "Budget discussion",
+		Question:     "Budget discussion",
 		Participants: []string{"alice@test.com", "bob@test.com"},
 	}
 	plan := planner.BuildPlan(req, 100000)
@@ -105,7 +105,7 @@ func TestBuildPlanWithConversations(t *testing.T) {
 	planner := NewPlanner(now)
 
 	req := TopicRequest{
-		Question:     "Thread summary",
+		Question:      "Thread summary",
 		Conversations: []string{"conv-123", "conv-456"},
 	}
 	plan := planner.BuildPlan(req, 100000)

@@ -1,4 +1,4 @@
-package uploader
+package retention
 
 import (
 	"context"
@@ -88,20 +88,19 @@ type PruneStore interface {
 
 // Pruner sweeps one workspace.
 type Pruner struct {
-	docs  PruneStore
-	reset interface{ DrainPending(context.Context) error }
-	log   *slog.Logger
+	docs PruneStore
+	log  *slog.Logger
 }
 
-func NewPruner(docs PruneStore, reset interface{ DrainPending(context.Context) error }, log *slog.Logger) *Pruner {
-	return &Pruner{docs: docs, reset: reset, log: log}
+func NewPruner(docs PruneStore, reset any, log *slog.Logger) *Pruner {
+	return &Pruner{docs: docs, log: log}
 }
 
 // PruneOptions bounds one sweep.
 type PruneOptions struct {
 	// AbsPaths and Ignore describe what the workspace currently stages, and
-	// must be the same pair the uploader walked: a sweep judging a wider or
-	// narrower set of files than the upload did would delete what was just
+	// must be the same pair the scan walked: a sweep judging a wider or
+	// narrower set of files than admission did would delete what was just
 	// added, or keep what was just excluded.
 	AbsPaths []string
 	Ignore   func(rel string) bool
@@ -120,7 +119,7 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 		return nil, ErrPlacementsIncomplete
 	}
 
-	contents, files, err := stagedContents(o.AbsPaths, o.Ignore)
+	contents, files, err := stagedContentsContext(ctx, o.AbsPaths, o.Ignore)
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +180,8 @@ func (r *PruneReport) withinBlastRadius(maxShare float64) error {
 
 // Apply deletes the planned candidates.
 //
-// Tier 2 removal and durable object cleanup requests commit together. A failed
-// cleanup fails the run; its requests remain available without document rows.
+// Every derived row a candidate owns is removed in one transaction, so a
+// failed sweep leaves the workspace describing exactly what it did before.
 func (p *Pruner) Apply(ctx context.Context, workspaceID string, report *PruneReport) error {
 	if len(report.Candidates) == 0 {
 		report.DryRun = false
@@ -198,10 +197,6 @@ func (p *Pruner) Apply(ctx context.Context, workspaceID string, report *PruneRep
 		return err
 	}
 	report.Deleted = int(deleted)
-
-	if err := p.reset.DrainPending(ctx); err != nil {
-		return err
-	}
 
 	report.DryRun = false
 	p.log.Info("prune applied",

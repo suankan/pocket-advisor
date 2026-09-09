@@ -3,23 +3,22 @@ package doctor
 import (
 	"encoding/json"
 	"testing"
-
 )
 
 func TestHealthyReport(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:  true,
-		CredsOK:     true,
-		PGRaw:       true,
-		RustFSRaw:   true,
-		NATSRaw:     true,
-		EmbedModelOK: true,
-		EmbedDimOK:  true,
+		RegistryOK:    true,
+		CredsOK:       true,
+		PGRaw:         true,
+		SourcesRaw:    true,
+		NATSRaw:       true,
+		EmbedModelOK:  true,
+		EmbedDimOK:    true,
 		PGVectorExtOK: true,
-		PGSchemaOK:  true,
-		PGHNSWOK:    true,
-		PGBM25OK:    true,
-		StreamsOK:    true,
+		PGSchemaOK:    true,
+		PGHNSWOK:      true,
+		PGBM25OK:      true,
+		StreamsOK:     true,
 	})
 	r := d.Run(nil)
 	if !r.Healthy {
@@ -32,15 +31,15 @@ func TestHealthyReport(t *testing.T) {
 
 func TestUnhealthyReport(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:  true,
-		CredsOK:     true,
-		PGRaw:       false, // broken
-		RustFSRaw:   true,
-		NATSRaw:     true,
-		PGSchemaOK:  true,
-		PGHNSWOK:    true,
-		PGBM25OK:    true,
-		StreamsOK:    true,
+		RegistryOK: true,
+		CredsOK:    true,
+		PGRaw:      false, // broken
+		SourcesRaw: true,
+		NATSRaw:    true,
+		PGSchemaOK: true,
+		PGHNSWOK:   true,
+		PGBM25OK:   true,
+		StreamsOK:  true,
 	})
 	r := d.Run(nil)
 	if r.Healthy {
@@ -68,12 +67,12 @@ func TestStalePendingFinding(t *testing.T) {
 		RegistryOK:   true,
 		CredsOK:      true,
 		PGRaw:        true,
-		RustFSRaw:    true,
+		SourcesRaw:   true,
 		NATSRaw:      true,
 		PGSchemaOK:   true,
 		PGHNSWOK:     true,
 		PGBM25OK:     true,
-		StreamsOK:     true,
+		StreamsOK:    true,
 		StalePending: 5,
 	})
 	r := d.Run(nil)
@@ -99,19 +98,19 @@ func TestStalePendingFinding(t *testing.T) {
 
 func TestFailedByReasonFinding(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:   true,
-		CredsOK:      true,
-		PGRaw:        true,
-		RustFSRaw:    true,
-		NATSRaw:      true,
-		PGSchemaOK:   true,
-		PGHNSWOK:     true,
-		PGBM25OK:     true,
-		StreamsOK:     true,
+		RegistryOK: true,
+		CredsOK:    true,
+		PGRaw:      true,
+		SourcesRaw: true,
+		NATSRaw:    true,
+		PGSchemaOK: true,
+		PGHNSWOK:   true,
+		PGBM25OK:   true,
+		StreamsOK:  true,
 		FailedByReason: map[string]int{
-			"EXTRACTION_FAILED":  3,
-			"OCR_FAILED":         1,
-			"UNKNOWN_ENCODING":   2,
+			"EXTRACTION_FAILED": 3,
+			"OCR_FAILED":        1,
+			"UNKNOWN_ENCODING":  2,
 		},
 	})
 	r := d.Run(nil)
@@ -154,19 +153,19 @@ func TestReportJSON(t *testing.T) {
 
 func TestZeroCountFindingsAreOmitted(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:     true,
-		CredsOK:        true,
-		PGRaw:          true,
-		RustFSRaw:      true,
-		NATSRaw:        true,
-		EmbedModelOK:   true,
-		EmbedDimOK:     true,
-		PGVectorExtOK:  true,
-		PGSchemaOK:     true,
-		PGHNSWOK:       true,
-		PGBM25OK:       true,
-		StreamsOK:       true,
-		StalePending:   0, // zero count should not produce a finding
+		RegistryOK:    true,
+		CredsOK:       true,
+		PGRaw:         true,
+		SourcesRaw:    true,
+		NATSRaw:       true,
+		EmbedModelOK:  true,
+		EmbedDimOK:    true,
+		PGVectorExtOK: true,
+		PGSchemaOK:    true,
+		PGHNSWOK:      true,
+		PGBM25OK:      true,
+		StreamsOK:     true,
+		StalePending:  0, // zero count should not produce a finding
 	})
 	r := d.Run(nil)
 	if !r.Healthy {
@@ -185,15 +184,15 @@ func TestNilReportExitCode(t *testing.T) {
 
 func TestIncompleteResetFinding(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:     true,
-		CredsOK:        true,
-		PGRaw:          true,
-		RustFSRaw:      true,
-		NATSRaw:        true,
-		PGSchemaOK:     true,
-		PGHNSWOK:       true,
-		PGBM25OK:       true,
-		StreamsOK:      true,
+		RegistryOK:      true,
+		CredsOK:         true,
+		PGRaw:           true,
+		SourcesRaw:      true,
+		NATSRaw:         true,
+		PGSchemaOK:      true,
+		PGHNSWOK:        true,
+		PGBM25OK:        true,
+		StreamsOK:       true,
 		IncompleteReset: true,
 	})
 	r := d.Run(nil)
@@ -213,15 +212,15 @@ func TestIncompleteResetFinding(t *testing.T) {
 
 func TestSkippedByReasonFinding(t *testing.T) {
 	d := New("test-ws", Checks{
-		RegistryOK:   true,
-		CredsOK:      true,
-		PGRaw:        true,
-		RustFSRaw:    true,
-		NATSRaw:      true,
-		PGSchemaOK:   true,
-		PGHNSWOK:     true,
-		PGBM25OK:     true,
-		StreamsOK:     true,
+		RegistryOK: true,
+		CredsOK:    true,
+		PGRaw:      true,
+		SourcesRaw: true,
+		NATSRaw:    true,
+		PGSchemaOK: true,
+		PGHNSWOK:   true,
+		PGBM25OK:   true,
+		StreamsOK:  true,
 		SkippedByReason: map[string]int{
 			"UNSUPPORTED_FORMAT": 10,
 		},

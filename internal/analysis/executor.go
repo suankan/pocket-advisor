@@ -59,16 +59,16 @@ func (e *Executor) ExecuteTopicAnalysis(ctx context.Context, req TopicRequest) (
 	plan.MaxEvidence = budget
 
 	dossier := &TopicDossier{
-		Request:                req,
-		Scope:                  plan.Scope,
-		Participants:           make([]ParticipantObservation, 0),
-		Conversations:          make([]ConversationSummary, 0),
-		Timeline:               make([]TimelineEvent, 0),
+		Request:                 req,
+		Scope:                   plan.Scope,
+		Participants:            make([]ParticipantObservation, 0),
+		Conversations:           make([]ConversationSummary, 0),
+		Timeline:                make([]TimelineEvent, 0),
 		StatementsByParticipant: make(map[string][]ParticipantStatement),
 		MostRecentByParticipant: make(map[string]*ParticipantStatement),
-		ConflictingStatements:  make([]ConflictEntry, 0),
-		Warnings:               make([]Warning, 0),
-		EvidenceRefs:           make([]EvidenceReference, 0),
+		ConflictingStatements:   make([]ConflictEntry, 0),
+		Warnings:                make([]Warning, 0),
+		EvidenceRefs:            make([]EvidenceReference, 0),
 		Budget: EvidenceBudgetInfo{
 			Allowed: budget,
 			Unit:    UTF8ByteUnit,

@@ -42,7 +42,7 @@ func syntheticTextResult(text string) *retrieval.Result {
 			Document: retrieval.Document{
 				DocID: "11111111-1111-1111-1111-111111111111", ThreadID: "thread-1", DocType: "email",
 				Title: "Synthetic evidence", From: "sender@example.test", To: "reader@example.test", Date: &date,
-				RawURI: "s3://synthetic/raw/abc", SHA256: strings.Repeat("a", 64), CharCount: len(text),
+				SourceRef: "source:abc", SHA256: strings.Repeat("a", 64), CharCount: len(text),
 			},
 			Match: retrieval.Match{
 				ChunkID: "22222222-2222-2222-2222-222222222222", StartByte: 0, EndByte: len("Привет"),
@@ -52,7 +52,7 @@ func syntheticTextResult(text string) *retrieval.Result {
 			Related: []retrieval.Related{{
 				Document: retrieval.Document{
 					DocID: "33333333-3333-3333-3333-333333333333", DocType: "email", Title: "Synthetic parent",
-					RawURI: "s3://synthetic/raw/def", SHA256: strings.Repeat("b", 64), CharCount: 20,
+					SourceRef: "source:def", SHA256: strings.Repeat("b", 64), CharCount: 20,
 				},
 				Relation: retrieval.RelationParent,
 			}},
@@ -276,7 +276,7 @@ func TestMultiplePacketsKeepReferencesAcrossPages(t *testing.T) {
 		packet := syntheticTextResult(strings.Repeat(fmt.Sprintf("packet-%d 🙂 ", i+1), 1200)).Packets[0]
 		packet.DocID = fmt.Sprintf("11111111-1111-1111-1111-%012d", i+1)
 		packet.Match.ChunkID = fmt.Sprintf("22222222-2222-2222-2222-%012d", i+1)
-		packet.RawURI = fmt.Sprintf("s3://synthetic/raw/%d", i+1)
+		packet.SourceRef = fmt.Sprintf("source:%d", i+1)
 		packet.SHA256 = strings.Repeat(fmt.Sprintf("%x", i+1), 64)
 		packet.Related = []retrieval.Related{}
 		base.Packets = append(base.Packets, packet)
@@ -317,7 +317,7 @@ func TestCompactIndexPaginatesManyPackets(t *testing.T) {
 		packet.DocID = fmt.Sprintf("11111111-1111-1111-1111-%012d", i+1)
 		packet.Match.ChunkID = fmt.Sprintf("22222222-2222-2222-2222-%012d", i+1)
 		packet.Title = fmt.Sprintf("Synthetic evidence packet %02d with bounded metadata", i+1)
-		packet.RawURI = fmt.Sprintf("s3://synthetic/raw/index-%02d", i+1)
+		packet.SourceRef = fmt.Sprintf("source:index-%02d", i+1)
 		packet.SHA256 = strings.Repeat(fmt.Sprintf("%x", i%15+1), 64)
 		packet.Match.Snippet = strings.Repeat("bounded ", 30)
 		packet.Text = ""

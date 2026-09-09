@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
@@ -38,9 +39,9 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		fillDocumentChecks(ctx, pgDB, &checks, log)
 	}
 
-	// 3. RustFS reachability
-	rustfsOK := checkRustFS(ctx, cfg, o.WorkspaceID, log)
-	checks.RustFSRaw = rustfsOK
+	// 3. Configured source-root availability
+	sourcesOK := checkSources(ctx, cfg, o.WorkspaceID, log)
+	checks.SourcesRaw = sourcesOK
 
 	// 4. NATS and JetStream
 	natsOK, busConn := connectNATS(ctx, cfg, o.WorkspaceID, log)
@@ -51,8 +52,8 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	// 5. Tier 1/Tier 2 gaps
-	if pgDB != nil && rustfsOK {
-		fillTier1Checks(ctx, pgDB, &checks, log)
+	if pgDB != nil && sourcesOK {
+		fillSourceChecks(ctx, pgDB, &checks, log)
 	}
 
 	// 6. Partial reset detection
@@ -120,20 +121,19 @@ func connectNATS(ctx context.Context, cfg *config.Config, wsID string, log *slog
 	return true, b
 }
 
-// checkRustFS checks if the RustFS bucket is reachable. This does a
-// minimal HEAD request — no data is read.
-func checkRustFS(ctx context.Context, cfg *config.Config, wsID string, log *slog.Logger) bool {
-	w, err := cfg.Workspace(wsID)
+// checkSources stats configured roots; the coverage audit verifies file bytes.
+func checkSources(ctx context.Context, cfg *config.Config, wsID string, log *slog.Logger) bool {
+	ws, err := workspace.Load(cfg.WorkspacesConfigPath, wsID)
 	if err != nil {
 		return false
 	}
-	// Just verify the workspace resolves to an endpoint and bucket name. A
-	// full reachability check would require the rustfs client to exist,
-	// which needs app.New — we avoid importing rustfs here to keep doctor
-	// mode lightweight. The critical checks are PG and NATS; the actual
-	// bucket check happens when app.New calls EnsureBucket. There is no
-	// credential to resolve any more (the application connects anonymously).
-	return w.RustFSEndpoint != "" && w.BucketName != ""
+	for _, p := range ws.AbsPaths {
+		st, err := os.Stat(p)
+		if err != nil || !st.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 // fillSchemaChecks queries schema objects and embedding metadata.
@@ -228,14 +228,18 @@ func fillJetStreamChecks(ctx context.Context, b *bus.Bus, checks *doctor.Checks,
 	}
 }
 
-// fillTier1Checks checks for Tier 2 rows missing Tier 1 objects.
-func fillTier1Checks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
+// fillSourceChecks reports waiting jobs and inventory gaps.
+func fillSourceChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
+	_, _, waiting, _, jobErr := postgres.NewJobs(db).Counts(ctx)
+	if jobErr == nil {
+		checks.SourceWaitingJobs = waiting
+	}
 	q := postgres.NewDoctorQueries(db)
-	t2missing, err := q.Tier2MissingTier1(ctx)
+	t2missing, err := q.DocumentsWithoutSources(ctx)
 	if err != nil {
-		log.Warn("tier2 missing tier1 check failed", "error", err)
+		log.Warn("source inventory check failed", "error", err)
 	} else {
-		checks.Tier2WithoutTier1 = t2missing
+		checks.DocumentsWithoutSources = t2missing
 	}
 }
 

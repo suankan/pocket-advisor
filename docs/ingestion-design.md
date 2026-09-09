@@ -1,67 +1,41 @@
 # Ingestion Design
 
-This document is the design authority for Pocket Advisor’s write path: upload, discovery, extraction, indexing, queues, failure handling, runtime composition, and ingestion observability. [PDF text extraction](pdf-to-text.md) owns PDF classification, layout reconstruction, rasterisation, and OCR. [Workspace isolation](workspace-isolation.md) owns credentials and store boundaries. [Retrieval](retrieval-design.md) owns the read path over the index produced here.
+This document is the design authority for Pocket Advisor’s write path: source discovery, discovery, extraction, indexing, queues, failure handling, runtime composition, and ingestion observability. [PDF text extraction](pdf-to-text.md) owns PDF classification, layout reconstruction, rasterisation, and OCR. [Workspace isolation](workspace-isolation.md) owns credentials and store boundaries. [Retrieval](retrieval-design.md) owns the read path over the index produced here.
 
 ## 1. Current state
 
-Ingestion is a bounded host process. One `pocket-advisor` binary contains the uploader, discovery logic, and six JetStream consumer pools. Kubernetes runs only the shared RustFS, PostgreSQL, and NATS stores.
+One host Go process discovers original files, dispatches durable ingestion jobs, and runs five JetStream stage pools. Kubernetes supplies PostgreSQL and NATS. Directories configured in the private workspace registry are authoritative for original bytes; the application never writes them. PostgreSQL retains normalized text, structured metadata, shared passages, placements, and search indexes. No object store or permanent attachment-byte directory is required.
 
-The central invariants are:
-
-1. RustFS is the sole authoritative store for document bytes, and a workspace's local directories decide what belongs in it. The uploader treats them as a feed and only ever adds; `--ingest-all` sweeps before starting its worker pools, removing documents nothing stages any more (§6.5). The asymmetry is deliberate: adding is safe when a directory is half-present, removing is not, so every guard lives on the sweep rather than on the upload.
-2. Document identity (doc_id) and content identity (raw_sha256) are deliberately independent: doc_id is an opaque, randomly generated cross-reference key, and raw_sha256 — enforced unique per workspace database — is what deduplication and idempotency actually depend on. Neither depends on a workspace, a path, or which of a workspace's recursively walked directories, or which subdirectory of one, currently holds the file.
-3. Discovery is the only component that creates root documents. Container workers create children with explicit lineage.
-4. Every worker is idempotent under at-least-once delivery.
-5. Indexed text is extracted source text only. No generated summaries or answers enter Tier 2 or Tier 3.
-6. Every chunk is an exact byte slice of `documents.normalized_text` and retains its document identity and offsets.
-7. A known unsupported input is `SKIPPED`; work that should have succeeded and did not is `FAILED` and dead-lettered.
-8. Every run is fixed to one workspace and connects using only that workspace’s credentials.
+Document identity is an opaque UUID, independent of its unique per-workspace raw SHA-256. Moves and identical copies preserve that identity; changed bytes create a new content identity. Every indexed passage is an exact UTF-8 byte slice of canonical normalized text. Generated answers never enter the index. Jobs use at-least-once delivery with transactional stage completion.
 
 ```mermaid
 flowchart LR
-  Source["Local workspace directory\n(staging only)"] --> Upload["Uploader"]
-  Upload --> Raw["RustFS raw/"]
-  Raw --> Notify["RustFS notification target"]
-  Notify --> Events["RUSTFS_EVENTS"]
-  Events --> Discovery["Discovery worker"]
-  Discovery --> Docs["PostgreSQL documents"]
-  Discovery --> Work["INGESTION subjects"]
-  Work --> Extract["Email · PDF/image · Office pools"]
-  Extract --> Docs
-  Extract --> EmbedQ["ingest.text.embed"]
-  EmbedQ --> Indexer["Embedding pool"]
-  Indexer --> Chunks["PostgreSQL document_chunks"]
-  Model["Local embedding endpoint"] --> Indexer
+    Files["Configured original files"] --> Scan["Host source scan"]
+    Scan --> Tx["PostgreSQL: occurrence + stub + job"]
+    Tx --> Dispatcher["Outbox dispatcher"]
+    Dispatcher --> NATS["JetStream stage queues"]
+    NATS --> Workers["Extraction and embedding workers"]
+    Files --> Resolver["Verified source resolver"]
+    Resolver --> Workers
+    Workers --> Tx
+    Workers --> Evidence["PostgreSQL text, metadata and indexes"]
 ```
 
-## 2. Tier model and identity
+## 2. Source inventory and identity
 
-### 2.1 Tier 1: RustFS
+### 2.1 Original files and replayable members
 
-Each workspace has its own bucket. Object keys do not repeat the workspace id because the bucket is already the boundary:
+`source_roots` assigns opaque root IDs to SHA-256 bindings of cleaned absolute configured directories. Absolute directories resolve only from the private registry; bindings and relative paths are private database metadata. Root order does not affect identity. A relocated directory gets a new binding on a complete rescan.
 
-```text
-raw/<sha256-prefix>/<sha256>
-extracted/<sha256-prefix>/<sha256>
-```
+`source_occurrences` records each root-relative path, document UUID, display path, size, mtime, scan ID, observation time, and availability. Identical files retain separate occurrences. `source_scans` records starts and successful completion; only successful full traversal marks old occurrences unavailable. Partial scans may add observations but cannot prove absence. Human display paths include a root basename when multiple roots are configured.
 
-`raw/` holds uploaded root objects. `extracted/` holds child objects unrolled from email and archive containers. Keys are stable content hashes, so identical bytes anywhere in one workspace converge on one object and repeated uploads can use an exact existence check.
+`source_members` records every parent/member-selector/child occurrence, including repeated filenames and shared attachments. MIME selectors are versioned decoded-child ordinals; ZIP and TAR selectors use original member ordinals. `document_placements` remains the complete containment graph used for retention. A single `parent_doc_id` cannot select all sources or establish retention.
 
-The object metadata carries the provenance that a content-addressed key cannot:
+A `source:<document UUID>` reference is interpreted only inside the selected workspace. The resolver tries direct occurrences and alternative parent routes, reopens the configured original, and verifies SHA-256 over bytes actually handed to extraction. Every child replay verifies the decoded child's content hash. It never accepts a caller-supplied host path or substitutes changed bytes under an old identity.
 
-| Metadata | Purpose |
-| --- | --- |
-| `source-filename` | original basename |
-| `source-path` | path relative to the workspace's configured directory the file was found under (prefixed with that directory's basename when the workspace configures more than one) |
-| `uploaded-at` | upload timestamp |
-| `uploader-run-id` | upload run correlation |
-| `alias-filenames` | additional names observed for identical content |
+Reads use `os.Root` confinement, reject observed symlinks, traversal and special files, apply ignore rules, and compare descriptor attributes before and after reading. Each original is limited to 256 MiB; replay is bounded to eight container levels and 512 MiB of cumulative decoded bytes, including siblings. MIME and archive parsing rejects truncated or over-limit members. Buffers are transient; sources remain read-only. Workers have a bounded handler deadline, and file reads check cancellation between reads.
 
-Aliases are JSON-encoded in object metadata. Non-ASCII metadata is decoded on read before names are compared.
-
-Discovery mirrors `source-path` into the owning `documents` row as a Tier 2 fact, alongside `uploaded-at` and `uploader-run-id`. [Retrieval](retrieval-design.md) and [MCP](mcp.md) surface it read-only, as the file's location relative to whichever of the workspace's local staging directories it was found under, so a caller can point the operator at the original file. Only a root document discovered from one of those directories has one: a child created by a container worker — an email attachment, an extracted Office part — was never a file of its own. The read path gives such a document the nearest ancestor that does have a path, so every document reports either its own staged file or the file it was extracted from. Neither is ever inferred from where similar documents live; a plausible guess is frequently wrong, and stating one as fact is the failure this distinction exists to prevent.
-
-No absolute host path is recorded anywhere. The stored value is always workspace-relative, and the root that completes it lives only in the workspace registry the uploader reads, so Tier 2 remains rebuildable on another machine and no evidence packet can disclose the operator's filesystem layout.
+Missing originals or changed bytes are separate waiting outcomes. PostgreSQL evidence can still be retrieved while an original is offline, but reprocessing and rebuilding require the original hash to be recoverable. Current paths do not preserve overwritten historical bytes: source-side versioning or backups are the operator's responsibility.
 
 ### 2.2 Tier 2: PostgreSQL documents
 
@@ -75,10 +49,9 @@ This is what makes moving a file within a workspace, reorganizing a workspace's 
 The `documents` table holds:
 
 - parent/child and thread lineage;
-- workspace id;
 - processing status;
 - detected type and MIME type;
-- Tier 1 URI and content hash;
+- source reference, raw content hash, canonical extraction hash and extraction version;
 - original filename;
 - extracted `normalized_text`;
 - email subject, sender, recipients, and date as separate columns; and
@@ -92,7 +65,7 @@ A workspace stores each exact normalised passage once in `chunks`, keyed by its 
 
 `document_chunks` is the placement relation. Its own identity is `placement_id`, an opaque, randomly generated id (`domain.NewChunkID`, needing no more determinism than `doc_id` does — the same delete-then-insert replace this paragraph describes already makes a re-embed converge correctly regardless of what the new placement ids happen to be). `chunk_id` here is a foreign key naming which shared passage this placement points at — the same name as `chunks`' own primary key, exactly the way `doc_id` names both `documents`' primary key and every foreign key that references it. Alongside `doc_id`, `chunk_index`, and the start and end byte offsets into that document's `normalized_text`, this is what lets retrieval search shared passages, join placements to recover document-specific provenance, and cite the matched placement rather than an arbitrary document sharing the same text. Replacing a document's chunks atomically creates or reuses passage rows, replaces its placements, and removes passages with no remaining placement.
 
-The BM25 lexical index is a `pg_textsearch` index over `chunks.chunk_text` using the `simple` text configuration. It is not part of the base DDL. A full ingest drops it before streaming chunk writes and rebuilds it after the queues drain. Small scan and reconciliation runs leave it in place.
+The BM25 lexical index is a `pg_textsearch` index over `chunks.chunk_text` using the `simple` text configuration. It is not part of the base DDL. It remains available during ingestion and is created idempotently after a bounded run drains. Shared passage text still supplies the lexical index; returned candidate text comes from the exact placement slice of the owning document.
 
 ### 2.4 Schema bootstrap
 
@@ -102,7 +75,7 @@ Startup verifies that the endpoint’s model and vector width match `schema_meta
 
 **Target state:** a model change is handled as an explicit re-embed into a distinct model namespace, with the existing namespace remaining queryable until backfill and cutover complete. The migration and backfill workflow is not implemented.
 
-Applying the schema to an already-provisioned workspace adds structural changes it predates, including the email message tables in §2.5 and containment and object-cleanup tables in §6.5. Containment setup also seeds known parent links and changes the parent foreign key to `ON DELETE SET NULL`. The idempotent containment upgrade is available to maintenance commands without probing the embedding endpoint. Full containment backfill reads authoritative Tier 1 bytes separately.
+Structural source migration is transactional, repeatable, and recorded in `application_migrations`. It preserves document UUIDs and existing evidence, renames the source column, adds inventory and jobs, and refuses unresolved legacy object-deletion requests. Canonical text gains an exact SHA-256; existing text is labelled `legacy-canonical`, and new extraction uses `canonical-v1`. This version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately. See the operational compatibility gate in [README §11](../README.md#11-upgrade-and-teardown).
 
 ### 2.5 Email message metadata and conversations
 
@@ -123,15 +96,15 @@ A conversation is a connected component of the identifier graph. A message's ide
 
 Indexes cover conversation lookup, exact address-and-kind matching, exact sender-domain matching, the `sent_at DESC NULLS LAST, doc_id DESC` browse keyset, the `ingested_at` watermark, and identifier and component lookup.
 
-One message's metadata is written in a single transaction, serialized per workspace so that concurrent workers cannot plan a component merge against a graph the other is rewriting. The write is idempotent for a given `doc_id`: mailboxes and reply headers are replaced rather than appended, and component identity is derived from identifiers rather than minted per run, so re-ingesting a message from Tier 1 reproduces the same conversation.
+One message's metadata is written in a single transaction, serialized per workspace so that concurrent workers cannot plan a component merge against a graph the other is rewriting. The write is idempotent for a given `doc_id`: mailboxes and reply headers are replaced rather than appended, and component identity is derived from identifiers rather than minted per run, so re-ingesting a message from verified originals reproduces the same conversation.
 
 #### Reprocessing existing documents
 
-`--reprocess-email-metadata` is the supported way for documents older than these tables to gain the metadata. It walks one workspace's email message documents in `doc_id` order, reads each one's authoritative Tier 1 object, and writes the result through the same parser, the same header mapping, and the same repository transaction the email worker uses. There is no second parser and no second write path.
+`--reprocess-email-metadata` is the supported way for documents older than these tables to gain the metadata. It walks one workspace's email message documents in `doc_id` order, reads each one's authoritative original source, and writes the result through the same parser, the same header mapping, and the same repository transaction the email worker uses. There is no second parser and no second write path.
 
-It is a maintenance walk rather than an ingest: nothing is uploaded, enqueued, extracted, re-chunked, or re-embedded, and the `documents` row, its text, its thread id, and its processing status are left untouched. Archives and non-email documents are out of scope. An email row with no Tier 1 object is selected and reported as unreadable; it is never rebuilt from Tier 2 values. Concurrency is bounded, the keyset cursor makes an interrupted run resumable, and cancellation stops the walk and reports what it completed.
+It is a maintenance walk rather than an ingest: nothing is admitted, enqueued, extracted, re-chunked, or re-embedded, and the `documents` row, its text, its thread id, and its processing status are left untouched. Archives and non-email documents are out of scope. An email row with no original source is selected and reported as unreadable; it is never rebuilt from Tier 2 values. Concurrency is bounded, the keyset cursor makes an interrupted run resumable, and cancellation stops the walk and reports what it completed.
 
-A run reports processed, updated, unreadable, and failed counts, with a closed set of reason codes behind the last two. `unreadable` is a document whose Tier 1 bytes could not be read at all; `failed` is bytes that were read and could not be turned into metadata. Neither is repaired and neither is skipped silently — nothing but the message can say what the message said — and a run that ends with either count above zero exits with failure. `--dry-run` reports the same counts without writing, `--reprocess-missing-only` narrows selection to documents with no metadata row yet, and `--reprocess-limit` bounds one run. Only aggregate counts and closed-set outcome codes are logged: no subject, address, identifier, or source path reaches a summary or a log line.
+A run reports processed, updated, unreadable, and failed counts, with a closed set of reason codes behind the last two. `unreadable` is a document whose original bytes could not be read at all; `failed` is bytes that were read and could not be turned into metadata. Neither is repaired and neither is skipped silently — nothing but the message can say what the message said — and a run that ends with either count above zero exits with failure. `--dry-run` reports the same counts without writing, `--reprocess-missing-only` narrows selection to documents with no metadata row yet, and `--reprocess-limit` bounds one run. Only aggregate counts and closed-set outcome codes are logged: no subject, address, identifier, or source path reaches a summary or a log line.
 
 Reply edges are derived per conversation at read time: an unambiguous `In-Reply-To` owner is `in_reply_to`; otherwise the nearest resolvable `References` ancestor is `references_recovery`. Ambiguous, damaged, or unavailable linkage is `unresolved` with warnings, and a message with no parent evidence is `root`. Exact browse, conversation fetch, and awaiting-reply queries read these tables, using configured workspace owner identities for direction; their semantics are described in [retrieval design](retrieval-design.md).
 
@@ -145,53 +118,19 @@ The build's `--dry-run` makes the same bounded selection and local extraction ca
 
 Topic relations and episodes are a second replaceable BUILDING-only layer in the same graph version. Each accepted local classification records its method and version and its two endpoint mentions as support. Repository validation proves fixed-workspace/version membership, applies the `sent_at` then immutable `doc_id` ordering (`NULL` dates sort last), and rejects cycles before a supported candidate becomes an edge. Episodes are recreated only as undirected connected components of supported edges, so declined candidates and similar or identically labelled mentions do not join one. Finalization, promotion, retirement, and removal are separate explicit CLI operations. The fixed-workspace, transport-independent topic timeline service reads only the active graph. It accepts server-issued opaque mention or episode references, pins the active graph version in a read snapshot, and walks supported edges backward and forward under explicit depth, node, cited-source-byte, and latency bounds. It returns chronologically ordered source-range citations, relation type and confidence, graph version, warnings, and omitted-node counts. Labels are never returned as evidence or facts; every returned node has validated canonical document ranges. Retrieval may opt in to graph expansion only after ordinary packet selection, using high-confidence validated spans and the shared evidence budget; it never displaces ordinary packets. The fixed-workspace `topic_timeline` MCP tool exposes bounded timeline reads under the same source-evidence and response-bound rules.
 
-## 3. Upload and discovery
+## 3. Discovery and reconciliation
 
-### 3.1 Workspace resolution
+The workspace's `paths` and ordered ignore rules define eligible regular files. Relative roots resolve against the registry directory, and multiple roots require distinct basenames. Each scan fully reads and hashes originals, including unchanged mtime/size observations. Platform metadata files are excluded. There is no watcher dependency; `--listen` scans at startup and every minute. Changes to registry configuration require restarting the process.
 
-`--ingest-all` resolves the named workspace's one or more directories from `workspaces/workspaces.yaml`, or the configured override, before touching a store. An unknown workspace id is an error, as is a configured path that does not exist or is not a directory, or a repeated path.
+Each accepted original commits its conflict-safe document stub, source occurrence, and next-stage outbox job together. Completed, skipped, and failed documents are not automatically re-extracted. Existing containers are replayed to refresh known member routes. New supported plain text commits canonical text and its embed job together.
 
-A workspace's paths are resolved relative to the registry file. Only the uploader reads them; workers and retrieval never do. There is no further subdivision inside a workspace — no collection, no per-subdirectory registry metadata — the uploader walks each configured directory recursively and every regular file found under any of them, at any depth, is a candidate document unless the workspace's `ignore` patterns exclude it.
+Discovery stops at the configured high-water mark of unfinished durable jobs and resumes at the low-water mark. Its live raw input buffer is one file. A container can add at most its bounded member count of downstream jobs in one transaction, so fan-out can temporarily exceed the intake threshold.
 
-`ignore` is the operator's answer to "which staged files are not documents?". A staging directory is rarely all corpus: a mail client's profile carries its index databases beside the mail, and discovery cannot rescue this by classifying better — Thunderbird's Mork indexes genuinely are text, and a 40 MB one indexes as ~19,000 chunks of scaffolding. Only whoever chose the directory knows what belongs. The patterns are the familiar ones (`*`, `**`, `?`, `[abc]`, and `!` to re-include), a pattern without a slash matches the file's name at any depth while one containing a slash matches the whole path relative to the directory it was found under, and the last matching rule decides. They are compiled and validated when the registry loads, so a malformed pattern stops the run before it walks anything, and the count of what they excluded is reported on every upload so a pattern that quietly matches nothing is visible. The same patterns apply to pruning (§6.5): "staged" has to mean one thing, so content a pattern excludes is not staged, and a document indexed before the pattern existed is one whose source the workspace has since disowned — which is what makes adding a pattern remove what it matches on the next complete ingest. When a workspace configures more than one path, their basenames must be distinct: a document's recorded source path is relative to whichever directory it came from, disambiguated by that directory's basename, and the registry is rejected at load time if two configured paths would make that disambiguation ambiguous.
+`--ingest-all` binds known sources and prunes before starting workers unless `--no-prune` is selected. `--scan` performs additive discovery and drains work. `--reconcile` refreshes sources and reissues unfinished jobs, including broker-lost commands, with a new dispatch generation. Legacy nonterminal rows without durable jobs are admitted from existing normalized text or verified originals. Terminal failures require explicit recovery.
 
-### 3.2 Upload
+`--ingest-all --dry-run` only hashes configured files and reports file/byte counts. It opens no database, broker, or model connection and writes no derived state.
 
-For every regular file found under any of the workspace's directories, at any depth, the uploader:
-
-1. streams the file and computes SHA-256;
-2. forms the canonical `raw/` key;
-3. checks whether that exact key exists;
-4. uploads missing bytes with provenance metadata; or
-5. records a duplicate and, when necessary, adds an alias filename.
-
-The uploader does not classify formats. Discovery owns format knowledge so a format change has one routing authority.
-
-The uploader and worker clients use the same workspace RustFS identity. `rustfs.Vault` adds an application-level role guard: a worker-role client refuses writes or deletes under `raw/`, while an uploader-role client may perform them. This is a defence against application mistakes, not a RustFS credential boundary; [workspace isolation](workspace-isolation.md) owns that trade-off.
-
-### 3.3 Live notification path
-
-The chart configures one RustFS NATS notification target per workspace. `deploy-workspaces` binds that workspace’s bucket to its target for `s3:ObjectCreated:*` events under `raw/` only. Each target connects anonymously (NATS has no accounts, users, or passwords) and publishes into that workspace’s namespaced `RUSTFS_EVENTS_<SUFFIX>` stream.
-
-The discovery event worker:
-
-1. decodes the RustFS NATS payload;
-2. validates the canonical `raw/` key;
-3. fetches the object and provenance;
-4. verifies that the object bytes match the key hash;
-5. creates a deterministic Tier 2 stub;
-6. classifies the bytes; and
-7. publishes the corresponding Protobuf command.
-
-Events for invalid keys are rejected or ignored without allowing worker-produced `extracted/` objects to become roots.
-
-### 3.4 Exact reconciliation
-
-Notifications reduce latency; reconciliation remains the completeness authority. `--scan` and `--ingest-all` enumerate `raw/`, compare object URIs with Tier 2, and identify objects without document rows.
-
-For each gap, discovery uses the uploader-role vault to perform a same-object copy that preserves metadata. RustFS emits a fresh notification, so both new uploads and reconciled gaps enter through the same event worker.
-
-The scan applies high- and low-water marks to the main stream. It pauses above 10,000 pending messages and resumes at or below 2,000 so enumeration cannot outrun extraction indefinitely.
+`--audit-sources` reads configured files and recursively checks the hashes of retained documents. The conservative audit requires a known original document at each replay chain's root. It reports aggregate availability and parsing failures without persisting anything. `--bind-sources` requires that coverage, persists occurrences and replay recipes, verifies resolvability, and completes containment backfill. Unresolved coverage blocks object-store retirement.
 
 ## 4. Routing and extraction
 
@@ -218,8 +157,8 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - records headers in structured columns;
 - persists the durable message metadata and conversation assignment described in §2.5;
 - derives thread ids from message headers, with subject/participant/date fallback;
-- writes child bytes under `extracted/`;
-- creates child stubs before publishing child commands; and
+- records child replay selectors and containment without persisting child bytes;
+- commits child stubs and all downstream job intents with the parent stage; and
 - enforces nesting and expansion bounds for hostile containers.
 
 Child commands carry `parent_doc_id`, thread context, depth, and the parent trace id. Root creation remains exclusive to discovery.
@@ -248,95 +187,45 @@ Discovery writes supported plain text directly to `documents.normalized_text` be
 
 ## 5. Commands and queues
 
-Every ingestion command is Protobuf and begins with `DocumentMetadata` containing document identity, workspace, lineage, MIME type, content hash, trace context, and container depth.
+Every ingestion command is Protobuf and begins with `DocumentMetadata` containing document identity, lineage, MIME type, content hash, trace context, and container depth.
 
 | Command | Subject | Payload role |
 | --- | --- | --- |
-| `ProcessEmailCommand` | `ingest.emails.raw` | Tier 1 URI and metadata |
-| `ProcessPdfCommand` | `ingest.pdfs.raw` | Tier 1 URI and metadata |
-| `ProcessOfficeCommand` | `ingest.docx.raw` | Tier 1 URI, subtype, metadata |
-| `ProcessImageCommand` | `ingest.images.raw` | Tier 1 URI, dimensions, size, metadata |
+| `ProcessEmailCommand` | `ingest.emails.raw` | source reference and metadata |
+| `ProcessPdfCommand` | `ingest.pdfs.raw` | source reference and metadata |
+| `ProcessOfficeCommand` | `ingest.docx.raw` | source reference, subtype, metadata |
+| `ProcessImageCommand` | `ingest.images.raw` | source reference, dimensions, size, metadata |
 | `EmbedTextCommand` | `ingest.text.embed` | document reference and text length |
 
 Extracted text is written to Tier 2 before an embed command is published. This keeps large OCR output below NATS payload limits and gives `normalized_text` one durable owner.
 
-The workspace has three streams:
+The workspace has two namespaced streams: `INGESTION` with work-queue retention over the five stage subjects, and `INGESTION_DLQ` with limits retention for terminal failures. `deploy-workspaces` provisions both. There is no notification stream. Protobuf commands reserve retired field number 2 and carry the source reference in field 10; old and new consumers must not overlap.
 
-- `INGESTION`: work-queue retention over the five command subjects;
-- `INGESTION_DLQ`: limits retention for terminal failures; and
-- `RUSTFS_EVENTS`: work-queue retention for native RustFS events, with a 10-minute duplicate window.
+## 6. Durable handoff, failure and retention
 
-Streams are created by `./pocket-advisor.sh deploy-workspaces`, not by the Go process.
+### 6.1 Transactional jobs
 
-## 6. Idempotency and failure handling
+`ingestion_jobs` is both the durable work record and transactional outbox. Its unique identity is document, stage subject, and content revision; embedding also binds the canonical-text hash. Payloads contain references and metadata, never document bodies. A dispatcher leases READY entries for 30 seconds, publishes with acknowledgement, and records DISPATCHED. `Nats-Msg-Id` combines immutable job ID and dispatch generation. Failed or ambiguous publication retries the same identity.
 
-### 6.1 Stub then publish
+The runtime verifies job identity, subject, exact stored payload, and dispatch generation. A transaction advisory lock and row lock serialize duplicate deliveries; stale generations and jobs removed by pruning acknowledge as no-ops. The handler's writes, child/embedding intents, and COMPLETED state commit together. Nested repositories use savepoints on the stage transaction. Completed jobs are not rerun even after the broker deduplication window expires.
 
-Discovery and the email worker create a Tier 2 stub before publishing work. The database commit and JetStream publish are separate operations, so a crash can leave a `PENDING` row without a queued command.
+The current implementation holds one database transaction through extraction/model work, bounded by the one-hour handler deadline. This favors atomicity and requires monitoring long transactions and vacuum pressure. A process-wide job gate reserves three pool connections for scanning, dispatch, and maintenance; ingestion requires at least four connections. A future short-transaction claim/fence design must preserve the same commit guarantees.
 
-Publishing waits for a JetStream acknowledgement and retries with bounded backoff. `--reconcile` claims up to 500 rows that have remained `PENDING` beyond `--stale-after` and republishes them.
+### 6.2 Failures and recovery
 
-### 6.2 Worker idempotency
+Consumers acknowledge explicitly, permit unlimited broker redelivery, and heartbeat under the bounded handler deadline. Expected declines commit SKIPPED without dead-lettering. Transient failures use jittered delayed NAK. Terminal failures, or errors reaching the application retry threshold, publish the original command to the DLQ before atomically recording failed job/document state; failed DLQ publication requests another delivery.
 
-- Stub creation uses conflict-safe insertion.
-- Tier 1 child writes are content-addressed.
-- Chunk replacement deletes and reinserts one document’s chunks within the same transaction that marks the document complete.
-- Duplicate command delivery redoes work for the same deterministic document rather than creating another document.
+A missing or changed source records WAITING_SOURCE with a closed reason and acknowledges the broker message. Complete listener scans retry source waits; an explicit reconciliation also retries them. No changed bytes replace the expected revision. A finite run reports waiting and failed jobs as unresolved, even when broker queues are empty.
 
-### 6.3 Delivery and dead letters
+A process crash before stage commit leaves no partial stage effects. A crash after commit but before acknowledgement produces a completed-job no-op. A crash after outbox commit but before publication leaves READY work. Broker message loss is repaired from DISPATCHED jobs by explicit reconciliation with a new generation. `--recover --yes` resets only planner-approved retryable states and redrives their unfinished durable jobs; completed jobs stay complete.
 
-Consumers use explicit acknowledgements, unlimited broker redelivery (`MaxDeliver = -1`), and a five-minute `AckWait`. The application sends terminal failures, or non-shutdown errors on the third or any later delivery, to the DLQ. Shutdown cancellation requests redelivery without a DLQ verdict. NAK does not reset the delivery count; unlimited broker delivery keeps work resumable after repeated cancellations or crashes. Consumer startup updates existing durable consumers to this configuration. While a handler runs, the runtime sends `InProgress` heartbeats so legitimate long OCR work does not expire its acknowledgement window.
+### 6.3 Pruning and maintenance
 
-Both the heartbeat and the handler are bounded by one budget, `maxHandlerRuntime` (one hour, against a worst legitimate document of roughly fifteen minutes of OCR). A heartbeat that renews without end reports a wedged handler as healthy indefinitely, and the broker will not reassign work it believes is in hand: an overloaded embedding endpoint once wedged eighteen handlers whose heartbeats held eighteen messages against a 49,000-message backlog, and only killing the process cleared it. Past the budget the runtime stops renewing, `AckWait` lapses, and the message is redelivered; the handler's own context expires with it, so the lane is released rather than occupied for the life of the process. Workers are idempotent, so a redelivery overlapping a handler that is still alive is safe.
+A workspace-scoped advisory maintenance lock serializes ingestion, binding, recovery, forgetting, and destructive sweeps. Workers run only after the pre-ingest sweep. Retention is transitive reachability from current source hashes through all containment edges, so duplicate files and shared attachments survive while any configured route retains them.
 
-A transient failure requests redelivery after a jittered backoff rather than immediately. An immediate request only helps when the next attempt has some reason to succeed, and under a failing dependency it has none — the embedding breaker refuses instantly for thirty seconds after tripping, so an undelayed retry spends all three delivery attempts inside one cooldown and dead-letters work that was never broken. The backoff starts above that cooldown, doubles per delivery to a five-minute ceiling, and spreads half its width randomly so a batch that fails together does not return together.
+Absence-based pruning requires complete traversal, a nonempty source set, complete containment backfill, and a deletion share within `--prune-max-share` (default 10%). A share refusal prints the plan and continues additive ingestion without deleting. Missing roots or incomplete traversal fail the run. `--reconcile-deletions` prepares derived inventory/containment and previews the plan; applying requires `--yes` and confirmation. The preview may refresh derived state but never deletes documents or writes original files.
 
-Terminal failure handling:
-
-1. marks the message terminal rather than requesting another delivery;
-2. republishes the original payload to `ingest.dlq`;
-3. records failure reason, worker, delivery count, original subject, and trace context in headers; and
-4. updates the document to `FAILED`.
-
-Failure reasons are a closed `domain.FailureReason` vocabulary. Unclassified failures use `UNCLASSIFIED` so missing classification stays visible.
-
-Expected declines set `SKIPPED` and never create DLQ entries.
-
-### 6.4 Current recovery boundary
-
-Reconciliation republishes stale `PENDING` rows only. Rows left `PROCESSING` by an interrupted handler and rows marked `FAILED` require an explicit reset or forget-and-ingest workflow. Automated redrive needs a durable distinction between transient and terminal failures and remains an open design decision.
-
-### 6.5 Pruning
-
-A document is retained when it is reachable from content the workspace currently stages: either its own bytes are staged, or something reachable contains it. Everything else is residue — a file deleted from a staging directory, a file an `ignore` pattern now excludes, an attachment whose only carriers were either of those — and `--ingest-all` removes it before its pools start. `--reconcile-deletions` reaches the same sweep explicitly, without ingesting, which is how a plan is inspected before being allowed. `--no-prune` skips it.
-
-Reachability, rather than reference counting, because containment nests: an archive inside an email, an email attached to an email. Removing one container orphans a subtree rather than a row, so a single pass over direct references would leave the tail behind. The recursive term is a `UNION`, which terminates on its own if lineage were ever cyclic.
-
-Candidacy is decided by content, never by filename. Documents are deduplicated on `raw_sha256`, so one document records only the first path its bytes were staged at, while the same bytes commonly sit under several names; judging by path would call a document deleted while its content is still present, and the next ingest would re-upload it under a new `doc_id`, invalidating anything that referenced the old one. The command therefore hashes every one of the workspace's staging directories each run, under the same `ignore` patterns the upload used — a sweep judging a wider or narrower set of files than the upload did would delete what was just added.
-
-#### Containment, and why parent_doc_id cannot answer this
-
-`documents.parent_doc_id` is a single column and content identity is unique per workspace, so an attachment carried by two emails is one row whose parent points at whichever email was processed first; the second email's containment was discarded at `ON CONFLICT`. That is the right shape for provenance — "where did this come from" wants one answer, and the read path resolves the nearest ancestor holding a source path through it — and it cannot answer the question deletion asks, which is whether anything still holds this. Pruning through `parent_doc_id` would cascade a shared attachment away with whichever email happened to own the link, silently stripping it from an email nobody asked to remove, and leaving no record it had been there.
-
-`document_placements` answers containment instead, one row per containment, written for every child an extraction observes including those whose content was already known. `documents.parent_doc_id` keeps answering provenance, and its foreign key is `ON DELETE SET NULL` rather than `CASCADE`: deletion is the sweep's decision, and a survivor whose provenance pointed at a removed container is repointed at one that remains. Extra placement rows are safe and missing ones are not — an edge too many retains a document that could have gone, an edge too few deletes one something still holds — so every writer errs toward more.
-
-#### Durable object cleanup
-
-Deleting document rows queues their content hashes in `pending_object_deletions` in the same PostgreSQL transaction. Both `raw/` and `extracted/` objects are removed for each hash, and its request is cleared only after both removals succeed. Cleanup errors fail the command and keep the outstanding request, even though the document row is gone. Ingestion, scan, reconciliation, and listener startup finish pending cleanup before starting intake; `--no-prune` disables new pruning but does not cancel an already committed deletion. Discovery and stub creation reject content while its cleanup request is pending. A later successful upload can reintroduce content after cleanup. A successful whole-bucket wipe clears pending requests.
-
-`--ingest-all --dry-run` returns after a read-only upload preview. It opens no database, broker, or model connection and performs no schema upgrade, containment backfill, pruning, indexing, or queue work. `--reconcile-deletions` is a separate deletion preview: it prepares the derived containment schema and backfill, then reports the plan without deleting until `--yes` and confirmation.
-
-#### Guards
-
-Pruning requires complete containment, a nonempty staging set, and an acceptable deletion share.
-
-Run only one ingestion or deletion process per workspace at a time. Within ingestion, the sweep runs before the pools start: a child's row exists for the moment between being stubbed and having its containment recorded, and a sweep landing in that window would read it as unheld. Running first rather than last is also what stops a run finishing work it is about to discard — a 40 MB index file that an `ignore` pattern has just disowned would otherwise be embedded to completion, at every one of its delivery attempts, before being deleted. The cost is one run's lag: a file removed while this run is walking is swept by the next. Pruning converges, so a lag is the cheap direction to be wrong in.
-
-Because the queues are not transactional with the sweep, work enqueued by an earlier run can name a document this one has deleted. Every downstream write then fails for a reason that is not the work's fault, so the runtime acks it as `DOCUMENT_PRUNED` rather than dead-lettering: a DLQ entry whose document an operator cannot go and inspect is not actionable.
-
-It refuses while `schema_metadata.placements_backfilled_at` is unset. A workspace provisioned before this table has placements seeded from `parent_doc_id`, which reproduces exactly the single-parent under-count described above; sweeping against that floor deletes shared attachments. The containment backfill re-derives what each container holds by re-reading its Tier 1 bytes through the same unrolling the email worker uses, and runs once, automatically, the first time a sweep would otherwise have been unsafe. It is all-or-nothing: anything unreadable leaves the marker unset and pruning refused.
-
-It refuses a sweep larger than a tenth of the corpus (`--prune-max-share`). An unmounted volume, a half-finished mail sync and a deliberately emptied folder all present as fewer files, and only one of them means the documents should go. `ErrStagingEmpty` already refuses the total case; this refuses the shape of it. A refusal reports the plan and continues with additive intake without deleting, and `--reconcile-deletions`, where an operator reads the plan and is asked to confirm, runs without the ratio because that reading is the better check.
+Deletion removes derived rows, their jobs and placements, and unreferenced passages in a transaction. The parent foreign key is `ON DELETE SET NULL`; surviving display provenance is repointed where possible. Source occurrence/member tables provide the full citation paths. No object cleanup queue exists.
 
 ## 7. Chunking and embedding
 
@@ -357,7 +246,6 @@ One process constructs shared store clients, model clients, logging, metrics, an
 
 | Pool | Lanes |
 | --- | --- |
-| RustFS event discovery | `2 × CPU` |
 | email | `2 × CPU` |
 | PDF | `CPU` |
 | image | `CPU` |
@@ -365,30 +253,21 @@ One process constructs shared store clients, model clients, logging, metrics, an
 | embedding | `2 × CPU` |
 | rasterisation and OCR CPU semaphore | `CPU` shared slots |
 
-Embedding concurrency is separately configurable because it is a capacity limit of the model endpoint rather than the host CPU. PostgreSQL’s pool is sized above the combined lane demand.
+Embedding concurrency is separately configurable because it is a capacity limit of the model endpoint rather than the host CPU. The database job gate limits concurrent stage transactions independently of lane count.
 
 PDFium uses the wazero WebAssembly backend. Its instance pool is lazy and sized to the document lanes. Tesseract uses CGo. PDF rasterisation remains serial per document, while page OCR can run concurrently under the shared semaphore and stores results by page index.
 
 ## 9. Run lifecycle
 
-`--ingest-all`, `--scan`, and `--reconcile` start all pools before feeding work, then wait until every consumer is idle and every queue has remained empty for a three-second settling period. The settling window prevents a run from finishing during the brief gap between a parent completing and its child commands becoming visible.
+A finite run starts the dispatcher and all stage pools, completes discovery, and waits for both unfinished durable jobs and broker/in-flight work to remain empty for three seconds. WAITING_SOURCE and FAILED jobs are reported as unresolved. A listener scans periodically and runs until interrupted.
 
-`--listen` starts the same pools and waits until interrupted. It does not upload or scan.
-
-Interrupt handling has two stages:
-
-1. the first signal stops fetching and allows in-flight handlers to finish and acknowledge;
-2. a second signal, or expiry of the drain grace period, cancels active handlers.
-
-Resume state is composed from Tier 1 objects, Tier 2 rows, and durable JetStream messages. No separate checkpoint file exists.
+The first interrupt stops intake and fetching while handlers drain. A second interrupt or grace-period expiry cancels handlers. Downstream intents committed during shutdown remain durable for the next run even if no dispatcher remains active.
 
 ## 10. Reset semantics
 
-`--forget <sha256>` upgrades and backfills containment when needed, then deletes the selected document and its exclusively held descendants. Descendants recorded as independently staged, or reachable through another container, remain. Surviving provenance is repointed where possible. Every deleted content hash enters the same durable object cleanup as pruning, including hashes belonging to descendants. Repeating the command resumes cleanup even when the selected row is already gone. Shared passage rows without remaining placements are retained until an explicit storage cleanup is introduced.
+`--forget <sha256>` removes the selected document and exclusively held descendants from derived state, retains independently present or shared descendants, and collects orphan passages. It never edits an original. A later scan can reintroduce still-configured bytes; persistent exclusion belongs in `ignore`.
 
-`--delete-data` removes all objects and document-related PostgreSQL rows for the workspace, clears completed object-cleanup requests, and purges `INGESTION`, `INGESTION_DLQ`, and `RUSTFS_EVENTS`. Like `--forget`, it currently retains shared passage rows released by the operation until an explicit storage cleanup is introduced. It requires all three stores to be reachable before beginning and prompts unless `--yes` is supplied. Reset operations update PostgreSQL, RustFS, and NATS in a defined order but are not transactional across stores; rerunning after a partial failure converges the remaining work.
-
-The uploader never treats absence from a later local scan as deletion.
+`--delete-data` clears documents, email identifier nodes, topic graph versions, passages, source inventory, jobs, and both workspace queues. Original files and configuration remain unchanged. PostgreSQL deletion is transactional, while broker purge is a separate idempotent step; rerun after a partial failure. Purged or delayed commands naming removed jobs cannot resurrect deleted documents.
 
 ## 11. Observability
 
@@ -398,11 +277,7 @@ Implemented metrics include:
 
 | Metric | Purpose |
 | --- | --- |
-| `rag_uploader_files_total{outcome}` | uploaded, duplicate, failed files |
-| `rag_uploader_bytes_total` | Tier 1 ingress bytes |
 | `rag_discovery_files_total{mode,outcome}` | discovery and reconciliation outcomes |
-| `rag_discovery_unstubbed_objects` | Tier 1 gaps found by reconciliation |
-| `rag_discovery_stale_pending` | stale rows found by reconciliation |
 | `rag_ingestion_tasks_total{worker,status}` | worker terminal outcomes |
 | `rag_ingestion_duration_seconds{worker,doc_type}` | stage latency |
 | `rag_pdf_classification_total{type}` | digital and scanned routing |
@@ -413,19 +288,17 @@ Implemented metrics include:
 
 The process creates and propagates W3C `traceparent` values and records their trace ids in logs. It does not currently export spans to an external tracing backend.
 
-During ingestion, the terminal dashboard owns stdout and shows uploader progress, queue depth, active lanes, retry/skip/dead-letter counts, CPU slots, embedding sessions, and PostgreSQL pool use. Non-terminal output falls back to summaries. `--query` and the `mcp` subcommands log to stderr instead of role files. Current ingestion logs include local source paths and filenames for diagnosis; `logs/` is gitignored and must be treated as private workspace material.
+During ingestion, the terminal dashboard owns stdout and shows source scan progress, queue depth, active lanes, retry/skip/dead-letter counts, CPU slots, embedding sessions, and PostgreSQL pool use. Non-terminal output falls back to summaries. `--query` and the `mcp` subcommands log to stderr instead of role files. Current ingestion logs include local source paths and filenames for diagnosis; `logs/` is gitignored and must be treated as private workspace material.
 
 ## 12. Deployment boundary
 
-The `pocket-advisor-infra` chart deploys one shared StatefulSet and Service for each store. Store administrator identities (`postgres`, RustFS `admin`/`admin`) are hardcoded literals in the chart; there is no private values file and no per-workspace credential of any kind. `./pocket-advisor.sh deploy-workspaces` creates, for every registered workspace, its database, role, extensions, bucket, public policy, notification binding, and streams.
+The chart deploys only PostgreSQL and NATS. Workspace provisioning creates database/role/extensions and the two namespaced streams. The host process reads configured original directories and uses only its fixed workspace's clients. Source access, authentication, and the local trust model belong to [workspace isolation](workspace-isolation.md).
 
-The binary never holds store administrator credentials. It connects as the selected workspace and applies only the dimension-dependent application schema.
-
-**Target state:** an authenticated control plane records and dispatches ingestion operations to a host agent using this same bounded process. Moving ingestion into Kubernetes requires deliberate designs for source upload and model/OCR access; it is not implied by the target API. See [API Server Design](api-server-design.md).
+An authenticated future control plane may dispatch operations to a host agent using this same bounded process. Moving extraction elsewhere requires deliberate, confined access to originals and local models; it is not implied by the target API.
 
 ## 13. Verification
 
-The supported checks are documented in [README §9](../README.md#9-verification). Ingestion changes normally require:
+The supported checks are documented in [README §10](../README.md#10-verification). Ingestion changes normally require:
 
 ```sh
 ./pocket-advisor.sh build
@@ -436,22 +309,12 @@ git diff --check
 git status --short
 ```
 
-Manual checks should confirm:
-
-- an idempotent second upload performs no object writes;
-- scan-triggered notification processing closes every Tier 1/Tier 2 gap;
-- interrupted work resumes without duplicate chunks;
-- unsupported inputs are skipped without DLQ entries;
-- terminal failures carry diagnostic DLQ headers;
-- chunk offsets resolve byte-for-byte into `normalized_text`;
-- the BM25 index exists after a full ingest; and
-- no table contains generated answer text.
+Synthetic integration checks cover stage rollback, duplicate delivery, broker purge and redispatch, source schema migration, partial scans, shared locations, unchanged second ingestion, rename identity, hybrid retrieval, and derived-only reset. Source tests cover content changes preserving size/mtime, alternative container routes, repeated member names, replay bounds, missing roots, traversal, symlinks, and cross-root scope. Run manual tests only against disposable PostgreSQL/NATS as described in the README.
 
 ## 14. Open decisions
 
-1. **Schema migrations and model changes.** The current bootstrap only creates an empty schema and rejects model or dimension drift. A migration runner and a resumable namespace backfill are required before changing a populated index.
-2. **Failed and processing redrive.** Recovery needs transient/terminal classification, attempt history, and an operator surface that does not retry permanently corrupt documents on every ingest.
-3. **Storage durability.** The local deployment uses one replica per store and has no integrated backup workflow. Tier 1 loss is corpus loss unless external source material or a separate backup exists.
-4. **PostgreSQL contention.** Bulk writes and retrieval share one server. Measure query latency during ingest before introducing workload separation.
-5. **Horizontal ingestion.** Pool sizes assume one host process. Multiple processes can share JetStream, but CPU and lifecycle coordination are not designed.
-6. **Log retention.** Role logs append across runs and have no built-in rotation policy.
+- A resumable model/extractor namespace upgrade needs deliberate revision fingerprints and cutover; it is not automatic re-embedding.
+- Measure long-transaction contention, query latency during ingestion, and container replay costs before increasing concurrency.
+- Define a source-version retention and coordinated database/source backup policy. One local replica is not a backup.
+- Watcher acceleration and configurable scan intervals can follow measured freshness and I/O needs.
+- Log rotation and a shorter transactional claim/fence implementation remain operational improvements.

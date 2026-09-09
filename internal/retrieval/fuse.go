@@ -88,7 +88,7 @@ fused AS (
            COALESCE(1.0 / ($6 + d.rank), 0) + COALESCE(1.0 / ($6 + l.rank), 0) AS rrf
     FROM dense d FULL OUTER JOIN lexical l USING (chunk_id)
 )
-SELECT f.chunk_id::text, p.doc_id::text, d.thread_id, c.chunk_text,
+SELECT f.chunk_id::text, p.doc_id::text, d.thread_id, convert_from(substring(convert_to(d.normalized_text,'UTF8') from p.start_char_offset+1 for p.end_char_offset-p.start_char_offset),'UTF8'),
        p.start_char_offset, p.end_char_offset,
        f.dense_rank, f.lex_rank, f.rrf
 FROM fused f

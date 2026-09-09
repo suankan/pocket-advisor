@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/source"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -71,6 +74,7 @@ type DocumentStore interface {
 }
 
 type Runtime struct {
+	Jobs    *postgres.Jobs
 	Name    string
 	Bus     DeadLetterer
 	Docs    DocumentStore
@@ -345,7 +349,35 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	// one of a pool's lanes for the life of the process, so the queue would
 	// move while the pool it moves through slowly narrowed to nothing.
 	handlerCtx, cancelHandler := context.WithTimeout(ctx, maxHandlerRuntime)
-	err := r.invoke(handlerCtx, msg, h)
+	err := r.invoke(handlerCtx, msg, func(ctx context.Context, msg jetstream.Msg) error {
+		if r.Jobs == nil {
+			return h(ctx, msg)
+		}
+		generation, e := strconv.ParseInt(msg.Headers().Get(postgres.GenerationHeader), 10, 64)
+		if e != nil || generation < 1 {
+			return Fatal(domain.ReasonMalformedCommand, postgres.ErrInvalidJob)
+		}
+		var declined error
+		err := r.Jobs.Run(ctx, msg.Headers().Get(postgres.JobHeader), r.Subject, msg.Data(), func(ctx context.Context) error {
+			err := h(ctx, msg)
+			var d *Declined
+			if errors.As(err, &d) {
+				if err := r.Docs.UpdateStatus(ctx, d.DocID, domain.StatusSkipped, d.Reason); err != nil {
+					return err
+				}
+				declined = err
+				return nil
+			}
+			return err
+		}, generation)
+		if errors.Is(err, postgres.ErrInvalidJob) {
+			return Fatal(domain.ReasonMalformedCommand, err)
+		}
+		if err == nil && declined != nil {
+			return declined
+		}
+		return err
+	})
 	cancelHandler()
 	stopHeartbeat()
 	telemetry.IngestionDuration.WithLabelValues(r.Name, r.Subject).Observe(time.Since(start).Seconds())
@@ -363,12 +395,30 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
 		telemetry.Skipped.WithLabelValues(string(d.Reason)).Inc()
 		r.stat((*telemetry.Queue).Skipped)
-		if d.DocID != "" && r.Docs != nil {
+		if d.DocID != "" && r.Docs != nil && r.Jobs == nil {
 			if uerr := r.Docs.UpdateStatus(ctx, d.DocID, domain.StatusSkipped, d.Reason); uerr != nil {
 				r.Log.Error("record skip", "doc_id", d.DocID, "error", uerr)
 			}
 		}
 		r.Log.Info("declined", "reason", d.Reason, "doc_id", d.DocID)
+		_ = msg.Ack()
+		return
+	}
+
+	if errors.Is(err, postgres.ErrJobBusy) {
+		_ = msg.NakWithDelay(30 * time.Second)
+		return
+	}
+	if r.Jobs != nil && (errors.Is(err, source.ErrUnavailable) || errors.Is(err, source.ErrChanged)) {
+		reason := "SOURCE_UNAVAILABLE"
+		if errors.Is(err, source.ErrChanged) {
+			reason = "SOURCE_CHANGED"
+		}
+		if e := r.Jobs.Waiting(ctx, msg.Headers().Get(postgres.JobHeader), reason); e != nil {
+			_ = msg.NakWithDelay(time.Minute)
+			return
+		}
+		r.Log.Warn("ingestion waiting for source", "reason", reason)
 		_ = msg.Ack()
 		return
 	}
@@ -419,12 +469,20 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		if derr := r.Bus.ToDLQ(ctx, r.Subject, r.Name, string(reason),
 			msg.Headers().Get(bus.HdrTraceparent), deliveries, msg.Data()); derr != nil {
 			r.Log.Error("dlq publish failed", "error", derr)
+			_ = msg.NakWithDelay(time.Minute)
+			return
+		}
+		if r.Jobs != nil && !errors.Is(err, postgres.ErrInvalidJob) {
+			if e := r.Jobs.Fail(ctx, msg.Headers().Get(postgres.JobHeader), reason); e != nil {
+				_ = msg.NakWithDelay(time.Minute)
+				return
+			}
 		}
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "dlq").Inc()
 		telemetry.DLQ.WithLabelValues(r.Name, string(reason)).Inc()
 		r.stat((*telemetry.Queue).DeadLettered)
 
-		if id := docIDOf(err); id != "" && r.Docs != nil {
+		if id := docIDOf(err); id != "" && r.Docs != nil && r.Jobs == nil {
 			_ = r.Docs.UpdateStatus(ctx, id, domain.StatusFailed, reason)
 		}
 		r.Log.Error("terminal failure, routed to dlq",
@@ -495,8 +553,9 @@ func reasonOf(err error) domain.FailureReason {
 	}
 	// Deliberately not ReasonExtractionFailed. Defaulting to a real class made
 	// every unclassified error indistinguishable from a genuine extraction
-	// failure, which is how a RustFS outage came to be recorded as 44 broken
-	// documents. UNCLASSIFIED says the true thing: nobody named this path yet.
+	// failure, which is how a Tier 1 read outage came to be recorded as 44
+	// broken documents. UNCLASSIFIED says the true thing: nobody named this
+	// path yet.
 	return domain.ReasonUnclassified
 }
 

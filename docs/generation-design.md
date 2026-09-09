@@ -6,7 +6,7 @@ In the current system, the workspace-bound stdio MCP server returns retrieval ev
 
 ## Purpose and boundary
 
-Generation composes a cited answer from a retrieval result. It does not search PostgreSQL, fetch arbitrary RustFS objects, ingest content, modify the index, or decide which workspace a caller may access.
+Generation composes a cited answer from a retrieval result. It does not search PostgreSQL, open arbitrary original files, ingest content, modify the index, or decide which workspace a caller may access.
 
 The dependency is one-way: generation calls its paired retrieval service. Retrieval remains complete and usable without generation and never receives answer-model credentials.
 
@@ -30,7 +30,7 @@ The generation workload receives:
 - network access to the configured answer-model endpoint; and
 - only the credential needed for that model endpoint, if one is required.
 
-It receives no PostgreSQL, RustFS, NATS, provisioning, ingestion, or Kubernetes administrative credential. Giving generation direct storage access would create a second retrieval path and weaken the workspace boundary.
+It receives no PostgreSQL, source-filesystem, NATS, provisioning, ingestion, or Kubernetes administrative credential. Giving generation direct storage access would create a second retrieval path and weaken the workspace boundary.
 
 The gateway authenticates the caller, authorizes the workspace, and routes to the matching generation workload. A workspace value in the request cannot override that workload's configured scope.
 

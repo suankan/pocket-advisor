@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"strings"
 	"time"
 
@@ -471,55 +472,13 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 // carry SourcePath are skipped, so a page of ordinary staged mail issues no
 // query at all.
 func (p *PostgresStore) hydrateContainerPaths(ctx context.Context, msgs []Message) error {
-	var needed []string
-	for i := range msgs {
-		if msgs[i].SourcePath == "" {
-			needed = append(needed, msgs[i].DocID)
-		}
-	}
-	if len(needed) == 0 {
-		return nil
-	}
-	rows, err := p.db.Pool.Query(ctx, `
-        WITH RECURSIVE origins AS (
-            SELECT unnest($1::uuid[]) AS doc_id
-        ),
-        ancestry AS (
-            SELECT DISTINCT origin.doc_id AS origin, source.parent_doc_id,
-                   NULLIF(source.metadata_headers->>'source_path', '') AS source_path, 0 AS hops
-            FROM origins origin
-            JOIN documents source ON source.doc_id = origin.doc_id
-            UNION ALL
-            SELECT walk.origin, parent.parent_doc_id,
-                   NULLIF(parent.metadata_headers->>'source_path', ''), walk.hops + 1
-            FROM documents parent
-            JOIN ancestry walk ON walk.parent_doc_id = parent.doc_id
-            WHERE walk.source_path IS NULL AND walk.hops < 16
-        )
-        SELECT DISTINCT ON (origin) origin::text, source_path
-        FROM ancestry
-        WHERE source_path IS NOT NULL AND hops > 0
-        ORDER BY origin, hops`, needed)
+	locations, err := postgres.NewSourceRepo(p.db).Locations(ctx, docIDs(msgs))
 	if err != nil {
-		return fmt.Errorf("resolve message container paths: %w", err)
-	}
-	defer rows.Close()
-
-	paths := make(map[string]string, len(needed))
-	for rows.Next() {
-		var docID, path string
-		if err := rows.Scan(&docID, &path); err != nil {
-			return fmt.Errorf("read message container path: %w", err)
-		}
-		paths[docID] = path
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read message container paths: %w", err)
+		return err
 	}
 	for i := range msgs {
-		if msgs[i].SourcePath == "" {
-			msgs[i].ContainerPath = paths[msgs[i].DocID]
-		}
+		msgs[i].SourceLocations = locations[msgs[i].DocID]
+		msgs[i].SourcePath, msgs[i].ContainerPath = source.DisplayLocations(msgs[i].SourceLocations)
 	}
 	return nil
 }

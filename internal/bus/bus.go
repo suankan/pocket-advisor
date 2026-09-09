@@ -25,24 +25,8 @@ const (
 	SubjectEmbed  = "ingest.text.embed"
 	SubjectDLQ    = "ingest.dlq"
 
-	// SubjectRustFSEvents carries RustFS's own S3-shaped ObjectCreated/
-	// ObjectUpdated event JSON, published directly by RustFS's native NATS
-	// notify target — not a protobuf command, so it lives on its own stream
-	// rather than StreamName (ingestion-design.md §5.2).
-	SubjectRustFSEvents = "rustfs.events.raw"
-
 	StreamName = "INGESTION"
 	StreamDLQ  = "INGESTION_DLQ"
-	// StreamRustFSEvents holds RustFS's raw notify events. Separate from
-	// StreamName because it needs a much wider duplicate window: RustFS
-	// refuses to publish into a stream whose dedup window doesn't cover its
-	// own retry lifetime (~274s observed live), which StreamName's default
-	// does not need and should not carry.
-	StreamRustFSEvents = "RUSTFS_EVENTS"
-	// RustFSEventsDedupWindow must exceed RustFS's retry lifetime — live-
-	// verified against beta.12, which refused to publish into a stream with
-	// the 2-minute default. 10m leaves headroom.
-	RustFSEventsDedupWindow = 10 * time.Minute
 
 	// MaxDeliver is the application's failure threshold. Errors on the third
 	// or a later delivery go to the DLQ, except shutdown cancellations.
@@ -112,12 +96,7 @@ func (b *Bus) subject(bare string) string {
 	return b.workspaceID + "." + bare
 }
 
-// stream namespaces a bare stream-name constant to this connection's
-// workspace. Stream names, unlike subjects, disallow dots — this reuses the
-// same hyphen-to-underscore, uppercased suffix transform
-// charts/pocket-advisor-infra/templates/rustfs.yaml already applies to
-// workspace ids for its per-workspace notify env var names, so the two stay
-// visually consistent even though nothing enforces they must.
+// stream applies the same workspace suffix used by deploy-workspaces.
 func (b *Bus) stream(bare string) string {
 	suffix := strings.ToUpper(strings.ReplaceAll(b.workspaceID, "-", "_"))
 	return bare + "_" + suffix
@@ -143,7 +122,7 @@ func (b *Bus) Close() { b.nc.Close() }
 // half-purged one is no worse than the state this started from.
 func (b *Bus) PurgeQueues(ctx context.Context) error {
 	var failed []string
-	for _, name := range []string{b.stream(StreamName), b.stream(StreamDLQ), b.stream(StreamRustFSEvents)} {
+	for _, name := range []string{b.stream(StreamName), b.stream(StreamDLQ)} {
 		s, err := b.js.Stream(ctx, name)
 		if err != nil {
 			// A stream that does not exist is already as empty as it can be.
@@ -193,21 +172,6 @@ func (b *Bus) EnsureStreams(ctx context.Context) error {
 		return fmt.Errorf("create stream %s: %w", b.stream(StreamDLQ), err)
 	}
 
-	// RustFS's live event feed (§5.2) — WorkQueue like StreamName, for the
-	// same reason (a durable pull consumer drains it), but its own stream so
-	// its wider dedup window doesn't apply to the typed-command traffic.
-	_, err = b.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:       b.stream(StreamRustFSEvents),
-		Subjects:   []string{b.subject(SubjectRustFSEvents)},
-		Retention:  jetstream.WorkQueuePolicy,
-		Storage:    jetstream.FileStorage,
-		Discard:    jetstream.DiscardNew,
-		MaxMsgs:    1_000_000,
-		Duplicates: RustFSEventsDedupWindow,
-	})
-	if err != nil {
-		return fmt.Errorf("create stream %s: %w", b.stream(StreamRustFSEvents), err)
-	}
 	return nil
 }
 
@@ -318,4 +282,17 @@ func (b *Bus) StreamInfo(ctx context.Context, bareName string) (*jetstream.Strea
 		return nil, err
 	}
 	return s.Info(ctx)
+}
+
+// PublishJob durably publishes an outbox entry. Its identity is stable across
+// retries; explicit redispatch uses a new generation after broker loss.
+func (b *Bus) PublishJob(ctx context.Context, subject string, payload []byte, traceparent, id string, generation int64) error {
+	m := nats.NewMsg(b.subject(subject))
+	m.Data = payload
+	m.Header.Set(HdrTraceparent, traceparent)
+	m.Header.Set("X-Ingestion-Job", id)
+	m.Header.Set("X-Ingestion-Generation", fmt.Sprint(generation))
+	m.Header.Set("Nats-Msg-Id", fmt.Sprintf("%s/%d", id, generation))
+	_, err := b.js.PublishMsg(ctx, m)
+	return err
 }

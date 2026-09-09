@@ -12,8 +12,8 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 )
 
 // Fakes for the three collaborators a reprocessing run has: the selector that
@@ -58,8 +58,8 @@ func (f *fakeSelector) EmailDocuments(_ context.Context, q postgres.EmailDocumen
 	return out, nil
 }
 
-type fakeVault struct {
-	objects map[string][]byte
+type fakeSources struct {
+	files map[string][]byte
 	// unreadable simulates an object the store will not serve: present in
 	// Tier 2, absent or erroring in Tier 1.
 	unreadable map[string]bool
@@ -68,15 +68,11 @@ type fakeVault struct {
 	peak       int
 }
 
-func (f *fakeVault) KeyFromURI(uri string) (string, error) {
-	const prefix = "s3://bucket/"
-	if !strings.HasPrefix(uri, prefix) {
-		return "", fmt.Errorf("uri %q is not in bucket", uri)
+func (f *fakeSources) Read(_ context.Context, ref, expected string) ([]byte, error) {
+	if !strings.HasPrefix(ref, "source:doc-") {
+		return nil, source.ErrUnsafe
 	}
-	return strings.TrimPrefix(uri, prefix), nil
-}
-
-func (f *fakeVault) Get(_ context.Context, key string) ([]byte, rustfs.Provenance, error) {
+	key := "raw/" + strings.TrimPrefix(ref, "source:doc-")
 	f.mu.Lock()
 	f.inFlight++
 	if f.inFlight > f.peak {
@@ -90,13 +86,13 @@ func (f *fakeVault) Get(_ context.Context, key string) ([]byte, rustfs.Provenanc
 	}()
 
 	if f.unreadable[key] {
-		return nil, rustfs.Provenance{}, errors.New("object store: read failed")
+		return nil, errors.New("source unreadable")
 	}
-	data, ok := f.objects[key]
+	data, ok := f.files[key]
 	if !ok {
-		return nil, rustfs.Provenance{}, errors.New("object store: 404")
+		return nil, errors.New("source missing")
 	}
-	return data, rustfs.Provenance{}, nil
+	return data, nil
 }
 
 type fakeWriter struct {
@@ -140,25 +136,25 @@ func synthetic(messageID, subject, from string) []byte {
 
 func emailDoc(docID, key string) domain.Document {
 	return domain.Document{
-		DocID:    docID,
-		MimeType: "message/rfc822",
-		RawURI:   "s3://bucket/" + key,
+		DocID:     docID,
+		MimeType:  "message/rfc822",
+		SourceRef: "source:" + docID,
 	}
 }
 
 // fixture builds a reprocessor over three readable synthetic messages.
-func fixture() (*EmailMetadataReprocessor, *fakeSelector, *fakeVault, *fakeWriter) {
+func fixture() (*EmailMetadataReprocessor, *fakeSelector, *fakeSources, *fakeWriter) {
 	sel := &fakeSelector{missing: map[string]bool{}}
-	vault := &fakeVault{objects: map[string][]byte{}, unreadable: map[string]bool{}}
+	sources := &fakeSources{files: map[string][]byte{}, unreadable: map[string]bool{}}
 	writer := &fakeWriter{failFor: map[string]bool{}}
 	for _, id := range []string{"a", "b", "c"} {
 		key := "raw/" + id
-		vault.objects[key] = synthetic("msg-"+id+"@example.test", "Subject "+id, "sender@example.test")
+		sources.files[key] = synthetic("msg-"+id+"@example.test", "Subject "+id, "sender@example.test")
 		sel.docs = append(sel.docs, emailDoc("doc-"+id, key))
 	}
 	return &EmailMetadataReprocessor{
-		Docs: sel, Vault: vault, Emails: writer, Log: quietLogger(),
-	}, sel, vault, writer
+		Docs: sel, Sources: sources, Emails: writer, Log: quietLogger(),
+	}, sel, sources, writer
 }
 
 // ---- selection --------------------------------------------------------------
@@ -284,8 +280,8 @@ func TestReprocessIsIdempotentAcrossRuns(t *testing.T) {
 // A dry run answers "what would this rebuild, and what can it not read?"
 // without writing a row.
 func TestReprocessDryRunWritesNothing(t *testing.T) {
-	r, _, vault, writer := fixture()
-	vault.unreadable["raw/b"] = true
+	r, _, sources, writer := fixture()
+	sources.unreadable["raw/b"] = true
 
 	summary, err := r.Run(context.Background(), EmailReprocessOptions{
 		WorkspaceID: testWorkspace, DryRun: true,
@@ -318,11 +314,11 @@ func TestReprocessReportsProgressPerBatch(t *testing.T) {
 // The pool is a bound, not a suggestion: a maintenance walk must not open more
 // Tier 1 reads at once than it was told to.
 func TestReprocessBoundsConcurrency(t *testing.T) {
-	r, sel, vault, _ := fixture()
+	r, sel, sources, _ := fixture()
 	for i := 0; i < 20; i++ {
 		id := fmt.Sprintf("doc-%02d", i)
 		key := fmt.Sprintf("raw/%02d", i)
-		vault.objects[key] = synthetic(id+"@example.test", "Subject", "sender@example.test")
+		sources.files[key] = synthetic(id+"@example.test", "Subject", "sender@example.test")
 		sel.docs = append(sel.docs, emailDoc(id, key))
 	}
 	if _, err := r.Run(context.Background(), EmailReprocessOptions{
@@ -330,9 +326,9 @@ func TestReprocessBoundsConcurrency(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	vault.mu.Lock()
-	peak := vault.peak
-	vault.mu.Unlock()
+	sources.mu.Lock()
+	peak := sources.peak
+	sources.mu.Unlock()
 	if peak > 2 {
 		t.Errorf("peak concurrent reads = %d, want at most 2", peak)
 	}
@@ -363,20 +359,20 @@ func TestReprocessStopsOnCancellation(t *testing.T) {
 // Tier 1 would not give up the bytes, the other says the bytes were read and
 // could not be turned into metadata. Neither is silently skipped.
 func TestReprocessClassifiesEachOutcome(t *testing.T) {
-	r, sel, vault, writer := fixture()
+	r, sel, sources, writer := fixture()
 
 	// Present in Tier 2, unreadable in Tier 1.
-	vault.unreadable["raw/b"] = true
+	sources.unreadable["raw/b"] = true
 	// Read cleanly, refused by the write path.
 	writer.failFor["doc-c"] = true
-	// A document whose row names no object at all.
+	// A document whose row names no source at all.
 	sel.docs = append(sel.docs, domain.Document{DocID: "doc-d"})
-	// A row pointing outside this workspace's own bucket.
+	// A row whose reference is not a resolvable source reference.
 	sel.docs = append(sel.docs, domain.Document{
-		DocID: "doc-e", RawURI: "s3://elsewhere/raw/e",
+		DocID: "doc-e", SourceRef: "elsewhere:raw/e",
 	})
 	// Bytes that are not a parsable message.
-	vault.objects["raw/f"] = []byte("not a message")
+	sources.files["raw/f"] = []byte("not a message")
 	sel.docs = append(sel.docs, emailDoc("doc-f", "raw/f"))
 
 	summary, err := r.Run(context.Background(), EmailReprocessOptions{WorkspaceID: testWorkspace})
@@ -439,8 +435,8 @@ func TestClassifyEmailReprocess(t *testing.T) {
 // An undecodable body is its own class: the message was read, and guessing at
 // its charset would be silent content corruption rather than a loud failure.
 func TestReprocessClassifiesAnUnknownCharset(t *testing.T) {
-	r, sel, vault, _ := fixture()
-	vault.objects["raw/g"] = []byte("Subject: Synthetic\r\n" +
+	r, sel, sources, _ := fixture()
+	sources.files["raw/g"] = []byte("Subject: Synthetic\r\n" +
 		"Content-Type: text/plain; charset=definitely-not-a-charset\r\n\r\nbody\r\n")
 	sel.docs = append(sel.docs, emailDoc("doc-g", "raw/g"))
 

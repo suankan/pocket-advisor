@@ -10,9 +10,7 @@ import (
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/app"
-	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
-	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/worker"
 )
@@ -26,7 +24,7 @@ import (
 // nothing; only the message bytes can say who wrote what, to whom, and in
 // answer to which message, so this command goes back to them.
 //
-// It is not an ingest. Nothing is uploaded, enqueued, extracted, embedded or
+// It is not an ingest. Nothing is admitted, enqueued, extracted, embedded or
 // re-chunked; documents, chunks, thread ids and processing statuses are left
 // exactly as they are. The only writes are the email metadata tables, through
 // the same idempotent transaction the email worker uses, so a run that is
@@ -42,33 +40,35 @@ func runReprocessEmail(o *Options, cfg *config.Config, logs *telemetry.Logs) err
 	// Tier 1 as the worker role — this reads objects and must never be able to
 	// write under raw/ — and Postgres for selection and the metadata write. No
 	// NATS: nothing is published, because nothing is being re-extracted.
-	a, err := app.New(ctx, cfg, logs, app.Needs{RustFS: true, Postgres: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
-
-	// Existing workspaces need the additive email tables before the metadata
-	// walk can select or populate them. Like ingestion, apply the idempotent
-	// schema upgrade using the live embedding dimension; deploy-workspaces
-	// cannot know that dimension.
-	if err := cfg.RequireEmbedding(); err != nil {
-		return err
-	}
-	info, err := embedding.New(cfg.Embedding).Probe(ctx)
+	unlock, err := a.DB.LockMaintenance(ctx)
 	if err != nil {
-		return fmt.Errorf("embedding endpoint %s: %w", cfg.Embedding.Endpoint, err)
-	}
-	if err := provision.EnsureWorkspace(ctx, cfg, o.WorkspaceID, info, a.Log); err != nil {
 		return err
+	}
+	defer unlock()
+	if !o.DryRun {
+		meta, err := a.DB.LoadSchemaMetadata(ctx)
+		if err != nil {
+			return err
+		}
+		if err := a.DB.ApplySchema(ctx, meta); err != nil {
+			return err
+		}
+		if err := discoveryService(a).BindExisting(ctx); err != nil {
+			return err
+		}
 	}
 
 	log := a.Logger(telemetry.RoleEmail)
 	r := &worker.EmailMetadataReprocessor{
-		Docs:   a.Emails,
-		Vault:  a.Vault,
-		Emails: a.Emails,
-		Log:    log,
+		Docs:    a.Emails,
+		Sources: a.Sources,
+		Emails:  a.Emails,
+		Log:     log,
 	}
 
 	opts := worker.EmailReprocessOptions{

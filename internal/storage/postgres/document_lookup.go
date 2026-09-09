@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"time"
 )
 
@@ -16,18 +17,20 @@ import (
 // sibling documents happen to live (ingestion-design.md, StagedRoots's
 // sibling in this file).
 type DocumentLocation struct {
-	DocID          string
-	ParentDocID    string
-	DocType        string
-	MimeType       string
-	SourceFilename string
-	EmailSubject   string
-	EmailFrom      string
-	EmailTo        string
-	EmailDate      *time.Time
-	NormalizedText string
-	SourcePath     string
-	ContainerPath  string
+	SourceRef       string
+	SourceLocations []source.Location
+	DocID           string
+	ParentDocID     string
+	DocType         string
+	MimeType        string
+	SourceFilename  string
+	EmailSubject    string
+	EmailFrom       string
+	EmailTo         string
+	EmailDate       *time.Time
+	NormalizedText  string
+	SourcePath      string
+	ContainerPath   string
 }
 
 // fetchDocumentMaxResults bounds every exact lookup below. These are point
@@ -36,39 +39,15 @@ type DocumentLocation struct {
 // signals an under-specified query rather than a browse that needs paging.
 const fetchDocumentMaxResults = 20
 
-// documentAncestryAndSelectSQL resolves the container ancestry for whatever
-// origins CTE the caller prepends, exactly as retrieval's containerAncestrySQL
-// does (internal/retrieval/expand.go) — duplicated rather than shared because
-// each read path's SQL is that path's own query plan, not a general-purpose
-// repository (the same call the mailbox store's package doc makes for its
-// own source-path hydration).
-const documentAncestryAndSelectSQL = `
-ancestry AS (
-    SELECT DISTINCT origin.doc_id AS origin, source.parent_doc_id,
-           NULLIF(source.metadata_headers->>'source_path', '') AS source_path, 0 AS hops
-    FROM origins origin
-    JOIN documents source ON source.doc_id = origin.doc_id
-    UNION ALL
-    SELECT walk.origin, parent.parent_doc_id,
-           NULLIF(parent.metadata_headers->>'source_path', ''), walk.hops + 1
-    FROM documents parent
-    JOIN ancestry walk ON walk.parent_doc_id = parent.doc_id
-    WHERE walk.source_path IS NULL AND walk.hops < 16
-),
-container AS (
-    SELECT DISTINCT ON (origin) origin, source_path
-    FROM ancestry
-    WHERE source_path IS NOT NULL AND hops > 0
-    ORDER BY origin, hops
-)
+// documentsSelectSQL loads exact evidence; source locations are hydrated separately.
+const documentsSelectSQL = `
 SELECT d.doc_id::text, COALESCE(d.parent_doc_id::text, ''), d.doc_type, d.mime_type,
        d.source_filename, d.email_subject, d.email_from, d.email_to, d.email_date,
        COALESCE(d.normalized_text, ''),
        COALESCE(d.metadata_headers->>'source_path', ''),
-       COALESCE(c.source_path, '')
+       ''::text
 FROM documents d
 JOIN origins o ON o.doc_id = d.doc_id
-LEFT JOIN container c ON c.origin = d.doc_id
 ORDER BY d.email_date DESC NULLS LAST, d.created_at DESC`
 
 func (r *DocumentRepo) documentsFrom(ctx context.Context, query string, args ...any) ([]DocumentLocation, error) {
@@ -88,7 +67,24 @@ func (r *DocumentRepo) documentsFrom(ctx context.Context, query string, args ...
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out))
+	for _, d := range out {
+		ids = append(ids, d.DocID)
+	}
+	locations, err := NewSourceRepo(r.db).Locations(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].SourceRef = source.Ref(out[i].DocID)
+		out[i].SourceLocations = locations[out[i].DocID]
+		out[i].SourcePath, out[i].ContainerPath = source.DisplayLocations(out[i].SourceLocations)
+	}
+	return out, nil
 }
 
 // FindByFilename matches documents whose original filename, exactly as
@@ -99,8 +95,8 @@ func (r *DocumentRepo) FindByFilename(ctx context.Context, filename string) ([]D
 	return r.documentsFrom(ctx, `
         WITH RECURSIVE origins AS (
             SELECT doc_id FROM documents WHERE source_filename = $1 LIMIT $2
-        ),
-        `+documentAncestryAndSelectSQL, filename, fetchDocumentMaxResults)
+        )
+        `+documentsSelectSQL, filename, fetchDocumentMaxResults)
 }
 
 // FindEmailsBySenderDate matches email documents from exactly this sender
@@ -113,8 +109,8 @@ func (r *DocumentRepo) FindEmailsBySenderDate(ctx context.Context, sender string
             JOIN email_addresses a ON a.doc_id = d.doc_id AND a.kind = 'from' AND a.valid
             WHERE a.address = $1 AND d.email_date >= $2 AND d.email_date < $3
             LIMIT $4
-        ),
-        `+documentAncestryAndSelectSQL, sender, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
+        )
+        `+documentsSelectSQL, sender, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
 }
 
 // FindEmailsBySubjectDate matches email documents whose subject, exactly as
@@ -126,8 +122,8 @@ func (r *DocumentRepo) FindEmailsBySubjectDate(ctx context.Context, subject stri
             WHERE doc_type = 'email' AND email_subject = $1
               AND email_date >= $2 AND email_date < $3
             LIMIT $4
-        ),
-        `+documentAncestryAndSelectSQL, subject, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
+        )
+        `+documentsSelectSQL, subject, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
 }
 
 // Children lists the direct descendants of one document — an email's
@@ -136,8 +132,8 @@ func (r *DocumentRepo) Children(ctx context.Context, docID string) ([]DocumentLo
 	return r.documentsFrom(ctx, `
         WITH RECURSIVE origins AS (
             SELECT doc_id FROM documents WHERE parent_doc_id = $1 LIMIT $2
-        ),
-        `+documentAncestryAndSelectSQL, docID, fetchDocumentMaxResults)
+        )
+        `+documentsSelectSQL, docID, fetchDocumentMaxResults)
 }
 
 // EmailRecipients splits one email's To and Cc addresses, exactly as

@@ -1,7 +1,7 @@
 // Package workspace reads the user's workspace registry —
 // `workspaces/workspaces.yaml`.
 //
-// A workspace is one or more recursively walked directories: the uploader
+// A workspace is one or more recursively walked directories: the scan
 // resolves them rather than being told a path, so "what belongs to this
 // matter" has a single definition instead of one per invocation
 // (ingestion-design.md §5.1). There is no further subdivision inside a
@@ -150,7 +150,7 @@ func Load(configPath, workspaceID string) (*Resolved, error) {
 }
 
 // resolvePaths turns one workspace's configured paths into absolute,
-// existing directories, and rejects anything that would leave a document's
+// directories, and rejects anything that would leave a document's
 // recorded source path ambiguous about which directory it came from.
 func resolvePaths(root string, paths []string, workspaceID string) ([]string, error) {
 	abs := make([]string, 0, len(paths))
@@ -161,13 +161,9 @@ func resolvePaths(root string, paths []string, workspaceID string) ([]string, er
 		if !filepath.IsAbs(resolved) {
 			resolved = filepath.Join(root, p)
 		}
-		info, err := os.Stat(resolved)
-		if err != nil {
-			return nil, fmt.Errorf("workspace %q path %s: %w", workspaceID, resolved, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("workspace %q path %s is not a directory", workspaceID, resolved)
-		}
+		resolved = filepath.Clean(resolved)
+		// Availability is checked by source reads/scans. Loading the registry must
+		// still permit database-backed evidence while an original volume is offline.
 		if first, dup := seenPath[resolved]; dup {
 			return nil, fmt.Errorf("workspace %q paths entry %d repeats entry %d (%s)",
 				workspaceID, i+1, first+1, resolved)

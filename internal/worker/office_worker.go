@@ -15,17 +15,17 @@ import (
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/office"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type OfficeWorker struct {
-	Vault *rustfs.Vault
-	Docs  *postgres.DocumentRepo
-	Bus   *bus.Bus
-	Log   *slog.Logger
+	Sources source.Reader
+	Docs    *postgres.DocumentRepo
+	Bus     *postgres.Jobs
+	Log     *slog.Logger
 }
 
 func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
@@ -38,11 +38,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
-	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
-	if err != nil {
-		return Fatal(domain.ReasonBadObjectURI, err)
-	}
-	data, _, err := w.Vault.Get(ctx, key)
+	data, err := w.Sources.Read(ctx, cmd.SourceRef, meta.RawSha256)
 	if err != nil {
 		return WithDoc(meta.DocId, err)
 	}
@@ -80,5 +76,3 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
-
-var _ = rustfs.Provenance{}

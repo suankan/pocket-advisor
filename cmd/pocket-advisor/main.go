@@ -1,6 +1,6 @@
 // Command pocket-advisor is the ingestion pipeline.
 //
-// It runs on the host against three stores in the local cluster (RustFS,
+// It runs on the host against two stores in the local cluster (
 // PostgreSQL+pgvector, NATS JetStream), which communicate as before over
 // JetStream subjects carrying protobuf commands. What changed is that every
 // worker role now runs as a pool of goroutines in this process rather than as

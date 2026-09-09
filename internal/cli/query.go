@@ -13,8 +13,10 @@ import (
 	"github.com/suankan/pocket-advisor/internal/client/reranking"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 // runQuery is a thin adapter over internal/retrieval — it parses flags,
@@ -28,7 +30,7 @@ func runQuery(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	log := logs.Logger(telemetry.RoleApp)
 
 	// The read path needs Postgres and the model endpoints, and nothing else:
-	// no RustFS, no NATS, no worker pools.
+	// no source roots, no NATS, no worker pools.
 	dsn, err := cfg.WorkspacePostgresDSN(o.WorkspaceID)
 	if err != nil {
 		return err
@@ -70,14 +72,31 @@ func runQuery(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(res)
 	}
-	renderResult(res, time.Since(started))
+	ws, err := workspace.Load(o.WorkspaceConfig, o.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	resolver, err := source.New(ws.AbsPaths, ws.Ignore.Match, nil)
+	if err != nil {
+		return err
+	}
+	defer resolver.Close()
+	renderResult(res, time.Since(started), resolver)
 	return nil
 }
 
 // renderResult prints what a reader of an evidence corpus needs: what was
 // actually searched, anything that silently reduced quality, and a citation on
 // every result. A result that cannot be traced back to a file is not a result.
-func renderResult(res *retrieval.Result, elapsed time.Duration) {
+func renderResult(res *retrieval.Result, elapsed time.Duration, resolvers ...*source.Resolver) {
+	display := func(p string) string {
+		if len(resolvers) > 0 {
+			if abs, err := resolvers[0].AbsoluteDisplay(p); err == nil {
+				return abs
+			}
+		}
+		return p
+	}
 	searched := res.Question
 	if len(res.SubQueries) > 1 {
 		searched = strings.Join(res.SubQueries, "  ·  ")
@@ -116,12 +135,12 @@ func renderResult(res *retrieval.Result, elapsed time.Duration) {
 		if p.Match.SubQuery != "" {
 			fmt.Printf("   via: %s\n", p.Match.SubQuery)
 		}
-		fmt.Printf("   cite: %s\n", p.RawURI)
+		fmt.Printf("   cite: %s\n", p.SourceRef)
 		switch {
 		case p.SourcePath != "":
-			fmt.Printf("   file: workspaces/data/<workspace-id>/%s\n", p.SourcePath)
+			fmt.Printf("   file: %s\n", display(p.SourcePath))
 		case p.ContainerPath != "":
-			fmt.Printf("   file: extracted from workspaces/data/<workspace-id>/%s\n", p.ContainerPath)
+			fmt.Printf("   file: extracted from %s\n", display(p.ContainerPath))
 		}
 		fmt.Printf("   \"%s\"\n", p.Match.Snippet)
 		if n := len(p.Related); n > 0 {

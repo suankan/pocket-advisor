@@ -47,9 +47,10 @@ type Parsed struct {
 	Headers Headers
 }
 
-// Child is an attachment or archive member extracted to Tier 1.
+// Child is a decoded member with a deterministic, versioned replay selector.
 type Child struct {
 	Filename string
+	Selector string
 	Data     []byte
 }
 
@@ -85,6 +86,9 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		return nil, err
 	}
 
+	for i := range p.Children {
+		p.Children[i].Selector = fmt.Sprintf("mime-v1:%d", i)
+	}
 	p.BodyText = Compact(p.BodyText)
 	return p, nil
 }
@@ -103,7 +107,7 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
-			return nil
+			return fmt.Errorf("missing multipart boundary")
 		}
 		mr := multipart.NewReader(body, boundary)
 		for {
@@ -112,8 +116,7 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 				return nil
 			}
 			if err != nil {
-				// A malformed tail should not discard the parts already read.
-				return nil
+				return fmt.Errorf("incomplete multipart: %w", err)
 			}
 			pct := part.Header.Get("Content-Type")
 			if pct == "" {
@@ -125,8 +128,14 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 			// child document regardless of its media type; otherwise it is
 			// body structure to descend into.
 			if name := attachmentName(part.Header.Get("Content-Disposition"), pct); name != "" {
-				raw, rerr := io.ReadAll(io.LimitReader(decodeBody(enc, part), maxSingleChildSize))
-				if rerr == nil && len(raw) > 0 && len(p.Children) < MaxExtractedFiles {
+				raw, rerr := io.ReadAll(io.LimitReader(decodeBody(enc, part), maxSingleChildSize+1))
+				if rerr != nil {
+					return rerr
+				}
+				if len(raw) > maxSingleChildSize || len(p.Children) >= MaxExtractedFiles {
+					return fmt.Errorf("MIME member limit exceeded")
+				}
+				if len(raw) > 0 {
 					p.Children = append(p.Children, Child{Filename: name, Data: raw})
 				}
 			} else if err := walkPart(enc, pct, part, p, depth+1); err != nil {
@@ -137,9 +146,12 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 		}
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(decodeBody(encoding, body), maxSingleChildSize))
+	raw, err := io.ReadAll(io.LimitReader(decodeBody(encoding, body), maxSingleChildSize+1))
 	if err != nil {
-		return nil
+		return err
+	}
+	if len(raw) > maxSingleChildSize {
+		return fmt.Errorf("MIME member limit exceeded")
 	}
 
 	switch {
@@ -162,7 +174,10 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 		if name == "" {
 			name = "attachment"
 		}
-		if len(p.Children) < MaxExtractedFiles {
+		if len(p.Children) >= MaxExtractedFiles {
+			return fmt.Errorf("MIME member count exceeded")
+		}
+		{
 			p.Children = append(p.Children, Child{Filename: name, Data: raw})
 		}
 	}
@@ -224,7 +239,7 @@ func decodeHeader(s string) string {
 // decompresses to 10 GB is refused before it reaches the heap (§5.3).
 func UnrollArchive(data []byte, filename string) ([]Child, error) {
 	lower := strings.ToLower(filename)
-	budget := int64(len(data)) * MaxExpansionRatio
+	budget := min(int64(len(data))*MaxExpansionRatio, int64(512<<20))
 
 	switch {
 	case bytes.HasPrefix(data, []byte("PK\x03\x04")):
@@ -251,7 +266,7 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 
 	var out []Child
 	var total int64
-	for _, f := range zr.File {
+	for ordinal, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
 		}
@@ -260,28 +275,30 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 		}
 		rc, err := f.Open()
 		if err != nil {
-			continue
+			return nil, err
 		}
 		b, err := io.ReadAll(io.LimitReader(rc, budget-total+1))
 		_ = rc.Close()
 		if err != nil {
-			continue
+			return nil, err
 		}
 		total += int64(len(b))
 		if total > budget {
 			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
 		}
-		out = append(out, Child{Filename: sanitize(f.Name), Data: b})
+		out = append(out, Child{Filename: sanitize(f.Name), Selector: fmt.Sprintf("zip-v1:%d", ordinal), Data: b})
 	}
 	return out, nil
 }
 
 func unrollTar(r io.Reader, budget int64) ([]Child, error) {
 	tr := tar.NewReader(r)
+	ordinal := -1
 	var out []Child
 	var total int64
 	for {
 		h, err := tr.Next()
+		ordinal++
 		if err == io.EOF {
 			return out, nil
 		}
@@ -296,13 +313,13 @@ func unrollTar(r io.Reader, budget int64) ([]Child, error) {
 		}
 		b, err := io.ReadAll(io.LimitReader(tr, budget-total+1))
 		if err != nil {
-			continue
+			return nil, err
 		}
 		total += int64(len(b))
 		if total > budget {
 			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
 		}
-		out = append(out, Child{Filename: sanitize(h.Name), Data: b})
+		out = append(out, Child{Filename: sanitize(h.Name), Selector: fmt.Sprintf("tar-v1:%d", ordinal), Data: b})
 	}
 }
 

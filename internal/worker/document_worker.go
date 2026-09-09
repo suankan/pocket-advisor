@@ -17,8 +17,8 @@ import (
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/ocr"
 	"github.com/suankan/pocket-advisor/internal/engine/pdf"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
@@ -33,12 +33,12 @@ const RasterDPI = 300
 // paths execute the same OCR engine against the same finite CPU budget. Two
 // pools would compete for cores with no coordination (§5.4).
 type DocumentWorker struct {
-	Vault *rustfs.Vault
-	Docs  *postgres.DocumentRepo
-	Bus   *bus.Bus
-	PDF   *pdf.Engine
-	OCR   *ocr.Engine
-	Log   *slog.Logger
+	Sources source.Reader
+	Docs    *postgres.DocumentRepo
+	Bus     *postgres.Jobs
+	PDF     *pdf.Engine
+	OCR     *ocr.Engine
+	Log     *slog.Logger
 }
 
 func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error {
@@ -51,7 +51,7 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error
 		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
-	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
+	data, err := w.fetch(ctx, cmd.SourceRef, meta.DocId)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 		return Decline(meta.DocId, domain.ReasonOCRUnavailable)
 	}
 
-	data, err := w.fetch(ctx, cmd.RustfsRawUri, meta.DocId)
+	data, err := w.fetch(ctx, cmd.SourceRef, meta.DocId)
 	if err != nil {
 		return err
 	}
@@ -274,11 +274,7 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) err
 }
 
 func (w *DocumentWorker) fetch(ctx context.Context, uri, docID string) ([]byte, error) {
-	key, err := w.Vault.KeyFromURI(uri)
-	if err != nil {
-		return nil, Fatal(domain.ReasonBadObjectURI, err)
-	}
-	data, _, err := w.Vault.Get(ctx, key)
+	data, err := w.Sources.Read(ctx, uri, "")
 	if err != nil {
 		return nil, WithDoc(docID, err)
 	}

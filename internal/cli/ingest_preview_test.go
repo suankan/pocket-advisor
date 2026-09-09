@@ -2,12 +2,8 @@ package cli
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/suankan/pocket-advisor/internal/config"
@@ -15,22 +11,6 @@ import (
 )
 
 func TestIngestDryRunNeedsNoDatabaseBrokerOrModelAndNeverWrites(t *testing.T) {
-	var reads, writes atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			writes.Add(1)
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		reads.Add(1)
-		if _, ok := r.URL.Query()["location"]; ok {
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = w.Write([]byte(`<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "document.txt"), []byte("synthetic content"), 0600); err != nil {
 		t.Fatal(err)
@@ -44,13 +24,14 @@ func TestIngestDryRunNeedsNoDatabaseBrokerOrModelAndNeverWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logs.Close()
-	cfg := &config.Config{RustFS: config.RustFS{Endpoint: strings.TrimPrefix(server.URL, "http://")}}
+	cfg := &config.Config{}
 	o := &Options{IngestAll: true, DryRun: true, WorkspaceID: "synthetic", WorkspaceConfig: registry}
 	if err := runIngest(o, cfg, logs); err != nil {
 		t.Fatal(err)
 	}
-	if reads.Load() == 0 || writes.Load() != 0 {
-		t.Fatalf("reads=%d writes=%d", reads.Load(), writes.Load())
+	data, err := os.ReadFile(filepath.Join(root, "document.txt"))
+	if err != nil || string(data) != "synthetic content" {
+		t.Fatalf("source changed: %q, %v", data, err)
 	}
 }
 

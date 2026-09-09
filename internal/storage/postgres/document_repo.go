@@ -38,17 +38,16 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
 
 	var id string
 	var inserted bool
-	err = r.db.Pool.QueryRow(ctx, `
+	err = r.db.executor(ctx).QueryRow(ctx, `
         INSERT INTO documents (
             doc_id, parent_doc_id, thread_id,
-            processing_status, doc_type, mime_type, rustfs_raw_uri, raw_sha256,
+            processing_status, doc_type, mime_type, source_ref, raw_sha256,
             source_filename, metadata_headers)
         SELECT $1::uuid,$2::uuid,$3,'PENDING',$4,$5,$6,$7::varchar,$8,$9::jsonb
-        WHERE NOT EXISTS (SELECT 1 FROM pending_object_deletions WHERE raw_sha256 = $7::varchar)
         ON CONFLICT (raw_sha256) DO UPDATE SET raw_sha256 = EXCLUDED.raw_sha256
         RETURNING doc_id::text, (xmax = 0)`,
 		d.DocID, parent, d.ThreadID,
-		d.DocType, d.MimeType, d.RawURI, d.RawSHA256, d.SourceName, meta).Scan(&id, &inserted)
+		d.DocType, d.MimeType, "source:"+d.DocID, d.RawSHA256, d.SourceName, meta).Scan(&id, &inserted)
 
 	if err != nil {
 		return "", false, fmt.Errorf("create stub %s: %w", d.DocID, err)
@@ -59,7 +58,7 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
 // Status reads the current state of a document.
 func (r *DocumentRepo) Status(ctx context.Context, docID string) (domain.Status, error) {
 	var s string
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT processing_status::text FROM documents WHERE doc_id = $1`, docID).Scan(&s)
 	if err != nil {
 		return "", err
@@ -70,7 +69,7 @@ func (r *DocumentRepo) Status(ctx context.Context, docID string) (domain.Status,
 // UpdateStatus moves a document to a terminal or intermediate state. reason is
 // recorded in metadata_headers so SKIPPED and FAILED rows stay auditable.
 func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.Status, reason domain.FailureReason) error {
-	_, err := r.db.Pool.Exec(ctx, `
+	_, err := r.db.executor(ctx).Exec(ctx, `
         UPDATE documents
         SET processing_status = $2::processing_status,
             metadata_headers  = CASE WHEN $3 = '' THEN metadata_headers
@@ -87,9 +86,11 @@ func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.
 // this column; commands carry a doc_id reference rather than the text itself
 // (§4.1).
 func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threadID string) error {
-	_, err := r.db.Pool.Exec(ctx, `
+	_, err := r.db.executor(ctx).Exec(ctx, `
         UPDATE documents
         SET normalized_text = $2,
+            extraction_hash = encode(sha256(convert_to($2,'UTF8')),'hex'),
+            extraction_version = 'canonical-v1',
             doc_type        = COALESCE(NULLIF($3,''), doc_type),
             thread_id       = COALESCE(NULLIF($4,''), thread_id),
             updated_at      = now()
@@ -113,9 +114,11 @@ func (r *DocumentRepo) SaveEmailText(
 	if !h.Date.IsZero() {
 		date = h.Date
 	}
-	_, err := r.db.Pool.Exec(ctx, `
+	_, err := r.db.executor(ctx).Exec(ctx, `
         UPDATE documents
         SET normalized_text = $2,
+            extraction_hash = encode(sha256(convert_to($2,'UTF8')),'hex'),
+            extraction_version = 'canonical-v1',
             doc_type        = 'email',
             thread_id       = COALESCE(NULLIF($3,''), thread_id),
             email_subject   = $4,
@@ -141,7 +144,7 @@ type LoadedText struct {
 // LoadText reads normalized_text back for the embedding indexer.
 func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, error) {
 	var text *string
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT normalized_text FROM documents WHERE doc_id = $1`,
 		docID).Scan(&text)
 	if err != nil {
@@ -153,9 +156,9 @@ func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, 
 // ClaimStalePending returns documents stuck PENDING past the threshold, for
 // the reconciliation sweep (§2.2).
 func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]domain.Document, error) {
-	rows, err := r.db.Pool.Query(ctx, `
+	rows, err := r.db.executor(ctx).Query(ctx, `
         SELECT doc_id::text, mime_type,
-               rustfs_raw_uri, raw_sha256, source_filename,
+               source_ref, raw_sha256, source_filename,
                COALESCE(parent_doc_id::text, '')
         FROM documents
         WHERE processing_status = 'PENDING'
@@ -171,7 +174,7 @@ func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Dur
 	for rows.Next() {
 		var d domain.Document
 		if err := rows.Scan(&d.DocID, &d.MimeType,
-			&d.RawURI, &d.RawSHA256, &d.SourceName, &d.ParentDocID); err != nil {
+			&d.SourceRef, &d.RawSHA256, &d.SourceName, &d.ParentDocID); err != nil {
 			return nil, err
 		}
 		d.Status = domain.StatusPending
@@ -183,7 +186,7 @@ func (r *DocumentRepo) ClaimStalePending(ctx context.Context, olderThan time.Dur
 // CountStalePending backs the rag_discovery_stale_pending gauge.
 func (r *DocumentRepo) CountStalePending(ctx context.Context, olderThan time.Duration) (int, error) {
 	var n int
-	err := r.db.Pool.QueryRow(ctx, `
+	err := r.db.executor(ctx).QueryRow(ctx, `
         SELECT count(*) FROM documents
         WHERE processing_status = 'PENDING' AND updated_at < now() - $1::interval`,
 		olderThan.String()).Scan(&n)
@@ -208,7 +211,7 @@ type StagedRoot struct {
 // file can remove a whole extracted tree, and an operator confirming a
 // deletion needs to see that before agreeing to it, not after.
 func (r *DocumentRepo) StagedRoots(ctx context.Context) ([]StagedRoot, error) {
-	rows, err := r.db.Pool.Query(ctx, `
+	rows, err := r.db.executor(ctx).Query(ctx, `
         WITH RECURSIVE tree AS (
             SELECT doc_id AS root, doc_id
             FROM documents
@@ -245,50 +248,37 @@ func (r *DocumentRepo) StagedRoots(ctx context.Context) ([]StagedRoot, error) {
 	return out, rows.Err()
 }
 
-// KnownRawURIs returns the set of Tier 1 URIs already represented in Tier 2,
-// for the bucket-scan anti-join (§5.2).
-func (r *DocumentRepo) KnownRawURIs(ctx context.Context) (map[string]struct{}, error) {
-	rows, err := r.db.Pool.Query(ctx,
-		`SELECT rustfs_raw_uri FROM documents WHERE rustfs_raw_uri <> ''`)
-	if err != nil {
-		return nil, fmt.Errorf("known raw uris: %w", err)
-	}
-	defer rows.Close()
-
-	out := make(map[string]struct{})
-	for rows.Next() {
-		var uri string
-		if err := rows.Scan(&uri); err != nil {
-			return nil, err
-		}
-		out[uri] = struct{}{}
-	}
-	return out, rows.Err()
-}
-
 // DeleteWorkspace empties this workspace's database: every document, with
-// chunks cascading. This is the Tier 2 half of `uploader --wipe`, which must
-// not leave the database populated against an emptied bucket (§5.1).
+// chunks cascading. This is the Tier 2 half of --delete-data, which must leave
+// no derived row describing content the workspace no longer indexes (§5.1).
 func (r *DocumentRepo) DeleteWorkspace(ctx context.Context) (int64, error) {
-	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM documents`)
-	if err != nil {
-		return 0, fmt.Errorf("delete workspace: %w", err)
-	}
-	// The identifier graph does not cascade: its nodes outlive the documents
-	// they name, which is exactly how a conversation survives a missing
-	// ancestor. That makes them the one thing a wipe would leave behind — a
-	// graph of placeholders for a corpus that no longer exists — so they are
-	// removed explicitly (§2.5).
-	if _, err := r.db.Pool.Exec(ctx, `DELETE FROM email_identifier_nodes`); err != nil {
-		return tag.RowsAffected(), fmt.Errorf("delete workspace identifier graph: %w", err)
-	}
-	return tag.RowsAffected(), nil
+	var n int64
+	err := r.db.Transaction(ctx, func(ctx context.Context) error {
+		if _, err := r.db.executor(ctx).Exec(ctx, "SELECT set_config('pocket_advisor.topic_graph_remove','on',true)"); err != nil {
+			return err
+		}
+		if _, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM topic_graph_versions"); err != nil {
+			return err
+		}
+		tag, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM documents")
+		if err != nil {
+			return err
+		}
+		n = tag.RowsAffected()
+		for _, table := range []string{"email_identifier_nodes", "chunks", "source_scans", "source_roots"} {
+			if _, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM "+table); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return n, err
 }
 
 // DeleteBySHA forgets the selected document and exclusively held descendants.
 // Other roots and containers retain shared content, including nested children.
 func (r *DocumentRepo) DeleteBySHA(ctx context.Context, sha string) (int64, error) {
-	tx, err := r.db.Pool.Begin(ctx)
+	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -320,23 +310,17 @@ func (r *DocumentRepo) DeleteBySHA(ctx context.Context, sha string) (int64, erro
 	if err != nil {
 		return 0, err
 	}
-	// Also handles an object whose document was never discovered, and retries
-	// after an older deletion removed its row before cleaning up its objects.
-	if _, err := tx.Exec(ctx, `INSERT INTO pending_object_deletions (raw_sha256)
-        VALUES ($1) ON CONFLICT DO NOTHING`, sha); err != nil {
-		return 0, err
-	}
 	return deleteDocuments(ctx, tx, ids)
 }
 
-// UpdateSourcePath refreshes the recorded staging location for the document
+// UpdateSourcePath refreshes the recorded source location for the document
 // with this content hash. Identity here is raw_sha256, never doc_id or the
 // old path (reconcile.go): a document's source_path is set once, at first
-// upload, and otherwise never revisited, so a same-content move leaves it
+// admission, and otherwise never revisited, so a same-content move leaves it
 // pointing at a file that no longer exists until this is called explicitly
-// (the uploader does so when it finds existing content at a new path).
+// (the scan does so when it finds existing content at a new path).
 func (r *DocumentRepo) UpdateSourcePath(ctx context.Context, sha, path string) error {
-	_, err := r.db.Pool.Exec(ctx, `
+	_, err := r.db.executor(ctx).Exec(ctx, `
         UPDATE documents
         SET metadata_headers = jsonb_set(metadata_headers, '{source_path}', to_jsonb($2::text)),
             updated_at       = now()

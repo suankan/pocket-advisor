@@ -165,7 +165,7 @@ An image is declined before OCR when:
 
 After OCR, the text must contain at least five word-like tokens. A token counts when it contains a run of at least four letters; digits may occur inside the token but do not establish a word by themselves.
 
-A declined image remains in Tier 1 and retains its Tier 2 row and lineage. It is recorded as `SKIPPED / IMAGE_NOT_VIABLE` and produces no chunks or DLQ entry.
+A declined image remains untouched at its original source and retains its database row and lineage. It is recorded as `SKIPPED / IMAGE_NOT_VIABLE` and produces no chunks or DLQ entry.
 
 ## 9. Resource bounds
 
@@ -226,3 +226,7 @@ Visual sampling remains required for extraction changes. Word-presence checks ca
 1. **Visual regression corpus.** The current automated invariants cannot prove reading order. A durable, non-private set of rendered fixtures and expected page images would make visual comparison repeatable.
 2. **Language availability check.** Startup should verify that every configured OCR language is installed rather than relying on Tesseract’s runtime behaviour.
 3. **Extraction quality reporting.** The worker records terminal outcomes but does not expose a per-document confidence or coverage summary suitable for operator review.
+
+## Source replay and evidence revisions
+
+PDF/image workers receive verified original bytes through the workspace source resolver, including replayed attachments. They do not depend on an object store. Canonical normalized text remains in PostgreSQL; evidence offsets and hashes refer to that text, not PDF file byte offsets. OCR output may vary after tool/model/configuration changes, so a future text-free retrieval mode must verify a pinned canonical revision before serving reconstructed evidence. Current retrieval uses the retained canonical text and does not rerun OCR at query time.

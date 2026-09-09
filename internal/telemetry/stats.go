@@ -76,46 +76,46 @@ func (q *Queue) Snapshot() QueueSnapshot {
 	}
 }
 
-// Upload is the live state of the Tier 1 upload stage.
-type Upload struct {
+// Scan is the live state of the source scan stage.
+type Scan struct {
 	total     atomic.Int64
-	uploaded  atomic.Int64
+	scanned   atomic.Int64
 	duplicate atomic.Int64
 	failed    atomic.Int64
 	bytes     atomic.Int64
 	running   atomic.Bool
 }
 
-func (u *Upload) Start(total int64) {
+func (u *Scan) Start(total int64) {
 	u.total.Store(total)
 	u.running.Store(true)
 }
 
-func (u *Upload) Finish() { u.running.Store(false) }
+func (u *Scan) Finish() { u.running.Store(false) }
 
-func (u *Upload) AddTotal(n int64) { u.total.Add(n) }
-func (u *Upload) Uploaded(n int64) { u.uploaded.Add(1); u.bytes.Add(n) }
-func (u *Upload) Duplicate()       { u.duplicate.Add(1) }
-func (u *Upload) Failed()          { u.failed.Add(1) }
+func (u *Scan) AddTotal(n int64) { u.total.Add(n) }
+func (u *Scan) Scanned(n int64)  { u.scanned.Add(1); u.bytes.Add(n) }
+func (u *Scan) Duplicate()       { u.duplicate.Add(1) }
+func (u *Scan) Failed()          { u.failed.Add(1) }
 
-type UploadSnapshot struct {
+type ScanSnapshot struct {
 	Running   bool
 	Total     int64
-	Uploaded  int64
+	Scanned   int64
 	Duplicate int64
 	Failed    int64
 	Bytes     int64
 }
 
-// Done counts every file the uploader has finished deciding about, which is
+// Done counts every file the scaner has finished deciding about, which is
 // what a progress bar measures — not just the ones whose bytes moved.
-func (s UploadSnapshot) Done() int64 { return s.Uploaded + s.Duplicate + s.Failed }
+func (s ScanSnapshot) Done() int64 { return s.Scanned + s.Duplicate + s.Failed }
 
-func (u *Upload) Snapshot() UploadSnapshot {
-	return UploadSnapshot{
+func (u *Scan) Snapshot() ScanSnapshot {
+	return ScanSnapshot{
 		Running:   u.running.Load(),
 		Total:     u.total.Load(),
-		Uploaded:  u.uploaded.Load(),
+		Scanned:   u.scanned.Load(),
 		Duplicate: u.duplicate.Load(),
 		Failed:    u.failed.Load(),
 		Bytes:     u.bytes.Load(),
@@ -124,7 +124,7 @@ func (u *Upload) Snapshot() UploadSnapshot {
 
 // Stats is every live number for one run.
 type Stats struct {
-	Upload Upload
+	Scan Scan
 
 	mu     sync.RWMutex
 	queues []*Queue

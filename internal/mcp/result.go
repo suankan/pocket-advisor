@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"math"
 	"strings"
 	"time"
@@ -68,16 +69,19 @@ type EvidencePacket struct {
 }
 
 type EvidenceDocument struct {
-	DocumentID       string  `json:"document_id"`
-	ParentDocumentID *string `json:"parent_document_id"`
-	ThreadID         *string `json:"thread_id"`
-	DocumentType     string  `json:"document_type"`
-	Title            string  `json:"title"`
-	From             string  `json:"from"`
-	To               string  `json:"to"`
-	Date             *string `json:"date"`
-	SourceSHA256     string  `json:"source_sha256"`
-	Tier1URI         string  `json:"tier1_uri"`
+	SourceLocations   []source.Location `json:"source_locations,omitempty"`
+	ExtractionHash    string            `json:"extraction_sha256,omitempty"`
+	ExtractionVersion string            `json:"extraction_version,omitempty"`
+	DocumentID        string            `json:"document_id"`
+	ParentDocumentID  *string           `json:"parent_document_id"`
+	ThreadID          *string           `json:"thread_id"`
+	DocumentType      string            `json:"document_type"`
+	Title             string            `json:"title"`
+	From              string            `json:"from"`
+	To                string            `json:"to"`
+	Date              *string           `json:"date"`
+	SourceSHA256      string            `json:"source_sha256"`
+	SourceRef         string            `json:"source_ref"`
 	// WorkspaceRelativePath is the document's original file location relative
 	// to the workspace's local staging directory, exactly as recorded at
 	// upload time. It is informational only, for the human operator to open
@@ -95,14 +99,15 @@ type EvidenceDocument struct {
 }
 
 type EvidenceMatch struct {
-	ChunkID    string  `json:"chunk_id"`
-	Start      int     `json:"start"`
-	End        int     `json:"end"`
-	OffsetUnit string  `json:"offset_unit"`
-	Score      float64 `json:"score"`
-	Legs       string  `json:"legs"`
-	SubQuery   *string `json:"sub_query"`
-	Snippet    string  `json:"snippet"`
+	SliceSHA256 string  `json:"slice_sha256,omitempty"`
+	ChunkID     string  `json:"chunk_id"`
+	Start       int     `json:"start"`
+	End         int     `json:"end"`
+	OffsetUnit  string  `json:"offset_unit"`
+	Score       float64 `json:"score"`
+	Legs        string  `json:"legs"`
+	SubQuery    *string `json:"sub_query"`
+	Snippet     string  `json:"snippet"`
 }
 
 type EvidenceRelated struct {
@@ -178,7 +183,7 @@ func newEvidenceResult(res *retrieval.Result, resultID string) (*EvidenceResult,
 			Reference: resultReference(resultID, i+1),
 			Rank:      i + 1,
 			Document:  evidenceDocument(packet.Document),
-			Match: EvidenceMatch{
+			Match: EvidenceMatch{SliceSHA256: packet.Match.SliceSHA256,
 				ChunkID: packet.Match.ChunkID, Start: packet.Match.StartByte, End: packet.Match.EndByte,
 				OffsetUnit: utf8ByteUnit, Score: packet.Match.Score, Legs: packet.Match.Legs,
 				SubQuery: nullableString(packet.Match.SubQuery), Snippet: packet.Match.Snippet,
@@ -211,7 +216,7 @@ func evidenceDocument(document retrieval.Document) EvidenceDocument {
 		DocumentID: document.DocID, ParentDocumentID: nullableString(document.ParentID),
 		ThreadID: nullableString(document.ThreadID), DocumentType: document.DocType,
 		Title: document.Title, From: document.From, To: document.To, Date: date,
-		SourceSHA256: document.SHA256, Tier1URI: document.RawURI,
+		SourceLocations: document.SourceLocations, ExtractionHash: document.ExtractionHash, ExtractionVersion: document.ExtractionVersion, SourceSHA256: document.SHA256, SourceRef: document.SourceRef,
 		WorkspaceRelativePath:          nullableString(document.SourcePath),
 		ContainerWorkspaceRelativePath: nullableString(document.ContainerPath),
 	}
@@ -301,7 +306,7 @@ func validateBudget(budget EvidenceBudget) error {
 }
 
 func validateDocument(document EvidenceDocument) error {
-	if document.DocumentID == "" || document.DocumentType == "" || document.SourceSHA256 == "" || document.Tier1URI == "" {
+	if document.DocumentID == "" || document.DocumentType == "" || document.SourceSHA256 == "" || document.SourceRef == "" {
 		return fmt.Errorf("document provenance is incomplete")
 	}
 	return nil
@@ -458,7 +463,7 @@ func renderEvidencePage(page *EvidencePage) string {
 			}
 			fmt.Fprintln(&builder, strings.Join(metadata, " · "))
 			fmt.Fprintf(&builder, "cite: %s (doc %s, UTF-8 bytes %d-%d, relevance %+.3f)\n",
-				packet.Document.Tier1URI, shortID(packet.Document.DocumentID), packet.Match.Start, packet.Match.End, packet.Match.Score)
+				packet.Document.SourceRef, shortID(packet.Document.DocumentID), packet.Match.Start, packet.Match.End, packet.Match.Score)
 			if packet.Document.WorkspaceRelativePath != nil {
 				fmt.Fprintf(&builder, "local file: %s (tell the user this location; do not fetch it yourself)\n",
 					*packet.Document.WorkspaceRelativePath)

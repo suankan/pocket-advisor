@@ -63,11 +63,11 @@ For HTTP MCP, the authentication and authorization model is described in [MCP se
 
 Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database, bucket, and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
 
-Administrative access is distinct from user query access. Destructive operations require explicit permissions, an auditable operation record, and confirmation semantics suitable for non-interactive clients. The API must not expose shared PostgreSQL or RustFS administrative credentials.
+Administrative access is distinct from user query access. Destructive operations require explicit permissions, an auditable operation record, and confirmation semantics suitable for non-interactive clients. The API must not expose shared PostgreSQL administrative credentials.
 
 ## Service topology
 
-Authenticated HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote-access options such as SSH tunneling or a reverse proxy) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL, RustFS, and NATS.
+Authenticated HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote-access options such as SSH tunneling or a reverse proxy) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL and NATS.
 
 The target general control plane is a separate long-running workload — unlike MCP, one that is expected to run in Kubernetes. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
 

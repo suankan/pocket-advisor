@@ -10,7 +10,7 @@ The transport-independent Go retrieval package, exact mailbox browse package, an
 
 - Retrieve source text only. The index contains extracted or normalized source text, not model-produced summaries.
 - Run dense and lexical search together because they cover different failure modes.
-- Preserve byte provenance through document IDs, chunk byte ranges, source hashes, and Tier 1 URIs.
+- Preserve byte provenance through document IDs, chunk byte ranges, source hashes, and original-source references.
 - Enforce workspace scope through separate databases and credentials, then assert the connected database's contents at process startup.
 - Return quality degradations as structured warnings instead of hiding them in logs.
 - Keep the retrieval package independent of CLI, MCP, and HTTP transport types.
@@ -89,7 +89,13 @@ The compiled defaults are 15 returned matches, a reranker relevance floor of `0.
 
 An empty `thread_id` denotes a standalone document and is not capped as a shared conversation. A below-floor candidate is never restored merely to fill the requested count.
 
-Each returned packet contains the matched document's metadata and source text, the chunk ID and UTF-8 byte range, its reranker score, the search leg or legs that found it, a snippet, source hash, and Tier 1 URI. The transport-independent result and CLI JSON use `start_byte` and `end_byte`; MCP additionally carries `offset_unit: utf8_bytes`. The document also carries where to find it on the operator's machine, relative to the workspace's local staging directory. `source_path` (`workspace_relative_path` in MCP) is the document's own staged file; `container_source_path` (`container_workspace_relative_path` in MCP) is the file it was extracted from. Exactly one of the two is set, resolved by walking recorded lineage to the nearest ancestor holding a path, so an extracted document such as an email attachment still reports an honest location rather than none. Both are informational, for the operator to open the file themselves; retrieval serves no file bytes and never infers a location from where similar documents live. Related documents are labeled using stored facts:
+Each returned packet contains document metadata, normalized source text, matched placement identity and UTF-8 byte range, ranking score, search legs, source hash, canonical extraction hash/version, and `source:<doc_id>`. Returned candidate text is sliced from the owning normalized document, so whitespace-deduplicated shared passages cannot substitute another document's spelling or offsets. `slice_sha256` identifies the exact placement bytes; the shortened snippet is display text.
+
+`source_locations` lists up to 128 recorded direct or container routes, ordered by observed availability, shortest recipe, and path. Each has an opaque root ID, relative/display path, versioned selectors from original to child, `last_observed` or `missing` status, and observation time. The location query walks all recorded parents with cycle/depth bounds. `source_path` (`workspace_relative_path` in MCP) and `container_source_path` (`container_workspace_relative_path` in MCP) are compatibility display fields derived from the preferred route. Either may be absent if no route is known; both direct and contained routes may exist in the structured list.
+
+Ordinary retrieval does not reopen originals. Locations state inventory observations, not current file availability. Cached text and MCP continuation snapshots remain usable after a source changes or goes offline; the source hash and extraction hash identify the cited revision. The local CLI resolves configured roots for the operator's absolute path. MCP returns relative metadata and never grants arbitrary filesystem access.
+
+Related documents are labeled using stored facts:
 
 - `parent` for the matched document's recorded parent;
 - `attachment` for a recorded child document; and
@@ -156,3 +162,15 @@ Use the repository commands in [README §10](../README.md#10-verification). Retr
 - Calibrate representative category coverage and acceptance thresholds for model or tuning changes as corpora and models change.
 - Choose metrics buckets and labels that diagnose quality and latency without exposing workspace identifiers or query text.
 - Decide whether multi-turn question state belongs in the future generation service or solely in its client.
+
+## Optional text-free storage experiment
+
+The supported mode retains normalized documents and shared passage text. Removing the byte store does not require changing BM25 or evidence hydration. A text-free mode is an unimplemented experiment and must not become the default without measured quality, availability and latency gates.
+
+Vectors and whole-document hashes cannot reproduce BM25. Efficient lexical scoring needs token-level postings, term frequencies, document/chunk lengths, document frequencies and corpus statistics, together with the same tokenizer and scoring rules. Token hashes may replace dictionary strings, but they still require postings/statistics, collision handling and query normalization. They are not encryption: dictionary attacks can reveal low-entropy terms. Positions are additionally needed for phrase/proximity behavior or accurate highlighting.
+
+A viable experiment retains vectors, a dedicated lexical index and structured provenance/metadata, then reconstructs candidate text through a `TextProvider` before reranking, exact evidence slicing, full document fetch and topic evidence validation. A hash proves equality of reconstructed bytes; it cannot reconstruct them. The current `pg_textsearch` index is tied to `chunks.chunk_text`; dropping that column is not a supported text-free backend.
+
+The provider would need raw hash, deterministic container recipes, extractor/configuration fingerprints, canonical text hash and byte length, and exact placement ranges/hashes. Current whitespace-collapsed passage identity is unsuitable as a lossless text address. Overlapping trimmed chunks cannot simply be concatenated to recover a full canonical document.
+
+Compare retained text, lossless compressed text, and on-demand extraction before choosing a backend. Preserve mailbox headers, exact conversation relationships, topic annotations and cited spans; removing body text alone is not removing all textual metadata. Cold OCR/replay cost and unavailable historical originals may outweigh disk savings. Source unavailability must yield an explicit omission or failure, never an unverified citation. Adoption requires exact lexical/scoring and byte-slice parity, unchanged private evaluation identities, passing retrieval thresholds, full deterministic tools, and agreed cold/warm p50/p95 latency and memory bounds.

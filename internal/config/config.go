@@ -61,7 +61,6 @@ func expandEnvironmentPlaceholders(value, field string) (string, error) {
 
 func expandFilePlaceholders(f *file) error {
 	fields := map[string]*string{
-		"infra.rustfs.endpoint":         &f.Infra.RustFS.Endpoint,
 		"infra.nats.url":                &f.Infra.NATS.URL,
 		"infra.postgres.host":           &f.Infra.Postgres.Host,
 		"infra.postgres.sslmode":        &f.Infra.Postgres.SSLMode,
@@ -86,26 +85,6 @@ func expandFilePlaceholders(f *file) error {
 		*value = expanded
 	}
 	return nil
-}
-
-// RustFS holds the connection and credential settings for Tier 1. There is no
-// bucket here: every bucket is a workspace's own (workspace-isolation.md
-// §2.2), and the shared one this used to name was deleted along with the setup
-// Job that created it (ingestion-design.md deviation 19).
-type RustFS struct {
-	Endpoint string
-	UseSSL   bool
-
-	// No administrative credentials, and no per-workspace ones either: the
-	// bucket, its public policy, and its notification binding are all
-	// created once by `./pocket-advisor.sh deploy-workspaces`, over aws-cli,
-	// not by anything this binary runs (deviation 39). This binary connects
-	// to a workspace's bucket anonymously — isolation is the bucket name and
-	// its policy, not a credential. The RustFS root identity still exists
-	// (deploy-workspaces/destroy-workspace need it to create buckets and
-	// policies) but is the fixed literal admin/admin
-	// (charts/pocket-advisor-infra/values.yaml); nothing about it lives in
-	// Go.
 }
 
 type Postgres struct {
@@ -170,22 +149,10 @@ type MCPTLS struct {
 	KeyFile  string
 }
 
-// Workspace is one workspace's infrastructure identity. Every name and
-// credential is the workspace id itself, or derived from it by fixed
-// convention — nothing per-workspace is stored anywhere, so this is a pure
-// function of id, never a file read.
-//
-// Postgres keeps a real per-workspace role (trust auth skips the password
-// check, not Postgres's own privilege checks, so a role owning only its own
-// database is still an enforced boundary). RustFS and NATS have no
-// per-workspace identity at all any more: RustFS isolation is a public
-// bucket policy scoped to that bucket's name, and NATS isolation is subject/
-// stream naming inside internal/bus — both are convention, not credentials.
+// Workspace is the selected database role/name and namespaced broker scope.
+// PostgreSQL role ownership enforces database access; local NATS uses naming.
 type Workspace struct {
 	ID string
-
-	RustFSEndpoint string
-	BucketName     string
 
 	NATSURL string
 
@@ -276,7 +243,6 @@ type Query struct {
 }
 
 type Config struct {
-	RustFS     RustFS
 	Postgres   Postgres
 	NATS       NATS
 	Embedding  Embedding
@@ -290,7 +256,7 @@ type Config struct {
 	// (config.yaml's workspaces.config — required, no fallback) — the same
 	// file internal/workspace reads for each workspace's single recursively
 	// walked path. There is no separate credentials file any more: every
-	// workspace's Postgres role, RustFS bucket, and NATS subjects/streams
+	// workspace's Postgres role and NATS subjects/streams
 	// are named after its id by fixed convention (see Workspace), so
 	// nothing per-workspace needs its own registry entry.
 	WorkspacesConfigPath string
@@ -307,10 +273,6 @@ type Config struct {
 // legacy sections stay harmless.
 type file struct {
 	Infra struct {
-		RustFS struct {
-			Endpoint string `yaml:"endpoint"`
-			UseSSL   *bool  `yaml:"use_ssl"`
-		} `yaml:"rustfs"`
 		NATS struct {
 			URL string `yaml:"url"`
 		} `yaml:"nats"`
@@ -423,9 +385,6 @@ func Load(path string) (*Config, error) {
 // sources of truth for the same field.
 func requireInfra(c *Config) error {
 	var missing []string
-	if c.RustFS.Endpoint == "" {
-		missing = append(missing, "infra.rustfs.endpoint")
-	}
 	if c.NATS.URL == "" {
 		missing = append(missing, "infra.nats.url")
 	}
@@ -456,9 +415,6 @@ func requireInfra(c *Config) error {
 // come from.
 func defaults() *Config {
 	return &Config{
-		RustFS: RustFS{
-			UseSSL: false,
-		},
 		Postgres: Postgres{
 			Port:     5432,
 			SSLMode:  "disable",
@@ -523,11 +479,6 @@ func applyFile(c *Config, path string) error {
 		return fmt.Errorf("expand %s: %w", path, err)
 	}
 	in := f.Infra
-
-	setStr(&c.RustFS.Endpoint, in.RustFS.Endpoint)
-	if in.RustFS.UseSSL != nil {
-		c.RustFS.UseSSL = *in.RustFS.UseSSL
-	}
 
 	setStr(&c.NATS.URL, in.NATS.URL)
 
@@ -694,8 +645,6 @@ func applyFile(c *Config, path string) error {
 // somewhere else without editing committed configuration. Secrets in
 // particular belong here rather than in a committed file.
 func applyEnv(c *Config) {
-	c.RustFS.Endpoint = env("RUSTFS_ENDPOINT", c.RustFS.Endpoint)
-	c.RustFS.UseSSL = envBool("RUSTFS_USE_SSL", c.RustFS.UseSSL)
 
 	c.Reranking.Endpoint = env("RERANK_ENDPOINT", c.Reranking.Endpoint)
 	c.Reranking.APIKey = env("RERANK_API_KEY", c.Reranking.APIKey)
@@ -743,14 +692,6 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 	}
 	return Workspace{
 		ID: id,
-
-		// One shared RustFS StatefulSet (deviation 39, replacing deviation
-		// 35's Tenant CRD): the endpoint is constant, and the bucket name is
-		// what `./pocket-advisor.sh deploy-workspaces` actually created via
-		// aws-cli, not a CRD. No identity: the bucket carries a public
-		// policy scoped to itself, and the application connects anonymously.
-		RustFSEndpoint: c.RustFS.Endpoint,
-		BucketName:     id,
 
 		NATSURL: c.NATS.URL,
 

@@ -83,7 +83,7 @@ func TestUnknownWorkspaceListsTheAvailableOnes(t *testing.T) {
 	}
 }
 
-func TestMissingWorkspacePathIsAnError(t *testing.T) {
+func TestMissingWorkspacePathCanStillConfigureRetrieval(t *testing.T) {
 	y := `
 schema_version: 2
 workspaces:
@@ -92,8 +92,8 @@ workspaces:
       - data/gone
 `
 	p := fixture(t, y) // directory deliberately not created
-	if _, err := Load(p, "matter"); err == nil {
-		t.Fatal("expected a missing workspace directory to be reported")
+	if _, err := Load(p, "matter"); err != nil {
+		t.Fatalf("offline original must not block registry loading: %v", err)
 	}
 }
 

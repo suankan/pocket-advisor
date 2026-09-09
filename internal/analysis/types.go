@@ -19,17 +19,17 @@ import (
 
 // Maximum bounds for analysis requests.
 const (
-	MaxTopicRunes        = 8192
-	MaxParticipants      = 50
-	MaxConversations     = 100
-	MaxEvidenceBudget    = 500000 // UTF-8 bytes aggregate across all passes
-	MaxResearchPasses    = 20
-	MaxResultPageBytes   = 48 * 1024
-	AbsoluteResponseBytes = 51200
-	MaxParticipantsShown = 30
-	MaxTimelineEvents    = 100
+	MaxTopicRunes               = 8192
+	MaxParticipants             = 50
+	MaxConversations            = 100
+	MaxEvidenceBudget           = 500000 // UTF-8 bytes aggregate across all passes
+	MaxResearchPasses           = 20
+	MaxResultPageBytes          = 48 * 1024
+	AbsoluteResponseBytes       = 51200
+	MaxParticipantsShown        = 30
+	MaxTimelineEvents           = 100
 	MaxStatementsPerParticipant = 20
-	UTF8ByteUnit         = "utf8_bytes"
+	UTF8ByteUnit                = "utf8_bytes"
 )
 
 // TopicRequest is the input to analyze_topic.
@@ -67,14 +67,14 @@ type OutboxItem struct {
 
 // ConversationMessage is one message in a conversation.
 type ConversationMessage struct {
-	Reference    string  `json:"reference"`
-	From         string  `json:"from"`
-	To           string  `json:"to"`
-	Date         string  `json:"date"`
-	Subject      string  `json:"subject"`
-	Snippet      string  `json:"snippet"`
-	IsInbound    bool    `json:"is_inbound"`
-	HasQuestion  bool    `json:"has_question"`
+	Reference     string `json:"reference"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	Date          string `json:"date"`
+	Subject       string `json:"subject"`
+	Snippet       string `json:"snippet"`
+	IsInbound     bool   `json:"is_inbound"`
+	HasQuestion   bool   `json:"has_question"`
 	TextAvailable bool   `json:"text_available"`
 }
 
@@ -97,39 +97,39 @@ type ResearchPass struct {
 
 // ResearchPlan is the full plan for a topic analysis.
 type ResearchPlan struct {
-	Question     string         `json:"question"`
-	Scope        ScopeFilter    `json:"scope"`
-	Passes       []ResearchPass `json:"passes"`
-	MaxEvidence  int            `json:"max_evidence"`
+	Question     string             `json:"question"`
+	Scope        ScopeFilter        `json:"scope"`
+	Passes       []ResearchPass     `json:"passes"`
+	MaxEvidence  int                `json:"max_evidence"`
 	Continuation *ContinuationState `json:"continuation,omitempty"`
 }
 
 // ScopeFilter captures the resolved date range, participants, and conversations.
 type ScopeFilter struct {
-	After        *time.Time `json:"after,omitempty"`
-	Before       *time.Time `json:"before,omitempty"`
-	Participants []string   `json:"participants,omitempty"`
-	Conversations []string  `json:"conversations,omitempty"`
+	After         *time.Time `json:"after,omitempty"`
+	Before        *time.Time `json:"before,omitempty"`
+	Participants  []string   `json:"participants,omitempty"`
+	Conversations []string   `json:"conversations,omitempty"`
 }
 
 // ParticipantObservation tracks one participant's evidence across the analysis.
 type ParticipantObservation struct {
-	Address        string                `json:"address"`
-	MessageCount   int                   `json:"message_count"`
-	EarliestDate   string                `json:"earliest_date,omitempty"`
-	LatestDate     string                `json:"latest_date,omitempty"`
-	Statements     []ParticipantStatement `json:"statements"`
-	MostRecentStatement *ParticipantStatement `json:"most_recent_statement,omitempty"`
-	ConflictsWith  []EvidenceReference   `json:"conflicts_with,omitempty"`
+	Address             string                 `json:"address"`
+	MessageCount        int                    `json:"message_count"`
+	EarliestDate        string                 `json:"earliest_date,omitempty"`
+	LatestDate          string                 `json:"latest_date,omitempty"`
+	Statements          []ParticipantStatement `json:"statements"`
+	MostRecentStatement *ParticipantStatement  `json:"most_recent_statement,omitempty"`
+	ConflictsWith       []EvidenceReference    `json:"conflicts_with,omitempty"`
 }
 
 // ParticipantStatement is one source statement by a participant.
 type ParticipantStatement struct {
-	Reference     EvidenceReference `json:"reference"`
-	Date          string            `json:"date"`
-	Summary       string            `json:"summary"`
-	Position      string            `json:"position"`
-	Relevance     float64           `json:"relevance"`
+	Reference EvidenceReference `json:"reference"`
+	Date      string            `json:"date"`
+	Summary   string            `json:"summary"`
+	Position  string            `json:"position"`
+	Relevance float64           `json:"relevance"`
 }
 
 // TimelineEvent is one event in the chronological timeline.
@@ -164,16 +164,16 @@ const (
 
 // Classification for outstanding-item review.
 const (
-	ClassificationActionRequired      = "likely_action_required"
-	ClassificationNoActionRequired    = "likely_no_action_required"
-	ClassificationUncertain           = "uncertain"
+	ClassificationActionRequired   = "likely_action_required"
+	ClassificationNoActionRequired = "likely_no_action_required"
+	ClassificationUncertain        = "uncertain"
 )
 
 // TopicDossier is the complete output of analyze_topic.
 type TopicDossier struct {
 	// Original request and effective scope.
-	Request       TopicRequest `json:"request"`
-	Scope         ScopeFilter  `json:"scope"`
+	Request TopicRequest `json:"request"`
+	Scope   ScopeFilter  `json:"scope"`
 
 	// Research passes performed and skipped.
 	PassesPerformed []ResearchPass `json:"passes_performed"`
@@ -224,9 +224,9 @@ type ConversationSummary struct {
 
 // ConflictEntry represents one set of conflicting statements.
 type ConflictEntry struct {
-	Participant    string              `json:"participant"`
-	Statements     []ParticipantStatement `json:"statements"`
-	Topic          string              `json:"topic"`
+	Participant string                 `json:"participant"`
+	Statements  []ParticipantStatement `json:"statements"`
+	Topic       string                 `json:"topic"`
 }
 
 // EvidenceBudgetInfo describes budget consumption.
@@ -250,28 +250,28 @@ type ReviewRequest struct {
 
 // CandidateClassification is the agent-facing classification of one candidate.
 type CandidateClassification struct {
-	ConversationID   string            `json:"conversation_id"`
-	Subject          string            `json:"subject"`
-	Classification   string            `json:"classification"`
-	EvidenceRefs     []EvidenceReference `json:"evidence_refs"`
-	Reasoning        string            `json:"reasoning"`
-	LatestInbound    ConversationMessage `json:"latest_inbound"`
+	ConversationID   string                `json:"conversation_id"`
+	Subject          string                `json:"subject"`
+	Classification   string                `json:"classification"`
+	EvidenceRefs     []EvidenceReference   `json:"evidence_refs"`
+	Reasoning        string                `json:"reasoning"`
+	LatestInbound    ConversationMessage   `json:"latest_inbound"`
 	Messages         []ConversationMessage `json:"messages"`
-	ParticipantCount int               `json:"participant_count"`
-	LastActivity     string            `json:"last_activity"`
-	Warnings         []Warning         `json:"warnings,omitempty"`
+	ParticipantCount int                   `json:"participant_count"`
+	LastActivity     string                `json:"last_activity"`
+	Warnings         []Warning             `json:"warnings,omitempty"`
 }
 
 // ReviewDossier is the complete output of review_awaiting_reply.
 type ReviewDossier struct {
-	Request       ReviewRequest               `json:"request"`
+	Request         ReviewRequest             `json:"request"`
 	Classifications []CandidateClassification `json:"classifications"`
 	TotalCandidates int                       `json:"total_candidates"`
-	ReturnedCount  int                        `json:"returned_count"`
-	Budget         EvidenceBudgetInfo          `json:"budget"`
-	Warnings       []Warning                  `json:"warnings"`
-	Complete       bool                       `json:"complete"`
-	NextCursor     string                     `json:"next_cursor,omitempty"`
+	ReturnedCount   int                       `json:"returned_count"`
+	Budget          EvidenceBudgetInfo        `json:"budget"`
+	Warnings        []Warning                 `json:"warnings"`
+	Complete        bool                      `json:"complete"`
+	NextCursor      string                    `json:"next_cursor,omitempty"`
 }
 
 // ContinuationState preserves research-plan state across continuation calls.

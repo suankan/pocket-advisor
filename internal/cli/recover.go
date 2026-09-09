@@ -7,8 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/suankan/pocket-advisor/internal/config"
-	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/doctor"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
@@ -28,6 +28,11 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer db.Close()
+	unlock, err := db.LockMaintenance(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	q := postgres.NewDoctorQueries(db)
 	threshold := doctor.StalenessThreshold

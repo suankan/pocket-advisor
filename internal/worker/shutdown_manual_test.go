@@ -44,7 +44,7 @@ func TestShutdownRemainsDeliverableBeyondBrokerLimit(t *testing.T) {
 	}
 	suffix := strings.ToUpper(strings.ReplaceAll(ws, "-", "_"))
 	defer func() {
-		for _, name := range []string{bus.StreamName, bus.StreamDLQ, bus.StreamRustFSEvents} {
+		for _, name := range []string{bus.StreamName, bus.StreamDLQ} {
 			_ = js.DeleteStream(context.Background(), name+"_"+suffix)
 		}
 	}()

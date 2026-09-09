@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"strings"
 	"unicode/utf8"
 )
@@ -52,7 +53,7 @@ func (s *Service) buildPackets(ctx context.Context, picked []scored, subQueries 
 			Match: Match{
 				ChunkID: p.ChunkID, StartByte: p.StartByte, EndByte: p.EndByte,
 				Score: p.Score, Legs: legs, SubQuery: sq,
-				Snippet: snippet(p.Text),
+				Snippet: snippet(p.Text), SliceSHA256: domain.SHA256Hex([]byte(p.Text)),
 			},
 		})
 	}

@@ -18,7 +18,7 @@ import (
 const (
 	RoleApp        = "pocket-advisor"
 	RoleMCP        = "mcp"
-	RoleUploader   = "uploader"
+	RoleRetention  = "retention"
 	RoleDiscover   = "discovery"
 	RoleEmail      = "email-processor"
 	RoleDocument   = "document-extractor"
@@ -29,7 +29,7 @@ const (
 
 // Roles is every role that gets a log file, in pipeline order.
 var Roles = []string{
-	RoleApp, RoleMCP, RoleUploader, RoleDiscover,
+	RoleApp, RoleMCP, RoleRetention, RoleDiscover,
 	RoleEmail, RoleDocument, RoleOffice, RoleEmbed, RoleTopicGraph,
 }
 

@@ -39,7 +39,7 @@ const emailGraphLockKey = "email-identifier-graph"
 func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage) (domain.EmailConversation, error) {
 	var conv domain.EmailConversation
 
-	tx, err := r.db.Pool.Begin(ctx)
+	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return conv, fmt.Errorf("begin email metadata: %w", err)
 	}
@@ -310,7 +310,7 @@ type EmailDocumentQuery struct {
 	// OnlyMissing restricts the walk to documents that have no email_messages
 	// row yet — the cheap pass after an interrupted rebuild. It is a selection
 	// narrowing, never a correctness one: a full pass rewrites every message
-	// from its Tier 1 bytes and converges on the same rows.
+	// from its original bytes and converges on the same rows.
 	OnlyMissing bool
 }
 
@@ -319,11 +319,11 @@ type EmailDocumentQuery struct {
 //
 // Only doc_type = 'email' is returned. An archive is a container routed to the
 // same worker but is not a message and has no metadata of its own, and a
-// document with no Tier 1 object is still returned so the reprocessor can
+// document with no original source is still returned so the reprocessor can
 // report it as unreadable rather than silently losing the missing metadata.
 func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([]domain.Document, error) {
-	rows, err := r.db.Pool.Query(ctx, `
-        SELECT d.doc_id::text, d.mime_type, d.rustfs_raw_uri, d.raw_sha256
+	rows, err := r.db.executor(ctx).Query(ctx, `
+        SELECT d.doc_id::text, d.mime_type, d.source_ref, d.raw_sha256
         FROM documents d
         WHERE d.doc_type = 'email'
           AND ($1::text = '' OR d.doc_id > $1::uuid)
@@ -339,7 +339,7 @@ func (r *EmailRepo) EmailDocuments(ctx context.Context, q EmailDocumentQuery) ([
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.MimeType, &d.RawURI, &d.RawSHA256); err != nil {
+		if err := rows.Scan(&d.DocID, &d.MimeType, &d.SourceRef, &d.RawSHA256); err != nil {
 			return nil, fmt.Errorf("list email documents: %w", err)
 		}
 		out = append(out, d)

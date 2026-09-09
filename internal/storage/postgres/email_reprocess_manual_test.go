@@ -22,13 +22,18 @@ import (
 // All content is synthetic.
 
 // reprocessDoc creates one Tier 2 row the way discovery would have, with the
-// doc_type and Tier 1 URI the selection query filters on.
-func reprocessDoc(t *testing.T, db *DB, sha, docType, rawURI string) string {
+// doc_type and source reference the selection query filters on. withSource
+// false leaves source_ref empty, standing for a row naming no original at all.
+func reprocessDoc(t *testing.T, db *DB, sha, docType string, withSource bool) string {
 	t.Helper()
 	docID := domain.NewDocID()
+	rawURI := ""
+	if withSource {
+		rawURI = "source:" + docID
+	}
 	if _, err := db.Pool.Exec(context.Background(), `
         INSERT INTO documents (doc_id, processing_status,
-                               doc_type, mime_type, rustfs_raw_uri, raw_sha256)
+                               doc_type, mime_type, source_ref, raw_sha256)
         VALUES ($1, 'COMPLETED', $2, 'message/rfc822', $3, $4)
         ON CONFLICT (raw_sha256) DO NOTHING`,
 		docID, docType, rawURI, sha); err != nil {
@@ -47,7 +52,7 @@ func docIDs(docs []domain.Document) []string {
 
 // A rebuild walks message documents and nothing else: an archive is a
 // container rather than a message, and a non-email document has no metadata
-// to rebuild. An email row with no Tier 1 object is deliberately selected:
+// to rebuild. An email row with no Tier 1 original is deliberately selected:
 // the command must report it as unreadable rather than silently skip the
 // missing metadata.
 func TestEmailDocumentsSelectsOnlyMessageDocuments(t *testing.T) {
@@ -55,14 +60,13 @@ func TestEmailDocumentsSelectsOnlyMessageDocuments(t *testing.T) {
 	ctx := context.Background()
 
 	wantSet := map[string]bool{}
-	for i, sha := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
-		wantSet[reprocessDoc(t, db, sha, "email",
-			fmt.Sprintf("s3://bucket/raw/%d", i))] = true
+	for _, sha := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
+		wantSet[reprocessDoc(t, db, sha, "email", true)] = true
 	}
-	reprocessDoc(t, db, strings.Repeat("c", 64), "archive", "s3://bucket/raw/c")
-	reprocessDoc(t, db, strings.Repeat("d", 64), "pdf", "s3://bucket/raw/d")
-	missingObject := reprocessDoc(t, db, strings.Repeat("e", 64), "email", "")
-	wantSet[missingObject] = true
+	reprocessDoc(t, db, strings.Repeat("c", 64), "archive", true)
+	reprocessDoc(t, db, strings.Repeat("d", 64), "pdf", true)
+	missingSource := reprocessDoc(t, db, strings.Repeat("e", 64), "email", false)
+	wantSet[missingSource] = true
 
 	got, err := repo.EmailDocuments(ctx, EmailDocumentQuery{Limit: 100})
 	if err != nil {
@@ -86,8 +90,7 @@ func TestEmailDocumentsPagesDeterministically(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		reprocessDoc(t, db, strings.Repeat(fmt.Sprint(i), 64),
-			"email", fmt.Sprintf("s3://bucket/raw/%d", i))
+		reprocessDoc(t, db, strings.Repeat(fmt.Sprint(i), 64), "email", true)
 	}
 
 	all, err := repo.EmailDocuments(ctx, EmailDocumentQuery{Limit: 100})
@@ -130,8 +133,8 @@ func TestEmailDocumentsCanSelectOnlyMissingMetadata(t *testing.T) {
 	db, repo := applied(t, "missing")
 	ctx := context.Background()
 
-	done := reprocessDoc(t, db, strings.Repeat("7", 64), "email", "s3://bucket/raw/7")
-	pending := reprocessDoc(t, db, strings.Repeat("8", 64), "email", "s3://bucket/raw/8")
+	done := reprocessDoc(t, db, strings.Repeat("7", 64), "email", true)
+	pending := reprocessDoc(t, db, strings.Repeat("8", 64), "email", true)
 
 	if _, err := repo.SaveEmailMessage(ctx,
 		message(done, "seven@mail.example.test", "Quarterly review", "")); err != nil {
@@ -166,7 +169,7 @@ func TestEmailReprocessingLeavesTheDocumentRowAlone(t *testing.T) {
 	db, repo := applied(t, "canonical")
 	ctx := context.Background()
 
-	docID := reprocessDoc(t, db, strings.Repeat("9", 64), "email", "s3://bucket/raw/9")
+	docID := reprocessDoc(t, db, strings.Repeat("9", 64), "email", true)
 	if _, err := db.Pool.Exec(ctx, `
         UPDATE documents SET normalized_text = $2, thread_id = $3, email_subject = $4
         WHERE doc_id = $1`, docID, "synthetic body", "thread-key", "Quarterly review"); err != nil {

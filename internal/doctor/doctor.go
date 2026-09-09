@@ -14,7 +14,7 @@ import (
 const StalenessThreshold = 30 * time.Minute
 
 // Doctor performs read-only health checks on a workspace. It never writes
-// to PostgreSQL, RustFS, NATS, or any other store.
+// to PostgreSQL, sources, NATS, or any other store.
 type Doctor struct {
 	checks    Checks
 	workspace string
@@ -29,9 +29,9 @@ type Checks struct {
 	CredsOK    bool // credential values match workspace
 
 	// Store reachability
-	PGRaw     bool // PostgreSQL ping succeeded
-	RustFSRaw bool // RustFS bucket reachable
-	NATSRaw   bool // NATS connection alive
+	PGRaw      bool // PostgreSQL ping succeeded
+	SourcesRaw bool // configured roots available
+	NATSRaw    bool // NATS connection alive
 
 	// Embedding
 	EmbedModelOK bool   // model matches schema_metadata
@@ -47,9 +47,9 @@ type Checks struct {
 	PGHNSWOK      bool // HNSW index present
 	PGBM25OK      bool // BM25 index present
 
-	// Tier 1/Tier 2 gaps
-	Tier1WithoutTier2 int // raw/ objects with no document row
-	Tier2WithoutTier1 int // document rows with missing Tier 1 object
+	// Source inventory gaps
+	SourceWaitingJobs       int // jobs waiting for original bytes
+	DocumentsWithoutSources int // documents without observed sources
 
 	// Document state
 	StalePending    int // PENDING rows older than threshold
@@ -105,10 +105,10 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 			"PostgreSQL connection failed",
 			"check postgres StatefulSet health and workspace credentials")
 	}
-	if !d.checks.RustFSRaw {
-		addFinding(&findings, "RUSTFS_UNREACHABLE", SeverityCritical, 1,
-			"RustFS bucket unreachable",
-			"check rustfs StatefulSet health and bucket identity")
+	if !d.checks.SourcesRaw {
+		addFinding(&findings, "SOURCES_UNREACHABLE", SeverityCritical, 1,
+			"source roots unavailable",
+			"check configured source directories and mounts")
 	}
 	if !d.checks.NATSRaw {
 		addFinding(&findings, "NATS_UNREACHABLE", SeverityCritical, 1,
@@ -152,13 +152,13 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 			"run --ingest-all which rebuilds it after writes land")
 	}
 
-	// 5. Tier 1/Tier 2 gaps
-	addFinding(&findings, "TIER1_ORPHAN", SeverityWarning, d.checks.Tier1WithoutTier2,
-		"raw/ objects with no corresponding document row",
-		"run --scan to create missing Tier 2 stubs")
-	addFinding(&findings, "TIER2_MISSING_TIER1", SeverityWarning, d.checks.Tier2WithoutTier1,
-		"document rows whose Tier 1 object is missing",
-		"run --forget to clean up dangling rows, or re-upload the source")
+	// 5. Source inventory gaps
+	addFinding(&findings, "SOURCE_WAITING_JOBS", SeverityWarning, d.checks.SourceWaitingJobs,
+		"ingestion jobs waiting for original files",
+		"restore the expected originals, then run --reconcile")
+	addFinding(&findings, "DOCUMENTS_WITHOUT_SOURCES", SeverityWarning, d.checks.DocumentsWithoutSources,
+		"documents without an observed original-file route",
+		"run --audit-sources; restore expected originals or review the pruning plan")
 
 	// 6. Stale document rows
 	addFinding(&findings, "STALE_PENDING", SeverityWarning, d.checks.StalePending,

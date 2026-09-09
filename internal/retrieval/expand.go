@@ -3,24 +3,29 @@ package retrieval
 import (
 	"context"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"time"
 )
 
 // Document is a Tier 2 row as the read path needs it.
 type Document struct {
-	DocID     string     `json:"doc_id"`
-	ParentID  string     `json:"parent_doc_id,omitempty"`
-	ThreadID  string     `json:"thread_id,omitempty"`
-	DocType   string     `json:"doc_type"`
-	Title     string     `json:"title"`
-	From      string     `json:"from,omitempty"`
-	To        string     `json:"to,omitempty"`
-	Date      *time.Time `json:"date,omitempty"`
-	RawURI    string     `json:"raw_uri"`
-	SHA256    string     `json:"raw_sha256"`
-	CharCount int        `json:"char_count"`
+	SourceLocations   []source.Location `json:"source_locations,omitempty"`
+	ExtractionHash    string            `json:"extraction_sha256"`
+	ExtractionVersion string            `json:"extraction_version"`
+	DocID             string            `json:"doc_id"`
+	ParentID          string            `json:"parent_doc_id,omitempty"`
+	ThreadID          string            `json:"thread_id,omitempty"`
+	DocType           string            `json:"doc_type"`
+	Title             string            `json:"title"`
+	From              string            `json:"from,omitempty"`
+	To                string            `json:"to,omitempty"`
+	Date              *time.Time        `json:"date,omitempty"`
+	SourceRef         string            `json:"source_ref"`
+	SHA256            string            `json:"raw_sha256"`
+	CharCount         int               `json:"char_count"`
 	// SourcePath is the document's original path relative to the workspace's
-	// local staging directory, exactly as the uploader recorded it
+	// configured source directory, exactly as the scan recorded it
 	// (ingestion-design.md's Provenance.SourcePath, stored in
 	// documents.metadata_headers). It is empty for a document that was never
 	// its own file on disk — a child created by a container worker, such as
@@ -59,13 +64,14 @@ type Related struct {
 
 // Match locates a packet's hit inside its document.
 type Match struct {
-	ChunkID   string  `json:"chunk_id"`
-	StartByte int     `json:"start_byte"`
-	EndByte   int     `json:"end_byte"`
-	Score     float64 `json:"score"`
-	Legs      string  `json:"legs"` // dense | lexical | both
-	SubQuery  string  `json:"sub_query,omitempty"`
-	Snippet   string  `json:"snippet"`
+	SliceSHA256 string  `json:"slice_sha256"`
+	ChunkID     string  `json:"chunk_id"`
+	StartByte   int     `json:"start_byte"`
+	EndByte     int     `json:"end_byte"`
+	Score       float64 `json:"score"`
+	Legs        string  `json:"legs"` // dense | lexical | both
+	SubQuery    string  `json:"sub_query,omitempty"`
+	Snippet     string  `json:"snippet"`
 }
 
 // Packet is one returned result: a matched document, why it matched, its text,
@@ -77,49 +83,22 @@ type Packet struct {
 	Related []Related `json:"related,omitempty"`
 }
 
-// containerAncestrySQL resolves, for a set of origin documents, the nearest
-// ancestor that is itself a staged file. A document created by a container
-// worker never had a path of its own, and its siblings are not evidence of
-// where it lives, so the only honest location it can be given is the file it
-// was extracted from. The walk stops at the first ancestor with a path and is
-// depth-bounded so malformed lineage cannot spin.
-const containerAncestrySQL = `
-ancestry AS (
-    SELECT DISTINCT origin.doc_id AS origin, source.parent_doc_id,
-           NULLIF(source.metadata_headers->>'source_path', '') AS source_path, 0 AS hops
-    FROM origins origin
-    JOIN documents source ON source.doc_id = origin.doc_id
-    UNION ALL
-    SELECT walk.origin, parent.parent_doc_id,
-           NULLIF(parent.metadata_headers->>'source_path', ''), walk.hops + 1
-    FROM documents parent
-    JOIN ancestry walk ON walk.parent_doc_id = parent.doc_id
-    WHERE walk.source_path IS NULL AND walk.hops < 16
-),
-container AS (
-    SELECT DISTINCT ON (origin) origin, source_path
-    FROM ancestry
-    WHERE source_path IS NOT NULL AND hops > 0
-    ORDER BY origin, hops
-)`
-
 const documentsSQL = `
 WITH RECURSIVE origins AS (
     SELECT unnest($1::uuid[]) AS doc_id
-),
-` + containerAncestrySQL + `
+)
+
 SELECT d.doc_id::text,
        COALESCE(d.parent_doc_id::text, ''),
        d.thread_id, d.doc_type,
        COALESCE(NULLIF(d.email_subject, ''), d.source_filename),
        d.email_from, d.email_to, d.email_date,
-       d.rustfs_raw_uri, d.raw_sha256,
+       d.source_ref, d.raw_sha256,d.extraction_hash,d.extraction_version,
        COALESCE(length(d.normalized_text), 0),
        COALESCE(d.normalized_text, ''),
        COALESCE(d.metadata_headers->>'source_path', ''),
-       COALESCE(c.source_path, '')
+       ''::text
 FROM documents d
-LEFT JOIN container c ON c.origin = d.doc_id
 WHERE d.doc_id = ANY($1::uuid[])`
 
 func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]Document, map[string]string, error) {
@@ -138,7 +117,7 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 		var text string
 		var date *time.Time
 		if err := rows.Scan(&d.DocID, &d.ParentID, &d.ThreadID, &d.DocType, &d.Title,
-			&d.From, &d.To, &date, &d.RawURI, &d.SHA256, &d.CharCount, &text,
+			&d.From, &d.To, &date, &d.SourceRef, &d.SHA256, &d.ExtractionHash, &d.ExtractionVersion, &d.CharCount, &text,
 			&d.SourcePath, &d.ContainerPath); err != nil {
 			return nil, nil, err
 		}
@@ -146,7 +125,20 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 		docs[d.DocID] = d
 		texts[d.DocID] = text
 	}
-	return docs, texts, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	locations, err := postgres.NewSourceRepo(s.DB).Locations(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	for id, d := range docs {
+		d.SourceLocations = locations[id]
+		d.SourcePath, d.ContainerPath = source.DisplayLocations(d.SourceLocations)
+		docs[id] = d
+	}
+	return docs, texts, nil
 }
 
 // neighbourSQL finds every document related to the matched set by recorded
@@ -174,22 +166,21 @@ WITH RECURSIVE neighbours AS (
 ),
 origins AS (
     SELECT DISTINCT doc_id FROM neighbours
-),
-` + containerAncestrySQL + `
+)
+
 SELECT d.doc_id::text,
        COALESCE(d.parent_doc_id::text, ''),
        d.thread_id, d.doc_type,
        COALESCE(NULLIF(d.email_subject, ''), d.source_filename),
        d.email_from, d.email_to, d.email_date,
-       d.rustfs_raw_uri, d.raw_sha256,
+       d.source_ref, d.raw_sha256,d.extraction_hash,d.extraction_version,
        COALESCE(length(d.normalized_text), 0),
        COALESCE(d.normalized_text, ''),
        COALESCE(d.metadata_headers->>'source_path', ''),
-       COALESCE(c.source_path, ''),
+       ''::text,
        n.relation
 FROM neighbours n
 JOIN documents d ON d.doc_id = n.doc_id
-LEFT JOIN container c ON c.origin = n.doc_id
 ORDER BY d.email_date NULLS LAST, d.doc_id`
 
 type neighbour struct {
@@ -214,7 +205,7 @@ func (s *Service) loadNeighbours(ctx context.Context, matched []string) ([]neigh
 		var date *time.Time
 		var rel string
 		if err := rows.Scan(&n.DocID, &n.ParentID, &n.ThreadID, &n.DocType, &n.Title,
-			&n.From, &n.To, &date, &n.RawURI, &n.SHA256, &n.CharCount, &n.text,
+			&n.From, &n.To, &date, &n.SourceRef, &n.SHA256, &n.ExtractionHash, &n.ExtractionVersion, &n.CharCount, &n.text,
 			&n.SourcePath, &n.ContainerPath, &rel); err != nil {
 			return nil, err
 		}
@@ -226,7 +217,23 @@ func (s *Service) loadNeighbours(ctx context.Context, matched []string) ([]neigh
 		n.Relation = Relation(rel)
 		out = append(out, n)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out))
+	for _, n := range out {
+		ids = append(ids, n.DocID)
+	}
+	locations, err := postgres.NewSourceRepo(s.DB).Locations(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].SourceLocations = locations[out[i].DocID]
+		out[i].SourcePath, out[i].ContainerPath = source.DisplayLocations(out[i].SourceLocations)
+	}
+	return out, nil
 }
 
 // budgeter allocates the single per-answer UTF-8 byte allowance.

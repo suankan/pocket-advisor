@@ -28,7 +28,7 @@ func (r *DocumentRepo) RecordPlacement(ctx context.Context, containerID, contain
 	if containerID == containedID {
 		return fmt.Errorf("record placement: document %s cannot contain itself", containerID)
 	}
-	_, err := r.db.Pool.Exec(ctx, `
+	_, err := r.db.executor(ctx).Exec(ctx, `
         INSERT INTO document_placements (container_doc_id, contained_doc_id)
         VALUES ($1, $2)
         ON CONFLICT DO NOTHING`, containerID, containedID)
@@ -42,7 +42,7 @@ func (r *DocumentRepo) RecordPlacement(ctx context.Context, containerID, contain
 // content is not known to this workspace.
 func (r *DocumentRepo) DocIDBySHA(ctx context.Context, sha string) (string, error) {
 	var id string
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT doc_id::text FROM documents WHERE raw_sha256 = $1`, sha).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return "", nil
@@ -57,7 +57,7 @@ func (r *DocumentRepo) DocIDBySHA(ctx context.Context, sha string) (string, erro
 // A zero time means it never has, and pruning must refuse.
 func (r *DocumentRepo) PlacementsBackfilledAt(ctx context.Context) (time.Time, error) {
 	var at *time.Time
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT placements_backfilled_at FROM schema_metadata LIMIT 1`).Scan(&at)
 	if err == pgx.ErrNoRows {
 		return time.Time{}, nil
@@ -72,9 +72,9 @@ func (r *DocumentRepo) PlacementsBackfilledAt(ctx context.Context) (time.Time, e
 }
 
 // MarkPlacementsBackfilled records that every existing document's containments
-// have been re-derived from Tier 1.
+// have been re-derived from verified originals.
 func (r *DocumentRepo) MarkPlacementsBackfilled(ctx context.Context, at time.Time) error {
-	_, err := r.db.Pool.Exec(ctx,
+	_, err := r.db.executor(ctx).Exec(ctx,
 		`UPDATE schema_metadata SET placements_backfilled_at = $1`, at)
 	if err != nil {
 		return fmt.Errorf("mark backfill complete: %w", err)
@@ -108,7 +108,7 @@ type PruneCandidate struct {
 // because a real workspace stages tens of thousands of files, and a query with
 // 60,000 bind parameters is not a query.
 func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []string) ([]PruneCandidate, error) {
-	tx, err := r.db.Pool.Begin(ctx)
+	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin sweep: %w", err)
 	}
@@ -170,7 +170,7 @@ func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []st
 // denominator the sweep's blast-radius guard compares against.
 func (r *DocumentRepo) CountDocuments(ctx context.Context) (int, error) {
 	var n int
-	if err := r.db.Pool.QueryRow(ctx, `SELECT count(*) FROM documents`).Scan(&n); err != nil {
+	if err := r.db.executor(ctx).QueryRow(ctx, `SELECT count(*) FROM documents`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count documents: %w", err)
 	}
 	return n, nil
@@ -189,7 +189,7 @@ func (r *DocumentRepo) DeleteDocuments(ctx context.Context, ids []string) (int64
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	tx, err := r.db.Pool.Begin(ctx)
+	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin delete: %w", err)
 	}
@@ -199,12 +199,6 @@ func (r *DocumentRepo) DeleteDocuments(ctx context.Context, ids []string) (int64
 
 // deleteDocuments commits row removal and its object cleanup requests together.
 func deleteDocuments(ctx context.Context, tx pgx.Tx, ids []string) (int64, error) {
-	if _, err := tx.Exec(ctx, `
-        INSERT INTO pending_object_deletions (raw_sha256)
-        SELECT raw_sha256 FROM documents WHERE doc_id = ANY($1::uuid[])
-        ON CONFLICT DO NOTHING`, ids); err != nil {
-		return 0, fmt.Errorf("queue object deletion: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `
         UPDATE documents d
         SET parent_doc_id = (
@@ -223,44 +217,13 @@ func deleteDocuments(ctx context.Context, tx pgx.Tx, ids []string) (int64, error
 		return 0, fmt.Errorf("delete documents: %w", err)
 	}
 
+	if _, err := tx.Exec(ctx, `DELETE FROM chunks c WHERE NOT EXISTS(SELECT 1 FROM document_chunks p WHERE p.chunk_id=c.chunk_id)`); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit delete: %w", err)
 	}
 	return tag.RowsAffected(), nil
-}
-
-// PendingObjectDeletions returns a bounded batch of durable cleanup work.
-func (r *DocumentRepo) PendingObjectDeletions(ctx context.Context, limit int) ([]string, error) {
-	rows, err := r.db.Pool.Query(ctx, `SELECT raw_sha256 FROM pending_object_deletions
-		ORDER BY raw_sha256 LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowTo[string])
-}
-
-func (r *DocumentRepo) CompleteObjectDeletion(ctx context.Context, sha string) error {
-	_, err := r.db.Pool.Exec(ctx, `DELETE FROM pending_object_deletions WHERE raw_sha256 = $1`, sha)
-	return err
-}
-
-// ClearObjectDeletions follows a successful whole-bucket wipe. The conditional
-// keeps --delete-data usable on workspaces predating the cleanup table.
-func (r *DocumentRepo) ClearObjectDeletions(ctx context.Context) error {
-	_, err := r.db.Pool.Exec(ctx, `DO $$ BEGIN
-        IF to_regclass('pending_object_deletions') IS NOT NULL THEN
-            DELETE FROM pending_object_deletions;
-        END IF;
-    END $$`)
-	return err
-}
-
-func (r *DocumentRepo) ObjectDeletionPending(ctx context.Context, sha string) (bool, error) {
-	var pending bool
-	err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS (
-        SELECT 1 FROM pending_object_deletions WHERE raw_sha256 = $1)`, sha).Scan(&pending)
-	return pending, err
 }
 
 // ContainerDocuments walks the workspace's container documents in
@@ -273,8 +236,8 @@ func (r *DocumentRepo) ObjectDeletionPending(ctx context.Context, sha string) (b
 // object is still returned, so the backfill can report it as unreadable
 // instead of quietly leaving its containments underivable.
 func (r *DocumentRepo) ContainerDocuments(ctx context.Context, after string, limit int) ([]domain.Document, error) {
-	rows, err := r.db.Pool.Query(ctx, `
-        SELECT d.doc_id::text, d.mime_type, d.rustfs_raw_uri, d.raw_sha256, d.source_filename
+	rows, err := r.db.executor(ctx).Query(ctx, `
+        SELECT d.doc_id::text, d.mime_type, d.source_ref, d.raw_sha256, d.source_filename
         FROM documents d
         WHERE d.doc_type IN ('email', 'archive')
           AND ($1::text = '' OR d.doc_id > $1::uuid)
@@ -288,7 +251,7 @@ func (r *DocumentRepo) ContainerDocuments(ctx context.Context, after string, lim
 	var out []domain.Document
 	for rows.Next() {
 		var d domain.Document
-		if err := rows.Scan(&d.DocID, &d.MimeType, &d.RawURI, &d.RawSHA256, &d.SourceName); err != nil {
+		if err := rows.Scan(&d.DocID, &d.MimeType, &d.SourceRef, &d.RawSHA256, &d.SourceName); err != nil {
 			return nil, fmt.Errorf("read container document: %w", err)
 		}
 		out = append(out, d)
@@ -304,7 +267,7 @@ func (r *DocumentRepo) ContainerDocuments(ctx context.Context, after string, lim
 // those failures are not the work's fault and not worth a dead letter.
 func (r *DocumentRepo) Exists(ctx context.Context, docID string) (bool, error) {
 	var ok bool
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM documents WHERE doc_id = $1)`, docID).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("check document %s: %w", docID, err)
@@ -319,7 +282,7 @@ func (r *DocumentRepo) Exists(ctx context.Context, docID string) (bool, error) {
 // the second is a gap in the graph.
 func (r *DocumentRepo) HasPlacements(ctx context.Context, containerID string) (bool, error) {
 	var ok bool
-	err := r.db.Pool.QueryRow(ctx,
+	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM document_placements WHERE container_doc_id = $1)`,
 		containerID).Scan(&ok)
 	if err != nil {

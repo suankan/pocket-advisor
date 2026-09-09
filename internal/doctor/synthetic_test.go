@@ -100,7 +100,7 @@ func TestSyntheticStoresDownScenario(t *testing.T) {
 	for _, f := range r.Findings {
 		codes[f.Code] = true
 	}
-	for _, code := range []string{"PG_UNREACHABLE", "RUSTFS_UNREACHABLE", "NATS_UNREACHABLE"} {
+	for _, code := range []string{"PG_UNREACHABLE", "SOURCES_UNREACHABLE", "NATS_UNREACHABLE"} {
 		if !codes[code] {
 			t.Errorf("missing finding: %s", code)
 		}
@@ -130,7 +130,7 @@ func TestSyntheticTierGapsScenario(t *testing.T) {
 	for _, f := range r.Findings {
 		codes[f.Code] = true
 	}
-	for _, code := range []string{"TIER1_ORPHAN", "TIER2_MISSING_TIER1", "ORPHAN_EXTRACTED"} {
+	for _, code := range []string{"SOURCE_WAITING_JOBS", "DOCUMENTS_WITHOUT_SOURCES", "ORPHAN_EXTRACTED"} {
 		if !codes[code] {
 			t.Errorf("missing finding: %s", code)
 		}

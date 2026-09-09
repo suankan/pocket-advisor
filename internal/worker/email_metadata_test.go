@@ -155,7 +155,7 @@ func TestAutomatedClassNarrowsToStoredValues(t *testing.T) {
 		{
 			name: "bounce",
 			raw: "From: MAILER-DAEMON@example.test\r\nSubject: Undelivered mail\r\n" +
-				"Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n\r\nBody.\r\n",
+				"Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nBody.\r\n--b--\r\n",
 			want: domain.EmailAutomatedBounce,
 		},
 		{

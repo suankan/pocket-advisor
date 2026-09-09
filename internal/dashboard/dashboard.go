@@ -157,7 +157,7 @@ func (d *Dashboard) render() string {
 	header += " · elapsed " + elapsed(time.Since(d.start))
 	fmt.Fprintf(&b, "%s\n\n", d.bold(header))
 
-	d.renderUpload(&b)
+	d.renderScan(&b)
 	d.renderQueues(&b)
 	d.renderResources(&b)
 
@@ -167,8 +167,8 @@ func (d *Dashboard) render() string {
 	return b.String()
 }
 
-func (d *Dashboard) renderUpload(b *strings.Builder) {
-	u := d.src.Stats.Upload.Snapshot()
+func (d *Dashboard) renderScan(b *strings.Builder) {
+	u := d.src.Stats.Scan.Snapshot()
 	if u.Total == 0 && u.Done() == 0 {
 		return
 	}
@@ -182,7 +182,7 @@ func (d *Dashboard) renderUpload(b *strings.Builder) {
 	if u.Failed > 0 {
 		status += " · " + d.red(fmt.Sprintf("%s failed", commas(u.Failed)))
 	}
-	fmt.Fprintf(b, "%-9s %s  %s\n\n", d.bold("UPLOAD"), bar(frac, barWidth), status)
+	fmt.Fprintf(b, "%-9s %s  %s\n\n", d.bold("SOURCES"), bar(frac, barWidth), status)
 }
 
 func (d *Dashboard) renderQueues(b *strings.Builder) {
@@ -271,11 +271,11 @@ func (d *Dashboard) renderResources(b *strings.Builder) {
 
 // oneLine is the non-TTY form: no cursor movement, one appendable line.
 func (d *Dashboard) oneLine() string {
-	u := d.src.Stats.Upload.Snapshot()
+	u := d.src.Stats.Scan.Snapshot()
 	var parts []string
 	parts = append(parts, "["+elapsed(time.Since(d.start))+"]")
 	if u.Total > 0 {
-		parts = append(parts, fmt.Sprintf("upload %d/%d", u.Done(), u.Total))
+		parts = append(parts, fmt.Sprintf("scan %d/%d", u.Done(), u.Total))
 	}
 	for _, s := range d.src.Stats.QueueSnapshots() {
 		parts = append(parts, fmt.Sprintf("%s pending=%d active=%d done=%d dlq=%d",
@@ -292,10 +292,10 @@ func (d *Dashboard) oneLine() string {
 func (d *Dashboard) Summary() string {
 	var b strings.Builder
 
-	u := d.src.Stats.Upload.Snapshot()
+	u := d.src.Stats.Scan.Snapshot()
 	if u.Total > 0 {
-		fmt.Fprintf(&b, "upload    %s uploaded · %s duplicate · %s failed · %s\n",
-			commas(u.Uploaded), commas(u.Duplicate), commas(u.Failed), bytesHuman(u.Bytes))
+		fmt.Fprintf(&b, "scan    %s scanned · %s duplicate · %s failed · %s\n",
+			commas(u.Scanned), commas(u.Duplicate), commas(u.Failed), bytesHuman(u.Bytes))
 	}
 	for _, s := range d.src.Stats.QueueSnapshots() {
 		fmt.Fprintf(&b, "%-9s %s done · %s skipped · %s dead-lettered\n",

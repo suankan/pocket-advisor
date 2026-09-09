@@ -10,8 +10,8 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 )
 
 // Metadata reprocessing: rebuilding the durable email browse metadata of
@@ -19,7 +19,7 @@ import (
 // (ingestion-design.md §2.5).
 //
 // It is the same work the email worker does on a live message, minus the body:
-// read the authoritative Tier 1 bytes, parse them with the one MIME parser,
+// read the authoritative original bytes, parse them with the one MIME parser,
 // map the parsed headers with emailMessageOf, and write them through the one
 // repository transaction. Nothing here re-derives a document, a chunk, a
 // thread id or a processing status — a message that has already been extracted
@@ -37,18 +37,15 @@ type EmailMetadataWriter interface {
 	SaveEmailMessage(ctx context.Context, m domain.EmailMessage) (domain.EmailConversation, error)
 }
 
-// EmailObjectReader reads Tier 1, the only authority for what a message says.
-type EmailObjectReader interface {
-	KeyFromURI(uri string) (string, error)
-	Get(ctx context.Context, key string) ([]byte, rustfs.Provenance, error)
-}
+// EmailSourceReader reads verified original files, the only authority for what a message says.
+type EmailSourceReader = source.Reader
 
 // EmailMetadataReprocessor rebuilds browse metadata for one workspace.
 type EmailMetadataReprocessor struct {
-	Docs   EmailDocumentSelector
-	Vault  EmailObjectReader
-	Emails EmailMetadataWriter
-	Log    *slog.Logger
+	Docs    EmailDocumentSelector
+	Sources EmailSourceReader
+	Emails  EmailMetadataWriter
+	Log     *slog.Logger
 }
 
 // log keeps a reprocessor usable without telemetry wiring; a maintenance
@@ -70,7 +67,7 @@ type EmailReprocessOptions struct {
 	Limit int
 	// BatchSize is how many documents one keyset page fetches.
 	BatchSize int
-	// Concurrency bounds concurrent Tier 1 reads and metadata writes.
+	// Concurrency bounds concurrent original-file reads and metadata writes.
 	Concurrency int
 	// OnlyMissing narrows selection to documents with no metadata row yet.
 	OnlyMissing bool
@@ -83,8 +80,8 @@ type EmailReprocessOptions struct {
 }
 
 // Defaults for an unconfigured run. The concurrency default is deliberately
-// small: this is one object store and one database being walked by a
-// maintenance command, not the ingest pipeline, and it must not crowd out a
+// small: this is one set of source directories and one database being walked
+// by a maintenance command, not the ingest pipeline, and it must not crowd out a
 // pipeline running beside it.
 const (
 	defaultReprocessBatch       = 200
@@ -117,7 +114,7 @@ type EmailReprocessSummary struct {
 	// Updated is metadata successfully rebuilt — or, under DryRun, metadata
 	// that would have been rebuilt.
 	Updated int `json:"updated"`
-	// Unreadable is documents whose authoritative Tier 1 bytes could not be
+	// Unreadable is documents whose authoritative original bytes could not be
 	// read. Reported rather than skipped silently: their metadata is missing
 	// and nothing in this run can supply it.
 	Unreadable int `json:"unreadable"`
@@ -170,9 +167,9 @@ const (
 // document that cannot be read here keeps whatever the pipeline recorded for
 // it and stays exactly as recoverable as it was.
 const (
-	ReasonReprocessNoObject      = "no_tier1_object"
+	ReasonReprocessNoObject      = "no_source_reference"
 	ReasonReprocessBadObjectURI  = "bad_object_uri"
-	ReasonReprocessUnreadable    = "tier1_unreadable"
+	ReasonReprocessUnreadable    = "source_unreadable"
 	ReasonReprocessUnknownEncode = "unknown_encoding"
 	ReasonReprocessParseFailed   = "email_parse_failed"
 	ReasonReprocessWriteFailed   = "metadata_write_failed"
@@ -309,20 +306,19 @@ func (p *EmailMetadataReprocessor) processBatch(ctx context.Context, batch []dom
 	return results
 }
 
-// reprocessOne rebuilds one document's metadata from its Tier 1 bytes.
+// reprocessOne rebuilds one document's metadata from its original bytes.
 func (p *EmailMetadataReprocessor) reprocessOne(ctx context.Context, doc domain.Document, o EmailReprocessOptions) error {
-	if doc.RawURI == "" {
+	if doc.SourceRef == "" {
 		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessNoObject,
 			errors.New("document has no tier 1 object")}
 	}
-	key, err := p.Vault.KeyFromURI(doc.RawURI)
-	if err != nil {
-		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessBadObjectURI, err}
-	}
-	data, _, err := p.Vault.Get(ctx, key)
+	data, err := p.Sources.Read(ctx, doc.SourceRef, doc.RawSHA256)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, source.ErrUnsafe) {
+			return &reprocessError{EmailReprocessUnreadable, ReasonReprocessBadObjectURI, err}
 		}
 		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessUnreadable, err}
 	}

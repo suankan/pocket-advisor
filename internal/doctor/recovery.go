@@ -33,30 +33,30 @@ const (
 
 // RecoveryItem is one document the planner has classified.
 type RecoveryItem struct {
-	DocID           string                `json:"doc_id"`
-	Status          domain.Status         `json:"status"`
-	Reason          domain.FailureReason  `json:"reason,omitempty"`
+	DocID           string                 `json:"doc_id"`
+	Status          domain.Status          `json:"status"`
+	Reason          domain.FailureReason   `json:"reason,omitempty"`
 	Classification  RecoveryClassification `json:"classification"`
-	Action          RecoveryAction        `json:"action"`
-	ObjectOperation string                `json:"object_operation,omitempty"`
-	MessagePublish  string                `json:"message_publish,omitempty"`
+	Action          RecoveryAction         `json:"action"`
+	ObjectOperation string                 `json:"object_operation,omitempty"`
+	MessagePublish  string                 `json:"message_publish,omitempty"`
 }
 
 // RecoveryPlan is the complete output of the planner.
 type RecoveryPlan struct {
-	WorkspaceID string        `json:"workspace_id"`
-	DryRun      bool          `json:"dry_run"`
+	WorkspaceID string         `json:"workspace_id"`
+	DryRun      bool           `json:"dry_run"`
 	Items       []RecoveryItem `json:"items"`
-	Summary     string        `json:"summary"`
+	Summary     string         `json:"summary"`
 }
 
 // RecoverConfig controls what the planner selects and how it classifies.
 type RecoverConfig struct {
 	// Filters
-	States       []domain.Status
-	MinAge       time.Duration
-	FailureReas  []domain.FailureReason
-	DocIDs       []string
+	States      []domain.Status
+	MinAge      time.Duration
+	FailureReas []domain.FailureReason
+	DocIDs      []string
 
 	// Scope
 	WorkspaceID string
@@ -66,9 +66,9 @@ type RecoverConfig struct {
 // RecoveryPlanner produces a plan for the given documents. It never
 // writes to stores; it only classifies and recommends.
 type RecoveryPlanner struct {
-	cfg      RecoverConfig
+	cfg       RecoverConfig
 	documents []RecoveryItem
-	bus      RecoveryBus
+	bus       RecoveryBus
 }
 
 // RecoveryBus is the JetStream subset the planner needs to check for

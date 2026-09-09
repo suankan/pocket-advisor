@@ -21,7 +21,6 @@ import (
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
-	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/engine/ocr"
 	"github.com/suankan/pocket-advisor/internal/engine/pdf"
 	"github.com/suankan/pocket-advisor/internal/limits"
@@ -56,11 +55,6 @@ type Pipeline struct {
 // Options carries what the pipeline cannot derive for itself.
 type Options struct {
 	OCRLangs string
-	// RustFSEvents enables the live event role (§5.2): RustFS's native NATS
-	// notify target must actually be deployed and consumed for this to do
-	// anything, currently true only for the "test" workspace. False leaves
-	// the pipeline exactly as it was before this existed.
-	RustFSEvents bool
 }
 
 // New builds every pool and its consumer.
@@ -68,6 +62,9 @@ type Options struct {
 // Engines are constructed once and shared by every lane, which is the point of
 // the shared CPU semaphore: one bound, not one per pool.
 func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embedding.Client, opts Options) (*Pipeline, error) {
+	if a.DB.Pool.Config().MaxConns < 4 {
+		return nil, fmt.Errorf("ingestion requires postgres.max_conns >= 4")
+	}
 	p := &Pipeline{app: a, stats: stats, embedder: embedder}
 
 	// Cheap now: the instance pool is built on first use, so this costs
@@ -87,14 +84,14 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 	}
 
 	email := &worker.EmailWorker{
-		Vault: a.Vault, Docs: a.Docs, Emails: a.Emails, Bus: a.Bus,
+		Sources: a.Sources, Inventory: a.Inventory, Docs: a.Docs, Emails: a.Emails, Bus: a.Jobs,
 		Log: a.Logger(telemetry.RoleEmail),
 	}
 	docs := &worker.DocumentWorker{
-		Vault: a.Vault, Docs: a.Docs, Bus: a.Bus,
+		Sources: a.Sources, Docs: a.Docs, Bus: a.Jobs,
 		PDF: pdfEngine, OCR: p.ocrEngine, Log: a.Logger(telemetry.RoleDocument),
 	}
-	office := &worker.OfficeWorker{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleOffice)}
+	office := &worker.OfficeWorker{Sources: a.Sources, Docs: a.Docs, Bus: a.Jobs, Log: a.Logger(telemetry.RoleOffice)}
 	embed := &worker.EmbedWorker{Docs: a.Docs, Chunks: a.Chunks, Embedder: embedder, Log: a.Logger(telemetry.RoleEmbed)}
 
 	// Registration order is display order on the dashboard, so these follow the
@@ -114,17 +111,6 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 			lanes: limits.DocumentLanes(), handler: docs.HandleImage},
 		{name: telemetry.RoleEmbed, subject: bus.SubjectEmbed, durable: "embed-indexer",
 			lanes: limits.EmbedLanes(), handler: embed.Handle},
-	}
-
-	if opts.RustFSEvents {
-		notify := &worker.RustFSNotifyWorker{
-			Discovery: &discovery.Service{Vault: a.Vault, Docs: a.Docs, Bus: a.Bus, Log: a.Logger(telemetry.RoleDiscover)},
-			Log:       a.Logger(telemetry.RoleDiscover),
-		}
-		specs = append(specs, &role{
-			name: telemetry.RoleDiscover, stream: bus.StreamRustFSEvents, subject: bus.SubjectRustFSEvents,
-			durable: "rustfs-notify", lanes: limits.RustFSEventsLanes(), handler: notify.Handle,
-		})
 	}
 
 	// Concurrently, because each of these is a JetStream round trip and they
@@ -173,6 +159,26 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 // fetchCtx ending stops new work being pulled; workCtx bounds the handlers and
 // must outlive it. Start returns immediately — use Wait to join.
 func (p *Pipeline) Start(fetchCtx, workCtx context.Context) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		for {
+			if fetchCtx.Err() != nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(workCtx, 10*time.Second)
+			_, err := p.app.Jobs.Dispatch(ctx, p.app.Bus, 100)
+			cancel()
+			if err != nil {
+				p.app.Log.Warn("outbox dispatch paused", "error", err)
+			}
+			select {
+			case <-fetchCtx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}()
 	for _, r := range p.roles {
 		r := r
 		p.wg.Add(1)
@@ -182,6 +188,7 @@ func (p *Pipeline) Start(fetchCtx, workCtx context.Context) {
 				Name:    r.name,
 				Bus:     p.app.Bus,
 				Docs:    p.app.Docs,
+				Jobs:    p.app.Jobs,
 				Log:     p.app.Logger(r.name),
 				Subject: r.subject,
 				Lanes:   r.lanes,
@@ -250,7 +257,11 @@ func (p *Pipeline) WaitDrained(ctx context.Context, settle time.Duration) error 
 
 		p.samplePending(ctx)
 
-		if !p.stats.Idle() {
+		ready, unfinished, _, _, err := p.app.Jobs.Counts(ctx)
+		if err != nil {
+			return err
+		}
+		if !p.stats.Idle() || ready > 0 || unfinished > 0 {
 			quietSince = time.Time{}
 			continue
 		}

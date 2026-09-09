@@ -16,30 +16,10 @@ import (
 // The metric set from ingestion-design.md §9.1. Declared once, in one place,
 // so the names cannot drift between workers.
 var (
-	UploaderFiles = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "rag_uploader_files_total",
-		Help: "Files processed by the uploader, by outcome (uploaded/duplicate/failed).",
-	}, []string{"outcome"})
-
-	UploaderBytes = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "rag_uploader_bytes_total",
-		Help: "Bytes written to Tier 1 by the uploader.",
-	})
-
 	DiscoveryFiles = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "rag_discovery_files_total",
-		Help: "Objects processed by discovery, by mode and outcome.",
+		Help: "Original files processed by discovery, by mode and outcome.",
 	}, []string{"mode", "outcome"})
-
-	DiscoveryStalePending = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "rag_discovery_stale_pending",
-		Help: "Documents PENDING beyond the reconciliation threshold.",
-	})
-
-	DiscoveryUnstubbed = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "rag_discovery_unstubbed_objects",
-		Help: "Objects under raw/ with no corresponding Tier 2 row.",
-	})
 
 	IngestionTasks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "rag_ingestion_tasks_total",

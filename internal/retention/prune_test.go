@@ -1,4 +1,4 @@
-package uploader
+package retention
 
 import (
 	"context"

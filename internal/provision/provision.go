@@ -1,22 +1,5 @@
-// Package provision prepares the one thing a workspace needs that no
-// pocket-advisor.sh command already covers.
-//
-// Everything else lives in `./pocket-advisor.sh deploy-workspaces` now, not
-// here and not in a CRD an operator reconciles — deviation 39 removed
-// CloudNativePG, the RustFS operator and NACK entirely, on the view that
-// reconciling drift against a desired state, continuously, unattended,
-// across many clusters is machinery this single-tenant local cluster has no
-// use for. What that command does instead — CREATE ROLE, CREATE DATABASE,
-// CREATE EXTENSION over psql; a bucket, an identity and a policy over
-// rc/aws-cli; three JetStream streams over natscli — is the same operation
-// an operator would have made, run once by a human instead of continuously
-// by a controller.
-//
-// One thing could not follow, and for a real reason rather than because no
-// tool existed yet: the schema below. Its vector column is halfvec(N), and N
-// comes from probing the embedding endpoint on the operator's own machine —
-// which nothing inside the cluster, and no infra tooling running elsewhere,
-// can reach (§4.4).
+// Package provision applies the workspace schema after probing the local
+// embedding dimension. The host wrapper provisions databases and NATS streams.
 package provision
 
 import (

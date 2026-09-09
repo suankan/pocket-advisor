@@ -57,45 +57,8 @@ func TestForgetRetainsSharedAndIndependentDescendants(t *testing.T) {
 	if independentParent != nil {
 		t.Fatal("independent root was reparented")
 	}
-	pending, err := r.PendingObjectDeletions(ctx, 200)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pending) != 3 {
-		t.Fatalf("pending cleanup=%v", pending)
-	}
-	// A retry after document rows are gone must preserve all cleanup requests.
-	if _, err := r.DeleteBySHA(ctx, "first"); err != nil {
-		t.Fatal(err)
-	}
-	pending, err = r.PendingObjectDeletions(ctx, 200)
-	if err != nil || len(pending) != 3 {
-		t.Fatalf("pending=%v err=%v", pending, err)
-	}
-}
-
-func TestDeletionOutboxSurvivesRowsAndPreventsRediscovery(t *testing.T) {
-	db, _ := scratch(t, "deletion_outbox")
-	ctx := context.Background()
-	if err := db.ApplySchema(ctx, stageBMeta()); err != nil {
-		t.Fatal(err)
-	}
-	r := NewDocumentRepo(db)
-	id := stageDoc(t, r, "content", "text", "document.txt")
-	if _, err := r.DeleteDocuments(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
-	if pending, err := r.ObjectDeletionPending(ctx, "content"); err != nil || !pending {
-		t.Fatalf("pending=%v err=%v", pending, err)
-	}
-	// A stale scan cannot reintroduce content while object cleanup is pending.
-	if _, _, err := r.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: "content"}); err == nil {
-		t.Fatal("recreated a document pending object deletion")
-	}
-	if err := r.CompleteObjectDeletion(ctx, "content"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := r.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: "content"}); err != nil {
+	// A later deliberate scan may reintroduce a still-configured source.
+	if _, _, err := r.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: "first"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -114,9 +77,6 @@ func TestFailedDocumentDeletionDoesNotQueueObjectRemoval(t *testing.T) {
 	}
 	if _, err := r.DeleteDocuments(ctx, []string{id}); err == nil {
 		t.Fatal("expected foreign key failure")
-	}
-	if pending, err := r.PendingObjectDeletions(ctx, 200); err != nil || len(pending) != 0 {
-		t.Fatalf("pending=%v err=%v", pending, err)
 	}
 	if ok, err := r.Exists(ctx, id); err != nil || !ok {
 		t.Fatalf("exists=%v err=%v", ok, err)

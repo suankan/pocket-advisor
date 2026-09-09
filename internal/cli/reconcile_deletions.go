@@ -8,8 +8,8 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/retention"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
-	"github.com/suankan/pocket-advisor/internal/uploader"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
@@ -32,25 +32,36 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 		return err
 	}
 
-	// RustFS as well as Uploader: the containment backfill reads every
-	// container's Tier 1 bytes back, and the read-only worker role is the right
-	// identity for a pass that only reads.
+	// Sources as well as Postgres: the containment backfill reads every
+	// container's Tier 1 bytes back through the verified resolver, which only
+	// ever opens configured originals read-only.
 	a, err := app.New(ctx, cfg, logs,
-		app.Needs{RustFS: true, Uploader: true, Postgres: true, NATS: true}, o.WorkspaceID)
+		app.Needs{Sources: true, Postgres: true, NATS: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
+	unlock, err := a.DB.LockMaintenance(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := a.DB.ApplySourceSchema(ctx); err != nil {
+		return err
+	}
+	if err := discoveryService(a).BindExisting(ctx); err != nil {
+		return err
+	}
 
-	log := a.Logger(telemetry.RoleUploader)
+	log := a.Logger(telemetry.RoleRetention)
 	if err := ensureContainment(ctx, a, log); err != nil {
 		return err
 	}
 
-	reset := uploader.NewResetter(a.Uploads, a.Docs, a.Bus, log)
-	pruner := uploader.NewPruner(a.Docs, reset, log)
+	reset := retention.NewResetter(a.Docs, a.Bus, log)
+	pruner := retention.NewPruner(a.Docs, reset, log)
 
-	report, err := pruner.Plan(ctx, uploader.PruneOptions{
+	report, err := pruner.Plan(ctx, retention.PruneOptions{
 		AbsPaths: ws.AbsPaths,
 		Ignore:   ws.Ignore.Match,
 		MaxShare: 1,
@@ -70,11 +81,6 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	}
 
 	if len(report.Candidates) == 0 {
-		if o.Yes && !o.DryRun {
-			if err := reset.DrainPending(ctx); err != nil {
-				return err
-			}
-		}
 		if !o.JSON {
 			fmt.Printf("\nEverything indexed is still staged. Nothing to reconcile.\n")
 		}
@@ -87,13 +93,10 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	if !confirm(fmt.Sprintf(
 		"Delete %d document(s) from workspace %q?\n"+
 			"  - %d were staged in their own right; %d are held by nothing else\n"+
-			"  - deletes their Tier 1 objects, their rows and every chunk derived from them\n"+
+			"  - deletes derived rows and unreferenced passages; preserves original files\n"+
 			"Re-ingesting requires source files included by the workspace configuration.",
 		len(report.Candidates), ws.ID, report.Roots, report.Contained)) {
 		return errAborted
-	}
-	if err := reset.DrainPending(ctx); err != nil {
-		return err
 	}
 
 	if err := pruner.Apply(ctx, ws.ID, report); err != nil {

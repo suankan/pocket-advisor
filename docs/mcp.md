@@ -80,7 +80,7 @@ Every successful page contains structured and readable representations derived f
 - warnings;
 - budget used and allowed with explicit UTF-8 byte unit;
 - document and chunk identifiers;
-- source hash and Tier 1 URI;
+- source hash and source reference;
 - the document's own staged file path, or the file it was extracted from when it has none of its own — workspace-relative, for the caller to relay to the user rather than fetch or infer;
 - matched snippet and admitted-text availability;
 - start and end offsets with explicit UTF-8 byte unit;
@@ -273,7 +273,7 @@ Each `mcp start`/`mcp stdio` process is fixed to one workspace at startup, via `
 
 Both MCP transports follow the same rule: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name, public route, and Google-verified subject are routing and authorization inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
 
-Serving more than one workspace over HTTP means running one `mcp start --workspace-id <id>` process per workspace, each on its own address (`--addr`); nothing multiplexes several workspaces' credentials inside one process. Each process receives no RustFS, NATS, provisioning, or shared PostgreSQL administrative credential — only what `WorkspacePostgresDSN` resolves for its own workspace.
+Serving more than one workspace over HTTP means running one `mcp start --workspace-id <id>` process per workspace, each on its own address (`--addr`); nothing multiplexes several workspaces' credentials inside one process. Each process receives no source-file, NATS, provisioning, or shared PostgreSQL administrative credential — only what `WorkspacePostgresDSN` resolves for its own workspace.
 
 The Go process validates every request itself. When Google auth is enabled it requires a Google ID token whose audience matches the configured client ID and whose verified email is on the allowlist; there is no separate gateway performing authentication on its behalf. Continuation snapshots are partitioned by issuer and subject, so renewing a token does not lose a result and another authenticated caller cannot acquire it.
 
@@ -406,3 +406,9 @@ Use only synthetic MCP requests and evidence in committed fixtures. Confirm prot
 - [MCP 2025-11-25 schema](https://modelcontextprotocol.io/specification/2025-11-25/schema)
 - [MCP 2025-11-25 tool structured-content and output-schema contract](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 - [MCP 2025-11-25 Streamable HTTP compatibility contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+## Original-source provenance
+
+Search evidence documents expose `source_ref`, canonical `extraction_sha256` and `extraction_version`, plus `source_locations`. Exact document fetch and mailbox results also expose recorded locations. A location contains an opaque root ID, relative/display path, versioned container selectors, an observation timestamp, and `last_observed` or `missing` status. Up to 128 routes are returned, including shared attachments and independent copies. The existing relative file/container display fields describe the preferred route and may be absent if none is known.
+
+These are recorded observations. Search, deterministic fetch, mailbox tools, topic evidence and continuation snapshots read retained PostgreSQL evidence without opening originals. Clients must not interpret a source reference or relative path as permission to open arbitrary local files. Continuation returns the already-materialized evidence revision, even after original-file mutation. Source hashes identify original bytes; extraction hashes and UTF-8 offsets identify normalized evidence. `source_ref` replaces the former object URI field; consumers must use the advertised schema.

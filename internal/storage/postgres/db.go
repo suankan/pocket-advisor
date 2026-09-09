@@ -33,7 +33,7 @@ func Connect(ctx context.Context, dsn string, maxConns int32) (*DB, error) {
 	}
 	// A warm floor, so the first burst of lanes does not all pay connection
 	// setup at once.
-	cfg.MinConns = 4
+	cfg.MinConns = min(4, cfg.MaxConns)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

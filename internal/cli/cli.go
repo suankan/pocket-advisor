@@ -30,13 +30,15 @@ type Options struct {
 	WorkspaceConfig string
 	WorkspaceID     string
 
-	IngestAll  bool
-	Scan       bool
-	Reconcile  bool
-	Listen     bool
-	DeleteData bool
-	Forget     string
-	Query      string
+	AuditSources bool
+	BindSources  bool
+	IngestAll    bool
+	Scan         bool
+	Reconcile    bool
+	Listen       bool
+	DeleteData   bool
+	Forget       string
+	Query        string
 
 	// ReconcileDeletions previews the same sweep as ingest-all and applies
 	// it only with --yes and confirmation.
@@ -48,7 +50,7 @@ type Options struct {
 	// the corpus describing a staging directory that no longer exists.
 	NoPrune bool
 	// PruneMaxShare overrides the share of a workspace a single sweep may
-	// remove before refusing. Zero uses uploader.DefaultBlastRadius; 1 or
+	// remove before refusing. Zero uses retention.DefaultBlastRadius; 1 or
 	// more disables the guard, which is only right after reading a plan.
 	PruneMaxShare float64
 
@@ -101,13 +103,12 @@ type Options struct {
 const usage = `pocket-advisor — ingestion pipeline for a local RAG corpus.
 
 Modes (exactly one):
-  --ingest-all        upload the workspace, enqueue what is new, process to completion
-  --scan              enqueue Tier 1 objects with no Tier 2 row, then process
-  --reconcile         re-publish documents stuck PENDING, then process
-  --listen            run the pipeline indefinitely, processing RustFS's live
-                      notify events as they arrive — no upload, no scan, does
-                      not exit on idle. For objects arriving from something
-                      other than our own uploader.
+  --ingest-all        scan configured originals, prune safely, and process queued jobs
+  --scan              scan configured originals and process queued jobs
+  --reconcile         refresh sources and redispatch unfinished durable jobs
+  --listen            scan at startup and every minute while processing jobs
+  --audit-sources     verify retained source coverage without writing
+  --bind-sources      verify coverage and persist source locations and replay recipes
   --query <question>  ask the corpus a question and print the matching
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
@@ -116,12 +117,12 @@ Modes (exactly one):
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
   --reprocess-email-metadata
-                      rebuild durable email browse metadata from Tier 1 for
+                      rebuild durable email browse metadata from originals for
                       every email message document in the workspace. For a
                       workspace ingested before those tables existed: the
                       schema upgrade adds them empty and synthesises nothing.
-                      Reads objects and writes only the email metadata tables —
-                      no upload, no queue, no re-extraction, no re-embedding —
+                      Reads originals and writes derived email metadata —
+                      no queue, no re-extraction, no re-embedding —
                       and is idempotent, so repeating an interrupted run
                       converges (ingestion-design.md §2.5)
   --topic-graph-build create a BUILDING topic graph version and populate it
@@ -140,7 +141,7 @@ Modes (exactly one):
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
-  --delete-data       purge the workspace from Tier 1 and Tier 2
+  --delete-data       clear derived database state and queues; preserve original files
   --forget <sha256>   remove one document by content hash
   --reconcile-deletions
                       remove documents whose staged file is no longer in the
@@ -194,7 +195,7 @@ Query options:
 Email metadata reprocessing options:
   --reprocess-limit N        stop after this many documents (0 = the whole
                              workspace)
-  --reprocess-concurrency N  concurrent Tier 1 reads and metadata writes
+  --reprocess-concurrency N  concurrent original-file reads and metadata writes
                              (default 4)
   --reprocess-missing-only   only documents that have no metadata row yet
   --dry-run                  read and parse, report the counts, write nothing
@@ -218,7 +219,7 @@ Evaluate options:
 
 Options:
   --yes                     skip destructive confirmation prompts
-  --dry-run                 report what would be uploaded, write nothing
+  --dry-run                 report what would be admitted, write nothing
   --embedding-concurrency N concurrent embedding sessions (default 8)
   --ocr-langs <langs>       tesseract languages (default eng+rus)
   --log-dir <path>          per-role log files (default logs)
@@ -288,11 +289,13 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "", "workspace registry path override (default: infra config's workspaces.config, resolved relative to it)")
 	fs.StringVar(&o.WorkspaceID, "workspace-id", "", "workspace id within the registry")
 
-	fs.BoolVar(&o.IngestAll, "ingest-all", false, "upload, enqueue and process to completion")
-	fs.BoolVar(&o.Scan, "scan", false, "enqueue un-stubbed Tier 1 objects, then process")
+	fs.BoolVar(&o.AuditSources, "audit-sources", false, "read-only source coverage audit")
+	fs.BoolVar(&o.BindSources, "bind-sources", false, "bind existing documents to original source files")
+	fs.BoolVar(&o.IngestAll, "ingest-all", false, "scan originals, enqueue and process to completion")
+	fs.BoolVar(&o.Scan, "scan", false, "enqueue un-stubbed original sources, then process")
 	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
-	fs.BoolVar(&o.Listen, "listen", false, "run the pipeline indefinitely on RustFS's live notify events")
-	fs.BoolVar(&o.DeleteData, "delete-data", false, "purge the workspace from Tier 1 and Tier 2")
+	fs.BoolVar(&o.Listen, "listen", false, "scan originals every minute while running the pipeline")
+	fs.BoolVar(&o.DeleteData, "delete-data", false, "clear derived database state and queues; preserve original files")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.BoolVar(&o.ReconcileDeletions, "reconcile-deletions", false,
 		"remove documents whose staged file is gone (plans unless --yes)")
@@ -303,9 +306,9 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
-	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from Tier 1 bytes")
+	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from original bytes")
 	fs.IntVar(&o.ReprocessLimit, "reprocess-limit", 0, "stop after this many documents (0 = whole workspace)")
-	fs.IntVar(&o.ReprocessConc, "reprocess-concurrency", 0, "concurrent Tier 1 reads and metadata writes (0 = default)")
+	fs.IntVar(&o.ReprocessConc, "reprocess-concurrency", 0, "concurrent original-file reads and metadata writes (0 = default)")
 	fs.BoolVar(&o.ReprocessMissing, "reprocess-missing-only", false, "only documents with no email metadata row yet")
 	fs.BoolVar(&o.TopicGraphBuild, "topic-graph-build", false, "create and build a bounded topic graph version")
 	fs.StringVar(&o.TopicGraphVersion, "topic-graph-version", "", "new UUID version for --topic-graph-build")
@@ -329,7 +332,7 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.NoRerank, "no-rerank", false, "skip reranking; serve fused order (--query)")
 	fs.BoolVar(&o.NoDecompose, "no-decompose", false, "do not split the question into sub-queries (--query)")
 
-	fs.BoolVar(&o.DryRun, "dry-run", false, "report what would be uploaded, write nothing")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "report what would be admitted, write nothing")
 	fs.BoolVar(&o.Yes, "yes", false, "skip destructive confirmation prompts")
 	fs.StringVar(&o.OCRLangs, "ocr-langs", "eng+rus", "tesseract languages")
 	fs.IntVar(&o.EmbedConc, "embedding-concurrency", 0, "concurrent embedding sessions (0 = config default)")
@@ -352,6 +355,8 @@ func (o *Options) modes() []string {
 		on   bool
 		name string
 	}{
+		{o.AuditSources, "--audit-sources"},
+		{o.BindSources, "--bind-sources"},
 		{o.IngestAll, "--ingest-all"},
 		{o.Scan, "--scan"},
 		{o.Reconcile, "--reconcile"},
@@ -395,7 +400,7 @@ func (o *Options) validate() error {
 
 	// Every mode acts on one workspace, and a mode that silently defaulted to
 	// the wrong one could purge the wrong corpus. There is no shared database
-	// or bucket left to act on without one (workspace-isolation.md §13).
+	// left to act on without one (workspace-isolation.md §13).
 	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
 	}
@@ -508,6 +513,8 @@ func Run(o *Options) error {
 	defer logs.Close()
 
 	switch {
+	case o.AuditSources, o.BindSources:
+		return runSources(o, cfg, logs)
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
 	case o.ReconcileDeletions:

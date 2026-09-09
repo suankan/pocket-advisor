@@ -5,8 +5,6 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
-	"strings"
 	"time"
 )
 
@@ -77,7 +75,7 @@ const (
 	// That used to be ReasonExtractionFailed, which made it a lie: the code
 	// meant both "extraction genuinely failed" and "no one said". The two are
 	// not interchangeable, and conflating them actively misinforms — 44
-	// documents lost to a RustFS out-of-memory kill are recorded as extraction
+	// documents lost to an unreachable byte store were recorded as extraction
 	// failures, when Tier 1 reads were the thing that broke. Nothing about the
 	// text was ever the problem.
 	//
@@ -95,7 +93,7 @@ type Document struct {
 	Status      Status
 	DocType     string
 	MimeType    string
-	RawURI      string
+	SourceRef   string
 	RawSHA256   string
 	SourceName  string
 	Text        string // normalized_text; written by the extractor that produced it
@@ -136,55 +134,4 @@ type Chunk struct {
 func SHA256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
-}
-
-// RawObjectKey is the Tier 1 key for an uploaded document (§5.1). Content
-// addressed: stable before threading is known, deduplicating identical bytes
-// for free, and never renamed. No workspace segment: each workspace has its
-// own bucket (workspace-isolation.md), which already provides that scoping.
-func RawObjectKey(sha256hex string) string {
-	return fmt.Sprintf("raw/%s/%s", sha256hex[:2], sha256hex)
-}
-
-// ParseRawObjectKey validates and decomposes the only Tier 1 key shape that
-// may mint a root document.
-func ParseRawObjectKey(key string) (sha256hex string, err error) {
-	parts := strings.Split(key, "/")
-	if len(parts) != 3 || parts[0] != "raw" {
-		return "", fmt.Errorf("not a raw object key: %q", key)
-	}
-
-	hash := parts[2]
-	if len(hash) != sha256.Size*2 || hash != strings.ToLower(hash) {
-		return "", fmt.Errorf("raw object key has a non-canonical sha256: %q", key)
-	}
-	if _, err := hex.DecodeString(hash); err != nil {
-		return "", fmt.Errorf("raw object key has an invalid sha256: %q", key)
-	}
-	if parts[1] != hash[:2] {
-		return "", fmt.Errorf("raw object key shard does not match its sha256: %q", key)
-	}
-	return hash, nil
-}
-
-// ExtractedObjectKey is the Tier 1 key for a child unrolled out of a
-// container. A separate prefix from raw/ because the two have different write
-// authorities (§5.1).
-func ExtractedObjectKey(sha256hex string) string {
-	return fmt.Sprintf("extracted/%s/%s", sha256hex[:2], sha256hex)
-}
-
-// SHA256FromKey recovers the content hash from a Tier 1 object key. Discovery
-// re-verifies this against the bytes it reads (§5.2): a key that disagrees
-// with its own content means a corrupted or tampered object.
-func SHA256FromKey(key string) (string, error) {
-	// .../{aa}/{sha256}
-	if len(key) < 64 {
-		return "", fmt.Errorf("key too short to carry a sha256: %q", key)
-	}
-	h := key[len(key)-64:]
-	if _, err := hex.DecodeString(h); err != nil {
-		return "", fmt.Errorf("key does not end in a hex digest: %q", key)
-	}
-	return h, nil
 }

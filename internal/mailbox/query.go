@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"strings"
 	"time"
 
@@ -112,7 +113,8 @@ type ListedMessage struct {
 	// SourcePath is the message's original file location relative to the
 	// workspace's local staging directory. Informational only, for the
 	// human operator to open the original file themselves.
-	SourcePath string `json:"source_path,omitempty"`
+	SourceLocations []source.Location `json:"source_locations,omitempty"`
+	SourcePath      string            `json:"source_path,omitempty"`
 	// ContainerSourcePath is the staged file this message was extracted
 	// from, set exactly when SourcePath is empty.
 	ContainerSourcePath string `json:"container_source_path,omitempty"`
@@ -408,18 +410,18 @@ func appliedFilters(f Filters) AppliedFilters {
 
 func listedMessage(m Message) ListedMessage {
 	listed := ListedMessage{
-		Ref:                 encodeRef(refMessage, m.DocID),
-		DocID:               m.DocID,
-		ConversationRef:     encodeRef(refConversation, m.ConversationID),
-		ConversationID:      m.ConversationID,
-		ConversationMethod:  string(m.ConversationMethod),
-		Subject:             m.Subject,
-		SentAt:              optionalTime(m.SentAt),
-		Sender:              m.Sender,
-		Recipients:          nonNilStrings(m.Recipients),
-		AutomatedClass:      string(m.AutomatedClass),
-		ListID:              m.ListID,
-		SourcePath:          m.SourcePath,
+		Ref:                encodeRef(refMessage, m.DocID),
+		DocID:              m.DocID,
+		ConversationRef:    encodeRef(refConversation, m.ConversationID),
+		ConversationID:     m.ConversationID,
+		ConversationMethod: string(m.ConversationMethod),
+		Subject:            m.Subject,
+		SentAt:             optionalTime(m.SentAt),
+		Sender:             m.Sender,
+		Recipients:         nonNilStrings(m.Recipients),
+		AutomatedClass:     string(m.AutomatedClass),
+		ListID:             m.ListID,
+		SourceLocations:    m.SourceLocations, SourcePath: m.SourcePath,
 		ContainerSourcePath: m.ContainerPath,
 	}
 	return listed

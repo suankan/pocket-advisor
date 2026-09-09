@@ -148,20 +148,13 @@ func (q *DoctorQueries) SkippedByReason(ctx context.Context) (map[string]int, er
 	return out, rows.Err()
 }
 
-// Tier2MissingTier1 counts document rows whose rustfs_raw_uri does not
-// correspond to an existing Tier 1 object. This is a metadata check:
-// the query returns the count of rows whose URI is non-empty, which is
-// the upper bound; the vault-side check narrows it further.
-func (q *DoctorQueries) Tier2MissingTier1(ctx context.Context) (int, error) {
-	// This returns rows that have a URI but no text yet — a heuristic for
-	// rows whose object may have been lost. The vault-side check is more
-	// precise; this is the cheap metadata-side signal.
+// DocumentsWithoutSources counts inventory gaps, not live filesystem probes.
+func (q *DoctorQueries) DocumentsWithoutSources(ctx context.Context) (int, error) {
 	var n int
-	err := q.db.Pool.QueryRow(ctx, `
-		SELECT count(*) FROM documents
-		WHERE processing_status IN ('PENDING','PROCESSING')
-		  AND rustfs_raw_uri <> ''
-		  AND normalized_text IS NULL`).Scan(&n)
+	err := q.db.Pool.QueryRow(ctx, `WITH RECURSIVE reachable AS (
+ SELECT doc_id FROM source_occurrences WHERE available
+ UNION SELECT m.child_id FROM source_members m JOIN reachable r ON r.doc_id=m.parent_id)
+ SELECT count(*) FROM documents d WHERE NOT EXISTS(SELECT 1 FROM reachable r WHERE r.doc_id=d.doc_id)`).Scan(&n)
 	return n, err
 }
 
@@ -169,7 +162,7 @@ func (q *DoctorQueries) Tier2MissingTier1(ctx context.Context) (int, error) {
 func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
 		SELECT doc_id::text, mime_type,
-		       rustfs_raw_uri, raw_sha256, source_filename,
+		       source_ref, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
 		       updated_at
@@ -189,7 +182,7 @@ func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duratio
 func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
 		SELECT doc_id::text, mime_type,
-		       rustfs_raw_uri, raw_sha256, source_filename,
+		       source_ref, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
 		       updated_at
@@ -210,7 +203,7 @@ func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]Docto
 	// Pull all FAILED rows; the caller filters by classification.
 	rows, err := q.db.Pool.Query(ctx, `
 		SELECT doc_id::text, mime_type,
-		       rustfs_raw_uri, raw_sha256, source_filename,
+		       source_ref, raw_sha256, source_filename,
 		       COALESCE(parent_doc_id::text, ''),
 		       COALESCE(metadata_headers->>'reason', ''),
 		       updated_at
@@ -229,7 +222,7 @@ func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]Docto
 type DoctorDoc struct {
 	DocID       string
 	MimeType    string
-	RawURI      string
+	SourceRef   string
 	RawSHA256   string
 	SourceName  string
 	ParentDocID string
@@ -242,7 +235,7 @@ func scanDoctorDocs(rows pgxRows) ([]DoctorDoc, error) {
 	for rows.Next() {
 		var d DoctorDoc
 		if err := rows.Scan(&d.DocID, &d.MimeType,
-			&d.RawURI, &d.RawSHA256, &d.SourceName, &d.ParentDocID,
+			&d.SourceRef, &d.RawSHA256, &d.SourceName, &d.ParentDocID,
 			&d.Reason, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -262,16 +255,19 @@ type pgxRows interface {
 // a compare-and-set on the current status. Returns true if the row was
 // claimed.
 func (q *DoctorQueries) ResetToPENDING(ctx context.Context, docID string) (bool, error) {
-	tag, err := q.db.Pool.Exec(ctx, `
-		UPDATE documents
-		SET processing_status = 'PENDING',
-		    updated_at = now()
-		WHERE doc_id = $1
-		  AND processing_status IN ('PROCESSING', 'FAILED')`, docID)
-	if err != nil {
-		return false, fmt.Errorf("reset to pending %s: %w", docID, err)
-	}
-	return tag.RowsAffected() > 0, nil
+	changed := false
+	err := q.db.Transaction(ctx, func(ctx context.Context) error {
+		tag, err := q.db.executor(ctx).Exec(ctx, `UPDATE documents SET processing_status='PENDING',metadata_headers=metadata_headers-'reason',updated_at=now() WHERE doc_id=$1 AND processing_status IN ('PENDING','PROCESSING','FAILED')`, docID)
+		if err != nil {
+			return err
+		}
+		changed = tag.RowsAffected() > 0
+		if changed {
+			_, err = q.db.executor(ctx).Exec(ctx, `UPDATE ingestion_jobs SET state='READY',generation=generation+1,reason='',finished_at=NULL,dispatch_lease_until=NULL WHERE doc_id=$1 AND state<>'COMPLETED'`, docID)
+		}
+		return err
+	})
+	return changed, err
 }
 
 // Descendants returns all doc_ids descending from rootDocID, including
@@ -312,45 +308,6 @@ func (q *DoctorQueries) Descendants(ctx context.Context, rootDocID string) ([]st
 		}
 	}
 	return result, nil
-}
-
-// Tier1URIsForDocs returns the raw/ and extracted/ URIs for the given
-// doc_ids, partitioned into root (raw/) and child (extracted/).
-func (q *DoctorQueries) Tier1URIsForDocs(ctx context.Context, docIDs []string) (raw, extracted []string, err error) {
-	if len(docIDs) == 0 {
-		return nil, nil, nil
-	}
-	// Build a parameterised IN clause.
-	args := make([]any, len(docIDs))
-	placeholders := make([]string, len(docIDs))
-	for i, id := range docIDs {
-		args[i] = id
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-	query := fmt.Sprintf(`
-		SELECT DISTINCT rustfs_raw_uri FROM documents
-		WHERE doc_id IN (%s) AND rustfs_raw_uri <> ''`,
-		join(placeholders))
-
-	rows, err := q.db.Pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("tier1 uris: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var uri string
-		if err := rows.Scan(&uri); err != nil {
-			return nil, nil, err
-		}
-		switch {
-		case len(uri) > 4 && uri[:4] == "raw/":
-			raw = append(raw, uri)
-		case len(uri) > 9 && uri[:9] == "extracted/":
-			extracted = append(extracted, uri)
-		}
-	}
-	return raw, extracted, rows.Err()
 }
 
 // DeleteByIDs removes documents by doc_id. Cascades handle chunks.

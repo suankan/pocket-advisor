@@ -21,7 +21,7 @@ type Route struct {
 // Classify routes by magic bytes, never by file extension.
 //
 // Extensions in an email corpus lie routinely: .pdf attachments that are
-// actually .docx, extensionless ATT00001 parts. The uploader deliberately does
+// actually .docx, extensionless ATT00001 parts. Discovery deliberately does
 // not sniff, so this is the single place format knowledge lives (§5.1, §5.2).
 func Classify(data []byte, filename string) Route {
 	mt := mimetype.Detect(data)

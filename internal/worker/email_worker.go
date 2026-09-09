@@ -15,20 +15,21 @@ import (
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
 type EmailWorker struct {
-	Vault *rustfs.Vault
-	Docs  *postgres.DocumentRepo
+	Sources   source.Reader
+	Inventory *postgres.SourceRepo
+	Docs      *postgres.DocumentRepo
 	// Emails owns the durable browse metadata: structured identifiers,
 	// normalized mailboxes and the conversation assignment. Separate from Docs
 	// because it writes a different set of tables for a different question —
 	// what a message is, rather than where a document came from.
 	Emails *postgres.EmailRepo
-	Bus    *bus.Bus
+	Bus    *postgres.Jobs
 	Log    *slog.Logger
 }
 
@@ -47,13 +48,9 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		return Decline(meta.DocId, domain.ReasonRecursionLimit)
 	}
 
-	key, err := w.Vault.KeyFromURI(cmd.RustfsRawUri)
+	data, err := w.Sources.Read(ctx, cmd.SourceRef, meta.RawSha256)
 	if err != nil {
-		return Fatal(domain.ReasonBadObjectURI, err)
-	}
-	data, _, err := w.Vault.Get(ctx, key)
-	if err != nil {
-		return WithDoc(meta.DocId, err) // transient: object store may recover
+		return WithDoc(meta.DocId, err) // transient: an offline source may return
 	}
 
 	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
@@ -136,9 +133,8 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 	for _, c := range children {
 		if err := w.dispatchChild(ctx, meta, threadID, c); err != nil {
-			// One bad attachment must not fail the parent email.
-			w.Log.Error("child dispatch failed",
-				"parent_doc_id", meta.DocId, "filename", c.Filename, "error", err)
+			// All child intents must commit before the parent can acknowledge.
+			return WithDoc(meta.DocId, err)
 		}
 	}
 
@@ -148,32 +144,12 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	return nil
 }
 
-// dispatchChild writes an extracted child to Tier 1, stubs it, and routes it.
-//
-// Unlike discovery, this worker DOES write Tier 1 first — those bytes exist
-// nowhere else. It writes to extracted/, a separate prefix with a different
-// write authority from raw/ (§5.1).
+// dispatchChild records a replayable member and its durable processing intent.
 func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.DocumentMetadata, threadID string, c email.Child) error {
 	if len(c.Data) == 0 {
 		return nil
 	}
 	sum := domain.SHA256Hex(c.Data)
-	key := domain.ExtractedObjectKey(sum)
-
-	exists, _, err := w.Vault.Exists(ctx, key)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		prov := rustfs.Provenance{
-			SourceFilename: c.Filename,
-			SourcePath:     parent.SourceFilename + "!" + c.Filename,
-		}
-		if err := w.Vault.Put(ctx, key, bytesReader(c.Data), int64(len(c.Data)),
-			"application/octet-stream", prov); err != nil {
-			return err
-		}
-	}
 
 	route := discovery.Classify(c.Data, c.Filename)
 
@@ -185,7 +161,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		ThreadID:    threadID,
 		DocType:     route.DocType,
 		MimeType:    route.MimeType,
-		RawURI:      w.Vault.URI(key),
+		SourceRef:   "",
 		RawSHA256:   sum,
 		SourceName:  c.Filename,
 	}
@@ -194,6 +170,10 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	// of consumption order (§2.1).
 	childID, created, err := w.Docs.CreateStub(ctx, doc)
 	if err != nil {
+		return err
+	}
+
+	if err := w.Inventory.RecordMember(ctx, parent.DocId, childID, c.Selector); err != nil {
 		return err
 	}
 
@@ -208,7 +188,13 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	}
 
 	if !created {
-		return nil // same content already known in this workspace
+		status, err := w.Docs.Status(ctx, childID)
+		if err != nil {
+			return err
+		}
+		if status == domain.StatusCompleted || status == domain.StatusSkipped || status == domain.StatusFailed {
+			return nil
+		}
 	}
 
 	if route.Declined {
@@ -222,20 +208,20 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	meta.RawSha256 = sum
 	meta.Depth = parent.Depth + 1
 
-	uri := w.Vault.URI(key)
+	uri := source.Ref(childID)
 	switch route.Subject {
 	case bus.SubjectEmails:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessEmailCommand{Metadata: meta, RustfsRawUri: uri}, tp)
+			&ingestionv1.ProcessEmailCommand{Metadata: meta, SourceRef: uri}, tp)
 	case bus.SubjectPDFs:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessPdfCommand{Metadata: meta, RustfsRawUri: uri}, tp)
+			&ingestionv1.ProcessPdfCommand{Metadata: meta, SourceRef: uri}, tp)
 	case bus.SubjectDocx:
 		return w.Bus.Publish(ctx, route.Subject,
-			&ingestionv1.ProcessOfficeCommand{Metadata: meta, RustfsRawUri: uri, Subtype: route.Subtype}, tp)
+			&ingestionv1.ProcessOfficeCommand{Metadata: meta, SourceRef: uri, Subtype: route.Subtype}, tp)
 	case bus.SubjectImages:
 		return w.Bus.Publish(ctx, route.Subject, &ingestionv1.ProcessImageCommand{
-			Metadata: meta, RustfsRawUri: uri, ByteSize: int64(len(c.Data)),
+			Metadata: meta, SourceRef: uri, ByteSize: int64(len(c.Data)),
 		}, tp)
 	case bus.SubjectEmbed:
 		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType, threadID); err != nil {

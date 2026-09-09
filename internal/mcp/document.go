@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"log/slog"
 	"strings"
 	"time"
@@ -219,6 +220,8 @@ type FetchedDocument struct {
 	To                  []string             `json:"to,omitempty"`
 	Cc                  []string             `json:"cc,omitempty"`
 	Date                *string              `json:"date,omitempty"`
+	SourceLocations     []source.Location    `json:"source_locations,omitempty"`
+	SourceRef           string               `json:"source_ref"`
 	SourcePath          string               `json:"source_path,omitempty"`
 	ContainerSourcePath string               `json:"container_source_path,omitempty"`
 	Text                string               `json:"text,omitempty"`
@@ -229,12 +232,14 @@ type FetchedDocument struct {
 // AttachmentDocument is a direct child document: identified and located, but
 // without its own body text — fetch it by filename for that.
 type AttachmentDocument struct {
-	DocID               string `json:"doc_id"`
-	DocType             string `json:"doc_type"`
-	MimeType            string `json:"mime_type"`
-	SourceFilename      string `json:"source_filename"`
-	SourcePath          string `json:"source_path,omitempty"`
-	ContainerSourcePath string `json:"container_source_path,omitempty"`
+	DocID               string            `json:"doc_id"`
+	DocType             string            `json:"doc_type"`
+	MimeType            string            `json:"mime_type"`
+	SourceFilename      string            `json:"source_filename"`
+	SourceLocations     []source.Location `json:"source_locations,omitempty"`
+	SourceRef           string            `json:"source_ref"`
+	SourcePath          string            `json:"source_path,omitempty"`
+	ContainerSourcePath string            `json:"container_source_path,omitempty"`
 }
 
 type DocumentFetchResult struct {
@@ -245,7 +250,7 @@ type DocumentFetchResult struct {
 func (t *DocumentTool) render(ctx context.Context, d postgres.DocumentLocation) (FetchedDocument, error) {
 	fetched := FetchedDocument{
 		DocID: d.DocID, ParentDocID: d.ParentDocID, DocType: d.DocType, MimeType: d.MimeType,
-		SourceFilename: d.SourceFilename, SourcePath: d.SourcePath, ContainerSourcePath: d.ContainerPath,
+		SourceLocations: d.SourceLocations, SourceRef: d.SourceRef, SourceFilename: d.SourceFilename, SourcePath: d.SourcePath, ContainerSourcePath: d.ContainerPath,
 	}
 	if d.DocType == "email" {
 		fetched.Subject = d.EmailSubject
@@ -269,7 +274,7 @@ func (t *DocumentTool) render(ctx context.Context, d postgres.DocumentLocation) 
 	for _, c := range children {
 		fetched.Attachments = append(fetched.Attachments, AttachmentDocument{
 			DocID: c.DocID, DocType: c.DocType, MimeType: c.MimeType, SourceFilename: c.SourceFilename,
-			SourcePath: c.SourcePath, ContainerSourcePath: c.ContainerPath,
+			SourceLocations: c.SourceLocations, SourceRef: c.SourceRef, SourcePath: c.SourcePath, ContainerSourcePath: c.ContainerPath,
 		})
 	}
 	return fetched, nil
@@ -390,13 +395,13 @@ func documentOutputSchema() map[string]any {
 	stringArray := map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 	attachment := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 		"doc_id": map[string]any{"type": "string", "minLength": 1}, "doc_type": map[string]any{"type": "string"}, "mime_type": map[string]any{"type": "string"},
-		"source_filename": map[string]any{"type": "string"}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
+		"source_filename": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "source_locations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
 	}, "required": []string{"doc_id", "doc_type", "mime_type", "source_filename"}}
 	document := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 		"doc_id": map[string]any{"type": "string", "minLength": 1}, "parent_doc_id": map[string]any{"type": "string"},
 		"doc_type": map[string]any{"type": "string"}, "mime_type": map[string]any{"type": "string"}, "source_filename": map[string]any{"type": "string"},
 		"subject": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": stringArray, "cc": stringArray,
-		"date": map[string]any{"type": "string", "format": "date-time"}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
+		"date": map[string]any{"type": "string", "format": "date-time"}, "source_ref": map[string]any{"type": "string"}, "source_locations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
 		"text": map[string]any{"type": "string"}, "text_truncated": map[string]any{"type": "boolean"},
 		"attachments": map[string]any{"type": "array", "items": attachment},
 	}, "required": []string{"doc_id", "doc_type", "mime_type", "source_filename", "text_truncated"}}

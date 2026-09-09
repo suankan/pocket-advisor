@@ -1,198 +1,23 @@
-# ============================================================================
-# Global & Environment Settings
-#
-# resourcePolicy: no `resources:` block on any workload in this namespace —
-# not just no limits, no requests either. The OrbStack VM itself is capped at
-# 4GB/4CPU, a boundary this chart cannot see and does not try to replicate
-# piecemeal; every pod inside it competes freely for whatever that ceiling
-# actually leaves available, rather than each holding its own reservation
-# carved out of it. A single-tenant local cluster has nothing to protect one
-# pod's share from another's — there is one operator, and it is the person
-# reading this file.
-# ============================================================================
+# Shared local stores. The host process reads configured original files.
+# No workload requests or limits: the local VM provides the resource boundary.
 global:
   namespace: pocket-advisor
   environment: local
   logLevel: info
 
-# ============================================================================
-# Tier 1: RustFS Object Storage — the SOLE source of truth
-#
-# User filesystems are a staging feed into this bucket, never read by the
-# system itself (ingestion-design.md §5.1).
-#
-# Migrated from MinIO: MinIO's Community Edition has been progressively
-# stripped of features since mid-2025 and the project archived in Feb 2026.
-# RustFS is Apache-2.0 and deliberately implements MinIO's admin wire
-# protocol (/minio/admin/v3), so `mc admin` tooling and our whole scoped-
-# identity model carry over unchanged.
-#
-# Pinned to beta.12, not latest: beta.9 introduced a boot-order race where
-# init_event_notifier() unconditionally refreshed notify config from storage
-# before checking whether notify was even enabled, throwing "storage layer
-# not initialized" whenever storage wasn't ready yet at that exact moment.
-# Fixed in beta.12 (rustfs/rustfs commit 775279b6f, "defer disabled bootstrap
-# storage refresh") for the disabled-notify case; beta.9-beta.11 still carry
-# it. Live-verified on beta.12 (docs/ingestion-design.md §5.2) with a scratch
-# NATS+RustFS pair: clean boot, full object round trip, survived a restart.
-# ============================================================================
-rustfs:
-  image: rustfs/rustfs:1.0.0-beta.12
-  replicaCount: 1
-  apiPort: 9000
-  consolePort: 9001
-
-  # RustFS's own container requires an access/secret key to boot at all, and
-  # creating a workspace's bucket and public policy still needs an identity
-  # to do it with, so this is the one RustFS credential that cannot go away.
-  # Hardcoded to admin/admin, not a generated secret: this is a fully local,
-  # single-operator system, and nothing reads or writes documents as this
-  # identity — that happens anonymously against a workspace's own bucket,
-  # scoped by its public policy (`./pocket-advisor.sh deploy-workspace`), not
-  # by an identity (workspace-isolation.md §2.2, §9).
-  adminRustFSUser: admin
-  adminRustFSPassword: admin
-
-  # Bucket notifications. There is no enable flag: every workspace's target
-  # is configured the moment it appears in `workspaces:` below (§5.2). Only
-  # the shape lives here — subject and stream name are namespaced per
-  # workspace in the template (the same convention internal/bus/bus.go uses
-  # Go-side), so the literal values here are just the un-namespaced base.
-  notify:
-    subject: rustfs.events.raw
-    jetstreamStreamName: RUSTFS_EVENTS
-    # Default (/opt/rustfs/events) is unwritable by RustFS's non-root user —
-    # identical bug class already fixed for the webhook target (§12 bug 1).
-    # Each workspace's target gets its own subdirectory under this now, not
-    # this exact path — see templates/rustfs.yaml.
-    queueDir: /data/.rustfs-events-notify
-
-  persistence:
-    enabled: true
-    # CHANGING THIS ON A LIVE RELEASE REQUIRES RECREATING THE STATEFULSET.
-    # volumeClaimTemplates is immutable, so `helm upgrade` fails with
-    # "updates to statefulset spec ... are forbidden". See the chart README.
-    #
-    # Shared across every workspace now, not one volume each (deviation 35).
-    # Measured corpus 2026-07-27: 559Mi raw + ~280Mi extracted children, for
-    # one workspace. ~60x headroom: the matter is active, re-ingestion writes
-    # new extracted/ objects without reclaiming old ones (§6.4), and that cost
-    # is now paid once per cluster rather than once per workspace.
-    size: 50Gi
-  # No requests, no limits (see global.resourcePolicy below). The history
-  # that used to justify this component's own figures, kept because the
-  # symptom it describes can still recur without a per-container ceiling to
-  # blame: at 768Mi/500m the server was OOMKilled 13 times during a
-  # 1,891-file / 1.5GB run — exit 137, taking its in-flight uploads with it
-  # (31 failed) and dead-lettering 49 documents whose Tier 1 reads died
-  # mid-extraction. Separately, the RustFS operator sets its own liveness and
-  # readiness probes with timeoutSeconds: 1, and tenant.spec exposes no field
-  # to soften them — a server starved of CPU queues, a queued /health takes
-  # over a second, three in a row kill the container. Neither failure mode
-  # needed a K8s-level limit to happen; it needed the process to be slow.
-  # Removing the limit removes the artificial ceiling; it does not remove the
-  # VM's real one (global.resourcePolicy).
-
-# ============================================================================
-# Pipeline Bus: NATS JetStream
-# ============================================================================
 nats:
-  # No credentials block at all, unlike RustFS — not even an admin one.
-  # Nothing authenticates to NATS any more; isolation between workspaces is
-  # subject/stream naming (internal/bus/bus.go), not an account boundary.
-
-  # RUSTFS_EVENTS' duplicate window. Must exceed RustFS's retry lifetime —
-  # live-verified against beta.12, which refused to publish into a stream
-  # carrying the 2-minute default. 10m leaves headroom (§5.2).
-  rustfsEventsDedupWindow: 10m
+  # Workspace isolation is subject/stream naming; this local service has no accounts.
   image: nats:2.14.3-alpine
   replicaCount: 1
   clientPort: 4222
   monitorPort: 8222
   persistence:
     enabled: true
-    # Commands carry object references and doc_ids (~1Ki each), never document
-    # text (§4.1). Sized for backlog depth, not document volume.
     size: 5Gi
-  # No requests, no limits — see global.resourcePolicy.
 
-# ============================================================================
-# Tier 2 & 3: PostgreSQL + pgvector
-# ============================================================================
 postgres:
-  # A plain StatefulSet now, not a CloudNativePG Cluster (deviation 39) — one
-  # shared instance either way (deviation 34). templates/postgres.yaml's own
-  # header has the full account of what running this image standalone
-  # actually needed.
-  #
-  # CNPG's own Postgres 18 build with pg_textsearch layered on
-  # (docker-images/postgres/Dockerfile) — pgvector ships with the base image
-  # already, so pg_textsearch is the only extension this chart has to build
-  # itself. `./pocket-advisor.sh deploy-infra` builds this image first (its
-  # own docker-build-postgres command); it never leaves the local Docker
-  # daemon, since OrbStack's Kubernetes shares that daemon's image store
-  # directly. A major
-  # Postgres version bump still means a new volume either way: the on-disk
-  # format changes, and nothing here rewrites it in place.
+  # Built locally from docker-images/postgres/Dockerfile.
   image: pocket-advisor-postgres:18-pg_textsearch-v1.3.1
-
   port: 5432
-
-  # No admin credential field here: the superuser is hardcoded to the
-  # out-of-the-box default name (`postgres`) directly in
-  # templates/postgres.yaml, and every connection — admin and per-workspace
-  # role alike — is `trust` authenticated (no password, ever). Real and
-  # ongoing, unlike the CNPG-era bootstrap placeholder nothing ever connected
-  # to: removing CloudNativePG means nothing reconciles a Database/
-  # DatabaseRole any more, so ./pocket-advisor.sh deploy-workspace connects
-  # as `postgres` directly — psql, CREATE DATABASE/CREATE ROLE/GRANT — the
-  # same operation an operator would have made, run once by a human instead
-  # of continuously by a controller (deviation 39).
-
   storage:
-    # Shared across every workspace now, not one volume each. Steady state
-    # for the measured corpus is ~250Mi per workspace; the headroom is for
-    # transient operations rather than growth — a re-embed holds two
-    # embed_model namespaces at once, REINDEX needs ~2x the index, and
-    # max_wal_size defaults to 1Gi regardless of corpus size (§6.4) — plus
-    # now that cost is paid once per cluster rather than once per workspace.
     size: 20Gi
-
-  # No requests, no limits (see global.resourcePolicy). The history that
-  # used to justify this component's own figures: this container was
-  # OOMKilled too, in the same run that OOMKilled RustFS, exit 137 after its
-  # own liveness and readiness probes started timing out. Postgres is on the
-  # write path for every chunk and every embedding — 2,468 embeddings in that
-  # run, against a pool configured for 50 connections — so a single core was
-  # what made the probes slow enough to matter, the same failure shape as
-  # RustFS. That failure mode needed the process to be slow, not a K8s-level
-  # limit; removing the limit removes the artificial ceiling, not the VM's
-  # real one.
-
-# ============================================================================
-# Workspaces
-#
-# The one list this chart is driven by. Empty here on purpose: this file is
-# committed, and the real list is `./pocket-advisor.sh deploy-infra`'s own
-# `--set workspaces[N].id=<id>` args, generated from the authoritative
-# registry (workspaces/workspaces.yaml's own `.workspaces[].id` —
-# there is no second, credentials-only registry any more).
-#
-# Each entry is only ever `{id: <id>}` now — no nested rustfs/nats/postgres
-# objects, because nothing per-workspace is stored anywhere. RustFS and NATS
-# templates use `.id` directly to derive every resource name and, where one
-# is still needed (RustFS's bucket-notify subject/stream), the namespaced
-# form of it:
-#
-#   workspaces:
-#     - id: test
-#
-# `id` still names everything: the RustFS bucket (identity-free, isolated by
-# a public policy scoped to the bucket instead), and — namespaced — the NATS
-# subjects and stream names a workspace's commands and RustFS notify target
-# use (internal/bus/bus.go applies the identical transform Go-side). Only
-# Postgres keeps a real per-workspace *role*, also named `<id>`, because
-# that is the one boundary `trust` auth does not also remove (see
-# templates/postgres.yaml).
-# ============================================================================
-workspaces: []

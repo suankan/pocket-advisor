@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/source"
 )
 
 // Database-backed rehearsal of fetch_document's exact-attribute lookups
@@ -57,6 +58,22 @@ func insertDoc(t *testing.T, db *DB, s docSpec) string {
 		s.emailSubject, s.emailFrom, s.emailDate, s.normalizedText, s.sourcePath,
 	); err != nil {
 		t.Fatalf("insert document %s: %v", s.docID, err)
+	}
+	ctx := context.Background()
+	sources := NewSourceRepo(db)
+	if s.sourcePath != "" {
+		scan, err := sources.BeginScan(ctx, []string{"synthetic-root"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sources.Observe(ctx, scan, s.docID, source.File{RootKey: "synthetic-root", RelativePath: s.sourcePath, DisplayPath: s.sourcePath, ModifiedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.parentDocID != "" {
+		if err := sources.RecordMember(ctx, s.parentDocID, s.docID, "synthetic:"+s.docID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return s.docID
 }

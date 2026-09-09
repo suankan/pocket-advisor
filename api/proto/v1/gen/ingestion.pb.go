@@ -141,7 +141,7 @@ func (x *DocumentMetadata) GetCustomAttributes() map[string]string {
 type ProcessEmailCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Metadata      *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	RustfsRawUri  string                 `protobuf:"bytes,2,opt,name=rustfs_raw_uri,json=rustfsRawUri,proto3" json:"rustfs_raw_uri,omitempty"`
+	SourceRef     string                 `protobuf:"bytes,10,opt,name=source_ref,json=sourceRef,proto3" json:"source_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -183,9 +183,9 @@ func (x *ProcessEmailCommand) GetMetadata() *DocumentMetadata {
 	return nil
 }
 
-func (x *ProcessEmailCommand) GetRustfsRawUri() string {
+func (x *ProcessEmailCommand) GetSourceRef() string {
 	if x != nil {
-		return x.RustfsRawUri
+		return x.SourceRef
 	}
 	return ""
 }
@@ -194,7 +194,7 @@ func (x *ProcessEmailCommand) GetRustfsRawUri() string {
 type ProcessPdfCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Metadata      *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	RustfsRawUri  string                 `protobuf:"bytes,2,opt,name=rustfs_raw_uri,json=rustfsRawUri,proto3" json:"rustfs_raw_uri,omitempty"`
+	SourceRef     string                 `protobuf:"bytes,10,opt,name=source_ref,json=sourceRef,proto3" json:"source_ref,omitempty"`
 	Priority      int32                  `protobuf:"varint,3,opt,name=priority,proto3" json:"priority,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -237,9 +237,9 @@ func (x *ProcessPdfCommand) GetMetadata() *DocumentMetadata {
 	return nil
 }
 
-func (x *ProcessPdfCommand) GetRustfsRawUri() string {
+func (x *ProcessPdfCommand) GetSourceRef() string {
 	if x != nil {
-		return x.RustfsRawUri
+		return x.SourceRef
 	}
 	return ""
 }
@@ -253,9 +253,9 @@ func (x *ProcessPdfCommand) GetPriority() int32 {
 
 // ProcessOfficeCommand -> ingest.docx.raw
 type ProcessOfficeCommand struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Metadata     *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	RustfsRawUri string                 `protobuf:"bytes,2,opt,name=rustfs_raw_uri,json=rustfsRawUri,proto3" json:"rustfs_raw_uri,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Metadata  *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	SourceRef string                 `protobuf:"bytes,10,opt,name=source_ref,json=sourceRef,proto3" json:"source_ref,omitempty"`
 	// docx | xlsx | pptx | rtf | odt
 	Subtype       string `protobuf:"bytes,3,opt,name=subtype,proto3" json:"subtype,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -299,9 +299,9 @@ func (x *ProcessOfficeCommand) GetMetadata() *DocumentMetadata {
 	return nil
 }
 
-func (x *ProcessOfficeCommand) GetRustfsRawUri() string {
+func (x *ProcessOfficeCommand) GetSourceRef() string {
 	if x != nil {
-		return x.RustfsRawUri
+		return x.SourceRef
 	}
 	return ""
 }
@@ -319,7 +319,7 @@ func (x *ProcessOfficeCommand) GetSubtype() string {
 type ProcessImageCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Metadata      *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	RustfsRawUri  string                 `protobuf:"bytes,2,opt,name=rustfs_raw_uri,json=rustfsRawUri,proto3" json:"rustfs_raw_uri,omitempty"`
+	SourceRef     string                 `protobuf:"bytes,10,opt,name=source_ref,json=sourceRef,proto3" json:"source_ref,omitempty"`
 	Width         int32                  `protobuf:"varint,3,opt,name=width,proto3" json:"width,omitempty"`
 	Height        int32                  `protobuf:"varint,4,opt,name=height,proto3" json:"height,omitempty"`
 	ByteSize      int64                  `protobuf:"varint,5,opt,name=byte_size,json=byteSize,proto3" json:"byte_size,omitempty"`
@@ -364,9 +364,9 @@ func (x *ProcessImageCommand) GetMetadata() *DocumentMetadata {
 	return nil
 }
 
-func (x *ProcessImageCommand) GetRustfsRawUri() string {
+func (x *ProcessImageCommand) GetSourceRef() string {
 	if x != nil {
-		return x.RustfsRawUri
+		return x.SourceRef
 	}
 	return ""
 }
@@ -470,24 +470,32 @@ const file_ingestion_proto_rawDesc = "" +
 	"\x11custom_attributes\x18\v \x03(\v2B.pocketadvisor.ingestion.v1.DocumentMetadata.CustomAttributesEntryR\x10customAttributes\x1aC\n" +
 	"\x15CustomAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\fworkspace_idR\rcollection_id\"\x85\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\fworkspace_idR\rcollection_id\"\x94\x01\n" +
 	"\x13ProcessEmailCommand\x12H\n" +
-	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12$\n" +
-	"\x0erustfs_raw_uri\x18\x02 \x01(\tR\frustfsRawUri\"\x9f\x01\n" +
+	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
+	"\n" +
+	"source_ref\x18\n" +
+	" \x01(\tR\tsourceRefJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xae\x01\n" +
 	"\x11ProcessPdfCommand\x12H\n" +
-	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12$\n" +
-	"\x0erustfs_raw_uri\x18\x02 \x01(\tR\frustfsRawUri\x12\x1a\n" +
-	"\bpriority\x18\x03 \x01(\x05R\bpriority\"\xa0\x01\n" +
+	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
+	"\n" +
+	"source_ref\x18\n" +
+	" \x01(\tR\tsourceRef\x12\x1a\n" +
+	"\bpriority\x18\x03 \x01(\x05R\bpriorityJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xaf\x01\n" +
 	"\x14ProcessOfficeCommand\x12H\n" +
-	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12$\n" +
-	"\x0erustfs_raw_uri\x18\x02 \x01(\tR\frustfsRawUri\x12\x18\n" +
-	"\asubtype\x18\x03 \x01(\tR\asubtype\"\xd0\x01\n" +
+	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
+	"\n" +
+	"source_ref\x18\n" +
+	" \x01(\tR\tsourceRef\x12\x18\n" +
+	"\asubtype\x18\x03 \x01(\tR\asubtypeJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xdf\x01\n" +
 	"\x13ProcessImageCommand\x12H\n" +
-	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12$\n" +
-	"\x0erustfs_raw_uri\x18\x02 \x01(\tR\frustfsRawUri\x12\x14\n" +
+	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
+	"\n" +
+	"source_ref\x18\n" +
+	" \x01(\tR\tsourceRef\x12\x14\n" +
 	"\x05width\x18\x03 \x01(\x05R\x05width\x12\x16\n" +
 	"\x06height\x18\x04 \x01(\x05R\x06height\x12\x1b\n" +
-	"\tbyte_size\x18\x05 \x01(\x03R\bbyteSize\"}\n" +
+	"\tbyte_size\x18\x05 \x01(\x03R\bbyteSizeJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"}\n" +
 	"\x10EmbedTextCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1f\n" +
 	"\vtext_length\x18\x02 \x01(\x03R\n" +

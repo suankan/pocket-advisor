@@ -100,7 +100,7 @@ type EmailParseWarning struct {
 
 // EmailParseVersion is the version of the header model these rows were written
 // by. It exists so a later parser change can be told apart from a re-ingest of
-// the same bytes without re-reading Tier 1.
+// the same bytes without re-reading originals.
 const EmailParseVersion = 1
 
 // EmailMessage is one email message document's browse metadata.

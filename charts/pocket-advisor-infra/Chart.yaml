@@ -1,28 +1,6 @@
 apiVersion: v2
 name: pocket-advisor-infra
-description: >
-  The three shared stores as plain Kubernetes resources — a Postgres
-  StatefulSet, a RustFS StatefulSet, a NATS StatefulSet — and nothing else.
-  No operators, no CRDs: workspace-level provisioning (databases, buckets,
-  streams) is `./pocket-advisor.sh deploy-workspace`, over psql/rc/aws-cli/
-  natscli, not reconciled by anything running in the cluster (deviation 39).
+description: Shared PostgreSQL and NATS stores; workspace databases and streams are provisioned by pocket-advisor.sh.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "1.0.0"
-
-# No dependencies. There used to be three — CloudNativePG, NACK, the RustFS
-# operator — each reconciling a CRD this chart declared. Removed entirely:
-# for a single-tenant local cluster, an operator's reconciliation loop is
-# machinery bought to solve a problem (drift between desired and actual
-# state, across many clusters, unattended) this deployment does not have.
-# What replaced them is `./pocket-advisor.sh deploy-workspace`, calling the
-# same CLI tools an operator by hand — psql, rc, aws-cli, natscli — but run
-# once, when a human asks, rather than continuously by a controller
-# (deviation 39).
-#
-# metrics-server left with the rest, for consistency, but for a narrower
-# reason: it never depended on the removed three, so it did not have to
-# move — it moves anyway, to its own `./pocket-advisor.sh deploy-metrics-server` /
-# `destroy-metrics-server`, run as a standalone `helm install`/`uninstall`
-# of its own upstream chart rather than a dependency of this one, since its
-# lifecycle was already independent of everything else in it.

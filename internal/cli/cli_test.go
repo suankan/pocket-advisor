@@ -57,7 +57,7 @@ func TestParseRequiresAMode(t *testing.T) {
 }
 
 // A mode that defaulted its workspace could purge the wrong corpus. There is
-// no shared database or bucket left to fall back to
+// no shared database left to fall back to
 // (workspace-isolation.md §13).
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{

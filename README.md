@@ -1,33 +1,33 @@
 # Pocket Advisor Operator Guide
 
-Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion, direct local retrieval, and MCP (stdio and HTTP) all run as one Go binary on the host — none of it runs in Kubernetes. That binary uses three shared stores that do run in the local cluster:
+Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion, direct local retrieval, and MCP (stdio and HTTP) all run as one Go binary on the host — none of it runs in Kubernetes. That binary uses two shared stores that do run in the local cluster:
 
-- RustFS is Tier 1 and the authoritative document store.
+- Original files in configured workspace directories are authoritative and read-only.
 - PostgreSQL is Tier 2 lineage and Tier 3 vector and lexical indexes.
 - NATS JetStream carries durable work between ingestion pools.
 
-The binary uploads and ingests documents, retrieves cited evidence, and exposes retrieval as an MCP tool. It does not generate answers itself. An MCP client can read the returned evidence and compose a cited answer.
+The binary discovers and ingests documents, retrieves cited evidence, and exposes retrieval as an MCP tool. It does not generate answers itself. An MCP client can read the returned evidence and compose a cited answer.
 
 ```text
 host                                         local Kubernetes cluster
 
 pocket-advisor
-  uploader and discovery  -----------------> RustFS
+  source discovery        -----------------> configured original files (read-only)
   ingestion worker pools  <----------------> NATS JetStream
   ingestion and retrieval -----------------> PostgreSQL / pgvector / BM25
   embedding, reranking,
   query preparation       -----------------> local model endpoint
 ```
 
-The `pocket-advisor-infra` Helm chart deploys only the three shared stores. The MCP server is built into the `pocket-advisor` binary and runs locally via `mcp stdio` or `mcp start` (HTTP).
+The `pocket-advisor-infra` Helm chart deploys only the two shared stores. The MCP server is built into the `pocket-advisor` binary and runs locally via `mcp stdio` or `mcp start` (HTTP).
 
 ## 1. Concepts
 
 - Every command is scoped to one workspace with `--workspace-id`.
-- The stores are shared processes, but each workspace has its own PostgreSQL database and role, RustFS bucket, and NATS subject/stream namespace — no per-workspace identity in RustFS or NATS, isolation is naming, not a credential (see [§3](#3-configuration)).
-- RustFS is authoritative for document bytes. A workspace's configured staging directories and ignore patterns determine which content a full ingest retains.
-- Ingestion is reconciled. Re-running it skips objects already present, finds Tier 1 objects without Tier 2 rows, and drains durable queued work.
-- PostgreSQL is derived state. If a workspace database is lost, its schema and index can be rebuilt from Tier 1 by ingesting again.
+- The stores are shared processes, but each workspace has its own PostgreSQL database and role, confined source roots, and NATS subject/stream namespace — NATS isolation is naming, not a credential (see [§3](#3-configuration)).
+- The registry's `paths` and `ignore` rules define authoritative originals. Historical bytes require source-side versioning or backups.
+- Ingestion hashes configured files, preserves content identities across moves and copies, and drains durable PostgreSQL jobs through NATS. Completed unchanged content is not re-extracted or re-embedded.
+- PostgreSQL retains normalized text and derived metadata/indexes. Rebuilding requires hash-recoverable originals; restore a database backup when existing UUIDs and evaluation references must survive.
 - Full ingestion prunes documents no longer reachable from staged content before starting its workers. `--no-prune` disables this sweep; `--reconcile-deletions` previews it separately.
 - Retrieval returns cited evidence packets, not generated prose.
 
@@ -46,18 +46,17 @@ The authoritative designs are:
 - `mise` for the pinned Go and CGo environment.
 - Tesseract and the required language packs for scanned PDFs and images.
 - A local OpenAI-compatible model endpoint serving the embedding, reranking, and query-preparation models named in `config.yaml`.
-- Helm, `kubectl`, Docker, `psql`, `aws-cli`, RustFS `rc`, `natscli`, `yq`, and `envsubst`.
+- Helm, `kubectl`, Docker, `psql`, `natscli`, `yq`, and `envsubst`.
 - For authenticated HTTP MCP: an OAuth 2.0 Client ID registered in Google Cloud Console (see [MCP server design](docs/mcp.md#google-oauth-client-configuration)).
 
 On macOS:
 
 ```sh
-brew install mise tesseract tesseract-lang helm kubectl libpq awscli natscli yq gettext
+brew install mise tesseract tesseract-lang helm kubectl libpq natscli yq gettext
 mise trust
 mise install
 ```
 
-Install `rc` from the [RustFS CLI documentation](https://rustfs.com/docs/cli-reference).
 
 Use a Kubernetes context whose default namespace is `pocket-advisor`:
 
@@ -83,7 +82,6 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 `workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the local directories it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
 - **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
-- **RustFS**: the root identity is the literal `admin`/`admin` (used only by `./pocket-advisor.sh deploy-workspaces` to provision buckets). The application itself connects anonymously — a workspace's bucket carries a public policy scoped to itself, so isolation is the bucket name, not a credential.
 - **NATS**: no accounts, no users, no passwords at all. A workspace's subjects and stream names are namespaced by its id instead (`internal/bus/bus.go`).
 
 Example registry:
@@ -106,11 +104,11 @@ workspaces:
 
 A workspace's nonempty `paths` list contains the directories the ingestion pipeline walks recursively. Use `paths: [data/example]` for a single directory; the singular `path` key is unsupported. Relative paths resolve against the registry directory. Multiple roots must have distinct basenames; recorded source paths then include that basename. Every regular file is a candidate unless excluded by `ignore`.
 
-Ignore rules match slash-separated paths relative to each configured root. A bare pattern such as `*.tmp` matches filenames at any depth; a path pattern such as `build/*.log` is anchored to the root. `**` spans directory segments. A trailing slash excludes a directory's descendants, so `caches/` excludes caches at any depth. Rules apply in order and `!` re-includes a match. Upload and pruning use the same rules.
+Ignore rules match slash-separated paths relative to each configured root. A bare pattern such as `*.tmp` matches filenames at any depth; a path pattern such as `build/*.log` is anchored to the root. `**` spans directory segments. A trailing slash excludes a directory's descendants, so `caches/` excludes caches at any depth. Rules apply in order and `!` re-includes a match. Discovery and pruning use the same rules. Sources are never modified. Symlinks and special files are excluded; reads remain confined to configured roots.
 
 `owner-identities` is optional and private, scoped to one workspace. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
 
-Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database, RustFS bucket/policy, and NATS streams from its id alone — nothing else to configure.
+Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database and NATS streams from its id alone — nothing else to configure.
 
 The full values shape is documented in [`charts/pocket-advisor-infra/values.yaml`](charts/pocket-advisor-infra/values.yaml).
 
@@ -123,7 +121,7 @@ Bring up the shared stores and provision every registered workspace, then build 
 ./pocket-advisor.sh build
 ```
 
-`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for the PostgreSQL, RustFS, and NATS StatefulSets to roll out, and then runs `deploy-workspaces` automatically — every workspace in `workspaces/workspaces.yaml` is provisioned before `deploy-infra` returns. The chart itself needs only each workspace's `id` to render its RustFS notification target.
+`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for PostgreSQL and NATS, and provisions every registered workspace. The chart contains no private workspace list. Existing object-store installations require the source coverage and compatibility checks in [§11](#11-upgrade-and-teardown) before their workload is retired.
 
 Re-run provisioning on its own after editing the registry, without touching the shared stores:
 
@@ -136,15 +134,14 @@ This command creates, idempotently, for every registered workspace:
 | Store | Workspace resources |
 | --- | --- |
 | PostgreSQL | database `<id>`, role `<id>`, `vector` and `pg_textsearch` extensions |
-| RustFS | bucket and its public policy, plus a `raw/` notification binding |
-| NATS | `INGESTION_<SUFFIX>`, `INGESTION_DLQ_<SUFFIX>`, and `RUSTFS_EVENTS_<SUFFIX>` streams, namespaced by workspace id |
+| NATS | `INGESTION_<SUFFIX>` and `INGESTION_DLQ_<SUFFIX>` streams, namespaced by workspace id |
 
 The application applies the Tier 2/3 schema on the first ingest because the `halfvec` width comes from probing the host-local embedding endpoint.
 
 ### Add another workspace
 
 1. Add it to `workspaces/workspaces.yaml`.
-2. Run `./pocket-advisor.sh deploy-infra` (renders its RustFS notification target and provisions it, along with every other registered workspace) — or, if the shared stores are already up, just `./pocket-advisor.sh deploy-workspaces`.
+2. Run `./pocket-advisor.sh deploy-workspaces` if shared stores are already running; otherwise run `./pocket-advisor.sh deploy-infra`.
 3. Run an ingest to apply its schema and load content.
 
 ## 5. Ingest a workspace
@@ -153,49 +150,37 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 ./bin/pocket-advisor --ingest-all --workspace-id example
 ```
 
-`--ingest-all`:
+`--ingest-all` resolves original directories, applies the source/job schema, refreshes known source occurrences and containment, and conservatively prunes before starting workers. It then hashes and admits current files, dispatches transactional jobs, and waits for durable work and queues to drain. Normalized text, vectors and BM25 remain in PostgreSQL. Original or attachment bytes are never copied to permanent intermediate storage.
 
-1. resolves the workspace's directories and ignore rules;
-2. upgrades its schema and finishes any pending object deletions;
-3. backfills containment if needed and prunes unreachable documents, unless `--no-prune` is set;
-4. uploads new content-addressed objects and reconciles Tier 1 objects missing from Tier 2;
-5. runs every worker pool until the queues remain idle for the settling period; and
-6. rebuilds the BM25 index after the full ingest.
-
-Pruning refuses an empty staging set or incomplete containment. Its default deletion threshold is 10% of the indexed documents. Exceeding that threshold prints the plan and continues ingestion without deleting; inspect the complete plan with `--reconcile-deletions --json` before applying it or using `--prune-max-share 1`. Run only one ingestion or deletion process per workspace at a time.
-
-`--ingest-all --dry-run` previews uploads using read access to Tier 1 only. It does not connect to PostgreSQL, NATS, or models; provision schemas; backfill containment; prune; or start workers. Use the separate deletion plan to inspect pruning.
-
-Useful modes:
+Pruning refuses an empty or incompletely traversed source set and incomplete containment. The default deletion-share limit is 10%; exceeding it prints the plan and continues additive ingestion. Inspect `--reconcile-deletions --json` before explicitly allowing a larger sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
 
 ```sh
-# Preview upload changes without writing.
+# Hash originals and report counts without touching databases, queues or models.
 ./bin/pocket-advisor --ingest-all --workspace-id example --dry-run
 
-# Re-trigger Tier 1 objects that have no Tier 2 row, without walking local paths.
+# Additive source scan and ingestion.
 ./bin/pocket-advisor --scan --workspace-id example
 
-# Re-publish stale PENDING rows whose publish did not complete.
+# Refresh sources and redispatch unfinished jobs, including broker-lost work.
 ./bin/pocket-advisor --reconcile --workspace-id example
 
-# Keep the worker pools running for objects uploaded by another S3 client.
+# Scan at startup and every minute while processing jobs.
 ./bin/pocket-advisor --listen --workspace-id example
 
-# Rebuild durable email browse metadata after upgrading a workspace that was
-# ingested before the email metadata tables existed. Start with a bounded,
-# non-writing check; rows whose Tier 1 object cannot be read are reported.
-./bin/pocket-advisor --reprocess-email-metadata --workspace-id example \
-  --reprocess-limit 500 --dry-run
+# Verify retained originals and container replay without writing.
+./bin/pocket-advisor --audit-sources --workspace-id example --json
 
-# Apply the rebuild. It only reads Tier 1 and updates email metadata; it does
-# not upload, queue, extract, chunk, embed, or alter canonical documents.
-./bin/pocket-advisor --reprocess-email-metadata --workspace-id example \
-  --reprocess-missing-only --reprocess-concurrency 4
+# Verify coverage and persist source occurrences and member recipes.
+./bin/pocket-advisor --bind-sources --workspace-id example
+
+# Preview or rebuild email metadata from verified original bytes.
+./bin/pocket-advisor --reprocess-email-metadata --workspace-id example --dry-run --reprocess-limit 100
+./bin/pocket-advisor --reprocess-email-metadata --workspace-id example
 ```
 
-`--reprocess-email-metadata` walks only email message documents in the fixed workspace in deterministic order. It is idempotent and resumable: re-running it writes the same metadata through the live email worker's parser and transaction, does not duplicate rows or move `ingested_at`, and leaves documents, chunks, retrieval data, and legacy thread IDs untouched. `--reprocess-limit N` bounds a run (`0` is all messages); `--reprocess-missing-only` is useful after an interrupted pass. The summary reports processed, updated, unreadable, and failed counts. Unreadable Tier 1 bytes and parse/write failures cause a non-zero exit after the complete summary, rather than being silently skipped. `--json` produces the summary as JSON.
+File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if waiting or failed jobs remain. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
 
-The first interrupt stops fetching and drains in-flight handlers. A second interrupt aborts immediately. Queued and unacknowledged messages remain durable in JetStream, so the next run resumes them.
+Roots are limited to regular files of at most 256 MiB each. Container replay is limited to eight levels and 512 MiB cumulative decoded bytes, with bounded member counts and archive expansion ratios. Incomplete source traversal prevents pruning. Registry edits require restarting listener mode. Original volumes can be offline for ordinary database-backed retrieval; reprocessing and index rebuilding require accessible originals.
 
 ### Build email topic mentions
 
@@ -220,7 +205,7 @@ Promotion atomically retires the prior active version and activates the `READY` 
 
 ## 6. Observe ingestion
 
-During a terminal run, the dashboard shows upload progress, queue depths, active lanes, retries, skips, dead letters, CPU slots, embedding sessions, and PostgreSQL pool use. Full JSON logs are written by role under the gitignored `logs/` directory. Ingestion diagnostics include local source paths and filenames, so treat these files as private workspace material.
+During a terminal run, the dashboard shows source scan progress, queue depths, active lanes, retries, skips, dead letters, CPU slots, embedding sessions, and PostgreSQL pool use. Full JSON logs are written by role under the gitignored `logs/` directory. Ingestion diagnostics include local source paths and filenames, so treat these files as private workspace material.
 
 ```sh
 ls logs/
@@ -254,7 +239,7 @@ The result shows:
 - the query or subqueries actually searched;
 - warnings for degraded retrieval;
 - the shared evidence budget;
-- ranked passages with document metadata, UTF-8 byte offsets, and Tier 1 citations;
+- ranked passages with document metadata, UTF-8 byte offsets, and original-source citations;
 - lineage context such as parent documents, attachments, and same-thread messages; and
 - where to find each result, relative to its configured staging directory (prefixed with the root's basename when there are several), either as the document's own file or the container it was extracted from.
 
@@ -536,7 +521,7 @@ Remove documents whose file you deleted from the workspace directory:
 
 `--reconcile-deletions` reports documents unreachable from the currently staged, non-ignored content. It prepares the containment schema and backfill when needed, including on an older workspace, but deletes no documents unless `--yes` is supplied and the displayed confirmation is accepted. `--json` emits the complete plan. Matching is by content, so another staged copy retains the document and renaming alone does not delete it. Empty staging is refused. Shared attachments remain when another retained container carries them. This explicit command has no percentage limit.
 
-Object deletion requests are persisted in the same transaction that removes document rows. If RustFS cleanup fails, the command fails and retains the unfinished requests. Rerun the deletion command, or run ingestion, scan, reconciliation, or the listener to finish pending cleanup before intake. Even `--no-prune` finishes previously committed deletions; it only disables new pruning. Pending content cannot be rediscovered until cleanup completes.
+Deletion changes derived PostgreSQL state only. It also removes associated jobs and unreferenced passage text/vectors. Original files are never deleted or edited.
 
 Delete all content while leaving the workspace infrastructure ready for reuse:
 
@@ -544,7 +529,7 @@ Delete all content while leaving the workspace infrastructure ready for reuse:
 ./bin/pocket-advisor --delete-data --workspace-id example
 ```
 
-`--forget` and `--delete-data` prompt unless `--yes` is supplied. Forget removes the selected document and its exclusively held descendants, preserving descendants recorded as independently staged or still held by another container. It removes both raw and extracted objects for every deleted content hash through the same durable cleanup mechanism as pruning. Re-ingesting retained source files can add forgotten content again. `--delete-data` removes Tier 1 objects, document-related PostgreSQL rows, pending cleanup records, and all three workspace streams' messages. Shared passage rows released by these operations remain until an explicit storage cleanup is introduced. Store changes are ordered rather than transactional across stores; rerun after a partial failure to finish cleanup.
+`--forget` and `--delete-data` prompt unless `--yes` is supplied. Forget retains independently present and shared descendants. A later ingestion can reintroduce forgotten bytes that remain configured; use `ignore` for persistent exclusion. `--delete-data` clears documents, passages, metadata/graphs, source inventory, jobs, and both workspace queues. Database deletion and broker purge are separate operations; rerun after a partial failure. Original files and configuration remain untouched.
 
 Destroy the workspace infrastructure itself:
 
@@ -552,7 +537,7 @@ Destroy the workspace infrastructure itself:
 ./pocket-advisor.sh destroy-workspace example
 ```
 
-Then remove its entry from `workspaces/workspaces.yaml` and run `./pocket-advisor.sh deploy-infra` so the chart stops rendering its RustFS notification target (and `deploy-workspaces` re-provisions every workspace still listed).
+Then remove its entry from `workspaces/workspaces.yaml`. This removes its derived database and streams, not its original directories.
 
 ## 10. Verification
 
@@ -570,6 +555,15 @@ git status --short
 
 `lint` runs formatting, Go vet, Helm lint, and a chart-render assertion. Install the repository’s commit-message hook once per clone with `install-hooks`.
 
+For synthetic source integration tests, use disposable PostgreSQL with `vector` and `pg_textsearch`, plus disposable JetStream. Never point these variables at a workspace database or broker:
+
+```sh
+EMAIL_DSN=postgres://postgres@127.0.0.1:<test-port>/<disposable-db> \
+SOURCE_TEST_NATS=nats://127.0.0.1:<test-port> TAGS=ocr,manual ./pocket-advisor.sh test
+```
+
+The tests include a synthetic embedding endpoint, source/attachment ingestion, unchanged reruns and rename identity, hybrid retrieval, source migration, transactional failure injection, broker loss, and derived-only reset. They do not establish private-corpus retrieval quality or production latency; use the private evaluation workflow in §8 for that deployment gate.
+
 ## 11. Upgrade and teardown
 
 Upgrade the shared-store release with the supported wrapper:
@@ -578,7 +572,13 @@ Upgrade the shared-store release with the supported wrapper:
 ./pocket-advisor.sh deploy-infra
 ```
 
-Always use the wrapper rather than invoking Helm directly: it derives the chart's `workspaces:` list, and provisions every workspace via `deploy-workspaces`, straight from `workspaces/workspaces.yaml` — a bare `helm upgrade` would do neither.
+Always use the wrapper rather than invoking Helm directly: it checks legacy source coverage where needed and provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml`.
+
+For an existing object-store installation, stop all old ingestion producers and workers, resolve pending object-deletion requests with the old binary, and drain its ingestion stream. Keep a recoverable database backup and the matching old binary/object-store state. Then build the new binary and run `--audit-sources` for each workspace. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage.
+
+Run `--bind-sources` to persist verified locations and recipes without replacing document UUIDs, normalized evidence, chunks, mailbox identities or topic references. The migration rejects unresolved object-deletion records. New commands use a different Protobuf source field and require durable job headers; old and new consumers must not overlap. `--reconcile` admits remaining nonterminal legacy rows and recovers durable jobs. Recheck source coverage and run the private retrieval evaluation before accepting the deployment.
+
+When a legacy RustFS StatefulSet exists, `deploy-infra` checks that each ingestion stream is empty, audits every workspace, and binds its sources before Helm retires the workload. A failed gate leaves retirement blocked. Binding migrates database structure; rollback requires the matching database backup, old binary, and old object state. The wrapper does not create backups or delete the old PVC or notification stream. Retain those through the rollback interval; their eventual deletion is a separate explicit operator action. Removing the service alone does not reclaim that old disk allocation.
 
 StatefulSet volume claim templates are immutable. Changing a configured storage size requires deliberately recreating the relevant StatefulSet and claim. A PostgreSQL major-version change also requires a new data volume and re-ingestion.
 
@@ -594,7 +594,7 @@ Permanently delete every retained PVC in the `pocket-advisor` namespace:
 ./pocket-advisor.sh destroy-state
 ```
 
-The latter removes Tier 1, PostgreSQL, and JetStream state for every workspace and cannot be recovered without external source material or backups.
+The latter removes retained PostgreSQL and JetStream state, and any retained legacy object-store PVC, for every workspace. It cannot be undone. Original source directories are outside these PVCs.
 
 Optional metrics-server has an independent lifecycle:
 

@@ -35,7 +35,7 @@ func (syntheticRetriever) Query(ctx context.Context, req retrieval.Request) (*re
 		Packets: []retrieval.Packet{{
 			Document: retrieval.Document{
 				DocID: "11111111-1111-1111-1111-111111111111", DocType: "text",
-				Title: "Synthetic project status", RawURI: "s3://synthetic/raw/status",
+				Title: "Synthetic project status", SourceRef: "source:status",
 				SHA256: strings.Repeat("a", 64), CharCount: len(text),
 			},
 			Match: retrieval.Match{

@@ -42,23 +42,23 @@ func syntheticPacket(from, subject, snippet string, date time.Time, threadID str
 	sha256 := strings.Repeat("a", 64)
 	return retrieval.Packet{
 		Document: retrieval.Document{
-			DocID:    docID,
-			DocType:  "email",
-			Title:    subject,
-			From:     from,
-			Date:     &date,
-			SHA256:   sha256,
-			RawURI:   "s3://test/raw/" + docID,
+			DocID:     docID,
+			DocType:   "email",
+			Title:     subject,
+			From:      from,
+			Date:      &date,
+			SHA256:    sha256,
+			SourceRef: "source:" + docID,
 			CharCount: len(snippet),
-			ThreadID: threadID,
+			ThreadID:  threadID,
 		},
 		Match: retrieval.Match{
-			ChunkID:  "chunk-" + docID,
+			ChunkID:   "chunk-" + docID,
 			StartByte: 0,
-			EndByte:  len(snippet),
-			Score:    0.75,
-			Legs:     "both",
-			Snippet:  snippet,
+			EndByte:   len(snippet),
+			Score:     0.75,
+			Legs:      "both",
+			Snippet:   snippet,
 		},
 		Text: snippet,
 	}
@@ -70,7 +70,7 @@ func TestExecuteTopicAnalysisBasic(t *testing.T) {
 	date3 := time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	result1 := &retrieval.Result{
-		Question: "budget review",
+		Question:   "budget review",
 		SubQueries: []string{"budget review"},
 		Packets: []retrieval.Packet{
 			syntheticPacket("alice@test.com", "Budget Update", "The budget is on track for Q2", date1, "thread-1"),
@@ -85,7 +85,7 @@ func TestExecuteTopicAnalysisBasic(t *testing.T) {
 	executor := NewExecutor(stub, testLogger())
 
 	req := TopicRequest{
-		Question:   "budget review",
+		Question:     "budget review",
 		Participants: []string{"alice@test.com", "bob@test.com"},
 	}
 	dossier, err := executor.ExecuteTopicAnalysis(context.Background(), req)
@@ -118,7 +118,7 @@ func TestExecuteTopicAnalysisConflictDetection(t *testing.T) {
 	date2 := time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC)
 
 	result1 := &retrieval.Result{
-		Question: "project timeline",
+		Question:   "project timeline",
 		SubQueries: []string{"project timeline"},
 		Packets: []retrieval.Packet{
 			syntheticPacket("alice@test.com", "Timeline Proposal", "The project will finish by June with a conservative approach", date1, "thread-1"),
@@ -152,11 +152,11 @@ func TestExecuteTopicAnalysisConflictDetection(t *testing.T) {
 
 func TestExecuteTopicAnalysisEmptyResult(t *testing.T) {
 	result1 := &retrieval.Result{
-		Question: "nonexistent topic",
+		Question:   "nonexistent topic",
 		SubQueries: []string{"nonexistent topic"},
-		Packets:  []retrieval.Packet{},
-		Warnings: []string{},
-		Budget:   retrieval.Budget{BytesUsed: 0, BytesAllowed: 100000},
+		Packets:    []retrieval.Packet{},
+		Warnings:   []string{},
+		Budget:     retrieval.Budget{BytesUsed: 0, BytesAllowed: 100000},
 	}
 
 	stub := &stubRetriever{results: []*retrieval.Result{result1}}

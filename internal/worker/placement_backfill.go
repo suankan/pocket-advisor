@@ -10,10 +10,10 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
-	"github.com/suankan/pocket-advisor/internal/storage/rustfs"
+	"github.com/suankan/pocket-advisor/internal/source"
 )
 
-// Containment backfill re-derives, from Tier 1, the containments that ingest
+// Containment backfill re-derives, from verified originals, the containments that ingest
 // discarded before document_placements existed.
 //
 // The gap it fills is narrow and total: a container's children were recorded
@@ -25,7 +25,7 @@ import (
 // reads every container's bytes back and asks again.
 //
 // It writes nothing but placements: no status, no text, no chunk, no metadata.
-// A container whose Tier 1 object is gone is reported, never guessed at.
+// A container whose original source is gone is reported, never guessed at.
 
 // PlacementContainerSelector walks the workspace's container documents.
 type PlacementContainerSelector interface {
@@ -40,19 +40,16 @@ type PlacementWriter interface {
 	MarkPlacementsBackfilled(ctx context.Context, at time.Time) error
 }
 
-// PlacementObjectReader reads Tier 1, the only authority for what a container
+// PlacementObjectReader reads verified original files, the only authority for what a container
 // held.
-type PlacementObjectReader interface {
-	KeyFromURI(uri string) (string, error)
-	Get(ctx context.Context, key string) ([]byte, rustfs.Provenance, error)
-}
+type PlacementObjectReader = source.Reader
 
 // PlacementBackfiller rebuilds containment for one workspace.
 type PlacementBackfiller struct {
-	Docs  PlacementContainerSelector
-	Write PlacementWriter
-	Vault PlacementObjectReader
-	Log   *slog.Logger
+	Docs    PlacementContainerSelector
+	Write   PlacementWriter
+	Sources PlacementObjectReader
+	Log     *slog.Logger
 }
 
 func (b *PlacementBackfiller) log() *slog.Logger {
@@ -68,7 +65,7 @@ func (b *PlacementBackfiller) log() *slog.Logger {
 type PlacementBackfillSummary struct {
 	Containers int `json:"containers"`
 	Placements int `json:"placements"`
-	// Unreadable is a container whose Tier 1 bytes could not be read at all.
+	// Unreadable is a container whose original bytes could not be read at all.
 	Unreadable int `json:"unreadable"`
 	// Unparsable is bytes that were read and could not be unrolled.
 	Unparsable int `json:"unparsable"`
@@ -168,11 +165,7 @@ var (
 // one re-derives a single container's children through the same unrolling the
 // email worker uses, so the two cannot disagree about what a container holds.
 func (b *PlacementBackfiller) one(ctx context.Context, doc domain.Document) (int, error) {
-	key, err := b.Vault.KeyFromURI(doc.RawURI)
-	if err != nil {
-		return 0, fmt.Errorf("%w: %s", errUnreadable, doc.DocID)
-	}
-	data, _, err := b.Vault.Get(ctx, key)
+	data, err := b.Sources.Read(ctx, source.Ref(doc.DocID), doc.RawSHA256)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %s", errUnreadable, doc.DocID)
 	}

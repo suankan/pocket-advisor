@@ -32,10 +32,10 @@ func TestValidateTopicRequestValid(t *testing.T) {
 	after := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	before := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	req := TopicRequest{
-		Question:   "What is the status of the project?",
+		Question:     "What is the status of the project?",
 		Participants: []string{"alice@example.com"},
-		After:      &after,
-		Before:     &before,
+		After:        &after,
+		Before:       &before,
 	}
 	if err := ValidateTopicRequest(&req); err != nil {
 		t.Fatalf("unexpected error: %v", err)

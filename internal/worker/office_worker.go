@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -58,6 +59,9 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	}
 
 	if err := w.Docs.SaveText(ctx, meta.DocId, text, "office/"+cmd.Subtype, meta.ThreadId); err != nil {
+		if errors.Is(err, postgres.ErrInvalidText) {
+			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))
+		}
 		return WithDoc(meta.DocId, err)
 	}
 

@@ -66,8 +66,12 @@ type PruneReport struct {
 	// StagedContents is how many distinct contents the staging directories
 	// hold, and TotalDocuments how many the workspace holds. Together they are
 	// what the blast-radius guard judged.
-	StagedContents int  `json:"staged_contents"`
-	StagedFiles    int  `json:"staged_files"`
+	StagedContents int `json:"staged_contents"`
+	StagedFiles    int `json:"staged_files"`
+	// Unexpandable is how many staged containers could not be re-derived into
+	// members. Reported rather than fatal: containment comes from
+	// document_placements, which PlacementsBackfilledAt gates above.
+	Unexpandable   int  `json:"unexpandable_containers"`
 	TotalDocuments int  `json:"total_documents"`
 	Deleted        int  `json:"deleted"`
 	DryRun         bool `json:"dry_run"`
@@ -119,16 +123,21 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 		return nil, ErrPlacementsIncomplete
 	}
 
-	contents, files, err := stagedContentsContext(ctx, o.AbsPaths, o.Ignore)
+	st, err := stagedContentsContext(ctx, o.AbsPaths, o.Ignore, p.log)
 	if err != nil {
 		return nil, err
 	}
-	if files == 0 {
+	if st.files == 0 {
 		return nil, ErrStagingEmpty
 	}
+	if st.unexpandable > 0 && p.log != nil {
+		p.log.Info("some staged containers could not be re-derived into members; "+
+			"retention is using recorded containment for them",
+			"unexpandable", st.unexpandable, "staged_files", st.files)
+	}
 
-	shas := make([]string, 0, len(contents))
-	for sha := range contents {
+	shas := make([]string, 0, len(st.contents))
+	for sha := range st.contents {
 		shas = append(shas, sha)
 	}
 
@@ -143,8 +152,9 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 
 	report := &PruneReport{
 		Candidates:     candidates,
-		StagedContents: len(contents),
-		StagedFiles:    files,
+		StagedContents: len(st.contents),
+		StagedFiles:    st.files,
+		Unexpandable:   st.unexpandable,
 		TotalDocuments: total,
 		DryRun:         true,
 	}

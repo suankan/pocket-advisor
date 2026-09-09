@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/source"
@@ -11,27 +13,51 @@ import (
 
 var ErrStagingEmpty = errors.New("source directories contain no eligible files: refusing to delete every document")
 
-func stagedContents(roots []string, ignore func(string) bool) (map[string]struct{}, int, error) {
-	return stagedContentsContext(context.Background(), roots, ignore)
+// errReplayBudget stops one top-level file's expansion without ending the walk.
+var errReplayBudget = errors.New("replay byte budget exhausted")
+
+// staged is one traversal of the configured directories.
+type staged struct {
+	contents map[string]struct{}
+	files    int
+	// Unexpandable counts containers whose members could not be re-derived —
+	// a malformed multipart, an unknown charset, a corrupt archive, a replay
+	// budget exhausted by one pathological file.
+	//
+	// It does not block a sweep. Retention reaches a container's members
+	// through recorded containment (document_placements), and Plan refuses to
+	// run at all until that containment is complete, so re-expansion here is a
+	// redundant second source rather than the authority. A container that
+	// cannot be parsed now could not be parsed at admission either, so its
+	// members were never indexed as documents; one that could be is already
+	// holding them through the placement graph. Real mail corpora carry a
+	// steady fraction of these, and aborting on the first one only ever meant
+	// refusing to ingest.
+	unexpandable int
 }
-func stagedContentsContext(ctx context.Context, roots []string, ignore func(string) bool) (map[string]struct{}, int, error) {
+
+func stagedContents(roots []string, ignore func(string) bool) (staged, error) {
+	return stagedContentsContext(context.Background(), roots, ignore, nil)
+}
+
+func stagedContentsContext(ctx context.Context, roots []string, ignore func(string) bool, log *slog.Logger) (staged, error) {
 	r, err := source.New(roots, ignore, nil)
 	if err != nil {
-		return nil, 0, err
+		return staged{}, err
 	}
 	defer r.Close()
-	contents := map[string]struct{}{}
-	files := 0
-	var expand func([]byte, string, int, *int64) error
-	expand = func(data []byte, name string, depth int, budget *int64) error {
+
+	s := staged{contents: map[string]struct{}{}}
+	var expand func([]byte, string, int, string, *int64) error
+	expand = func(data []byte, name string, depth int, origin string, budget *int64) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		*budget -= int64(len(data))
 		if *budget < 0 {
-			return fmt.Errorf("retention replay byte limit exceeded")
+			return errReplayBudget
 		}
-		contents[domain.SHA256Hex(data)] = struct{}{}
+		s.contents[domain.SHA256Hex(data)] = struct{}{}
 		if depth >= 8 {
 			return nil
 		}
@@ -43,19 +69,40 @@ func stagedContentsContext(ctx context.Context, roots []string, ignore func(stri
 		}
 		children, err := source.Children(data, route.MimeType, name)
 		if err != nil {
-			return fmt.Errorf("retention container traversal incomplete: %w", err)
+			s.unexpandable++
+			// Named, because an operator chasing one of these has no other way
+			// to find it: the count alone cannot be turned back into a file.
+			if log != nil {
+				log.Debug("container members could not be re-derived",
+					"file", origin, "part", name, "depth", depth,
+					"mime", route.MimeType, "error", err)
+			}
+			return nil
 		}
 		for _, c := range children {
-			if err := expand(c.Data, c.Filename, depth+1, budget); err != nil {
+			if err := expand(c.Data, c.Filename, depth+1, origin, budget); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
+
 	err = r.Walk(ctx, func(f source.File, data []byte) error {
-		files++
+		s.files++
 		budget := source.MaxReplayBytes
-		return expand(data, f.Filename, 0, &budget)
+		err := expand(data, f.Filename, 0, f.DisplayPath, &budget)
+		if errors.Is(err, errReplayBudget) {
+			s.unexpandable++
+			if log != nil {
+				log.Debug("container expansion stopped at the replay byte limit",
+					"file", f.DisplayPath, "limit", source.MaxReplayBytes)
+			}
+			return nil
+		}
+		return err
 	})
-	return contents, files, err
+	if err != nil {
+		return s, fmt.Errorf("staged content traversal: %w", err)
+	}
+	return s, nil
 }

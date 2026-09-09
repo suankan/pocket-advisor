@@ -3,7 +3,9 @@ package discovery
 import (
 	"archive/zip"
 	"bytes"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 )
@@ -81,5 +83,29 @@ func TestClassifyPlainTextGoesStraightToEmbed(t *testing.T) {
 	got := Classify([]byte("just some notes about the matter\n"), "notes.txt")
 	if got.Subject != bus.SubjectEmbed {
 		t.Errorf("expected direct embed routing, got %q", got.Subject)
+	}
+}
+
+// The sniffer labels text it cannot read as ISO-8859-1 and still routes it for
+// indexing. That label is an assumption drawn from "not valid UTF-8", never a
+// declaration by the file, which is why admission checks the bytes itself
+// rather than decoding on the strength of it (ingestion-design.md §6.3).
+func TestClassifyRoutesNonUTF8TextForIndexingWithAnAssumedCharset(t *testing.T) {
+	// ISO-8859-1 prose: the shape that ended a real scan.
+	latin1 := append([]byte("Informe de la reunion: "), 0xf1, 0x20, 0xd7, 0x20)
+	latin1 = append(latin1, []byte(" resumen adjunto.\n")...)
+
+	got := Classify(latin1, "notas.txt")
+	if got.Subject != bus.SubjectEmbed {
+		t.Fatalf("routed to %q, want the text/embed route", got.Subject)
+	}
+	if got.Declined {
+		t.Fatal("declined at classification; the encoding check belongs to admission")
+	}
+	if !strings.Contains(got.MimeType, "iso-8859-1") {
+		t.Errorf("mime %q no longer carries the assumed charset this test is about", got.MimeType)
+	}
+	if utf8.Valid(latin1) {
+		t.Error("fixture is valid UTF-8, so it cannot stand for the case it names")
 	}
 }

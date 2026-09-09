@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
@@ -224,6 +225,12 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 			Metadata: meta, SourceRef: uri, ByteSize: int64(len(c.Data)),
 		}, tp)
 	case bus.SubjectEmbed:
+		// Same line as discovery draws on a staged text file: an attachment
+		// whose bytes are not valid UTF-8 is declined, not dead-lettered under
+		// a driver-level error nobody can classify.
+		if !utf8.Valid(c.Data) {
+			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonUnknownEncoding)
+		}
 		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType, threadID); err != nil {
 			return err
 		}

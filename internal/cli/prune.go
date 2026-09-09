@@ -126,6 +126,14 @@ func renderPrunePlan(report *retention.PruneReport, workspaceID string) {
 	fmt.Printf("\nprune:    workspace=%s\n", workspaceID)
 	fmt.Printf("staged:   %d files, %d distinct contents\n",
 		report.StagedFiles, report.StagedContents)
+	if report.Unexpandable > 0 {
+		// Not a warning about this sweep: recorded containment holds these.
+		// Said out loud anyway, because it is also the count of containers
+		// whose text was never extractable, and that is worth knowing.
+		fmt.Printf("unparsed: %d container(s) could not be re-read into members; "+
+			"recorded containment covers them (see the retention log)\n",
+			report.Unexpandable)
+	}
 	fmt.Printf("corpus:   %d documents\n", report.TotalDocuments)
 	fmt.Printf("unheld:   %d document(s) — %d staged in their own right, %d held by nothing else\n",
 		len(report.Candidates), report.Roots, report.Contained)

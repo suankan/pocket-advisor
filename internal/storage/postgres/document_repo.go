@@ -3,8 +3,10 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -85,7 +87,21 @@ func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.
 // SaveText writes normalized_text. The extractor that produced the text owns
 // this column; commands carry a doc_id reference rather than the text itself
 // (§4.1).
+// ErrInvalidText marks text the canonical column cannot hold. PostgreSQL
+// rejects a non-UTF-8 value at the driver level, as SQLSTATE 22021 naming a
+// byte offset — unclassifiable by the runtime, so it retried three times and
+// dead-lettered under UNCLASSIFIED, and on the admission path it ended the
+// whole scan. Refused here instead, once, with a reason a caller can act on.
+//
+// Refused rather than transcoded: guessing an encoding produces valid UTF-8
+// from wrong bytes, which is silent corruption of indexed evidence rather than
+// a loud failure (engine/email.decodeText holds the same line).
+var ErrInvalidText = errors.New("text is not valid UTF-8")
+
 func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threadID string) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("save text %s: %w", docID, ErrInvalidText)
+	}
 	_, err := r.db.executor(ctx).Exec(ctx, `
         UPDATE documents
         SET normalized_text = $2,
@@ -110,6 +126,9 @@ func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threa
 func (r *DocumentRepo) SaveEmailText(
 	ctx context.Context, docID, text, threadID string, h domain.EmailHeaders,
 ) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("save email text %s: %w", docID, ErrInvalidText)
+	}
 	var date any
 	if !h.Date.IsZero() {
 		date = h.Date

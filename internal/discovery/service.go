@@ -18,6 +18,7 @@ import (
 	_ "image/png"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 )
 
 type Service struct {
@@ -179,6 +180,14 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 		// Plain text needs no extraction pass, but normalized_text must still
 		// be written before the command goes out: the command carries a
 		// reference, not the text (§4.1).
+		//
+		// Bytes the canonical column cannot hold are one skipped document, not
+		// a failed scan. The sniffer routes anything text-shaped here, and it
+		// labels a non-UTF-8 file iso-8859-1 by assumption rather than by
+		// declaration, so decoding it would be a guess (§6.3).
+		if !utf8.Valid(data) {
+			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonUnknownEncoding)
+		}
 		if err := s.Docs.SaveText(ctx, meta.DocId, string(data), route.DocType, ""); err != nil {
 			return err
 		}

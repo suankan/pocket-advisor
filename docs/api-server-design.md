@@ -11,7 +11,7 @@ Pocket Advisor currently runs as a host CLI process. `internal/cli` parses comma
 - bounded ingestion and maintenance commands;
 - an interactive ingestion listener;
 - a direct query command; and
-- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence and fixed-workspace exact mailbox browse, described in [MCP server design](mcp.md).
+- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence, fixed-workspace exact mailbox browse, deterministic document lookup, and bounded topic timelines, described in [MCP server design](mcp.md).
 
 Answer generation is performed by the MCP client or another external consumer of evidence packets.
 
@@ -61,7 +61,7 @@ The Web UI is a client of these APIs. It must not introduce a parallel backend o
 
 For HTTP MCP, the authentication and authorization model is described in [MCP server design](mcp.md#authentication-and-authorization). The application release and OAuth client registrations fix one public resource URI to one workspace workload. A workspace ID in a URL, request body, OAuth claim, MCP argument, mirrored header, or tool name cannot change that workload's configured database or credentials. The general future gateway will apply the same rule to non-MCP APIs.
 
-Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database, bucket, and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
+Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
 
 Administrative access is distinct from user query access. Destructive operations require explicit permissions, an auditable operation record, and confirmation semantics suitable for non-interactive clients. The API must not expose shared PostgreSQL administrative credentials.
 
@@ -123,7 +123,7 @@ Health endpoints must separate process liveness from dependency readiness. A ret
 
 ## Verification expectations
 
-Implementation must add contract tests for authentication, authorization, workspace routing, operation idempotency, errors, and adapter parity. Isolation tests must prove that a caller authorized for one workspace cannot reach another through route manipulation, request fields, MCP tools, or direct service access. Use the general repository checks in [README §9](../README.md#9-verification) for existing components.
+Implementation must add contract tests for authentication, authorization, workspace routing, operation idempotency, errors, and adapter parity. Isolation tests must prove that a caller authorized for one workspace cannot reach another through route manipulation, request fields, MCP tools, or direct service access. Use the general repository checks in [README §10](../README.md#10-verification) for existing components.
 
 ## Open decisions
 

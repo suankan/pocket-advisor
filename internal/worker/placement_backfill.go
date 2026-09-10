@@ -158,7 +158,7 @@ func (b *PlacementBackfiller) Run(ctx context.Context, batch int) (PlacementBack
 }
 
 var (
-	errUnreadable = errors.New("tier 1 object unreadable")
+	errUnreadable = errors.New("original source unreadable")
 	errUnparsable = errors.New("container could not be unrolled")
 )
 

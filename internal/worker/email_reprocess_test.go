@@ -393,8 +393,8 @@ func TestReprocessClassifiesEachOutcome(t *testing.T) {
 	}
 	want := map[string]int{
 		ReasonReprocessUnreadable:   1,
-		ReasonReprocessNoObject:     1,
-		ReasonReprocessBadObjectURI: 1,
+		ReasonReprocessNoSourceRef:  1,
+		ReasonReprocessUnsafeSource: 1,
 		ReasonReprocessWriteFailed:  1,
 		ReasonReprocessParseFailed:  1,
 	}

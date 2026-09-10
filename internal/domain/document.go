@@ -51,8 +51,6 @@ const (
 	// Codes that used to be string literals at their call sites.
 	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"
 	ReasonMalformedCommand    FailureReason = "MALFORMED_COMMAND"
-	ReasonMalformedNotify     FailureReason = "MALFORMED_NOTIFY_EVENT"
-	ReasonBadObjectURI        FailureReason = "BAD_OBJECT_URI"
 	ReasonOCRUnavailable      FailureReason = "OCR_UNAVAILABLE"
 	ReasonOCRFailed           FailureReason = "OCR_FAILED"
 	ReasonPDFOpenFailed       FailureReason = "PDF_OPEN_FAILED"
@@ -74,10 +72,10 @@ const (
 	//
 	// That used to be ReasonExtractionFailed, which made it a lie: the code
 	// meant both "extraction genuinely failed" and "no one said". The two are
-	// not interchangeable, and conflating them actively misinforms — 44
-	// documents lost to an unreachable byte store were recorded as extraction
-	// failures, when Tier 1 reads were the thing that broke. Nothing about the
-	// text was ever the problem.
+	// not interchangeable, and conflating them actively misinforms — a
+	// document nothing could read is not a document whose text defeated the
+	// extractor, and recording the second when the first happened sends an
+	// operator to the wrong place entirely.
 	//
 	// Kept deliberately unhelpful, because a rising count here is a list of
 	// failure paths still needing a name, and a helpful-looking label would

@@ -11,7 +11,7 @@ Pocket Advisor exposes retrieval evidence through two MCP transports:
 - a workspace-bound stdio MCP server over newline-delimited JSON-RPC; and
 - a workspace-bound Streamable HTTP MCP resource server, running as a local process, optionally authenticated against Google.
 
-Both transports expose the same typed JSON Schema 2020-12 compact-search, mailbox, and bounded topic-timeline results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
+Both transports expose the same typed JSON Schema 2020-12 compact-search, mailbox, deterministic document, and bounded topic-timeline results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
 
 The stdio adapter is the default local integration, started with `mcp stdio`. The HTTP adapter, started with `mcp start`, runs as a detached local background daemon bound to loopback by default (operated afterward through `mcp stop`/`mcp status`) and serves remote, browser, and hosted agent clients directly or behind an operator-supplied reverse proxy. Both adapters log to `<log_dir>/mcp.log`; `mcp stdio` also copies every line to stderr, which an MCP client typically captures into its own log view, since `mcp start` has no such reader to copy to. Authentication is optional; when enabled, Google is the sole supported identity provider. The Go process is the resource server: it verifies every bearer token as a Google-issued OIDC ID token against Google's published JWKS (signature, issuer, audience, expiry), checks the verified `email`/`email_verified` claims against an operator-maintained allowlist, then keys continuation state by issuer and subject. RFC 9728 protected-resource metadata advertises the Google issuer. There is no token-result cache, so an ID token remains valid for its own natural (Google-issued) lifetime — revoking a caller means removing their email from the allowlist and restarting the server.
 
@@ -64,6 +64,14 @@ Successful mailbox calls use the same typed structured-content, readable fallbac
 Every match reports its location the same way search and the mailbox tools do (`source_path` or `container_source_path`, workspace-relative, never fetched or inferred), an email's `from`/`to`/`cc` and body text (`text`, truncated and flagged `text_truncated` past a fixed size), and its direct attachments — each with their own location but no text of their own; fetch one by its filename for that. If more than one document matches, every match is returned rather than a guess at which one was meant. Zero matches means the attribute or date was not exact, not that the corpus holds nothing related — the caller must not substitute a different message found by `search` and present it as this one.
 
 `fetch_document` uses the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as the other tools in this contract.
+
+## Research dossier tools
+
+`internal/analysis` and `internal/mcp.AnalysisTool` implement two further tools that no transport currently constructs, so no running server advertises or accepts them. They are complete and covered by the package's own tests; wiring them into `newMCPTool` is the remaining step.
+
+`analyze_topic` takes a bounded question with optional participants, RFC 3339 or date-only `after`/`before` bounds, conversation references, an evidence budget and a continuation cursor. A deterministic planner turns that into a reproducible multi-pass research plan — exact participant filters, lexical and dense topic passes, thread expansion, chronological sampling and additional passes for underrepresented participants or time windows — and the executor runs it through the same retrieval service, assembling a typed dossier of cited evidence grouped by participant. `review_awaiting_reply` takes optional candidate references, a maximum item count and a cursor, and returns the deterministic awaiting-reply candidates with their bounded conversations for the client to classify.
+
+Both remain evidence tools under this contract's rules: the plan is deterministic, every statement is a citation into an evidence packet, classification is the client's inference rather than a stored fact, and nothing either tool produces is written back into the corpus. Their bounds are the same as the rest of the contract — an 8,192-rune question, at most 50 participants, 100 conversations, 20 passes, a 500,000 UTF-8 byte aggregate evidence budget, and the same 48 KiB page and 51,200-byte response ceilings.
 
 ## Topic timelines
 
@@ -147,7 +155,7 @@ Separate protocol errors from tool execution errors according to MCP semantics. 
 
 ### stdio MCP
 
-`./bin/pocket-advisor mcp stdio --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes generated search and evidence-reading tools. Nothing but the protocol frames ever reaches stdout; logging goes to both `<log_dir>/mcp.log` (RoleMCP, the same file `mcp start` writes to) and stderr, so a client that captures the child's stderr into its own log view still sees it there too.
+`./bin/pocket-advisor mcp stdio --workspace-id <id>` serves newline-delimited JSON-RPC over standard input and output. The process is fixed to the selected workspace at startup and exposes the same generated tool set as the HTTP adapter. Nothing but the protocol frames ever reaches stdout; logging goes to both `<log_dir>/mcp.log` (RoleMCP, the same file `mcp start` writes to) and stderr, so a client that captures the child's stderr into its own log view still sees it there too.
 
 Stdio implements the final MCP revisions from 2024-11-05 through 2025-11-25, negotiates only those revisions, enforces initialize/initialized lifecycle order, supports ping and cancellation, and does not open a network listener. The direct protocol implementation remains smaller than introducing an SDK for this bounded method set; every advertised revision and method is covered by protocol tests.
 
@@ -155,7 +163,7 @@ Stdio snapshots are connection-local and share the same memory and eviction limi
 
 ### Streamable HTTP MCP
 
-`./bin/pocket-advisor mcp start --workspace-id <id> ...` serves the same two tools through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
+`./bin/pocket-advisor mcp start --workspace-id <id> ...` serves the same tool set through the official Go MCP SDK. It implements stateless MCP 2026-07-28 HTTP and retains 2025-11-25 compatibility for OpenCode 1.18.15. The adapter converts SDK calls into the existing `QueryTool.Call` boundary and converts the existing bounded result back; it does not construct a second retrieval request, evidence model, or cursor.
 
 `mcp start` self-daemonizes: the invoking process forks a child that re-execs the same binary with an internal signal (`--config` plus a hidden environment variable), detaches it from the invoking terminal and session, and waits for the daemon to confirm it has connected to its workspace database and started serving — via the same PID file `mcp stop`/`mcp status` read — before returning. A daemon that fails during startup (an unreachable database, a bad flag) is diagnosed from `<log_dir>/mcp.log`, which already has its output, since the child's raw stdout/stderr are also redirected there alongside its own structured logging. `mcp stop` sends `SIGTERM` to the recorded PID and waits up to five seconds for graceful shutdown and PID file removal; `mcp status` reports the recorded PID's liveness.
 
@@ -366,7 +374,7 @@ The evaluated OpenCode 1.18.15 compatibility:
 | Behavior | Result |
 | --- | --- |
 | Negotiated revision | `2025-11-25` |
-| Tool discovery | Both tools connected and callable |
+| Tool discovery | Every advertised tool connected and callable |
 | Model-visible representation | Readable output text retained; `structuredContent` not separately persisted |
 | Populated result | Search cursors followed to `complete: true`; distinct first-ranked references preserved across searches |
 | Large result | 156,200 admitted UTF-8 bytes delivered through one search and seven reader calls |
@@ -376,7 +384,7 @@ The evaluated OpenCode 1.18.15 compatibility:
 
 ## Verification
 
-Use the repository commands in [README §9](../README.md#9-verification). MCP behavior is covered by unit tests under `internal/mcp`, protocol-fixture tests, race tests for concurrent cancellation, cursor access and serialized writes, schema validation, non-ASCII snippet and page-boundary tests, response byte and line-limit tests, large single-document and multi-packet tests, snapshot lifecycle and workspace-isolation tests, and the supported-client smoke matrix.
+Use the repository commands in [README §10](../README.md#10-verification). MCP behavior is covered by unit tests under `internal/mcp`, protocol-fixture tests, race tests for concurrent cancellation, cursor access and serialized writes, schema validation, non-ASCII snippet and page-boundary tests, response byte and line-limit tests, large single-document and multi-packet tests, snapshot lifecycle and workspace-isolation tests, and the supported-client smoke matrix.
 
 Use only synthetic MCP requests and evidence in committed fixtures. Confirm protocol output remains valid when diagnostics are active.
 
@@ -411,4 +419,4 @@ Use only synthetic MCP requests and evidence in committed fixtures. Confirm prot
 
 Search evidence documents expose `source_ref`, canonical `extraction_sha256` and `extraction_version`, plus `source_locations`. Exact document fetch and mailbox results also expose recorded locations. A location contains an opaque root ID, relative/display path, versioned container selectors, an observation timestamp, and `last_observed` or `missing` status. Up to 128 routes are returned, including shared attachments and independent copies. The existing relative file/container display fields describe the preferred route and may be absent if none is known.
 
-These are recorded observations. Search, deterministic fetch, mailbox tools, topic evidence and continuation snapshots read retained PostgreSQL evidence without opening originals. Clients must not interpret a source reference or relative path as permission to open arbitrary local files. Continuation returns the already-materialized evidence revision, even after original-file mutation. Source hashes identify original bytes; extraction hashes and UTF-8 offsets identify normalized evidence. `source_ref` replaces the former object URI field; consumers must use the advertised schema.
+These are recorded observations. Search, deterministic fetch, mailbox tools, topic evidence and continuation snapshots read retained PostgreSQL evidence without opening originals. Clients must not interpret a source reference or relative path as permission to open arbitrary local files. Continuation returns the already-materialized evidence revision, even after original-file mutation. Source hashes identify original bytes; extraction hashes and UTF-8 offsets identify normalized evidence. Consumers must read these fields from the advertised schema rather than inferring them.

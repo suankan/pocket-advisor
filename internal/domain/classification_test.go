@@ -12,8 +12,6 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonMalformedCommand,
-		ReasonMalformedNotify,
-		ReasonBadObjectURI,
 		ReasonOCRUnavailable,
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,

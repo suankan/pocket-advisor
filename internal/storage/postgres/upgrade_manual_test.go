@@ -22,7 +22,7 @@ func TestPlacementUpgradeFromAnAlreadyProvisionedWorkspace(t *testing.T) {
 	repo := &DocumentRepo{db: db}
 	parent := stageDoc(t, repo, "pppp", "email", "mail/p.eml")
 	child := stageDoc(t, repo, "cccc", "pdf", "")
-	if _, err := db.Pool.Exec(ctx, `DROP TABLE IF EXISTS document_placements, pending_object_deletions`); err != nil {
+	if _, err := db.Pool.Exec(ctx, `DROP TABLE IF EXISTS document_placements`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Pool.Exec(ctx, `ALTER TABLE schema_metadata DROP COLUMN IF EXISTS placements_backfilled_at`); err != nil {

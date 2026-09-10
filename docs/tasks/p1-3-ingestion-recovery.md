@@ -7,11 +7,11 @@ reasoning_effort: xhigh
 
 ## Outcome
 
-An operator can determine why a workspace is unhealthy and can safely converge interrupted or retryable ingestion work without editing PostgreSQL, RustFS, or JetStream state by hand.
+An operator can determine why a workspace is unhealthy and can safely converge interrupted or retryable ingestion work without editing PostgreSQL or JetStream state by hand.
 
 ## Why this task is needed
 
-The current reconciler republishes stale `PENDING` rows only. A document left `PROCESSING`, a retryable document marked `FAILED`, a missing BM25 index, an orphan extracted object, or a partially completed multi-store reset has no single supported diagnosis and recovery workflow. `--forget` deletes database descendants but does not traverse their different content hashes when deleting Tier 1 child objects.
+The current reconciler republishes stale `PENDING` rows only. A document left `PROCESSING`, a retryable document marked `FAILED`, a missing BM25 index, a document whose original can no longer be resolved, or a partially completed reset has no single supported diagnosis and recovery workflow. `--forget` deletes database descendants but does not traverse their different content hashes when removing contained children.
 
 JetStream provides durable delivery, acknowledgement timeouts, maximum-delivery behavior, and advisories, but Pocket Advisor still owns the application policy that distinguishes retryable work, terminal corruption, expected declines, and safe redrive.
 
@@ -27,20 +27,19 @@ This is a follow-on reliability task after the P0 access and retrieval-quality w
 
 Add a `--doctor` mode for one fixed workspace. Put all checks in a transport-independent package and keep CLI rendering separate. Support human-readable and JSON output.
 
-Doctor mode must not write to PostgreSQL, RustFS, NATS, model endpoints, workspace files, or corpora. It checks and classifies:
+Doctor mode must not write to PostgreSQL, NATS, model endpoints, workspace files, or corpora. It checks and classifies:
 
 - workspace registry and credential-value consistency;
-- reachability and scoped authentication for PostgreSQL, RustFS, and NATS;
+- reachability and scoped authentication for PostgreSQL and NATS, and availability of the configured source roots;
 - embedding endpoint model and vector dimension against `schema_metadata`;
 - required PostgreSQL extensions, schema objects, HNSW index, and BM25 index;
-- Tier 1 `raw/` objects without Tier 2 rows;
-- Tier 2 rows whose Tier 1 object is missing;
+- configured original files with no corresponding document row;
+- document rows with no observed source occurrence;
 - stale `PENDING` and `PROCESSING` rows;
 - `FAILED` rows grouped by closed failure reason and retry classification;
 - `SKIPPED` rows grouped by reason;
-- stream, consumer, pending, redelivery, and DLQ state;
-- extracted Tier 1 objects with no surviving document lineage; and
-- incomplete reset or deletion state that can be detected from remaining tiers.
+- stream, consumer, pending, redelivery, and DLQ state; and
+- incomplete reset or deletion state detectable from the remaining derived rows.
 
 Each finding has a stable code, severity, affected count, safe summary, and supported next action. Output must not contain source paths, filenames, titles, content, questions, credentials, private endpoints, or raw workspace identifiers.
 
@@ -55,7 +54,7 @@ The planner must:
 - operate on one fixed workspace;
 - select work by state, age, failure reason, or explicit document identifier;
 - classify every selected item as retryable, terminal, already converged, or not safely reconstructible;
-- show intended database transitions, object operations, and message publications;
+- show intended database transitions and message publications;
 - refuse broad redrive of terminal failure reasons;
 - avoid republishing work that is already present and active in JetStream; and
 - preserve an auditable, content-free summary of what it attempted.
@@ -72,7 +71,7 @@ Implement bounded recovery for:
 - a missing BM25 index after otherwise completed ingestion; and
 - detectable partial reset or forget operations.
 
-Reconstruct work only from authoritative Tier 1 bytes and durable Tier 2 metadata. If a command cannot be reconstructed without guessing workspace, lineage, MIME type, thread context, or source identity, report it as not safely recoverable.
+Reconstruct work only from verified original bytes and durable document metadata. If a command cannot be reconstructed without guessing workspace, lineage, MIME type, thread context, or source identity, report it as not safely recoverable.
 
 Use compare-and-set state transitions or an equivalent lease mechanism so a live worker and a recovery command cannot both claim the same document. A recovery crash must leave a state that a later recovery run can inspect and converge.
 
@@ -89,9 +88,9 @@ Keep the closed failure vocabulary authoritative. An unknown value is never auto
 
 ### Complete forget semantics
 
-Before deleting database lineage, collect every descendant document and Tier 1 URI that belongs to the selected document tree. Delete all corresponding `raw/` and `extracted/` objects, rows, and chunks through a repeatable plan.
+Before deleting derived state, collect every descendant document that belongs to the selected document tree through the containment graph, including children whose content hashes differ from the root's. Delete their rows, placements, jobs and unreferenced passages through a repeatable plan, and never touch an original file.
 
-The operation remains non-transactional across stores, but every step must be idempotent and a rerun must converge after failure at any boundary. Do not infer deletion from absence in a local source directory.
+Database deletion is transactional, but the broker purge that accompanies it is not, so every step must be idempotent and a rerun must converge after failure at any boundary. Do not infer deletion from absence in a local source directory.
 
 ### Fault-injection coverage
 
@@ -100,14 +99,13 @@ Add deterministic failure points around:
 - stub commit before publish;
 - publish before acknowledgement;
 - transition to `PROCESSING`;
-- child object write and child stub creation;
+- child stub creation and downstream job commit;
 - normalized-text write and embed publication;
 - chunk transaction commit;
-- terminal acknowledgement and DLQ publication;
-- database deletion before object deletion; and
-- object deletion before queue cleanup.
+- terminal acknowledgement and DLQ publication; and
+- database deletion before queue purge.
 
-Tests must stop and restart processing at each point, run doctor and recovery, and assert the final state across all three stores.
+Tests must stop and restart processing at each point, run doctor and recovery, and assert the final state across both stores.
 
 ## Non-goals
 
@@ -126,14 +124,14 @@ Tests must stop and restart processing at each point, run doctor and recovery, a
 - Retryable failed work requires explicit selection and terminal work is not redriven by default.
 - Recovery refuses to act when the document may still be owned by a live worker.
 - Repeated recovery and forget operations are idempotent.
-- Forget removes every object and database descendant in the selected lineage, including children with different hashes.
+- Forget removes every database descendant in the selected lineage, including children with different hashes, and leaves originals untouched.
 - Fault-injection tests leave no unexplained stale document, orphan message, duplicate chunk set, or cross-workspace operation.
 - Existing at-least-once delivery and DLQ diagnostics remain intact.
 - No recovery output or test fixture contains private workspace material.
 
 ## Verification
 
-Run the repository checks from [`README.md` §9](../../README.md#9-verification), unit tests for planning and classification, PostgreSQL and JetStream integration tests, race tests, and the complete fault-injection matrix against temporary synthetic fixtures.
+Run the repository checks from [`README.md` §10](../../README.md#10-verification), unit tests for planning and classification, PostgreSQL and JetStream integration tests, race tests, and the complete fault-injection matrix against temporary synthetic fixtures.
 
 Prove workspace isolation with negative tests using two synthetic workspaces and separate credentials. Verify doctor and recovery cannot accept a caller-selected scope after clients are created.
 

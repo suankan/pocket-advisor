@@ -551,11 +551,10 @@ func reasonOf(err error) domain.FailureReason {
 	if errors.As(err, &t) {
 		return t.Reason
 	}
-	// Deliberately not ReasonExtractionFailed. Defaulting to a real class made
+	// Deliberately not ReasonExtractionFailed. Defaulting to a real class makes
 	// every unclassified error indistinguishable from a genuine extraction
-	// failure, which is how a Tier 1 read outage came to be recorded as 44
-	// broken documents. UNCLASSIFIED says the true thing: nobody named this
-	// path yet.
+	// failure, so a Tier 1 read outage reads as a corpus full of broken
+	// documents. UNCLASSIFIED says the true thing: nobody named this path yet.
 	return domain.ReasonUnclassified
 }
 

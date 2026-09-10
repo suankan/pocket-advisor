@@ -121,7 +121,7 @@ Bring up the shared stores and provision every registered workspace, then build 
 ./pocket-advisor.sh build
 ```
 
-`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for PostgreSQL and NATS, and provisions every registered workspace. The chart contains no private workspace list. Existing object-store installations require the source coverage and compatibility checks in [§11](#11-upgrade-and-teardown) before their workload is retired.
+`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for PostgreSQL and NATS, and provisions every registered workspace. The chart contains no private workspace list.
 
 Re-run provisioning on its own after editing the registry, without touching the shared stores:
 
@@ -150,7 +150,7 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 ./bin/pocket-advisor --ingest-all --workspace-id example
 ```
 
-`--ingest-all` resolves original directories, applies the source/job schema, refreshes known source occurrences and containment, and conservatively prunes before starting workers. It then hashes and admits current files, dispatches transactional jobs, and waits for durable work and queues to drain. Normalized text, vectors and BM25 remain in PostgreSQL. Original or attachment bytes are never copied to permanent intermediate storage.
+`--ingest-all` resolves original directories, applies the source/job schema, refreshes known source occurrences and containment, and conservatively prunes before starting workers. It then hashes and admits current files, dispatches transactional jobs, and waits for durable work and queues to drain. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
 
 Pruning refuses an empty or incompletely traversed source set and incomplete containment. The default deletion-share limit is 10%; exceeding it prints the plan and continues additive ingestion. Inspect `--reconcile-deletions --json` before explicitly allowing a larger sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
 
@@ -225,6 +225,26 @@ kubectl exec postgres-0 -n pocket-advisor -- \
 ```
 
 `SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A dead-lettered item is work that should have succeeded and did not. An ingest exits with failure when it dead-letters work.
+
+### Diagnose a workspace
+
+`--doctor` is read-only and writes nowhere. It checks the registry entry and resolved credentials, PostgreSQL, source-root and NATS reachability, the configured embedding model and dimension against what the schema recorded, the `vector` extension, the document and chunk tables and the HNSW and BM25 indexes, then counts jobs waiting on originals, documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes, `FAILED` and `SKIPPED` rows by reason, JetStream depth, and signs of an interrupted reset.
+
+```sh
+./bin/pocket-advisor --doctor --workspace-id example
+./bin/pocket-advisor --doctor --workspace-id example --json
+```
+
+Each finding has a stable code, a severity, a count, a summary containing no content or credentials, and one next action. The exit status is 0 when healthy, 1 when unhealthy but diagnosed, and 2 when the run itself failed.
+
+`--recover` classifies documents instead of describing the workspace, and prints the plan without changing anything unless `--yes` is supplied:
+
+```sh
+./bin/pocket-advisor --recover --workspace-id example
+./bin/pocket-advisor --recover --workspace-id example --yes
+```
+
+Each item is classified retryable, terminal, converged, or not recoverable, with one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. The planner reads JetStream depth so it does not propose redriving work an active consumer still holds, and completed jobs always stay complete.
 
 ## 7. Retrieve evidence
 
@@ -572,13 +592,11 @@ Upgrade the shared-store release with the supported wrapper:
 ./pocket-advisor.sh deploy-infra
 ```
 
-Always use the wrapper rather than invoking Helm directly: it checks legacy source coverage where needed and provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml`.
+Always use the wrapper rather than invoking Helm directly: it provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml` after the release rolls out.
 
-For an existing object-store installation, stop all old ingestion producers and workers, resolve pending object-deletion requests with the old binary, and drain its ingestion stream. Keep a recoverable database backup and the matching old binary/object-store state. Then build the new binary and run `--audit-sources` for each workspace. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage.
+Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then run `--audit-sources` for each workspace to confirm that every retained document is still reachable from a configured original. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage. `--bind-sources` then persists verified locations and replay recipes without replacing document UUIDs, normalized evidence, chunks, mailbox identities, or topic references. Recheck coverage with `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
 
-Run `--bind-sources` to persist verified locations and recipes without replacing document UUIDs, normalized evidence, chunks, mailbox identities or topic references. The migration rejects unresolved object-deletion records. New commands use a different Protobuf source field and require durable job headers; old and new consumers must not overlap. `--reconcile` admits remaining nonterminal legacy rows and recovers durable jobs. Recheck source coverage and run the private retrieval evaluation before accepting the deployment.
-
-When a legacy RustFS StatefulSet exists, `deploy-infra` checks that each ingestion stream is empty, audits every workspace, and binds its sources before Helm retires the workload. A failed gate leaves retirement blocked. Binding migrates database structure; rollback requires the matching database backup, old binary, and old object state. The wrapper does not create backups or delete the old PVC or notification stream. Retain those through the rollback interval; their eventual deletion is a separate explicit operator action. Removing the service alone does not reclaim that old disk allocation.
+Keep a recoverable database backup across any such upgrade: re-ingesting current originals rebuilds an index but cannot recover overwritten historical bytes or recreate previous document UUIDs and evaluation references.
 
 StatefulSet volume claim templates are immutable. Changing a configured storage size requires deliberately recreating the relevant StatefulSet and claim. A PostgreSQL major-version change also requires a new data volume and re-ingestion.
 
@@ -594,7 +612,7 @@ Permanently delete every retained PVC in the `pocket-advisor` namespace:
 ./pocket-advisor.sh destroy-state
 ```
 
-The latter removes retained PostgreSQL and JetStream state, and any retained legacy object-store PVC, for every workspace. It cannot be undone. Original source directories are outside these PVCs.
+The latter removes retained PostgreSQL and JetStream state for every workspace. It cannot be undone. Original source directories are outside these PVCs.
 
 Optional metrics-server has an independent lifecycle:
 

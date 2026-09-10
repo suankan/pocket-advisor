@@ -90,7 +90,7 @@ This task is complete when the open decisions above are resolved and recorded, n
 
 ## Verification
 
-Not applicable until a scoped implementation task is derived from these decisions. Any evaluation performed while resolving the open decisions above (chunking comparison, threshold calibration) should use the repository's private golden evaluation workflow described in [`README.md` §9](../../README.md#9-verification), never real workspace content in committed fixtures.
+Not applicable until a scoped implementation task is derived from these decisions. Any evaluation performed while resolving the open decisions above (chunking comparison, threshold calibration) should use the repository's private golden evaluation workflow described in [`README.md` §10](../../README.md#10-verification), never real workspace content in committed fixtures.
 
 ## Documentation and handoff
 

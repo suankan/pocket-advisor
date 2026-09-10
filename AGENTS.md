@@ -1,6 +1,6 @@
 # Pocket Advisor — Agent Instructions
 
-Pocket Advisor is a local RAG engine over personal content. One host Go binary runs ingestion, retrieval, and MCP; a single Helm chart deploys the shared PostgreSQL/pgvector and NATS JetStream stores; ingestion reads configured original files without an intermediate byte store.
+Pocket Advisor is a local RAG engine over personal content. One host Go binary runs ingestion, retrieval, and MCP; a single Helm chart deploys the shared PostgreSQL/pgvector and NATS JetStream stores; ingestion reads the configured original files directly.
 
 `retired-v2/` is a frozen prior implementation (Python, single-process). It is history, not a reference architecture — do not build on it, and do not treat anything under it as current design.
 

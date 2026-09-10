@@ -167,8 +167,8 @@ const (
 // document that cannot be read here keeps whatever the pipeline recorded for
 // it and stays exactly as recoverable as it was.
 const (
-	ReasonReprocessNoObject      = "no_source_reference"
-	ReasonReprocessBadObjectURI  = "bad_object_uri"
+	ReasonReprocessNoSourceRef   = "no_source_reference"
+	ReasonReprocessUnsafeSource  = "unsafe_source_ref"
 	ReasonReprocessUnreadable    = "source_unreadable"
 	ReasonReprocessUnknownEncode = "unknown_encoding"
 	ReasonReprocessParseFailed   = "email_parse_failed"
@@ -309,8 +309,8 @@ func (p *EmailMetadataReprocessor) processBatch(ctx context.Context, batch []dom
 // reprocessOne rebuilds one document's metadata from its original bytes.
 func (p *EmailMetadataReprocessor) reprocessOne(ctx context.Context, doc domain.Document, o EmailReprocessOptions) error {
 	if doc.SourceRef == "" {
-		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessNoObject,
-			errors.New("document has no tier 1 object")}
+		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessNoSourceRef,
+			errors.New("document has no source reference")}
 	}
 	data, err := p.Sources.Read(ctx, doc.SourceRef, doc.RawSHA256)
 	if err != nil {
@@ -318,7 +318,7 @@ func (p *EmailMetadataReprocessor) reprocessOne(ctx context.Context, doc domain.
 			return ctx.Err()
 		}
 		if errors.Is(err, source.ErrUnsafe) {
-			return &reprocessError{EmailReprocessUnreadable, ReasonReprocessBadObjectURI, err}
+			return &reprocessError{EmailReprocessUnreadable, ReasonReprocessUnsafeSource, err}
 		}
 		return &reprocessError{EmailReprocessUnreadable, ReasonReprocessUnreadable, err}
 	}

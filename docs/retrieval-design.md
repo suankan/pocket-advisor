@@ -26,7 +26,8 @@ The transport-independent Go retrieval package, exact mailbox browse package, an
 5. Rerank the pool once against the original question. If reranking is disabled or unavailable, preserve fused order.
 6. Apply the relevance floor, keep at most one hit per document, and cap results from one email thread.
 7. Load matched documents and related parent, attachment, and same-thread documents, then fill one shared answer-context budget breadth-first.
-8. Return content packets, sub-queries, budget use, and structured warnings.
+8. When topic-graph expansion is enabled, offer whatever remains of that same budget to the derived graph supplement.
+9. Return content packets, sub-queries, budget use, optional graph expansion, and structured warnings.
 
 The service owns warm model clients but no request state. PostgreSQL owns indexed and lineage state.
 
@@ -105,9 +106,17 @@ Chronological adjacency is never represented as a reply edge.
 
 All packets share a default 120,000 UTF-8 byte context budget. The budgeter charges `len(text)`, exposes `bytes_used` and `bytes_allowed` in the transport-independent result, and labels the unit explicitly in MCP. It first offers each packet its matched document, then related documents, so a large conversation cannot consume the allowance before other primary matches are considered. Text that does not fit is omitted and produces `budget_truncated`; the document metadata and relationship remain available.
 
+## Optional topic-graph expansion
+
+Graph expansion is a supplement to ordinary packets, not a candidate source. It is off by default (`infra.query.topic_graph_expansion_enabled`) so an ordinary query never reads derived graph data, and it runs only after packet construction, so ranked packets and their lineage context always consume the shared allowance first and can never be displaced or reordered by it.
+
+When enabled and a query selected at least one hit, the service derives seed mention references from the one `ACTIVE` graph version, admitting only mentions whose validated spans overlap a selected hit and that carry at least one supported edge. It then walks the timeline under the configured backward and forward depth, node count and byte ceiling — the byte ceiling further reduced to whatever the shared budget has left — with a two-second latency bound.
+
+The result carries the graph version, snapshot time, nodes, derived relations, warnings and an omitted-node count. A node is represented only by its canonical document and validated byte spans, each with the document's normalized-text hash and the slice hash: display labels are deliberately absent, so nothing derived from a model reaches the caller as a fact. A disabled gate, an absent graph, no seeds, an exhausted allowance or a failed walk are all visible degradations; none of them fails a query that ordinary retrieval already answered.
+
 ## Results and degradation signals
 
-`retrieval.Result` contains the original question, effective sub-queries, evidence packets, warnings, and used and allowed UTF-8 byte counts. Empty packet and warning collections are serialized as empty arrays.
+`retrieval.Result` contains the original question, effective sub-queries, evidence packets, warnings, used and allowed UTF-8 byte counts, and the optional `graph_expansion` object described above, which is omitted entirely when expansion is disabled or produced nothing. Empty packet and warning collections are serialized as empty arrays.
 
 Current warnings are:
 
@@ -121,6 +130,9 @@ Current warnings are:
 | `relevance_floor_applied` | Below-floor candidates caused fewer than the requested results to be selected. |
 | `thread_capped` | A conversation produced more selected documents than the per-thread limit. |
 | `budget_truncated` | Some document text did not fit the shared UTF-8 byte allowance. |
+| `topic_graph_unavailable` | Graph expansion was enabled but its seeds or walk could not be produced; ordinary packets are unaffected. |
+
+An enabled graph walk may additionally surface its own bounded-traversal warnings — `topic_timeline_node_limit`, `topic_timeline_byte_limit`, `topic_timeline_depth_limit`, `topic_timeline_edge_limit`, `topic_timeline_cycle_guard` and `topic_timeline_invalid_evidence` — on the result alongside the graph expansion that produced them.
 
 Embedding, SQL, lineage-loading, and packet-building errors fail the query. Decomposition and reranking failures have defined fallbacks because the system can still produce a useful, explicitly degraded result.
 
@@ -165,12 +177,10 @@ Use the repository commands in [README §10](../README.md#10-verification). Retr
 
 ## Optional text-free storage experiment
 
-The supported mode retains normalized documents and shared passage text. Removing the byte store does not require changing BM25 or evidence hydration. A text-free mode is an unimplemented experiment and must not become the default without measured quality, availability and latency gates.
+Retained normalized documents and shared passage text are the supported storage mode. A text-free mode — vectors, structured provenance and a dedicated lexical index, with candidate text reconstructed on demand — is an unimplemented experiment and must not become the default without measured quality, availability and latency gates.
 
-Vectors and whole-document hashes cannot reproduce BM25. Efficient lexical scoring needs token-level postings, term frequencies, document/chunk lengths, document frequencies and corpus statistics, together with the same tokenizer and scoring rules. Token hashes may replace dictionary strings, but they still require postings/statistics, collision handling and query normalization. They are not encryption: dictionary attacks can reveal low-entropy terms. Positions are additionally needed for phrase/proximity behavior or accurate highlighting.
+The obstacle is lexical scoring. Vectors and whole-document hashes cannot reproduce BM25: efficient scoring needs token-level postings, term frequencies, document and chunk lengths, document frequencies and corpus statistics, under the same tokenizer and scoring rules, plus positions for phrase, proximity and highlighting behaviour. Token hashes may replace dictionary strings but still require those postings, collision handling and query normalization, and they are not encryption — dictionary attacks recover low-entropy terms. The current `pg_textsearch` index is defined on `chunks.chunk_text`, so dropping that column is not a supported backend.
 
-A viable experiment retains vectors, a dedicated lexical index and structured provenance/metadata, then reconstructs candidate text through a `TextProvider` before reranking, exact evidence slicing, full document fetch and topic evidence validation. A hash proves equality of reconstructed bytes; it cannot reconstruct them. The current `pg_textsearch` index is tied to `chunks.chunk_text`; dropping that column is not a supported text-free backend.
+Reconstruction is the second obstacle. A `TextProvider` feeding reranking, exact evidence slicing, full document fetch and topic-evidence validation would need the raw hash, deterministic container recipes, extractor and configuration fingerprints, the canonical text hash and byte length, and exact placement ranges and hashes. A hash proves equality of reconstructed bytes; it cannot reconstruct them. Whitespace-collapsed passage identity is unsuitable as a lossless text address, and overlapping trimmed chunks cannot be concatenated back into a canonical document.
 
-The provider would need raw hash, deterministic container recipes, extractor/configuration fingerprints, canonical text hash and byte length, and exact placement ranges/hashes. Current whitespace-collapsed passage identity is unsuitable as a lossless text address. Overlapping trimmed chunks cannot simply be concatenated to recover a full canonical document.
-
-Compare retained text, lossless compressed text, and on-demand extraction before choosing a backend. Preserve mailbox headers, exact conversation relationships, topic annotations and cited spans; removing body text alone is not removing all textual metadata. Cold OCR/replay cost and unavailable historical originals may outweigh disk savings. Source unavailability must yield an explicit omission or failure, never an unverified citation. Adoption requires exact lexical/scoring and byte-slice parity, unchanged private evaluation identities, passing retrieval thresholds, full deterministic tools, and agreed cold/warm p50/p95 latency and memory bounds.
+Adoption would require comparing retained text, losslessly compressed text and on-demand extraction; preserving mailbox headers, exact conversation relationships, topic annotations and cited spans, since removing body text alone does not remove textual metadata; treating cold OCR and replay cost against unavailable historical originals as a real expense; and turning source unavailability into an explicit omission or failure rather than an unverified citation. The acceptance bar is exact lexical, scoring and byte-slice parity, unchanged private evaluation identities, passing retrieval thresholds, deterministic tooling, and agreed cold and warm p50/p95 latency and memory bounds.

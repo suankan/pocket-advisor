@@ -130,7 +130,7 @@ func TestSyntheticTierGapsScenario(t *testing.T) {
 	for _, f := range r.Findings {
 		codes[f.Code] = true
 	}
-	for _, code := range []string{"SOURCE_WAITING_JOBS", "DOCUMENTS_WITHOUT_SOURCES", "ORPHAN_EXTRACTED"} {
+	for _, code := range []string{"SOURCE_WAITING_JOBS", "DOCUMENTS_WITHOUT_SOURCES"} {
 		if !codes[code] {
 			t.Errorf("missing finding: %s", code)
 		}

@@ -2,7 +2,7 @@
 
 This document is the design authority for cited answer generation, answer-model access, evidence isolation, and the intended generation service. It describes target state. Pocket Advisor does not currently run an in-repository generation service.
 
-In the current system, the workspace-bound stdio MCP server returns retrieval evidence to an external agent, and that agent writes any answer. [Retrieval design](retrieval-design.md) owns evidence selection, [API server design](api-server-design.md) owns authentication and routing, and [workspace isolation](workspace-isolation.md) owns credential boundaries.
+In the current system, the workspace-bound MCP server — stdio or authenticated Streamable HTTP — returns retrieval evidence to an external agent, and that agent writes any answer. [Retrieval design](retrieval-design.md) owns evidence selection, [API server design](api-server-design.md) owns authentication and routing, and [workspace isolation](workspace-isolation.md) owns credential boundaries.
 
 ## Purpose and boundary
 
@@ -51,7 +51,7 @@ Retrieval must not gain provider credentials or general outbound access merely b
 
 ## Evidence contract
 
-Generation receives the complete `retrieval.Result`: original question, effective sub-queries, evidence packets, retrieval warnings, and context-budget use. Each packet includes stable document and chunk identifiers, UTF-8 byte offsets, source hash, Tier 1 URI, text admitted by the retrieval budget, and related-document labels.
+Generation receives the complete `retrieval.Result`: original question, effective sub-queries, evidence packets, retrieval warnings, and context-budget use. Each packet includes stable document and placement identifiers, UTF-8 byte offsets, the source hash, the canonical extraction hash and version, the opaque `source:<doc_id>` reference and recorded source locations, text admitted by the retrieval budget, and related-document labels.
 
 Generation may reason over only the evidence supplied for that request. It must not ask the model to fill evidentiary gaps from general knowledge while presenting the result as grounded in the workspace. When evidence is absent, insufficient, or conflicting, the answer shape must say so.
 
@@ -102,7 +102,7 @@ Telemetry records timings, response states, model identifiers, citation counts, 
 
 ## Relationship to MCP
 
-Current MCP exposes retrieval only, and the MCP client acts as the generation layer. MCP transport details are described in [MCP server design](mcp.md). When the target service exists, an MCP adapter may offer generation as an additional tool, but it must use the same authenticated route and response contract as HTTP. A tool name or workspace argument is never authorization.
+Current MCP exposes evidence only — retrieval, mailbox browse, document lookup and topic timelines — and the MCP client acts as the generation layer. MCP transport details are described in [MCP server design](mcp.md). When the target service exists, an MCP adapter may offer generation as an additional tool, but it must use the same authenticated route and response contract as HTTP. A tool name or workspace argument is never authorization.
 
 The local chat-completions model used by retrieval decomposition is not implicitly the answer model. Reusing it requires an explicit quality, privacy, and capacity decision.
 
@@ -110,7 +110,7 @@ The local chat-completions model used by retrieval decomposition is not implicit
 
 Implementation must test citation-reference validation, refusal and insufficient-evidence behavior, workspace route enforcement, prompt-size limits, provider allowlists, log redaction, timeouts, malformed model output, and retrieval-warning propagation. Security tests must prove the service has no data-store credentials and cannot reach another workspace's retrieval service.
 
-Use the repository checks in [README §9](../README.md#9-verification) for existing components; service-specific tests will be added with implementation.
+Use the repository checks in [README §10](../README.md#10-verification) for existing components; service-specific tests will be added with implementation.
 
 ## Open decisions
 

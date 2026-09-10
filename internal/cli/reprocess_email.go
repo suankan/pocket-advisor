@@ -37,9 +37,10 @@ func runReprocessEmail(o *Options, cfg *config.Config, logs *telemetry.Logs) err
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Tier 1 as the worker role — this reads objects and must never be able to
-	// write under raw/ — and Postgres for selection and the metadata write. No
-	// NATS: nothing is published, because nothing is being re-extracted.
+	// Tier 1 as the worker role — this reads originals through the confined
+	// resolver and can never write one — and Postgres for selection and the
+	// metadata write. No NATS: nothing is published, because nothing is being
+	// re-extracted.
 	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
@@ -154,8 +155,8 @@ func printReprocessSummary(s worker.EmailReprocessSummary) {
 // reprocessReasonOrder fixes the reporting order of the closed reason set, so
 // two runs of the same corpus print the same lines in the same places.
 var reprocessReasonOrder = []string{
-	worker.ReasonReprocessNoObject,
-	worker.ReasonReprocessBadObjectURI,
+	worker.ReasonReprocessNoSourceRef,
+	worker.ReasonReprocessUnsafeSource,
 	worker.ReasonReprocessUnreadable,
 	worker.ReasonReprocessUnknownEncode,
 	worker.ReasonReprocessParseFailed,

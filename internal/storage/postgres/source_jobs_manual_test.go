@@ -143,7 +143,7 @@ func TestSourceJobConcurrentDuplicateAndMaintenance(t *testing.T) {
 	}
 	unlock()
 }
-func TestSourceInventoryMigrationAndLocations(t *testing.T) {
+func TestSourceInventoryLocationsAndScanCompleteness(t *testing.T) {
 	db, docs, _, id, _ := setupSourceJob(t)
 	ctx := context.Background()
 	inventory := NewSourceRepo(db)
@@ -165,12 +165,8 @@ func TestSourceInventoryMigrationAndLocations(t *testing.T) {
 	if err != nil || len(locations[child]) != 1 || locations[child][0].Selectors[0] != "zip-v1:1" {
 		t.Fatalf("locations=%v %v", locations, err)
 	}
-	if _, err := db.Pool.Exec(ctx, "ALTER TABLE documents RENAME COLUMN source_ref TO rustfs_raw_uri"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.ApplySourceSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Re-applying the source schema is a supported no-op, so a rerun of the
+	// same binary must not disturb an identity or an observation.
 	if err := db.ApplySourceSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -273,27 +269,6 @@ func TestSourceWaitAndGenerationFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := jobs.CheckResolved(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSourceMigrationPendingDeletionGate(t *testing.T) {
-	db, _, _, _, _ := setupSourceJob(t)
-	ctx := context.Background()
-	if _, err := db.Pool.Exec(ctx, `ALTER TABLE documents RENAME COLUMN source_ref TO rustfs_raw_uri; CREATE TABLE pending_object_deletions(raw_sha256 text); INSERT INTO pending_object_deletions VALUES('synthetic')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.ApplySourceSchema(ctx); err == nil {
-		t.Fatal("unresolved legacy cleanup allowed migration")
-	}
-	var old bool
-	if err := db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='documents' AND column_name='rustfs_raw_uri')`).Scan(&old); err != nil || !old {
-		t.Fatalf("migration partially committed %v", err)
-	}
-	if _, err := db.Pool.Exec(ctx, `DELETE FROM pending_object_deletions`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.ApplySourceSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

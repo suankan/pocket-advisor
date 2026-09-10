@@ -106,10 +106,10 @@ func (b *Bus) Close() { b.nc.Close() }
 
 // PurgeQueues empties this workspace's streams.
 //
-// Queues are the one tier that is purely derived: a command names a Tier 1
-// object and a document row, and once both are gone the command describes work
+// Queues are the one tier that is purely derived: a command names an original
+// file and a document row, and once both are gone the command describes work
 // that cannot be done. Left behind after a wipe they are worse than useless —
-// every one of them fails on a missing object and manufactures a fresh dead
+// every one of them fails to resolve its source and manufactures a fresh dead
 // letter about a document nobody has any more.
 //
 // The DLQ goes too, and that is the point of purging at all rather than letting

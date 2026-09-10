@@ -49,8 +49,6 @@ func ClassifyReason(r FailureReason) FailureClass {
 	case ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonMalformedCommand,
-		ReasonMalformedNotify,
-		ReasonBadObjectURI,
 		ReasonHandlerPanic:
 		return ClassTerminal
 

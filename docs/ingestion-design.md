@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor’s write path: source 
 
 ## 1. Current state
 
-One host Go process discovers original files, dispatches durable ingestion jobs, and runs five JetStream stage pools. Kubernetes supplies PostgreSQL and NATS. Directories configured in the private workspace registry are authoritative for original bytes; the application never writes them. PostgreSQL retains normalized text, structured metadata, shared passages, placements, and search indexes. No object store or permanent attachment-byte directory is required.
+One host Go process discovers original files, dispatches durable ingestion jobs, and runs five JetStream stage pools. Kubernetes supplies PostgreSQL and NATS. Directories configured in the private workspace registry are authoritative for original bytes; the application never writes them. PostgreSQL retains normalized text, structured metadata, shared passages, placements, and search indexes. Container members are replayed from their verified original on demand; no extracted bytes are retained outside PostgreSQL.
 
 Document identity is an opaque UUID, independent of its unique per-workspace raw SHA-256. Moves and identical copies preserve that identity; changed bytes create a new content identity. Every indexed passage is an exact UTF-8 byte slice of canonical normalized text. Generated answers never enter the index. Jobs use at-least-once delivery with transactional stage completion.
 
@@ -23,7 +23,7 @@ flowchart LR
 
 ## 2. Source inventory and identity
 
-### 2.1 Original files and replayable members
+### 2.1 Tier 1: original files and replayable members
 
 `source_roots` assigns opaque root IDs to SHA-256 bindings of cleaned absolute configured directories. Absolute directories resolve only from the private registry; bindings and relative paths are private database metadata. Root order does not affect identity. A relocated directory gets a new binding on a complete rescan.
 
@@ -75,7 +75,7 @@ Startup verifies that the endpoint’s model and vector width match `schema_meta
 
 **Target state:** a model change is handled as an explicit re-embed into a distinct model namespace, with the existing namespace remaining queryable until backfill and cutover complete. The migration and backfill workflow is not implemented.
 
-Structural source migration is transactional, repeatable, and recorded in `application_migrations`. It preserves document UUIDs and existing evidence, renames the source column, adds inventory and jobs, and refuses unresolved legacy object-deletion requests. Canonical text gains an exact SHA-256; existing text is labelled `legacy-canonical`, and new extraction uses `canonical-v1`. This version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately. See the operational compatibility gate in [README §11](../README.md#11-upgrade-and-teardown).
+The source inventory, containment, and durable-job tables are applied by the same bootstrap, as a second transactional and repeatable step recorded in `application_migrations`. It preserves document UUIDs and existing evidence. Extraction records an exact canonical SHA-256 and an `extraction_version` of `canonical-v1`; that version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately.
 
 ### 2.5 Email message metadata and conversations
 
@@ -126,11 +126,11 @@ Each accepted original commits its conflict-safe document stub, source occurrenc
 
 Discovery stops at the configured high-water mark of unfinished durable jobs and resumes at the low-water mark. Its live raw input buffer is one file. A container can add at most its bounded member count of downstream jobs in one transaction, so fan-out can temporarily exceed the intake threshold.
 
-`--ingest-all` binds known sources and prunes before starting workers unless `--no-prune` is selected. `--scan` performs additive discovery and drains work. `--reconcile` refreshes sources and reissues unfinished jobs, including broker-lost commands, with a new dispatch generation. Legacy nonterminal rows without durable jobs are admitted from existing normalized text or verified originals. Terminal failures require explicit recovery.
+`--ingest-all` binds known sources and prunes before starting workers unless `--no-prune` is selected. `--scan` performs additive discovery and drains work. `--reconcile` refreshes sources and reissues unfinished jobs, including broker-lost commands, with a new dispatch generation. A `PENDING` or `PROCESSING` document row that has no durable job at all is re-admitted: straight to embedding when it already holds normalized text, and through classification of its verified original otherwise. Terminal failures require explicit recovery.
 
 `--ingest-all --dry-run` only hashes configured files and reports file/byte counts. It opens no database, broker, or model connection and writes no derived state.
 
-`--audit-sources` reads configured files and recursively checks the hashes of retained documents. The conservative audit requires a known original document at each replay chain's root. It reports aggregate availability and parsing failures without persisting anything. `--bind-sources` requires that coverage, persists occurrences and replay recipes, verifies resolvability, and completes containment backfill. Unresolved coverage blocks object-store retirement.
+`--audit-sources` reads configured files and recursively checks the hashes of retained documents. The conservative audit requires a known original document at each replay chain's root. It reports aggregate availability and parsing failures without persisting anything. `--bind-sources` requires that coverage, persists occurrences and replay recipes, verifies resolvability, and completes containment backfill.
 
 ## 4. Routing and extraction
 
@@ -199,7 +199,7 @@ Every ingestion command is Protobuf and begins with `DocumentMetadata` containin
 
 Extracted text is written to Tier 2 before an embed command is published. This keeps large OCR output below NATS payload limits and gives `normalized_text` one durable owner.
 
-The workspace has two namespaced streams: `INGESTION` with work-queue retention over the five stage subjects, and `INGESTION_DLQ` with limits retention for terminal failures. `deploy-workspaces` provisions both. There is no notification stream. Protobuf commands reserve retired field number 2 and carry the source reference in field 10; old and new consumers must not overlap.
+The workspace has two namespaced streams: `INGESTION` with work-queue retention over the five stage subjects, and `INGESTION_DLQ` with limits retention for terminal failures. `deploy-workspaces` provisions both. Every command carries its source reference in field 10; field 2 is permanently reserved and must not be reused.
 
 ## 6. Durable handoff, failure and retention
 
@@ -219,7 +219,15 @@ A missing or changed source records WAITING_SOURCE with a closed reason and ackn
 
 A process crash before stage commit leaves no partial stage effects. A crash after commit but before acknowledgement produces a completed-job no-op. A crash after outbox commit but before publication leaves READY work. Broker message loss is repaired from DISPATCHED jobs by explicit reconciliation with a new generation. `--recover --yes` resets only planner-approved retryable states and redrives their unfinished durable jobs; completed jobs stay complete.
 
-### 6.3 Pruning and maintenance
+### 6.3 Diagnosis and recovery planning
+
+`--doctor` is a read-only diagnosis of one workspace that writes to nothing. It resolves the registry entry and the workspace's credentials, pings PostgreSQL, the configured source roots and NATS, compares the configured embedding model and dimension against `schema_metadata`, and checks the `vector` extension, the document and chunk tables, and the HNSW and BM25 indexes. It then counts jobs waiting on originals, documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes, `FAILED` and `SKIPPED` rows grouped by reason, JetStream stream and consumer depth, and signs of an interrupted reset.
+
+Each finding carries a stable code, a severity of info, warning, error or critical, an affected count, a summary that contains no content, filename or credential, and one next action. `--json` emits the whole report. The exit status is 0 for healthy, 1 for unhealthy but diagnosed, and 2 for a doctor run that could not complete.
+
+`--recover` classifies documents rather than describing the workspace. Its planner is read-only: every selected document becomes one item with a classification — retryable, terminal, converged or not recoverable — and one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. The planner reads JetStream depth so it does not propose redriving work an active consumer still holds. Without `--yes` the plan is reported and nothing changes.
+
+### 6.4 Pruning and maintenance
 
 A workspace-scoped advisory maintenance lock serializes ingestion, binding, recovery, forgetting, and destructive sweeps. Workers run only after the pre-ingest sweep. Retention is transitive reachability from current source hashes through all containment edges, so duplicate files and shared attachments survive while any configured route retains them.
 

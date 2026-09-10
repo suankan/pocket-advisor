@@ -130,22 +130,6 @@ cmd_docker_build_postgres() {
 }
 
 cmd_deploy_infra() {
-  if kubectl get statefulset rustfs -n "$POCKET_ADVISOR_NAMESPACE" >/dev/null 2>&1; then
-    echo "Checking source coverage before retiring the object-store workload. Stop all old ingestion processes first."
-    cmd_build || exit 1
-    resolve_infra
-    for id in $(yq '.workspaces[].id' workspaces/workspaces.yaml); do
-      suffix=$(echo "$id" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-      pending=$(nats stream info "INGESTION_$suffix" -s "nats://$NATS_HOST" --json | yq '.state.messages')
-      if [ "$pending" != "0" ]; then
-        echo "Drain legacy ingestion work before upgrading: $id" >&2; exit 1
-      fi
-      "./$BIN" --audit-sources --workspace-id "$id" || exit 1
-    done
-    for id in $(yq '.workspaces[].id' workspaces/workspaces.yaml); do
-      "./$BIN" --bind-sources --workspace-id "$id" || exit 1
-    done
-  fi
   cmd_docker_build_postgres || exit 1
   if [ ! -f workspaces/workspaces.yaml ]; then
     echo "missing workspaces/workspaces.yaml" >&2

@@ -130,7 +130,7 @@ Evaluate retrieval coverage independently from final prose quality so a fluent a
 
 ## Verification
 
-Run the repository checks from [`README.md` §9](../../README.md#9-verification), retrieval and MCP unit tests, PostgreSQL integration tests, cursor and budget tests, workspace-isolation tests, the synthetic analysis evaluation suite, and intended-client end-to-end smoke tests through authenticated HTTP MCP.
+Run the repository checks from [`README.md` §10](../../README.md#10-verification), retrieval and MCP unit tests, PostgreSQL integration tests, cursor and budget tests, workspace-isolation tests, the synthetic analysis evaluation suite, and intended-client end-to-end smoke tests through authenticated HTTP MCP.
 
 Include adversarial synthetic cases with quoted instructions inside emails, ambiguous names, contradictory statements, sparse participants, long threads, missing parents, messages outside the date window, and a topic with no support. Confirm source content is always treated as evidence rather than executable instructions.
 

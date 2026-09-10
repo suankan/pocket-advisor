@@ -65,9 +65,6 @@ type Checks struct {
 	DLQMsgs         uint64
 	ConsumerPending uint64
 
-	// Orphan objects
-	OrphanExtracted int // extracted/ objects with no document lineage
-
 	// Partial reset
 	IncompleteReset bool // signs of an interrupted wipe or forget
 }
@@ -197,12 +194,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 			"normal during ingestion; persistent pending indicates stuck consumers")
 	}
 
-	// 10. Orphan extracted objects
-	addFinding(&findings, "ORPHAN_EXTRACTED", SeverityWarning, d.checks.OrphanExtracted,
-		"extracted/ objects with no surviving document lineage",
-		"run --delete-data or --forget with complete lineage to clean up")
-
-	// 11. Incomplete reset
+	// 10. Incomplete reset
 	if d.checks.IncompleteReset {
 		addFinding(&findings, "INCOMPLETE_RESET", SeverityError, 1,
 			"signs of an interrupted wipe or forget operation",

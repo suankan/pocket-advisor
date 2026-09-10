@@ -28,7 +28,7 @@ Two workspaces may deliberately configure overlapping physical directories. Thei
 
 ## PostgreSQL boundary
 
-`deploy-workspaces` creates role/database `<id>` and installs extensions using the local administrator. The application connects only as the selected role. Application startup and schema application verify recorded workspace scope before treating a populated database as that workspace. Retrieval performs its own fixed-workspace assertion. Source migrations preserve existing IDs and derived state.
+`deploy-workspaces` creates role/database `<id>` and installs extensions using the local administrator. The application connects only as the selected role. Application startup and schema application verify recorded workspace scope before treating a populated database as that workspace. Retrieval performs its own fixed-workspace assertion. Repeated schema application preserves existing IDs and derived state.
 
 The application never receives the shared PostgreSQL administrator connection. Per-workspace tables do not need caller-selectable workspace filters because the database itself is the boundary. No shared fallback role, database, or query is allowed.
 
@@ -52,7 +52,7 @@ Add the workspace to the private registry and run `./pocket-advisor.sh deploy-wo
 
 `--delete-data` removes derived data and queued work while preserving originals and configuration. `destroy-workspace <id>` drops the database/role and both streams; then remove its registry entry. No provisioning or teardown command traverses or deletes configured original directories.
 
-Back up originals with their required version history and retain a coordinated database backup when document identities, annotations, and evaluation references must survive. Re-ingesting current originals can rebuild an index, but it cannot recover overwritten historical bytes or recreate previous random UUIDs. The legacy object-store retirement gate and rollback requirements are documented in [README §11](../README.md#11-upgrade-and-teardown).
+Back up originals with their required version history and retain a coordinated database backup when document identities, annotations, and evaluation references must survive. Re-ingesting current originals can rebuild an index, but it cannot recover overwritten historical bytes or recreate previous random UUIDs. Upgrade and teardown procedures are documented in [README §11](../README.md#11-upgrade-and-teardown).
 
 ## Verification and open decisions
 

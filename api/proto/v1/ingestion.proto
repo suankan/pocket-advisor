@@ -40,16 +40,18 @@ message DocumentMetadata {
 // email worker already owns in-RAM container unrolling.
 message ProcessEmailCommand {
   DocumentMetadata metadata = 1;
+  // Field 2 held the retired staged-byte reference. Retired rather than
+  // reused: source_ref below is a document reference, not a byte address.
   reserved 2;
-  reserved "rustfs_raw_uri";
   string source_ref = 10;
 }
 
 // ProcessPdfCommand -> ingest.pdfs.raw
 message ProcessPdfCommand {
   DocumentMetadata metadata = 1;
+  // Field 2 held the retired staged-byte reference. Retired rather than
+  // reused: source_ref below is a document reference, not a byte address.
   reserved 2;
-  reserved "rustfs_raw_uri";
   string source_ref = 10;
   int32 priority = 3;
 }
@@ -57,8 +59,9 @@ message ProcessPdfCommand {
 // ProcessOfficeCommand -> ingest.docx.raw
 message ProcessOfficeCommand {
   DocumentMetadata metadata = 1;
+  // Field 2 held the retired staged-byte reference. Retired rather than
+  // reused: source_ref below is a document reference, not a byte address.
   reserved 2;
-  reserved "rustfs_raw_uri";
   string source_ref = 10;
   // docx | xlsx | pptx | rtf | odt
   string subtype = 3;
@@ -69,8 +72,9 @@ message ProcessOfficeCommand {
 // without a second fetch (§4.1).
 message ProcessImageCommand {
   DocumentMetadata metadata = 1;
+  // Field 2 held the retired staged-byte reference. Retired rather than
+  // reused: source_ref below is a document reference, not a byte address.
   reserved 2;
-  reserved "rustfs_raw_uri";
   string source_ref = 10;
   int32 width = 3;
   int32 height = 4;

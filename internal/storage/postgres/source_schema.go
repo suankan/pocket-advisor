@@ -7,19 +7,6 @@ import (
 
 const sourceSchemaSQL = `
 CREATE TABLE IF NOT EXISTS application_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
-DO $$ BEGIN
- IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='documents' AND column_name='rustfs_raw_uri') THEN
-  ALTER TABLE documents RENAME COLUMN rustfs_raw_uri TO source_ref;
- END IF;
-END $$;
-DO $$ BEGIN
- IF to_regclass('pending_object_deletions') IS NOT NULL THEN
-  IF EXISTS(SELECT 1 FROM pending_object_deletions) THEN
-   RAISE EXCEPTION 'finish pending object deletions with the previous binary before upgrading';
-  END IF;
-  DROP TABLE pending_object_deletions;
- END IF;
-END $$;
 CREATE TABLE IF NOT EXISTS source_roots (
  root_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), binding_key text NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS source_scans (
@@ -38,8 +25,6 @@ CREATE TABLE IF NOT EXISTS source_members (
  selector text NOT NULL, child_id uuid NOT NULL REFERENCES documents ON DELETE CASCADE,
  PRIMARY KEY(parent_id,selector));
 CREATE INDEX IF NOT EXISTS source_members_child_idx ON source_members(child_id);
--- The object-bucket anti-join it served is gone; source_ref is never a predicate.
-DROP INDEX IF EXISTS documents_source_ref_idx;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_hash text NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_version text NOT NULL DEFAULT '';
 ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS slice_sha256 bytea;
@@ -51,12 +36,11 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
  created_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz,
  reason text NOT NULL DEFAULT '', UNIQUE(doc_id,subject,revision));
 CREATE INDEX IF NOT EXISTS ingestion_jobs_ready_idx ON ingestion_jobs(created_at) WHERE state='READY';
-UPDATE documents SET extraction_hash=encode(sha256(convert_to(normalized_text,'UTF8')),'hex'),extraction_version='legacy-canonical' WHERE normalized_text IS NOT NULL AND extraction_hash='';
-UPDATE documents SET source_ref='source:'||doc_id::text WHERE source_ref NOT LIKE 'source:%';
 INSERT INTO application_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
 `
 
-// ApplySourceSchema is a transactional, repeatable structural migration. It
+// ApplySourceSchema applies the source inventory, containment and durable-job
+// half of the workspace schema. It is transactional and repeatable, and it
 // preserves document identities; source coverage is verified separately.
 func (d *DB) ApplySourceSchema(ctx context.Context) error {
 	return d.Transaction(ctx, func(ctx context.Context) error {

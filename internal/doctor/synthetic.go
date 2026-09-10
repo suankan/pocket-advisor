@@ -126,7 +126,6 @@ func SyntheticChecks(scenario string) Checks {
 			StreamsOK:               true,
 			SourceWaitingJobs:       7,
 			DocumentsWithoutSources: 3,
-			OrphanExtracted:         2,
 		}
 	default:
 		return Checks{}

@@ -470,24 +470,24 @@ const file_ingestion_proto_rawDesc = "" +
 	"\x11custom_attributes\x18\v \x03(\v2B.pocketadvisor.ingestion.v1.DocumentMetadata.CustomAttributesEntryR\x10customAttributes\x1aC\n" +
 	"\x15CustomAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\fworkspace_idR\rcollection_id\"\x94\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\fworkspace_idR\rcollection_id\"\x84\x01\n" +
 	"\x13ProcessEmailCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
 	"\n" +
 	"source_ref\x18\n" +
-	" \x01(\tR\tsourceRefJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xae\x01\n" +
+	" \x01(\tR\tsourceRefJ\x04\b\x02\x10\x03\"\x9e\x01\n" +
 	"\x11ProcessPdfCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
 	"\n" +
 	"source_ref\x18\n" +
 	" \x01(\tR\tsourceRef\x12\x1a\n" +
-	"\bpriority\x18\x03 \x01(\x05R\bpriorityJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xaf\x01\n" +
+	"\bpriority\x18\x03 \x01(\x05R\bpriorityJ\x04\b\x02\x10\x03\"\x9f\x01\n" +
 	"\x14ProcessOfficeCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
 	"\n" +
 	"source_ref\x18\n" +
 	" \x01(\tR\tsourceRef\x12\x18\n" +
-	"\asubtype\x18\x03 \x01(\tR\asubtypeJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"\xdf\x01\n" +
+	"\asubtype\x18\x03 \x01(\tR\asubtypeJ\x04\b\x02\x10\x03\"\xcf\x01\n" +
 	"\x13ProcessImageCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1d\n" +
 	"\n" +
@@ -495,7 +495,7 @@ const file_ingestion_proto_rawDesc = "" +
 	" \x01(\tR\tsourceRef\x12\x14\n" +
 	"\x05width\x18\x03 \x01(\x05R\x05width\x12\x16\n" +
 	"\x06height\x18\x04 \x01(\x05R\x06height\x12\x1b\n" +
-	"\tbyte_size\x18\x05 \x01(\x03R\bbyteSizeJ\x04\b\x02\x10\x03R\x0erustfs_raw_uri\"}\n" +
+	"\tbyte_size\x18\x05 \x01(\x03R\bbyteSizeJ\x04\b\x02\x10\x03\"}\n" +
 	"\x10EmbedTextCommand\x12H\n" +
 	"\bmetadata\x18\x01 \x01(\v2,.pocketadvisor.ingestion.v1.DocumentMetadataR\bmetadata\x12\x1f\n" +
 	"\vtext_length\x18\x02 \x01(\x03R\n" +

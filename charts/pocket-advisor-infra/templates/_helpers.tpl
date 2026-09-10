@@ -8,7 +8,7 @@ Call shape, for every resource:
   metadata:
     name: ...
     labels:
-      {{- include "pa.labels" (dict "ctx" . "component" "object-store") | nindent 4 }}
+      {{- include "pa.labels" (dict "ctx" . "component" "database") | nindent 4 }}
     {{- with include "pa.annotations" (dict "ctx" . "description" "…") }}
     annotations:
       {{- . | nindent 4 }}
@@ -42,8 +42,7 @@ WordPress `name: mysql, version: 5.7.21`, naming each application; Helm says
 name "should be the app name, reflecting the entire app" and version "can be
 set to {{ .Chart.AppVersion }}". Helm's reading assumes one app per chart and
 leaves component to distinguish the pieces, which is what we do: every object
-is name: pocket-advisor, and component says object-store / database /
-message-bus.
+is name: pocket-advisor, and component says database / message-bus.
 
 An earlier revision used the Kubernetes reading, with name per workload and
 version from the image tag. Reverted deliberately — the image tag is still on
@@ -63,8 +62,8 @@ Deliberately NOT wired into any workload's .spec.selector.matchLabels, which
 still match the legacy `app: <name>` key. .spec.selector is immutable on a live
 StatefulSet, so changing it fails `helm upgrade` outright with "updates to
 statefulset spec ... are forbidden", and the only way out is recreating the
-StatefulSet — which here means detaching the PVCs holding Tier 1 and the
-JetStream state. Not a trade worth making for a cosmetic key change.
+StatefulSet — which here means detaching the PVCs holding the workspace
+databases and the JetStream state. Not a trade worth making for a cosmetic key change.
 */}}
 {{- define "pa.labels" -}}
 {{- $ctx := .ctx -}}

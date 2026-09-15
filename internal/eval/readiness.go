@@ -10,23 +10,34 @@ import (
 
 // ReadinessReport captures the result of pre-query readiness checks.
 type ReadinessReport struct {
-	EmbeddingReachable bool     `json:"embedding_reachable"`
-	EmbeddingModel     string   `json:"embedding_model"`
-	EmbeddingDimension int      `json:"embedding_dimension"`
-	SchemaModel        string   `json:"schema_model"`
-	SchemaDimension    int      `json:"schema_dimension"`
-	ModelMatch         bool     `json:"model_match"`
-	DimensionMatch     bool     `json:"dimension_match"`
-	HNSWIndexExists    bool     `json:"hnsw_index_exists"`
-	BM25IndexExists    bool     `json:"bm25_index_exists"`
-	AllPassed          bool     `json:"all_passed"`
-	Errors             []string `json:"errors,omitempty"`
+	EmbeddingReachable bool   `json:"embedding_reachable"`
+	EmbeddingModel     string `json:"embedding_model"`
+	EmbeddingDimension int    `json:"embedding_dimension"`
+	SchemaModel        string `json:"schema_model"`
+	SchemaDimension    int    `json:"schema_dimension"`
+	ModelMatch         bool   `json:"model_match"`
+	DimensionMatch     bool   `json:"dimension_match"`
+	HNSWIndexExists    bool   `json:"hnsw_index_exists"`
+	BM25IndexExists    bool   `json:"bm25_index_exists"`
+	// CaseSetChecked is false when no case set was named, so a reader can
+	// tell "resolved cleanly" from "never looked".
+	CaseSetChecked    bool     `json:"case_set_checked"`
+	CaseSetResolvable bool     `json:"case_set_resolvable"`
+	CaseSetCases      int      `json:"case_set_cases"`
+	AllPassed         bool     `json:"all_passed"`
+	Errors            []string `json:"errors,omitempty"`
 }
 
 // CheckReadiness verifies that the retrieval path is ready to serve queries.
 // This checks embedding endpoint reachability, model/dimension consistency,
-// and index existence before any search runs.
-func CheckReadiness(ctx context.Context, db *postgres.DB, emb *embedding.Client) (*ReadinessReport, error) {
+// index existence, and — when a case set is named — that every document it
+// expects still exists, before any search runs.
+//
+// The case-set check is the one that matters most and was the one missing:
+// every other check here can pass while the suite names document ids the
+// workspace renumbered out of existence, in which case the run reports a
+// total quality failure and measures nothing at all.
+func CheckReadiness(ctx context.Context, db *postgres.DB, emb *embedding.Client, caseSetPath string) (*ReadinessReport, error) {
 	rpt := &ReadinessReport{}
 
 	// 1. Check embedding endpoint reachability and model info.
@@ -86,8 +97,25 @@ func CheckReadiness(ctx context.Context, db *postgres.DB, emb *embedding.Client)
 		}
 	}
 
+	// 5. Check the case set still resolves against this workspace.
+	if caseSetPath != "" {
+		rpt.CaseSetChecked = true
+		switch cs, err := LoadCaseSet(caseSetPath); {
+		case err != nil:
+			rpt.Errors = append(rpt.Errors, fmt.Sprintf("case set unusable: %v", err))
+		default:
+			rpt.CaseSetCases = len(cs.Cases)
+			if _, err := ResolveCases(ctx, postgres.NewDocumentRepo(db), cs.Cases); err != nil {
+				rpt.Errors = append(rpt.Errors, err.Error())
+			} else {
+				rpt.CaseSetResolvable = true
+			}
+		}
+	}
+
 	rpt.AllPassed = rpt.EmbeddingReachable && rpt.ModelMatch && rpt.DimensionMatch &&
-		rpt.HNSWIndexExists && rpt.BM25IndexExists
+		rpt.HNSWIndexExists && rpt.BM25IndexExists &&
+		(!rpt.CaseSetChecked || rpt.CaseSetResolvable)
 
 	return rpt, nil
 }

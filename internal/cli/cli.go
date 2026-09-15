@@ -209,7 +209,8 @@ Topic graph build options:
 
 Evaluate options:
   --eval-cases <path>        evaluation case set JSON (default: workspaces/evaluation/<workspace>/cases.json)
-  --eval-report <path>       write report to path (gitignored, default: none)
+  --eval-report <path>       write the report somewhere other than the
+                             default workspaces/evaluation/<workspace>/runs/
   --eval-filter-ids <csv>    comma-separated case IDs to evaluate
   --eval-filter-cats <csv>   comma-separated categories to evaluate
   --eval-hnsw                run exact vs HNSW dense search comparison
@@ -319,7 +320,7 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.TopicGraphRemove, "remove-topic-graph", "", "remove a BUILDING or RETIRED topic graph UUID")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
-	fs.StringVar(&o.EvalReport, "eval-report", "", "write report to path (gitignored)")
+	fs.StringVar(&o.EvalReport, "eval-report", "", "write the report somewhere other than the per-workspace runs directory")
 	fs.StringVar(&o.EvalFilterIDs, "eval-filter-ids", "", "comma-separated case IDs to evaluate")
 	fs.StringVar(&o.EvalFilterCats, "eval-filter-cats", "", "comma-separated categories to evaluate")
 	fs.BoolVar(&o.EvalRunHNSW, "eval-hnsw", false, "run exact vs HNSW dense search comparison")

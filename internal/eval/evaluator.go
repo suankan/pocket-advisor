@@ -55,6 +55,15 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		return nil, fmt.Errorf("no cases match the given filters")
 	}
 
+	// Resolve every document reference before the first query. An unusable
+	// suite has to fail here, loudly and as a setup error, rather than run to
+	// completion and report a quality verdict its own preconditions did not
+	// support.
+	resolved, err := ResolveCases(ctx, postgres.NewDocumentRepo(e.DB), cases)
+	if err != nil {
+		return nil, err
+	}
+
 	commitSHA := evalCfg.CommitSHA
 	if commitSHA == "" {
 		commitSHA = gitSHA()
@@ -89,7 +98,7 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 	var stageResults []*retrieval.StageResult
 	var allFailures []string
 
-	for _, c := range cases {
+	for _, c := range resolved {
 		cr, sr, err := e.runCase(ctx, svc, c)
 		if err != nil {
 			e.Log.Warn("case failed", "id", c.ID, "error", err)
@@ -97,7 +106,8 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 				CaseID:                c.ID,
 				Category:              c.Category,
 				ExpectedEmpty:         c.ExpectedEmpty,
-				ExpectedDocumentCount: len(c.ExpectedDocuments),
+				ExpectedDocumentCount: len(c.Expected),
+				ExpectedFactCount:     len(c.ExpectedFacts),
 				Passed:                false,
 				Failures:              []string{fmt.Sprintf("execution error: %v", err)},
 			}
@@ -187,12 +197,13 @@ func milliseconds(d time.Duration) float64 {
 }
 
 // runCase evaluates a single case.
-func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case) (*CaseReport, *retrieval.StageResult, error) {
+func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c ResolvedCase) (*CaseReport, *retrieval.StageResult, error) {
 	cr := &CaseReport{
 		CaseID:                c.ID,
 		Category:              c.Category,
 		ExpectedEmpty:         c.ExpectedEmpty,
-		ExpectedDocumentCount: len(c.ExpectedDocuments),
+		ExpectedDocumentCount: len(c.Expected),
+		ExpectedFactCount:     len(c.ExpectedFacts),
 	}
 
 	req := retrieval.Request{
@@ -221,12 +232,22 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case)
 		}
 	}
 
-	// Retrieval packets carry the Postgres document UUID used by evaluation cases.
+	// Packets carry both the document id metrics compare and the text the run
+	// actually admitted. Related-document text counts as admitted evidence
+	// too: it reaches the caller in the same response, so a fact grounded
+	// there is genuinely groundable.
 	var packets []packetRef
 	for _, p := range sr.SelectedPackets {
+		text := p.Text
+		for _, related := range p.Related {
+			if related.Text != "" {
+				text += "\n" + related.Text
+			}
+		}
 		packets = append(packets, packetRef{
 			DocID: p.DocID,
 			Score: p.Match.Score,
+			Text:  text,
 		})
 	}
 	cr.PacketCount = len(packets)
@@ -257,13 +278,16 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case)
 	cr.FusedCandidates = sr.FusedCount
 	cr.RerankedCandidates = sr.RerankCount
 
-	// Metrics compare document UUIDs directly; no metadata lookup is involved.
-	cr.DocumentRecallAtK = DocumentRecallAtK(packets, c.ExpectedDocuments, e.Config.DefaultTopK)
-	cr.RRFirstExpectedDocument = ReciprocalRankFirstExpectedDocument(packets, c.ExpectedDocuments)
-	cr.NDCG = NDCG(packets, c.ExpectedDocuments)
-
-	// Forbidden hits.
-	cr.ForbiddenHits = ForbiddenHits(packets, c.ForbiddenDocumentIDs)
+	// Document metrics compare resolved UUIDs; fact metrics compare admitted
+	// text. They disagree exactly when a document was ranked but its text was
+	// not returned, which is the case worth seeing.
+	cr.DocumentRecallAtK = DocumentRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
+	cr.RRFirstExpectedDocument = ReciprocalRankFirstExpectedDocument(packets, c.Expected)
+	cr.NDCG = NDCG(packets, c.Expected)
+	cr.FactRecall = FactRecall(packets, c.ExpectedFacts)
+	cr.RRFirstFact = ReciprocalRankFirstFact(packets, c.ExpectedFacts)
+	cr.AnswerRank = FirstFactRank(packets, c.ExpectedFacts)
+	cr.ExpectedDocumentRank = FirstExpectedDocumentRank(packets, c.Expected)
 
 	// Determine pass/fail.
 	cr.Passed = true
@@ -279,7 +303,7 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Case)
 // checkCase validates a case report against the case's explicit contracts.
 // Ranking-quality thresholds remain aggregate gates; this check deliberately
 // uses no numeric quality threshold.
-func (e *Evaluator) checkCase(c Case, cr *CaseReport) []string {
+func (e *Evaluator) checkCase(c ResolvedCase, cr *CaseReport) []string {
 	var failures []string
 
 	if c.ExpectedEmpty && cr.PacketCount > 0 {
@@ -301,11 +325,13 @@ func (e *Evaluator) checkCase(c Case, cr *CaseReport) []string {
 		}
 	}
 
-	// Forbidden documents invalidate every case kind, including expected-empty
-	// cases, even when the empty-result failure already records the outcome.
-	if cr.ForbiddenHits > 0 {
+	// Every asserted fact must be present in the admitted evidence. A partial
+	// answer is not a correct one, and the case exists to prove the evidence
+	// would support the whole thing.
+	if len(c.ExpectedFacts) > 0 && cr.FactRecall < 1 {
+		grounded := int(math.Round(cr.FactRecall * float64(len(c.ExpectedFacts))))
 		failures = append(failures, fmt.Sprintf(
-			"%d forbidden document(s) in results", cr.ForbiddenHits))
+			"evidence grounds %d of %d expected facts", grounded, len(c.ExpectedFacts)))
 	}
 
 	return failures
@@ -325,6 +351,8 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 	}
 
 	var recallSum, mrrSum, ndcgSum float64
+	var factRecallSum, factMRRSum float64
+	var factCases int
 	var emptyPassed, emptyExpected int
 	thresholds := thresholdsFor(cfg)
 
@@ -350,7 +378,14 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 			mrrSum += c.RRFirstExpectedDocument
 			ndcgSum += c.NDCG
 		}
-		s.TotalForbidden += c.ForbiddenHits
+		// Fact metrics have their own denominator: a case asserting no fact
+		// would otherwise contribute a free 1.0 and flatter every run that
+		// contained one.
+		if c.ExpectedFactCount > 0 {
+			factCases++
+			factRecallSum += c.FactRecall
+			factMRRSum += c.RRFirstFact
+		}
 		s.TotalWarnings += c.WarningCount
 		if c.BudgetTruncated {
 			s.BudgetTruncations++
@@ -362,6 +397,10 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		s.MeanRecall = recallSum / denominator
 		s.MeanMRR = mrrSum / denominator
 		s.MeanNDCG = ndcgSum / denominator
+	}
+	if factCases > 0 {
+		s.MeanFactRecall = factRecallSum / float64(factCases)
+		s.MeanFactMRR = factMRRSum / float64(factCases)
 	}
 	if emptyExpected > 0 {
 		s.EmptyPassRate = float64(emptyPassed) / float64(emptyExpected)
@@ -376,9 +415,6 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		s.OverallPassed = false
 	}
 	if s.RankedCases > 0 && s.MeanNDCG < thresholds.MinNDCG {
-		s.OverallPassed = false
-	}
-	if s.TotalForbidden > thresholds.MaxForbiddenHits {
 		s.OverallPassed = false
 	}
 	if s.EmptyPassRate < thresholds.MinEmptyPassRate && emptyExpected > 0 {

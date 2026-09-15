@@ -7,37 +7,52 @@ import (
 
 func TestCheckCaseUsesExpectedDocumentContracts(t *testing.T) {
 	e := &Evaluator{}
+	fact := ExpectedFact{Span: "closing balance 45.59", Grade: 3}
 	tests := []struct {
 		name       string
-		c          Case
+		c          ResolvedCase
 		cr         CaseReport
 		wantPassed bool
 		wantText   string
 	}{
-		{name: "expected empty accepts no packets", c: Case{ExpectedEmpty: true}, cr: CaseReport{}, wantPassed: true},
-		{name: "expected empty records forbidden result", c: Case{ExpectedEmpty: true}, cr: CaseReport{PacketCount: 1, ForbiddenHits: 1}, wantText: "forbidden"},
+		{name: "expected empty accepts no packets", c: ResolvedCase{Case: Case{ExpectedEmpty: true}}, cr: CaseReport{}, wantPassed: true},
 		{
 			name:     "regular case requires one expected document",
-			c:        Case{ExpectedDocuments: []ExpectedDocument{{DocumentID: "wanted", Grade: 1}}},
+			c:        ResolvedCase{Expected: []ResolvedDocument{{DocID: "wanted", Grade: 1}}},
 			cr:       CaseReport{PacketCount: 1, DocumentRecallAtK: 0},
 			wantText: "no expected document",
 		},
 		{
 			name:       "one expected document is sufficient by default",
-			c:          Case{ExpectedDocuments: []ExpectedDocument{{DocumentID: "a", Grade: 1}, {DocumentID: "b", Grade: 1}}},
+			c:          ResolvedCase{Expected: []ResolvedDocument{{DocID: "a", Grade: 1}, {DocID: "b", Grade: 1}}},
 			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 0.5},
 			wantPassed: true,
 		},
 		{
 			name:     "require all expected documents rejects partial coverage",
-			c:        Case{RequireAllExpectedDocuments: true},
+			c:        ResolvedCase{Case: Case{RequireAllExpectedDocuments: true}},
 			cr:       CaseReport{ExpectedDocumentCount: 2, DocumentRecallAtK: 0.5},
 			wantText: "found 1 of 2",
 		},
 		{
 			name:       "require all expected documents accepts full coverage",
-			c:          Case{RequireAllExpectedDocuments: true},
+			c:          ResolvedCase{Case: Case{RequireAllExpectedDocuments: true}},
 			cr:         CaseReport{ExpectedDocumentCount: 2, DocumentRecallAtK: 1},
+			wantPassed: true,
+		},
+		{
+			// The failure document recall structurally cannot see: the right
+			// document is ranked, and the budget then drops its text.
+			name:       "a ranked document whose text was not admitted fails on facts",
+			c:          ResolvedCase{Case: Case{ExpectedFacts: []ExpectedFact{fact}}, Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
+			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, FactRecall: 0},
+			wantText:   "grounds 0 of 1 expected facts",
+			wantPassed: false,
+		},
+		{
+			name:       "grounded facts pass alongside document recall",
+			c:          ResolvedCase{Case: Case{ExpectedFacts: []ExpectedFact{fact}}, Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
+			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, FactRecall: 1},
 			wantPassed: true,
 		},
 	}

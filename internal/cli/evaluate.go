@@ -53,9 +53,23 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 	rr := reranking.New(cfg.Reranking)
 	l := llm.New(cfg.LLM)
 
+	// Resolve the curated private case set when none is explicitly provided.
+	// Readiness needs it too: whether the suite still names documents this
+	// workspace holds is the check most worth making before a run.
+	caseSetPath := eo.CaseSet
+	if caseSetPath == "" {
+		caseSetPath = defaultCaseSetPath(o.WorkspaceID)
+		if _, err := os.Stat(caseSetPath); os.IsNotExist(err) {
+			if !eo.Readiness {
+				return fmt.Errorf("no evaluation cases found; add the curated private case set at %s or pass --eval-cases", caseSetPath)
+			}
+			caseSetPath = ""
+		}
+	}
+
 	// Readiness check.
 	if eo.Readiness {
-		rpt, err := eval.CheckReadiness(ctx, db, emb)
+		rpt, err := eval.CheckReadiness(ctx, db, emb, caseSetPath)
 		if err != nil {
 			return fmt.Errorf("readiness check: %w", err)
 		}
@@ -71,13 +85,8 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		return nil
 	}
 
-	// Resolve the curated private case set when none is explicitly provided.
-	caseSetPath := eo.CaseSet
 	if caseSetPath == "" {
-		caseSetPath = defaultCaseSetPath(o.WorkspaceID)
-		if _, err := os.Stat(caseSetPath); os.IsNotExist(err) {
-			return fmt.Errorf("no evaluation cases found; add the curated private case set at %s or pass --eval-cases", caseSetPath)
-		}
+		return fmt.Errorf("no evaluation cases found; add the curated private case set at %s or pass --eval-cases", defaultCaseSetPath(o.WorkspaceID))
 	}
 
 	// Load thresholds if specified.
@@ -114,11 +123,43 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		return err
 	}
 
-	// Write report if path specified.
-	if eo.ReportPath != "" {
+	// Every complete run is written, without anyone having to remember a
+	// flag: --eval-report now overrides where it goes rather than whether it
+	// happens. The default destination is the per-workspace runs directory,
+	// which makes the trend accumulate by itself.
+	//
+	// Filtered runs are deliberately left out of that series. They are a
+	// debugging tool over a handful of cases, and mixing their summaries in
+	// would make the suite look like it improved whenever someone ran three
+	// cases that happen to pass. An explicit --eval-report still writes one.
+	filtered := len(splitTrim(eo.FilterIDs)) > 0 || len(splitTrim(eo.FilterCats)) > 0
+	runsDir := evalRunsDir(o.WorkspaceID)
+
+	previous, err := eval.PreviousComparableRun(runsDir, report)
+	if err != nil {
+		log.Warn("could not read earlier runs", "error", err)
+	}
+
+	var reportPath string
+	switch {
+	case eo.ReportPath != "":
 		if err := writeReport(eo.ReportPath, report); err != nil {
 			return fmt.Errorf("write report: %w", err)
 		}
+		reportPath = eo.ReportPath
+	case !filtered:
+		reportPath, err = eval.ArchiveRun(runsDir, report)
+		if err != nil {
+			// A measurement that cannot be filed is still a measurement worth
+			// printing, so this degrades rather than failing the run.
+			log.Warn("could not archive run", "error", err)
+		}
+	}
+
+	var delta *eval.Delta
+	if previous != nil {
+		d := eval.Compare(previous, report)
+		delta = &d
 	}
 
 	if eo.JSON {
@@ -129,12 +170,59 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		}
 	} else {
 		renderEvalReport(report)
+		renderArchive(reportPath, delta, filtered && eo.ReportPath == "")
 	}
 
 	if !report.Summary.OverallPassed {
 		return fmt.Errorf("evaluation thresholds not met")
 	}
 	return nil
+}
+
+// evalRunsDir keeps archived runs beside the case set they measured. The
+// whole tree is gitignored private workspace material, which is where a
+// report belongs: it names case ids and document UUIDs.
+func evalRunsDir(workspaceID string) string {
+	return filepath.Join("workspaces", "evaluation", workspaceID, "runs")
+}
+
+// renderArchive reports where the run was written and how it moved.
+func renderArchive(path string, delta *eval.Delta, skippedAsFiltered bool) {
+	fmt.Println()
+	switch {
+	case skippedAsFiltered:
+		fmt.Println("Filtered run: not added to the trend series. Pass --eval-report <path> to keep it.")
+		return
+	case path == "":
+		return
+	}
+	fmt.Printf("Report: %s\n", path)
+	if delta == nil {
+		fmt.Println("No earlier run over this case set yet; this one is the baseline.")
+		return
+	}
+	fmt.Printf("Since %s (%s, commit %s):\n",
+		delta.PreviousRunID, delta.PreviousAt.Local().Format("2006-01-02 15:04"), shortSHA(delta.PreviousSHA))
+	fmt.Printf("  passed %+d   documents: recall %+.3f  MRR %+.3f  nDCG %+.3f\n",
+		delta.PassedCases, delta.MeanRecall, delta.MeanMRR, delta.MeanNDCG)
+	fmt.Printf("               answers:   recall %+.3f  MRR %+.3f\n",
+		delta.MeanFactRecall, delta.MeanFactMRR)
+	if len(delta.Fixed) > 0 {
+		fmt.Printf("  fixed:     %s\n", strings.Join(delta.Fixed, ", "))
+	}
+	if len(delta.Regressed) > 0 {
+		fmt.Printf("  regressed: %s\n", strings.Join(delta.Regressed, ", "))
+	}
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	if sha == "" {
+		return "unknown"
+	}
+	return sha
 }
 
 func defaultCaseSetPath(workspaceID string) string {
@@ -178,6 +266,10 @@ func renderReadiness(rpt *eval.ReadinessReport) {
 	fmt.Printf("  Dimension match:       %v\n", rpt.DimensionMatch)
 	fmt.Printf("  HNSW index exists:     %v\n", rpt.HNSWIndexExists)
 	fmt.Printf("  BM25 index exists:     %v\n", rpt.BM25IndexExists)
+	if rpt.CaseSetChecked {
+		fmt.Printf("  Case set cases:        %d\n", rpt.CaseSetCases)
+		fmt.Printf("  Case set resolvable:   %v\n", rpt.CaseSetResolvable)
+	}
 	fmt.Printf("  All passed:            %v\n", rpt.AllPassed)
 	if len(rpt.Errors) > 0 {
 		fmt.Println("  Errors:")
@@ -185,6 +277,16 @@ func renderReadiness(rpt *eval.ReadinessReport) {
 			fmt.Printf("    - %s\n", e)
 		}
 	}
+}
+
+// rankLabel renders a 1-based position, or a dash when the thing never
+// appeared. A dash and a large number mean different things and should not
+// look alike.
+func rankLabel(rank int) string {
+	if rank <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("#%d", rank)
 }
 
 func renderEvalReport(r *eval.Report) {
@@ -195,12 +297,12 @@ func renderEvalReport(r *eval.Report) {
 	fmt.Println()
 
 	s := &r.Summary
-	fmt.Printf("Results: %d/%d passed (mean recall %.3f, MRR %.3f, nDCG %.3f)\n",
-		s.PassedCases, s.TotalCases, s.MeanRecall, s.MeanMRR, s.MeanNDCG)
+	fmt.Printf("Results: %d/%d passed\n", s.PassedCases, s.TotalCases)
+	fmt.Printf("  documents: recall %.3f  MRR %.3f  nDCG %.3f\n",
+		s.MeanRecall, s.MeanMRR, s.MeanNDCG)
+	fmt.Printf("  answers:   recall %.3f  MRR %.3f\n",
+		s.MeanFactRecall, s.MeanFactMRR)
 
-	if s.TotalForbidden > 0 {
-		fmt.Printf("  FORBIDDEN HITS: %d\n", s.TotalForbidden)
-	}
 	if !s.OverallPassed {
 		fmt.Println("  OVERALL: FAILED")
 	} else {
@@ -213,9 +315,13 @@ func renderEvalReport(r *eval.Report) {
 		if !c.Passed {
 			status = "FAIL"
 		}
-		fmt.Printf("[%s] %s (%s) recall=%.2f MRR=%.2f nDCG=%.2f packets=%d\n",
-			status, c.CaseID, c.Category, c.DocumentRecallAtK,
-			c.RRFirstExpectedDocument, c.NDCG, c.PacketCount)
+		// Raw positions rather than reciprocals: this line is read one case at
+		// a time, where "the answer was 8th" says more than "0.12". The
+		// reciprocals stay in the summary, where they average properly.
+		fmt.Printf("[%s] %s (%s) doc=%s answer=%s recall=%.2f nDCG=%.2f packets=%d\n",
+			status, c.CaseID, c.Category,
+			rankLabel(c.ExpectedDocumentRank), rankLabel(c.AnswerRank),
+			c.DocumentRecallAtK, c.NDCG, c.PacketCount)
 		if len(c.Failures) > 0 {
 			for _, f := range c.Failures {
 				fmt.Printf("      FAIL: %s\n", f)

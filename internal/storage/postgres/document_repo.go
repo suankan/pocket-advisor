@@ -363,3 +363,31 @@ func deref(s *string) string {
 	}
 	return *s
 }
+
+// ResolveContentHashes maps raw content hashes to this database's document
+// ids.
+//
+// A hash with no row is simply absent from the result rather than an error:
+// "this workspace does not hold that content" is a legitimate answer, and the
+// caller is better placed to decide whether it is a problem. raw_sha256
+// carries a UNIQUE constraint, so each present hash yields exactly one id.
+func (r *DocumentRepo) ResolveContentHashes(ctx context.Context, hashes []string) (map[string]string, error) {
+	out := make(map[string]string, len(hashes))
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	rows, err := r.db.executor(ctx).Query(ctx,
+		`SELECT raw_sha256, doc_id::text FROM documents WHERE raw_sha256 = ANY($1::text[])`, hashes)
+	if err != nil {
+		return nil, fmt.Errorf("resolve content hashes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hash, id string
+		if err := rows.Scan(&hash, &id); err != nil {
+			return nil, err
+		}
+		out[hash] = id
+	}
+	return out, rows.Err()
+}

@@ -437,7 +437,28 @@ The evaluation framework measures whether retrieval returns the right evidence b
 
 ### Curated private cases
 
-Store the curated v3 case set outside version control at `workspaces/evaluation/<workspace>/cases.json`, or pass its private path with `--eval-cases`. Expected documents use `expected_documents[]`, where each entry has a `document_id` and relevance `grade`; set `require_all_expected_documents` when every listed document must be retrieved. Forbidden documents use `forbidden_document_ids`. Every identity is the stable PostgreSQL document UUID, never a filename stem or source hash. Do not commit case questions, document identifiers, or reports.
+Store the curated v4 case set outside version control at `workspaces/evaluation/<workspace>/cases.json`, or pass its private path with `--eval-cases`.
+
+Each entry in `expected_documents[]` carries a `match.raw_sha256` and a relevance `grade`, and `require_all_expected_documents` makes every listed document mandatory. Documents are named by content hash rather than by document UUID because a UUID is minted per database: re-ingesting the same originals into a rebuilt workspace renumbers every one of them and turns a working suite into a full sheet of failures that look like a quality collapse.
+
+`expected_facts[]` asserts the exact text a correct answer must rest on — `span`, a `grade`, and `case_sensitive` for the rare question about styling. It catches what document recall cannot: a document that ranks well and then loses its text to the context budget scores a perfect recall while grounding nothing. Matching collapses whitespace, so extracted PDF layout does not decide the outcome.
+
+References resolve before the first query. A case naming a document the workspace no longer holds fails the run as a setup error rather than a low score, and `--eval-readiness` runs the same check.
+
+Cases do not assert how highly a result must rank. Position is reported — per case as `doc=#3 answer=#3`, and per run as the averaged reciprocals — and watched as a trend across runs rather than fixed as a contract, since any bound would have to be copied from current behaviour.
+
+Every complete run is saved to `workspaces/evaluation/<workspace>/runs/`, named by its run id, and each run prints how it moved against the last comparable one:
+
+```text
+Report: workspaces/evaluation/main/runs/eval-20260911T004217Z.json
+Since eval-20260911T003753Z (2026-09-11 10:41, commit d4246a1):
+  passed +1   documents: recall +0.034  MRR +0.012  nDCG -0.005
+               answers:   recall +0.070  MRR +0.041
+  fixed:     golden-016
+  regressed: golden-021
+```
+
+Comparison requires the same case-set digest, so editing the suite starts a new series rather than silently continuing the old one. `--eval-report <path>` redirects that write; runs narrowed with `--eval-filter-ids` or `--eval-filter-cats` stay out of the series. Do not commit case questions, document identifiers, spans, or reports.
 
 Every evaluation report records a SHA-256 identity of its case-set contents. Compare quality metrics only between reports with the same case-set digest.
 
@@ -515,7 +536,7 @@ The evaluation reports:
 - **Document recall at k**: fraction of expected documents found in top-k results
 - **Reciprocal rank**: 1/rank of the first expected document
 - **nDCG**: normalized discounted cumulative gain using expected-document grades
-- **Forbidden hits**: unexpected documents that indicate false positives
+- **Answer rank**: how far down the first result that actually grounds the answer appeared
 - **Empty pass rate**: off-domain queries correctly returning no results
 - **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select, expand)
 
@@ -523,7 +544,7 @@ The evaluation reports:
 
 - Exit code 0: all thresholds passed
 - Exit code 1: one or more thresholds failed or an error occurred
-- Check the summary for specific failures (low recall, forbidden hits, etc.)
+- Check the summary for specific failures (low recall, ungrounded answers, etc.)
 
 ## 9. Remove content or a workspace
 

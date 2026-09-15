@@ -11,11 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 // CaseSchemaVersion is the current evaluation case format version.
-const CaseSchemaVersion = 3
+const CaseSchemaVersion = 4
 
 // Category constants for case classification.
 const (
@@ -35,17 +36,57 @@ type Case struct {
 	Category                    string             `json:"category"`
 	Question                    string             `json:"question"`
 	ExpectedDocuments           []ExpectedDocument `json:"expected_documents"`
+	ExpectedFacts               []ExpectedFact     `json:"expected_facts,omitempty"`
 	RequireAllExpectedDocuments bool               `json:"require_all_expected_documents,omitempty"`
-	ForbiddenDocumentIDs        []string           `json:"forbidden_document_ids,omitempty"`
 	ExpectedEmpty               bool               `json:"expected_empty,omitempty"`
 }
 
-// ExpectedDocument identifies a relevant document by its Postgres document
-// UUID. The UUID is stable within the evaluated workspace and is not inferred
-// from a filename, source hash, or other mutable document metadata.
+// DocumentMatch names a document by its content rather than by its row
+// identity, and is resolved against the evaluated workspace before any query
+// runs.
+//
+// doc_id was the obvious key and turned out to be the wrong one. It is a
+// random UUID minted per database, so rebuilding a workspace from the same
+// original files renumbers every document and silently invalidates a whole
+// curated suite: every case reports "no expected document in results" while
+// retrieval is working perfectly, which reads as a quality collapse rather
+// than as the setup error it is. raw_sha256 survives that, because it hashes
+// the original bytes and is the same key CreateStub already upserts on, so
+// "the same bytes are the same document" is enforced by the schema rather
+// than assumed here.
+//
+// The trade is deliberate rather than free. doc_id survives a document's
+// bytes changing and nothing else; raw_sha256 survives everything except
+// that. For an archived corpus, re-ingestion is routine and re-export is
+// rare, so the second failure is the one worth accepting.
+type DocumentMatch struct {
+	RawSHA256 string `json:"raw_sha256"`
+}
+
+// ExpectedDocument is a document a correct answer may rest on, with the
+// relevance grade nDCG scores it against.
 type ExpectedDocument struct {
-	DocumentID string `json:"document_id"`
-	Grade      int    `json:"grade"`
+	Match DocumentMatch `json:"match"`
+	Grade int           `json:"grade"`
+}
+
+// ExpectedFact is text a correct answer must rest on, checked against the
+// evidence a run actually returned rather than against what it merely ranked.
+//
+// It exists because document recall cannot see the failure that matters most
+// often in practice: the right document is retrieved, and its text is then
+// dropped by the shared context budget. Recall scores 1.0, the case passes,
+// and the answer is nowhere in the response. A fact assertion fails that
+// correctly.
+//
+// Matching collapses whitespace runs on both sides, using the same rule that
+// defines shared passage identity, so PDF layout spacing does not decide the
+// outcome. CaseSensitive is for the rare question about styling rather than
+// content, where "iStem" and "iSTEM" are different answers.
+type ExpectedFact struct {
+	Span          string `json:"span"`
+	Grade         int    `json:"grade"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
 // CaseSet is a versioned collection of evaluation cases.
@@ -126,39 +167,43 @@ func validateCaseDocumentIDs(c Case) error {
 	}
 
 	expected := make(map[string]struct{}, len(c.ExpectedDocuments))
-	for _, document := range c.ExpectedDocuments {
-		if !isUUID(document.DocumentID) {
-			return fmt.Errorf("expected document has invalid document_id %q", document.DocumentID)
+	for i, document := range c.ExpectedDocuments {
+		if !isSHA256Hex(document.Match.RawSHA256) {
+			return fmt.Errorf("expected document %d has invalid raw_sha256", i+1)
 		}
-		if _, duplicate := expected[document.DocumentID]; duplicate {
-			return fmt.Errorf("duplicate expected document_id %q", document.DocumentID)
+		if _, duplicate := expected[document.Match.RawSHA256]; duplicate {
+			return fmt.Errorf("expected document %d repeats an earlier raw_sha256", i+1)
 		}
-		expected[document.DocumentID] = struct{}{}
+		expected[document.Match.RawSHA256] = struct{}{}
 		if document.Grade < 0 || document.Grade > 3 {
-			return fmt.Errorf("expected document %q has grade %d outside 0-3", document.DocumentID, document.Grade)
+			return fmt.Errorf("expected document %d has grade %d outside 0-3", i+1, document.Grade)
 		}
 	}
 
-	for _, documentID := range c.ForbiddenDocumentIDs {
-		if !isUUID(documentID) {
-			return fmt.Errorf("forbidden document has invalid document_id %q", documentID)
+	// Spans are the answer, so an empty one would pass against any evidence at
+	// all. Reject it here rather than let it score a silent free pass.
+	for i, fact := range c.ExpectedFacts {
+		if strings.TrimSpace(fact.Span) == "" {
+			return fmt.Errorf("expected fact %d has an empty span", i+1)
 		}
+		if fact.Grade < 0 || fact.Grade > 3 {
+			return fmt.Errorf("expected fact %d has grade %d outside 0-3", i+1, fact.Grade)
+		}
+	}
+	if c.ExpectedEmpty && len(c.ExpectedFacts) > 0 {
+		return fmt.Errorf("expected-empty case asserts facts")
 	}
 	return nil
 }
 
-func isUUID(s string) bool {
-	if len(s) != 36 {
+// isSHA256Hex accepts only the lowercase form the documents table stores, so
+// a case set and a database row compare as plain strings everywhere else.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
 		return false
 	}
-	for i, r := range s {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if r != '-' {
-				return false
-			}
-			continue
-		}
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
 			return false
 		}
 	}
@@ -227,30 +272,44 @@ type Report struct {
 
 // CaseReport is the result for one evaluation case.
 type CaseReport struct {
-	CaseID                  string       `json:"case_id"`
-	Category                string       `json:"category"`
-	Passed                  bool         `json:"passed"`
-	ExpectedEmpty           bool         `json:"expected_empty"`
-	ExpectedDocumentCount   int          `json:"expected_document_count"`
-	Warnings                []string     `json:"warnings"`
-	PacketCount             int          `json:"packet_count"`
-	DocumentRecallAtK       float64      `json:"document_recall_at_k"`
-	RRFirstExpectedDocument float64      `json:"rr_first_expected_document"`
-	NDCG                    float64      `json:"ndcg"`
-	ForbiddenHits           int          `json:"forbidden_hits"`
-	DenseCandidates         int          `json:"dense_candidates"`
-	LexicalCandidates       int          `json:"lexical_candidates"`
-	FusedCandidates         int          `json:"fused_candidates"`
-	RerankedCandidates      int          `json:"reranked_candidates"`
-	SelectedPackets         int          `json:"selected_packets"`
-	BudgetUsed              int          `json:"budget_used"`
-	BudgetAllowed           int          `json:"budget_allowed"`
-	BudgetTruncated         bool         `json:"budget_truncated"`
-	WarningCount            int          `json:"warning_count"`
-	Stages                  StageMetrics `json:"stages"`
-	LatencyMS               float64      `json:"latency_ms"`
-	SubQueries              int          `json:"sub_queries"`
-	Failures                []string     `json:"failures,omitempty"`
+	CaseID                  string   `json:"case_id"`
+	Category                string   `json:"category"`
+	Passed                  bool     `json:"passed"`
+	ExpectedEmpty           bool     `json:"expected_empty"`
+	ExpectedDocumentCount   int      `json:"expected_document_count"`
+	ExpectedFactCount       int      `json:"expected_fact_count"`
+	Warnings                []string `json:"warnings"`
+	PacketCount             int      `json:"packet_count"`
+	DocumentRecallAtK       float64  `json:"document_recall_at_k"`
+	RRFirstExpectedDocument float64  `json:"rr_first_expected_document"`
+	NDCG                    float64  `json:"ndcg"`
+	FactRecall              float64  `json:"fact_recall"`
+	RRFirstFact             float64  `json:"rr_first_fact"`
+	// AnswerRank is the 1-based position of the first returned packet whose
+	// admitted text grounds an asserted fact, and 0 when none does. It is the
+	// same observation RRFirstFact carries, in the form a person reads a
+	// single run with: reciprocal rank averages well across a suite, a raw
+	// position says how far down the answer actually was. Neither gates a
+	// case — depth is watched as a trend, not asserted per case.
+	AnswerRank int `json:"answer_rank"`
+	// ExpectedDocumentRank is the same for the first expected document, and is
+	// the diagnostic that separates the two ways depth goes wrong: a good
+	// document rank with no answer rank means the budget dropped the text,
+	// while a poor document rank means the ranker did not find it.
+	ExpectedDocumentRank int          `json:"expected_document_rank"`
+	DenseCandidates      int          `json:"dense_candidates"`
+	LexicalCandidates    int          `json:"lexical_candidates"`
+	FusedCandidates      int          `json:"fused_candidates"`
+	RerankedCandidates   int          `json:"reranked_candidates"`
+	SelectedPackets      int          `json:"selected_packets"`
+	BudgetUsed           int          `json:"budget_used"`
+	BudgetAllowed        int          `json:"budget_allowed"`
+	BudgetTruncated      bool         `json:"budget_truncated"`
+	WarningCount         int          `json:"warning_count"`
+	Stages               StageMetrics `json:"stages"`
+	LatencyMS            float64      `json:"latency_ms"`
+	SubQueries           int          `json:"sub_queries"`
+	Failures             []string     `json:"failures,omitempty"`
 }
 
 // StageMetrics holds per-stage retrieval observations.
@@ -277,7 +336,8 @@ type Summary struct {
 	MeanRecall        float64 `json:"mean_recall"`
 	MeanMRR           float64 `json:"mean_mrr"`
 	MeanNDCG          float64 `json:"mean_ndcg"`
-	TotalForbidden    int     `json:"total_forbidden_hits"`
+	MeanFactRecall    float64 `json:"mean_fact_recall"`
+	MeanFactMRR       float64 `json:"mean_fact_mrr"`
 	EmptyPassRate     float64 `json:"empty_pass_rate"`
 	TotalWarnings     int     `json:"total_warnings"`
 	BudgetTruncations int     `json:"budget_truncations"`
@@ -334,7 +394,6 @@ type ThresholdsConfig struct {
 	MinRecallAtK     float64 `json:"min_recall_at_k"`
 	MinMRR           float64 `json:"min_mrr"`
 	MinNDCG          float64 `json:"min_ndcg"`
-	MaxForbiddenHits int     `json:"max_forbidden_hits"`
 	MinEmptyPassRate float64 `json:"min_empty_pass_rate"`
 	MinApproxRecall  float64 `json:"min_approximate_recall"`
 	// TopicGraph is opt-in. When Mandatory is true, failed graph gates make
@@ -349,7 +408,6 @@ func DefaultThresholds() ThresholdsConfig {
 		MinRecallAtK:     0.7,
 		MinMRR:           0.5,
 		MinNDCG:          0.5,
-		MaxForbiddenHits: 0,
 		MinEmptyPassRate: 1.0,
 		MinApproxRecall:  0.85,
 	}

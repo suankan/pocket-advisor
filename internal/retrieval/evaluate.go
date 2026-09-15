@@ -3,27 +3,25 @@ package retrieval
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
-// StageResult is the evaluation-only observation of the retrieval pipeline.
-// It exposes intermediate stage data without changing the production Result
-// contract (retrieval-design.md section 7).
+// StageResult is the evaluation-only view of one retrieval run.
 type StageResult struct {
-	Question   string
-	SubQueries []string
-	Warnings   []string
-	Budget     Budget
+	// Result is exactly what a caller receives, not a copy of the fields
+	// evaluation happened to need. Embedding it means a field added to the
+	// production result is visible to evaluation by construction, rather
+	// than through someone remembering to mirror it here — which is how
+	// graph expansion came to be invisible to evaluation for a while.
+	*Result
 
-	// Per-stage candidate counts and doc IDs.
-	DenseCandidates    []EvalCandidate
-	LexicalCandidates  []EvalCandidate
+	// Per-stage candidate counts and the intermediate candidates behind them.
 	FusedCandidates    []EvalCandidate
 	RerankedCandidates []scored
-	SelectedPackets    []Packet
 
-	// Latency per stage.
+	// Latency per stage. Dense and lexical overlap deliberately: both legs
+	// are computed in one SQL statement, so their timings are the same
+	// measurement reported under two names rather than additive costs.
 	EmbedDuration   time.Duration
 	DenseDuration   time.Duration
 	LexicalDuration time.Duration
@@ -33,10 +31,6 @@ type StageResult struct {
 	ExpandDuration  time.Duration
 	TotalDuration   time.Duration
 
-	// Exact search results for HNSW comparison.
-	ExactCandidates []EvalCandidate
-
-	// Candidate counts at each stage.
 	DenseCount   int
 	LexicalCount int
 	FusedCount   int
@@ -67,149 +61,68 @@ type EvalCandidate struct {
 	RRF       float64
 }
 
-// Evaluate runs the full retrieval pipeline and returns stage-level
-// observations. This is an evaluation-only method that does not change the
-// production Query contract.
-func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, error) {
-	question := strings.TrimSpace(req.Question)
-	if question == "" {
-		return nil, fmt.Errorf("empty question")
-	}
-	topK := req.TopK
-	if topK <= 0 {
-		topK = s.cfg.DefaultTopK
-	}
+// stage names a measured step of the read path.
+type stage int
 
-	cfg := s.cfg
-	if req.Rerank != nil {
-		cfg.RerankEnabled = *req.Rerank
-	}
-	if req.Decompose != nil {
-		cfg.DecomposeEnabled = *req.Decompose
-	}
-	sub := *s
-	sub.cfg = cfg
+const (
+	stageTotal stage = iota
+	stageEmbed
+	stageFusion
+	stageRerank
+	stageSelection
+	stageExpand
+)
 
-	sr := &StageResult{Question: question}
-	warn := newWarnSet()
-	totalStart := time.Now()
+// runObservation collects what evaluation needs and production discards.
+//
+// Every method tolerates a nil receiver and does nothing, which is what lets
+// one orchestration serve both callers: Query passes nil and pays a pointer
+// comparison per stage, never allocating a candidate copy and never reaching
+// time.Now at all.
+type runObservation struct {
+	total, embed, fusion, rerank, selection, expand time.Duration
 
-	// 1. Decompose.
-	subQueries, w := sub.decompose(ctx, question)
-	warn.add(w)
-	sr.SubQueries = subQueries
-
-	// 2. Per sub-query: embed and fuse.
-	groups := make([][]candidate, 0, len(subQueries))
-	var denseCount, lexCount int
-	for i, q := range subQueries {
-		embedStart := time.Now()
-		vecs, err := sub.Embedder.Embed(ctx, []string{q})
-		if err != nil {
-			return nil, fmt.Errorf("embed sub-query %d: %w", i+1, err)
-		}
-		sr.EmbedDuration += time.Since(embedStart)
-
-		if strings.TrimSpace(q) == "" {
-			warn.add(WarnLexicalQueryEmpty)
-		}
-
-		fuseStart := time.Now()
-		cands, err := sub.fuse(ctx, vecs[0], q, i)
-		if err != nil {
-			return nil, err
-		}
-		sr.recordFusionDuration(time.Since(fuseStart))
-
-		// Count dense and lexical contributions.
-		for _, c := range cands {
-			if c.DenseRank > 0 {
-				denseCount++
-			}
-			if c.LexRank > 0 {
-				lexCount++
-			}
-		}
-
-		if denseYield(cands) < cfg.VecCandidates && len(cands) < cfg.RerankCandidates {
-			warn.add(WarnDenseLegUnderfill)
-		}
-
-		groups = append(groups, cands)
-	}
-
-	sr.DenseCount = denseCount
-	sr.LexicalCount = lexCount
-
-	// Record fused candidates.
-	sr.recordFusedCandidates(groups)
-
-	// 3. Pool candidates.
-	poolStart := time.Now()
-	pool, floored := sub.poolCandidates(groups, cfg.RerankCandidates)
-	if floored {
-		warn.add(WarnPoolFloorApplied)
-	}
-	sr.SelectDuration += time.Since(poolStart)
-
-	// 4. Rerank.
-	rerankStart := time.Now()
-	ranked, w := sub.rerank(ctx, question, pool)
-	warn.add(w)
-	sr.RerankDuration += time.Since(rerankStart)
-
-	for _, r := range ranked {
-		sr.RerankedCandidates = append(sr.RerankedCandidates, r)
-	}
-	sr.RerankCount = len(ranked)
-
-	// 5. Select.
-	selectStart := time.Now()
-	sel := sub.selectPackets(ranked, topK)
-	if sel.FlooredCount > 0 && len(sel.Picked) < topK {
-		warn.add(WarnRelevanceFloorApplied)
-	}
-	if sel.ThreadCapped {
-		warn.add(WarnThreadCapped)
-	}
-	sr.SelectDuration += time.Since(selectStart)
-
-	// 6. Expand and build packets.
-	expandStart := time.Now()
-	packets, budget, err := sub.buildPackets(ctx, sel.Picked, subQueries)
-	if err != nil {
-		return nil, err
-	}
-	_, graphWarnings := sub.expandTopicGraph(ctx, sel.Picked, budget)
-	warn.addAll(graphWarnings)
-	if budget.truncated {
-		warn.add(WarnBudgetTruncated)
-	}
-	sr.ExpandDuration += time.Since(expandStart)
-
-	sr.TotalDuration = time.Since(totalStart)
-	sr.SelectedPackets = packets
-	sr.Budget = Budget{BytesUsed: budget.used, BytesAllowed: cfg.AnswerContextBytes}
-	sr.Warnings = warn.list()
-	sr.SelectCount = len(sel.Picked)
-
-	return sr, nil
+	fused    []EvalCandidate
+	ranked   []scored
+	selected int
 }
 
-// recordFusionDuration records the shared SQL round-trip for every logical
-// stage it performs. Dense and lexical candidates are calculated in the same
-// statement, so their timings overlap rather than being additive.
-func (sr *StageResult) recordFusionDuration(d time.Duration) {
-	sr.DenseDuration += d
-	sr.LexicalDuration += d
-	sr.FuseDuration += d
+// noopDone is returned by begin on a nil observation so the call site can
+// stay unconditional without allocating a closure per stage.
+var noopDone = func() {}
+
+// begin starts timing a stage and returns the function that records it.
+func (o *runObservation) begin(st stage) func() {
+	if o == nil {
+		return noopDone
+	}
+	at := time.Now()
+	return func() {
+		d := time.Since(at)
+		switch st {
+		case stageTotal:
+			o.total += d
+		case stageEmbed:
+			o.embed += d
+		case stageFusion:
+			o.fusion += d
+		case stageRerank:
+			o.rerank += d
+		case stageSelection:
+			o.selection += d
+		case stageExpand:
+			o.expand += d
+		}
+	}
 }
 
-// recordFusedCandidates exposes the fused candidate yield used by evaluation.
-func (sr *StageResult) recordFusedCandidates(groups [][]candidate) {
+func (o *runObservation) recordFused(groups [][]candidate) {
+	if o == nil {
+		return
+	}
 	for _, g := range groups {
 		for _, c := range g {
-			sr.FusedCandidates = append(sr.FusedCandidates, EvalCandidate{
+			o.fused = append(o.fused, EvalCandidate{
 				ChunkID:   c.ChunkID,
 				DocID:     c.DocID,
 				DenseRank: c.DenseRank,
@@ -218,7 +131,62 @@ func (sr *StageResult) recordFusedCandidates(groups [][]candidate) {
 			})
 		}
 	}
-	sr.FusedCount = len(sr.FusedCandidates)
+}
+
+func (o *runObservation) recordRanked(ranked []scored) {
+	if o == nil {
+		return
+	}
+	o.ranked = append(o.ranked, ranked...)
+}
+
+func (o *runObservation) recordSelected(n int) {
+	if o == nil {
+		return
+	}
+	o.selected = n
+}
+
+// stageResult projects the observation, alongside the result the caller would
+// have received, into the shape evaluation reports on.
+func (o *runObservation) stageResult(res *Result) *StageResult {
+	sr := &StageResult{
+		Result:             res,
+		FusedCandidates:    o.fused,
+		RerankedCandidates: o.ranked,
+		EmbedDuration:      o.embed,
+		DenseDuration:      o.fusion,
+		LexicalDuration:    o.fusion,
+		FuseDuration:       o.fusion,
+		RerankDuration:     o.rerank,
+		SelectDuration:     o.selection,
+		ExpandDuration:     o.expand,
+		TotalDuration:      o.total,
+		FusedCount:         len(o.fused),
+		RerankCount:        len(o.ranked),
+		SelectCount:        o.selected,
+	}
+	for _, c := range o.fused {
+		if c.DenseRank > 0 {
+			sr.DenseCount++
+		}
+		if c.LexRank > 0 {
+			sr.LexicalCount++
+		}
+	}
+	return sr
+}
+
+// Evaluate runs the same read path Query runs and additionally reports its
+// intermediate stages. It adds observation; it does not re-implement the
+// pipeline, so there is no ordering that can drift from production.
+func (s *Service) Evaluate(ctx context.Context, req Request) (*StageResult, error) {
+	obs := &runObservation{}
+	res, err := s.run(ctx, req, obs)
+	if err != nil {
+		return nil, err
+	}
+	return obs.stageResult(res), nil
 }
 
 // EvaluateExactSearch runs a brute-force cosine-distance search over the same

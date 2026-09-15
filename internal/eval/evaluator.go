@@ -237,7 +237,7 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Resol
 	// too: it reaches the caller in the same response, so a fact grounded
 	// there is genuinely groundable.
 	var packets []packetRef
-	for _, p := range sr.SelectedPackets {
+	for _, p := range sr.Packets {
 		text := p.Text
 		for _, related := range p.Related {
 			if related.Text != "" {

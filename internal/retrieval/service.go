@@ -125,7 +125,24 @@ type Budget struct {
 }
 
 // Query runs the read path end to end.
+//
+// Every caller of the read path — the CLI, both MCP transports, and
+// evaluation — goes through the single orchestration below. Evaluation used
+// to sequence the same stages in a function of its own, which meant the
+// ordering existed twice and nothing kept the two in step: a stage added
+// here and forgotten there would have left evaluation confidently measuring
+// a pipeline no user receives, which is the one failure an evaluation
+// harness exists to prevent.
 func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
+	return s.run(ctx, req, nil)
+}
+
+// run is the read path. obs may be nil, and is nil for every production
+// request: a nil observation records nothing and never calls time.Now, so
+// serving pays a pointer comparison per stage for being measurable.
+func (s *Service) run(ctx context.Context, req Request, obs *runObservation) (*Result, error) {
+	defer obs.begin(stageTotal)()
+
 	question := strings.TrimSpace(req.Question)
 	if question == "" {
 		return nil, fmt.Errorf("empty question")
@@ -158,7 +175,9 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 	//    is what makes fanning out and reranking once affordable.
 	groups := make([][]candidate, 0, len(subQueries))
 	for i, q := range subQueries {
+		doneEmbed := obs.begin(stageEmbed)
 		vecs, err := sub.Embedder.Embed(ctx, []string{q})
+		doneEmbed()
 		if err != nil {
 			return nil, fmt.Errorf("embed sub-query %d: %w", i+1, err)
 		}
@@ -168,7 +187,9 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 		if strings.TrimSpace(q) == "" {
 			warn.add(WarnLexicalQueryEmpty)
 		}
+		doneFuse := obs.begin(stageFusion)
 		cands, err := sub.fuse(ctx, vecs[0], q, i)
+		doneFuse()
 		if err != nil {
 			return nil, err
 		}
@@ -177,33 +198,44 @@ func (s *Service) Query(ctx context.Context, req Request) (*Result, error) {
 		}
 		groups = append(groups, cands)
 	}
+	obs.recordFused(groups)
 
 	// 3. Union with reserved floors, so a leg or sub-query that cannot compete
 	//    on fused score is not silently erased (§4.1).
+	donePool := obs.begin(stageSelection)
 	pool, floored := sub.poolCandidates(groups, cfg.RerankCandidates)
+	donePool()
 	if floored {
 		warn.add(WarnPoolFloorApplied)
 	}
 
 	// 4. Rerank once, against the original question.
+	doneRerank := obs.begin(stageRerank)
 	ranked, w := sub.rerank(ctx, question, pool)
+	doneRerank()
 	warn.add(w)
+	obs.recordRanked(ranked)
 
 	// 5. Relevance floor, one per document, thread cap.
+	doneSelect := obs.begin(stageSelection)
 	sel := sub.selectPackets(ranked, topK)
+	doneSelect()
 	if sel.FlooredCount > 0 && len(sel.Picked) < topK {
 		warn.add(WarnRelevanceFloorApplied)
 	}
 	if sel.ThreadCapped {
 		warn.add(WarnThreadCapped)
 	}
+	obs.recordSelected(len(sel.Picked))
 
 	// 6. Expand through lineage and pack against the shared budget.
+	doneExpand := obs.begin(stageExpand)
 	packets, budget, err := sub.buildPackets(ctx, sel.Picked, subQueries)
 	if err != nil {
 		return nil, err
 	}
 	graph, graphWarnings := sub.expandTopicGraph(ctx, sel.Picked, budget)
+	doneExpand()
 	warn.addAll(graphWarnings)
 	if budget.truncated {
 		warn.add(WarnBudgetTruncated)

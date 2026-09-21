@@ -114,12 +114,12 @@ type Delta struct {
 	PreviousAt    time.Time `json:"previous_at"`
 	PreviousSHA   string    `json:"previous_commit_sha"`
 
-	PassedCases    int     `json:"passed_cases"`
-	MeanRecall     float64 `json:"mean_recall"`
-	MeanMRR        float64 `json:"mean_mrr"`
-	MeanNDCG       float64 `json:"mean_ndcg"`
-	MeanFactRecall float64 `json:"mean_fact_recall"`
-	MeanFactMRR    float64 `json:"mean_fact_mrr"`
+	PassedCases         int     `json:"passed_cases"`
+	MeanRecall          float64 `json:"mean_recall"`
+	MeanMRR             float64 `json:"mean_mrr"`
+	MeanNDCG            float64 `json:"mean_ndcg"`
+	MeanDeliveredRecall float64 `json:"mean_delivered_recall"`
+	MeanDeliveredMRR    float64 `json:"mean_delivered_mrr"`
 
 	// Fixed and Regressed are case ids, which are the operator's own stable
 	// labels rather than workspace content.
@@ -130,15 +130,15 @@ type Delta struct {
 // Compare reports how cur moved relative to prev.
 func Compare(prev, cur *Report) Delta {
 	d := Delta{
-		PreviousRunID:  prev.RunID,
-		PreviousAt:     prev.Timestamp,
-		PreviousSHA:    prev.CommitSHA,
-		PassedCases:    cur.Summary.PassedCases - prev.Summary.PassedCases,
-		MeanRecall:     cur.Summary.MeanRecall - prev.Summary.MeanRecall,
-		MeanMRR:        cur.Summary.MeanMRR - prev.Summary.MeanMRR,
-		MeanNDCG:       cur.Summary.MeanNDCG - prev.Summary.MeanNDCG,
-		MeanFactRecall: cur.Summary.MeanFactRecall - prev.Summary.MeanFactRecall,
-		MeanFactMRR:    cur.Summary.MeanFactMRR - prev.Summary.MeanFactMRR,
+		PreviousRunID:       prev.RunID,
+		PreviousAt:          prev.Timestamp,
+		PreviousSHA:         prev.CommitSHA,
+		PassedCases:         cur.Summary.PassedCases - prev.Summary.PassedCases,
+		MeanRecall:          cur.Summary.MeanRecall - prev.Summary.MeanRecall,
+		MeanMRR:             cur.Summary.MeanMRR - prev.Summary.MeanMRR,
+		MeanNDCG:            cur.Summary.MeanNDCG - prev.Summary.MeanNDCG,
+		MeanDeliveredRecall: cur.Summary.MeanDeliveredRecall - prev.Summary.MeanDeliveredRecall,
+		MeanDeliveredMRR:    cur.Summary.MeanDeliveredMRR - prev.Summary.MeanDeliveredMRR,
 	}
 
 	was := make(map[string]bool, len(prev.Cases))

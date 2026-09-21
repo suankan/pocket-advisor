@@ -68,6 +68,12 @@ type Options struct {
 	Doctor  bool
 	Recover bool
 
+	// Golden-case authoring (retrieval-design.md's evaluation section).
+	// CorpusSearch deliberately bypasses retrieval: a case whose expected
+	// answer came from the ranker can never fail for the ranker missing a
+	// document, which is the failure worth catching.
+	CorpusSearch string
+
 	// Email metadata reprocessing (ingestion-design.md §2.5): a maintenance
 	// walk over one workspace's email message documents, not an ingest.
 	ReprocessEmail   bool
@@ -89,7 +95,6 @@ type Options struct {
 	EvalCases      string
 	EvalReport     string
 	EvalFilterIDs  string
-	EvalFilterCats string
 	EvalRunHNSW    bool
 	EvalEfSearch   int
 	EvalReadiness  bool
@@ -113,6 +118,15 @@ Modes (exactly one):
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
                       (retrieval-design.md §6.1)
+  --corpus-search <text>
+                      find every document whose text contains that exact
+                      wording, searching the corpus directly rather than
+                      through retrieval. Whitespace runs are collapsed
+                      before comparing, so extracted PDF layout does not
+                      hide a match. Use it to author a golden case: the
+                      answer has to be established independently of the
+                      ranker, or the case can never fail for the ranker
+                      missing a document. A full scan, tens of seconds.
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
@@ -212,7 +226,6 @@ Evaluate options:
   --eval-report <path>       write the report somewhere other than the
                              default workspaces/evaluation/<workspace>/runs/
   --eval-filter-ids <csv>    comma-separated case IDs to evaluate
-  --eval-filter-cats <csv>   comma-separated categories to evaluate
   --eval-hnsw                run exact vs HNSW dense search comparison
   --eval-ef-search N         HNSW ef_search for comparison (default 40)
   --eval-readiness           check readiness without running queries
@@ -305,6 +318,8 @@ func Parse(args []string) (*Options, error) {
 	fs.Float64Var(&o.PruneMaxShare, "prune-max-share", 0,
 		"share of the corpus one sweep may remove before refusing (0 = 10%, 1 = no limit)")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
+	fs.StringVar(&o.CorpusSearch, "corpus-search", "",
+		"find documents containing this exact text, bypassing retrieval")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
 	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from original bytes")
@@ -322,7 +337,6 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write the report somewhere other than the per-workspace runs directory")
 	fs.StringVar(&o.EvalFilterIDs, "eval-filter-ids", "", "comma-separated case IDs to evaluate")
-	fs.StringVar(&o.EvalFilterCats, "eval-filter-cats", "", "comma-separated categories to evaluate")
 	fs.BoolVar(&o.EvalRunHNSW, "eval-hnsw", false, "run exact vs HNSW dense search comparison")
 	fs.IntVar(&o.EvalEfSearch, "eval-ef-search", 40, "HNSW ef_search for comparison")
 	fs.BoolVar(&o.EvalReadiness, "eval-readiness", false, "check readiness without running queries")
@@ -375,6 +389,7 @@ func (o *Options) modes() []string {
 		{o.TopicGraphRetire != "", "--retire-topic-graph"},
 		{o.TopicGraphRemove != "", "--remove-topic-graph"},
 		{o.Evaluate, "--evaluate"},
+		{o.CorpusSearch != "", "--corpus-search"},
 	} {
 		if c.on {
 			m = append(m, c.name)
@@ -393,7 +408,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --doctor, --recover, --reprocess-email-metadata, --topic-graph-build, --finalize-topic-graph, --promote-topic-graph, --retire-topic-graph, --remove-topic-graph, --evaluate, --delete-data, " +
+			"--query, --doctor, --recover, --reprocess-email-metadata, --topic-graph-build, --finalize-topic-graph, --promote-topic-graph, --retire-topic-graph, --remove-topic-graph, --evaluate, --corpus-search, --delete-data, " +
 			"--forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
@@ -525,7 +540,6 @@ func Run(o *Options) error {
 			CaseSet:    o.EvalCases,
 			ReportPath: o.EvalReport,
 			FilterIDs:  o.EvalFilterIDs,
-			FilterCats: o.EvalFilterCats,
 			JSON:       o.JSON,
 			RunHNSW:    o.EvalRunHNSW,
 			EfSearch:   o.EvalEfSearch,
@@ -535,6 +549,8 @@ func Run(o *Options) error {
 		return runEvaluate(o, cfg, logs, eo)
 	case o.Query != "":
 		return runQuery(o, cfg, logs)
+	case o.CorpusSearch != "":
+		return runCorpusSearch(o, cfg, logs, o.CorpusSearch)
 	case o.Doctor:
 		return runDoctor(o, cfg, logs)
 	case o.Recover:

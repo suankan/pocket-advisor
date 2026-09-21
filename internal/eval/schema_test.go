@@ -16,18 +16,14 @@ func TestLoadCaseSet(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cases.json")
 	content := `{
-  "version": 4,
+  "version": 6,
   "set_id": "test-set",
   "cases": [
     {
       "id": "case-1",
-      "category": "exact-identifier",
       "question": "What is the vector dimension?",
       "expected_documents": [
         {"match": {"raw_sha256": "` + hashA + `"}, "grade": 3}
-      ],
-      "expected_facts": [
-        {"span": "the dimension is 1024", "grade": 3}
       ],
       "require_all_expected_documents": true
     }
@@ -47,30 +43,28 @@ func TestLoadCaseSet(t *testing.T) {
 	if got := cs.Cases[0].ExpectedDocuments[0].Match.RawSHA256; got != hashA {
 		t.Errorf("raw_sha256 = %q, want %q", got, hashA)
 	}
-	if len(cs.Cases[0].ExpectedFacts) != 1 {
-		t.Errorf("expected facts = %d, want 1", len(cs.Cases[0].ExpectedFacts))
-	}
 	if !cs.Cases[0].RequireAllExpectedDocuments {
 		t.Error("RequireAllExpectedDocuments = false, want true")
 	}
 }
 
-// A v3 set anchors on document UUIDs, which a rebuilt workspace renumbers.
-// Loading one would measure nothing, so the version gate refuses it rather
-// than resolving zero documents and reporting a quality failure.
-func TestLoadCaseSet_RejectsUUIDAnchoredSet(t *testing.T) {
+// JSON silently ignores unknown fields, so an older set would load with the
+// parts this schema dropped simply vanishing. Refusing it by version is what
+// makes one version mean exactly one shape.
+func TestLoadCaseSet_RejectsAnOlderSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cases.json")
-	content := `{"version": 3, "set_id": "test-set", "cases": [{"id": "c1", "question": "test?",
-	  "expected_documents": [{"document_id": "11111111-1111-1111-1111-111111111111", "grade": 1}]}]}`
+	content := `{"version": 5, "set_id": "test-set", "cases": [{"id": "c1", "question": "test?",
+	  "category": "exact-identifier",
+	  "expected_documents": [{"match": {"raw_sha256": "` + hashA + `"}, "grade": 1}]}]}`
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := LoadCaseSet(path)
 	if err == nil {
-		t.Fatal("expected error for a version 3 case set")
+		t.Fatal("expected error for a version 5 case set")
 	}
-	if !strings.Contains(err.Error(), "version 3") {
+	if !strings.Contains(err.Error(), "version 5") {
 		t.Errorf("error = %v, want it to name the unsupported version", err)
 	}
 }
@@ -86,7 +80,6 @@ func TestValidateCaseSetUsesContentHashes(t *testing.T) {
 		return &CaseSet{Version: CaseSchemaVersion, SetID: "golden", Cases: []Case{{
 			ID: "case-1", Question: "Question",
 			ExpectedDocuments: []ExpectedDocument{{Match: DocumentMatch{RawSHA256: hashA}, Grade: 3}},
-			ExpectedFacts:     []ExpectedFact{{Span: "an exact span", Grade: 3}},
 		}}}
 	}
 	if err := ValidateCaseSet(valid()); err != nil {
@@ -107,8 +100,7 @@ func TestValidateCaseSetUsesContentHashes(t *testing.T) {
 		{"duplicate expected document", func(c *Case) {
 			c.ExpectedDocuments = append(c.ExpectedDocuments, c.ExpectedDocuments[0])
 		}},
-		{"empty fact span passes against anything", func(c *Case) { c.ExpectedFacts[0].Span = "   " }},
-		{"fact grade out of range", func(c *Case) { c.ExpectedFacts[0].Grade = 9 }},
+		{"document grade out of range", func(c *Case) { c.ExpectedDocuments[0].Grade = 9 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := valid()
@@ -129,11 +121,6 @@ func TestValidateCaseSetRequiresExpectedDocumentsForRegularCases(t *testing.T) {
 	if err := ValidateCaseSet(base); err != nil {
 		t.Fatalf("ValidateCaseSet(expected-empty case) error = %v", err)
 	}
-	base.Cases[0].ExpectedFacts = []ExpectedFact{{Span: "anything", Grade: 3}}
-	if err := ValidateCaseSet(base); err == nil {
-		t.Fatal("ValidateCaseSet() accepted facts on an expected-empty case")
-	}
-	base.Cases[0].ExpectedFacts = nil
 	base.Cases[0].ExpectedDocuments = []ExpectedDocument{{Match: DocumentMatch{RawSHA256: hashA}, Grade: 1}}
 	if err := ValidateCaseSet(base); err == nil {
 		t.Fatal("ValidateCaseSet() accepted expected documents on expected-empty case")

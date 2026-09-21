@@ -127,12 +127,12 @@ func TestCompareReportsMovementAndTheCasesBehindIt(t *testing.T) {
 		CaseReport{CaseID: "a", Passed: true},
 		CaseReport{CaseID: "b", Passed: false},
 		CaseReport{CaseID: "c", Passed: true})
-	prev.Summary.MeanRecall, prev.Summary.MeanFactRecall = 0.80, 0.70
+	prev.Summary.MeanRecall, prev.Summary.MeanDeliveredRecall = 0.80, 0.70
 	cur := report("eval-cur", "sha-1", at.Add(time.Hour),
 		CaseReport{CaseID: "a", Passed: false},
 		CaseReport{CaseID: "b", Passed: true},
 		CaseReport{CaseID: "c", Passed: true})
-	cur.Summary.MeanRecall, cur.Summary.MeanFactRecall = 0.85, 0.90
+	cur.Summary.MeanRecall, cur.Summary.MeanDeliveredRecall = 0.85, 0.90
 
 	d := Compare(prev, cur)
 	// An equal number of fixes and regressions leaves every mean looking
@@ -149,8 +149,8 @@ func TestCompareReportsMovementAndTheCasesBehindIt(t *testing.T) {
 	if d.MeanRecall < 0.049 || d.MeanRecall > 0.051 {
 		t.Errorf("MeanRecall = %v, want about +0.05", d.MeanRecall)
 	}
-	if d.MeanFactRecall < 0.199 || d.MeanFactRecall > 0.201 {
-		t.Errorf("MeanFactRecall = %v, want about +0.20", d.MeanFactRecall)
+	if d.MeanDeliveredRecall < 0.199 || d.MeanDeliveredRecall > 0.201 {
+		t.Errorf("MeanDeliveredRecall = %v, want about +0.20", d.MeanDeliveredRecall)
 	}
 }
 

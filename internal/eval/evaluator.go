@@ -50,7 +50,7 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		return nil, err
 	}
 
-	cases := FilterCases(cs.Cases, evalCfg.FilterIDs, evalCfg.FilterCats)
+	cases := FilterCases(cs.Cases, evalCfg.FilterIDs)
 	if len(cases) == 0 {
 		return nil, fmt.Errorf("no cases match the given filters")
 	}
@@ -104,10 +104,8 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 			e.Log.Warn("case failed", "id", c.ID, "error", err)
 			cr = &CaseReport{
 				CaseID:                c.ID,
-				Category:              c.Category,
 				ExpectedEmpty:         c.ExpectedEmpty,
 				ExpectedDocumentCount: len(c.Expected),
-				ExpectedFactCount:     len(c.ExpectedFacts),
 				Passed:                false,
 				Failures:              []string{fmt.Sprintf("execution error: %v", err)},
 			}
@@ -200,10 +198,8 @@ func milliseconds(d time.Duration) float64 {
 func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c ResolvedCase) (*CaseReport, *retrieval.StageResult, error) {
 	cr := &CaseReport{
 		CaseID:                c.ID,
-		Category:              c.Category,
 		ExpectedEmpty:         c.ExpectedEmpty,
 		ExpectedDocumentCount: len(c.Expected),
-		ExpectedFactCount:     len(c.ExpectedFacts),
 	}
 
 	req := retrieval.Request{
@@ -284,9 +280,9 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Resol
 	cr.DocumentRecallAtK = DocumentRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
 	cr.RRFirstExpectedDocument = ReciprocalRankFirstExpectedDocument(packets, c.Expected)
 	cr.NDCG = NDCG(packets, c.Expected)
-	cr.FactRecall = FactRecall(packets, c.ExpectedFacts)
-	cr.RRFirstFact = ReciprocalRankFirstFact(packets, c.ExpectedFacts)
-	cr.AnswerRank = FirstFactRank(packets, c.ExpectedFacts)
+	cr.DeliveredRecall = DeliveredRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
+	cr.RRFirstDelivered = ReciprocalRankFirstDelivered(packets, c.Expected)
+	cr.DeliveredRank = FirstDeliveredRank(packets, c.Expected)
 	cr.ExpectedDocumentRank = FirstExpectedDocumentRank(packets, c.Expected)
 
 	// Determine pass/fail.
@@ -323,15 +319,14 @@ func (e *Evaluator) checkCase(c ResolvedCase, cr *CaseReport) []string {
 		} else if cr.DocumentRecallAtK == 0 {
 			failures = append(failures, "no expected document in results")
 		}
-	}
 
-	// Every asserted fact must be present in the admitted evidence. A partial
-	// answer is not a correct one, and the case exists to prove the evidence
-	// would support the whole thing.
-	if len(c.ExpectedFacts) > 0 && cr.FactRecall < 1 {
-		grounded := int(math.Round(cr.FactRecall * float64(len(c.ExpectedFacts))))
-		failures = append(failures, fmt.Sprintf(
-			"evidence grounds %d of %d expected facts", grounded, len(c.ExpectedFacts)))
+		// Finding a document and returning its text are different outcomes,
+		// and only the second lets a caller answer. The budget admits text
+		// whole or not at all, so an expected document with none delivered
+		// reaches the caller as a title and an empty body.
+		if cr.DocumentRecallAtK > 0 && cr.DeliveredRecall == 0 {
+			failures = append(failures, "expected document found but its text was not returned")
+		}
 	}
 
 	return failures
@@ -351,8 +346,7 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 	}
 
 	var recallSum, mrrSum, ndcgSum float64
-	var factRecallSum, factMRRSum float64
-	var factCases int
+	var deliveredRecallSum, deliveredMRRSum float64
 	var emptyPassed, emptyExpected int
 	thresholds := thresholdsFor(cfg)
 
@@ -378,13 +372,9 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 			mrrSum += c.RRFirstExpectedDocument
 			ndcgSum += c.NDCG
 		}
-		// Fact metrics have their own denominator: a case asserting no fact
-		// would otherwise contribute a free 1.0 and flatter every run that
-		// contained one.
-		if c.ExpectedFactCount > 0 {
-			factCases++
-			factRecallSum += c.FactRecall
-			factMRRSum += c.RRFirstFact
+		if c.ExpectedDocumentCount > 0 {
+			deliveredRecallSum += c.DeliveredRecall
+			deliveredMRRSum += c.RRFirstDelivered
 		}
 		s.TotalWarnings += c.WarningCount
 		if c.BudgetTruncated {
@@ -398,9 +388,9 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		s.MeanMRR = mrrSum / denominator
 		s.MeanNDCG = ndcgSum / denominator
 	}
-	if factCases > 0 {
-		s.MeanFactRecall = factRecallSum / float64(factCases)
-		s.MeanFactMRR = factMRRSum / float64(factCases)
+	if s.RankedCases > 0 {
+		s.MeanDeliveredRecall = deliveredRecallSum / float64(s.RankedCases)
+		s.MeanDeliveredMRR = deliveredMRRSum / float64(s.RankedCases)
 	}
 	if emptyExpected > 0 {
 		s.EmptyPassRate = float64(emptyPassed) / float64(emptyExpected)

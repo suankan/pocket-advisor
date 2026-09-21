@@ -62,8 +62,13 @@ func TestDistributionFrom(t *testing.T) {
 }
 
 func TestFilterCases(t *testing.T) {
-	cases := []Case{{ID: "c1", Category: "a"}, {ID: "c2", Category: "b"}}
-	if got := FilterCases(cases, []string{"c1"}, []string{"a"}); len(got) != 1 || got[0].ID != "c1" {
-		t.Errorf("FilterCases() = %v, want c1", got)
+	cases := []Case{{ID: "c1"}, {ID: "c2"}}
+	if got := FilterCases(cases, []string{"c1"}); len(got) != 1 || got[0].ID != "c1" {
+		t.Errorf("FilterCases() = %v, want only c1", got)
+	}
+	// No filter runs the whole suite, which is what makes a run comparable
+	// with every other unfiltered one.
+	if got := FilterCases(cases, nil); len(got) != 2 {
+		t.Errorf("FilterCases(no filter) = %v, want every case", got)
 	}
 }

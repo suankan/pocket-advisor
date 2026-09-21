@@ -437,15 +437,25 @@ The evaluation framework measures whether retrieval returns the right evidence b
 
 ### Curated private cases
 
-Store the curated v4 case set outside version control at `workspaces/evaluation/<workspace>/cases.json`, or pass its private path with `--eval-cases`.
+Store the curated v6 case set outside version control at `workspaces/evaluation/<workspace>/cases.json`, or pass its private path with `--eval-cases`.
 
-Each entry in `expected_documents[]` carries a `match.raw_sha256` and a relevance `grade`, and `require_all_expected_documents` makes every listed document mandatory. Documents are named by content hash rather than by document UUID because a UUID is minted per database: re-ingesting the same originals into a rebuilt workspace renumbers every one of them and turns a working suite into a full sheet of failures that look like a quality collapse.
+A case is an `id`, a `question`, and `expected_documents[]` — each entry a `match.raw_sha256` and a relevance `grade`. `require_all_expected_documents` makes every listed document mandatory. Documents are named by content hash rather than by document UUID because a UUID is minted per database: re-ingesting the same originals into a rebuilt workspace renumbers every one of them and turns a working suite into a full sheet of failures that look like a quality collapse.
 
-`expected_facts[]` asserts the exact text a correct answer must rest on — `span`, a `grade`, and `case_sensitive` for the rare question about styling. It catches what document recall cannot: a document that ranks well and then loses its text to the context budget scores a perfect recall while grounding nothing. Matching collapses whitespace, so extracted PDF layout does not decide the outcome.
+A case is a question and the documents that answer it — nothing else. It does not restate the answer, because the document already holds it and a copy in the case file goes stale the moment a PDF is re-extracted.
+
+Instead the run scores **delivery** alongside retrieval. A document's text arrives whole or not at all, so "the expected document came back with its text" is the honest test of whether your client could have answered from the result. A case fails when an expected document is found and its text is dropped by the context budget: recall says 1.00 while your client receives a title and an empty body.
 
 References resolve before the first query. A case naming a document the workspace no longer holds fails the run as a setup error rather than a low score, and `--eval-readiness` runs the same check.
 
-Cases do not assert how highly a result must rank. Position is reported — per case as `doc=#3 answer=#3`, and per run as the averaged reciprocals — and watched as a trend across runs rather than fixed as a contract, since any bound would have to be copied from current behaviour.
+Authoring a case is therefore one job: find the documents that answer a question. `--corpus-search` does that without consulting retrieval, which matters — a case whose expected documents came from the ranker agrees with current behaviour by construction and can never fail for the ranker missing a document.
+
+```sh
+./bin/pocket-advisor --corpus-search 'CLOSING BALANCE 45.59' --workspace-id example
+```
+
+It reports every document whose text contains that exact wording, with enough surrounding context to tell them apart. Whitespace runs are collapsed before comparing, so extracted PDF layout cannot hide a match. It is a full scan, so expect tens of seconds.
+
+Cases do not assert how highly a result must rank. Position is reported — per case as `found=#3 delivered=#3`, and per run as the averaged reciprocals — and watched as a trend across runs rather than fixed as a contract, since any bound would have to be copied from current behaviour.
 
 Every complete run is saved to `workspaces/evaluation/<workspace>/runs/`, named by its run id, and each run prints how it moved against the last comparable one:
 
@@ -453,12 +463,12 @@ Every complete run is saved to `workspaces/evaluation/<workspace>/runs/`, named 
 Report: workspaces/evaluation/main/runs/eval-20260911T004217Z.json
 Since eval-20260911T003753Z (2026-09-11 10:41, commit d4246a1):
   passed +1   documents: recall +0.034  MRR +0.012  nDCG -0.005
-               answers:   recall +0.070  MRR +0.041
+               delivered: recall +0.070  MRR +0.041
   fixed:     golden-016
   regressed: golden-021
 ```
 
-Comparison requires the same case-set digest, so editing the suite starts a new series rather than silently continuing the old one. `--eval-report <path>` redirects that write; runs narrowed with `--eval-filter-ids` or `--eval-filter-cats` stay out of the series. Do not commit case questions, document identifiers, spans, or reports.
+Comparison requires the same case-set digest, so editing the suite starts a new series rather than silently continuing the old one. `--eval-report <path>` redirects that write; runs narrowed with `--eval-filter-ids` stay out of the series. Do not commit case questions, document identifiers, or reports.
 
 Every evaluation report records a SHA-256 identity of its case-set contents. Compare quality metrics only between reports with the same case-set digest.
 
@@ -483,17 +493,15 @@ Run the optional preflight to report embedding and index readiness before an eva
 
 It probes the configured embedding endpoint, reports its model and dimension alongside `schema_metadata`, and checks that the HNSW and BM25 index names exist. It is an operator-invoked diagnostic; direct queries and MCP startup perform their own scope and dependency checks.
 
-### Filter by category or case ID
+### Filter by case ID
 
-Run only specific cases or categories:
+Run only specific cases while debugging one of them:
 
 ```sh
-# Run only paraphrase cases
-./bin/pocket-advisor --evaluate --eval-filter-cats paraphrase --workspace-id test
-
-# Run specific cases by ID
 ./bin/pocket-advisor --evaluate --eval-filter-ids case-001,case-002 --workspace-id test
 ```
+
+A filtered run stays out of the trend series: a summary over two hand-picked cases is not comparable with a summary over the suite.
 
 ### HNSW comparison
 
@@ -536,7 +544,7 @@ The evaluation reports:
 - **Document recall at k**: fraction of expected documents found in top-k results
 - **Reciprocal rank**: 1/rank of the first expected document
 - **nDCG**: normalized discounted cumulative gain using expected-document grades
-- **Answer rank**: how far down the first result that actually grounds the answer appeared
+- **Delivered rank**: how far down the first expected document that arrived with its text appeared
 - **Empty pass rate**: off-domain queries correctly returning no results
 - **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select, expand)
 

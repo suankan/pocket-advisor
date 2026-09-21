@@ -7,7 +7,6 @@ import (
 
 func TestCheckCaseUsesExpectedDocumentContracts(t *testing.T) {
 	e := &Evaluator{}
-	fact := ExpectedFact{Span: "closing balance 45.59", Grade: 3}
 	tests := []struct {
 		name       string
 		c          ResolvedCase
@@ -25,7 +24,7 @@ func TestCheckCaseUsesExpectedDocumentContracts(t *testing.T) {
 		{
 			name:       "one expected document is sufficient by default",
 			c:          ResolvedCase{Expected: []ResolvedDocument{{DocID: "a", Grade: 1}, {DocID: "b", Grade: 1}}},
-			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 0.5},
+			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 0.5, DeliveredRecall: 0.5},
 			wantPassed: true,
 		},
 		{
@@ -37,22 +36,23 @@ func TestCheckCaseUsesExpectedDocumentContracts(t *testing.T) {
 		{
 			name:       "require all expected documents accepts full coverage",
 			c:          ResolvedCase{Case: Case{RequireAllExpectedDocuments: true}},
-			cr:         CaseReport{ExpectedDocumentCount: 2, DocumentRecallAtK: 1},
+			cr:         CaseReport{ExpectedDocumentCount: 2, DocumentRecallAtK: 1, DeliveredRecall: 1},
 			wantPassed: true,
 		},
 		{
-			// The failure document recall structurally cannot see: the right
-			// document is ranked, and the budget then drops its text.
-			name:       "a ranked document whose text was not admitted fails on facts",
-			c:          ResolvedCase{Case: Case{ExpectedFacts: []ExpectedFact{fact}}, Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
-			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, FactRecall: 0},
-			wantText:   "grounds 0 of 1 expected facts",
+			// The failure plain recall structurally cannot see: the right
+			// document is ranked, and the budget then drops its text, so the
+			// caller receives a title and an empty body.
+			name:       "a ranked document whose text was not returned fails",
+			c:          ResolvedCase{Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
+			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, DeliveredRecall: 0},
+			wantText:   "text was not returned",
 			wantPassed: false,
 		},
 		{
-			name:       "grounded facts pass alongside document recall",
-			c:          ResolvedCase{Case: Case{ExpectedFacts: []ExpectedFact{fact}}, Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
-			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, FactRecall: 1},
+			name:       "a delivered document passes",
+			c:          ResolvedCase{Expected: []ResolvedDocument{{DocID: "a", Grade: 3}}},
+			cr:         CaseReport{PacketCount: 1, DocumentRecallAtK: 1, DeliveredRecall: 1},
 			wantPassed: true,
 		},
 	}

@@ -3,7 +3,6 @@ package eval
 import (
 	"math"
 	"sort"
-	"strings"
 )
 
 // DocumentRecallAtK computes the fraction of expected documents found among
@@ -177,78 +176,76 @@ type packetRef struct {
 	Text  string
 }
 
-// collapseSpace normalises whitespace runs to single spaces.
+// DeliveredRecallAtK is document recall counting only expected documents whose
+// text the run actually returned.
 //
-// The same rule that defines shared passage identity, deliberately: extracted
-// PDF text is full of layout spacing that carries no meaning, and a fact
-// assertion that broke whenever a column shifted would be measuring the
-// layout renderer rather than retrieval.
-func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
-
-func factMatches(haystack string, fact ExpectedFact) bool {
-	span := collapseSpace(fact.Span)
-	if span == "" {
-		return false
-	}
-	if fact.CaseSensitive {
-		return strings.Contains(haystack, span)
-	}
-	return strings.Contains(strings.ToLower(haystack), strings.ToLower(span))
-}
-
-// FactRecall is the fraction of asserted facts present in the admitted
-// evidence. Unlike document recall it is unaffected by which document
-// supplied the text, because a caller composing an answer does not care.
-func FactRecall(packets []packetRef, facts []ExpectedFact) float64 {
-	if len(facts) == 0 {
+// The budget admits a document's text whole or not at all, so a delivered
+// document carries everything it says and an undelivered one carries nothing.
+// That makes delivery, not the presence of any particular wording, the honest
+// test of whether a caller could work from the result: the API's job is to
+// return the documents holding the answer, and a title with an empty body does
+// not do that.
+func DeliveredRecallAtK(packets []packetRef, expected []ResolvedDocument, k int) float64 {
+	if len(expected) == 0 {
 		return 1.0
 	}
-	texts := make([]string, 0, len(packets))
-	for _, p := range packets {
-		if p.Text != "" {
-			texts = append(texts, collapseSpace(p.Text))
+	if k <= 0 {
+		k = len(packets)
+	}
+	want := make(map[string]struct{}, len(expected))
+	for _, e := range expected {
+		want[e.DocID] = struct{}{}
+	}
+	found := make(map[string]struct{}, len(expected))
+	for i, p := range packets {
+		if i >= k {
+			break
+		}
+		if p.Text == "" {
+			continue
+		}
+		if _, ok := want[p.DocID]; ok {
+			found[p.DocID] = struct{}{}
 		}
 	}
-	found := 0
-	for _, fact := range facts {
-		for _, t := range texts {
-			if factMatches(t, fact) {
-				found++
-				break
-			}
-		}
-	}
-	return float64(found) / float64(len(facts))
+	return float64(len(found)) / float64(len(expected))
 }
 
-// FirstFactRank returns the 1-based position of the first packet whose
-// admitted text grounds any asserted fact, or 0 when none does.
-//
-// The same observation ReciprocalRankFirstFact carries, kept as a raw
-// position because the two are read for different purposes: a reciprocal
-// averages sensibly across a suite, while a position is what tells a person
-// looking at one case how far down the answer actually was. Both are
-// reported; neither gates anything.
-func FirstFactRank(packets []packetRef, facts []ExpectedFact) int {
-	if len(facts) == 0 {
+// ReciprocalRankFirstDelivered is the reciprocal rank of the first expected
+// document returned with its text.
+func ReciprocalRankFirstDelivered(packets []packetRef, expected []ResolvedDocument) float64 {
+	if rank := FirstDeliveredRank(packets, expected); rank > 0 {
+		return 1.0 / float64(rank)
+	}
+	if len(expected) == 0 {
+		return 1.0
+	}
+	return 0.0
+}
+
+// FirstDeliveredRank is the 1-based position of the first expected document
+// returned with its text, or 0 when none was.
+func FirstDeliveredRank(packets []packetRef, expected []ResolvedDocument) int {
+	if len(expected) == 0 {
 		return 0
+	}
+	want := make(map[string]struct{}, len(expected))
+	for _, e := range expected {
+		want[e.DocID] = struct{}{}
 	}
 	for i, p := range packets {
 		if p.Text == "" {
 			continue
 		}
-		text := collapseSpace(p.Text)
-		for _, fact := range facts {
-			if factMatches(text, fact) {
-				return i + 1
-			}
+		if _, ok := want[p.DocID]; ok {
+			return i + 1
 		}
 	}
 	return 0
 }
 
-// FirstExpectedDocumentRank returns the 1-based position of the first
-// expected document, or 0 when none was returned.
+// FirstExpectedDocumentRank is the 1-based position of the first expected
+// document, delivered or not, or 0 when none was returned.
 func FirstExpectedDocumentRank(packets []packetRef, expected []ResolvedDocument) int {
 	if len(expected) == 0 {
 		return 0
@@ -263,26 +260,4 @@ func FirstExpectedDocumentRank(packets []packetRef, expected []ResolvedDocument)
 		}
 	}
 	return 0
-}
-
-// ReciprocalRankFirstFact returns 1/(rank of the first packet whose admitted
-// text grounds any asserted fact), or 0 when none does. It is the identity-free
-// counterpart of ReciprocalRankFirstExpectedDocument: same question, asked of
-// the evidence rather than of the row it came from.
-func ReciprocalRankFirstFact(packets []packetRef, facts []ExpectedFact) float64 {
-	if len(facts) == 0 {
-		return 1.0
-	}
-	for i, p := range packets {
-		if p.Text == "" {
-			continue
-		}
-		text := collapseSpace(p.Text)
-		for _, fact := range facts {
-			if factMatches(text, fact) {
-				return 1.0 / float64(i+1)
-			}
-		}
-	}
-	return 0.0
 }

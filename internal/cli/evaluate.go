@@ -23,7 +23,6 @@ type evaluateOptions struct {
 	CaseSet    string
 	ReportPath string
 	FilterIDs  string
-	FilterCats string
 	JSON       bool
 	RunHNSW    bool
 	EfSearch   int
@@ -113,7 +112,6 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 		CaseSetPath: caseSetPath,
 		ReportPath:  eo.ReportPath,
 		FilterIDs:   splitTrim(eo.FilterIDs),
-		FilterCats:  splitTrim(eo.FilterCats),
 		JSON:        eo.JSON,
 		RunHNSW:     eo.RunHNSW,
 		EfSearch:    eo.EfSearch,
@@ -132,7 +130,7 @@ func runEvaluate(o *Options, cfg *config.Config, logs *telemetry.Logs, eo evalua
 	// debugging tool over a handful of cases, and mixing their summaries in
 	// would make the suite look like it improved whenever someone ran three
 	// cases that happen to pass. An explicit --eval-report still writes one.
-	filtered := len(splitTrim(eo.FilterIDs)) > 0 || len(splitTrim(eo.FilterCats)) > 0
+	filtered := len(splitTrim(eo.FilterIDs)) > 0
 	runsDir := evalRunsDir(o.WorkspaceID)
 
 	previous, err := eval.PreviousComparableRun(runsDir, report)
@@ -205,8 +203,8 @@ func renderArchive(path string, delta *eval.Delta, skippedAsFiltered bool) {
 		delta.PreviousRunID, delta.PreviousAt.Local().Format("2006-01-02 15:04"), shortSHA(delta.PreviousSHA))
 	fmt.Printf("  passed %+d   documents: recall %+.3f  MRR %+.3f  nDCG %+.3f\n",
 		delta.PassedCases, delta.MeanRecall, delta.MeanMRR, delta.MeanNDCG)
-	fmt.Printf("               answers:   recall %+.3f  MRR %+.3f\n",
-		delta.MeanFactRecall, delta.MeanFactMRR)
+	fmt.Printf("               delivered: recall %+.3f  MRR %+.3f\n",
+		delta.MeanDeliveredRecall, delta.MeanDeliveredMRR)
 	if len(delta.Fixed) > 0 {
 		fmt.Printf("  fixed:     %s\n", strings.Join(delta.Fixed, ", "))
 	}
@@ -300,8 +298,8 @@ func renderEvalReport(r *eval.Report) {
 	fmt.Printf("Results: %d/%d passed\n", s.PassedCases, s.TotalCases)
 	fmt.Printf("  documents: recall %.3f  MRR %.3f  nDCG %.3f\n",
 		s.MeanRecall, s.MeanMRR, s.MeanNDCG)
-	fmt.Printf("  answers:   recall %.3f  MRR %.3f\n",
-		s.MeanFactRecall, s.MeanFactMRR)
+	fmt.Printf("  delivered: recall %.3f  MRR %.3f\n",
+		s.MeanDeliveredRecall, s.MeanDeliveredMRR)
 
 	if !s.OverallPassed {
 		fmt.Println("  OVERALL: FAILED")
@@ -318,9 +316,9 @@ func renderEvalReport(r *eval.Report) {
 		// Raw positions rather than reciprocals: this line is read one case at
 		// a time, where "the answer was 8th" says more than "0.12". The
 		// reciprocals stay in the summary, where they average properly.
-		fmt.Printf("[%s] %s (%s) doc=%s answer=%s recall=%.2f nDCG=%.2f packets=%d\n",
-			status, c.CaseID, c.Category,
-			rankLabel(c.ExpectedDocumentRank), rankLabel(c.AnswerRank),
+		fmt.Printf("[%s] %s found=%s delivered=%s recall=%.2f nDCG=%.2f packets=%d\n",
+			status, c.CaseID,
+			rankLabel(c.ExpectedDocumentRank), rankLabel(c.DeliveredRank),
 			c.DocumentRecallAtK, c.NDCG, c.PacketCount)
 		if len(c.Failures) > 0 {
 			for _, f := range c.Failures {

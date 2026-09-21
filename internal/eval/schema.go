@@ -11,32 +11,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
 // CaseSchemaVersion is the current evaluation case format version.
-const CaseSchemaVersion = 4
-
-// Category constants for case classification.
-const (
-	CatExactIdentifier = "exact-identifier"
-	CatParaphrase      = "paraphrase"
-	CatBilingual       = "bilingual"
-	CatMultiTopic      = "multi-topic"
-	CatThread          = "thread"
-	CatAttachment      = "attachment"
-	CatOffDomain       = "off-domain"
-)
+const CaseSchemaVersion = 6
 
 // Case is a single evaluation case. Stable IDs allow comparing repeated runs
 // without using question text as an identifier.
 type Case struct {
 	ID                          string             `json:"id"`
-	Category                    string             `json:"category"`
 	Question                    string             `json:"question"`
 	ExpectedDocuments           []ExpectedDocument `json:"expected_documents"`
-	ExpectedFacts               []ExpectedFact     `json:"expected_facts,omitempty"`
 	RequireAllExpectedDocuments bool               `json:"require_all_expected_documents,omitempty"`
 	ExpectedEmpty               bool               `json:"expected_empty,omitempty"`
 }
@@ -65,28 +51,16 @@ type DocumentMatch struct {
 
 // ExpectedDocument is a document a correct answer may rest on, with the
 // relevance grade nDCG scores it against.
+//
+// A case is a question paired with the documents that answer it, and nothing
+// else. Asserting the answer text as well would copy into the case file
+// something the document already states, leaving two sources of truth to keep
+// in step: re-extract a PDF under a newer OCR build and the copy is stale
+// while the document is not. Whether a caller could actually answer is
+// established by delivering the document, not by restating what it says.
 type ExpectedDocument struct {
 	Match DocumentMatch `json:"match"`
 	Grade int           `json:"grade"`
-}
-
-// ExpectedFact is text a correct answer must rest on, checked against the
-// evidence a run actually returned rather than against what it merely ranked.
-//
-// It exists because document recall cannot see the failure that matters most
-// often in practice: the right document is retrieved, and its text is then
-// dropped by the shared context budget. Recall scores 1.0, the case passes,
-// and the answer is nowhere in the response. A fact assertion fails that
-// correctly.
-//
-// Matching collapses whitespace runs on both sides, using the same rule that
-// defines shared passage identity, so PDF layout spacing does not decide the
-// outcome. CaseSensitive is for the rare question about styling rather than
-// content, where "iStem" and "iSTEM" are different answers.
-type ExpectedFact struct {
-	Span          string `json:"span"`
-	Grade         int    `json:"grade"`
-	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
 // CaseSet is a versioned collection of evaluation cases.
@@ -180,19 +154,6 @@ func validateCaseDocumentIDs(c Case) error {
 		}
 	}
 
-	// Spans are the answer, so an empty one would pass against any evidence at
-	// all. Reject it here rather than let it score a silent free pass.
-	for i, fact := range c.ExpectedFacts {
-		if strings.TrimSpace(fact.Span) == "" {
-			return fmt.Errorf("expected fact %d has an empty span", i+1)
-		}
-		if fact.Grade < 0 || fact.Grade > 3 {
-			return fmt.Errorf("expected fact %d has grade %d outside 0-3", i+1, fact.Grade)
-		}
-	}
-	if c.ExpectedEmpty && len(c.ExpectedFacts) > 0 {
-		return fmt.Errorf("expected-empty case asserts facts")
-	}
 	return nil
 }
 
@@ -210,24 +171,18 @@ func isSHA256Hex(s string) bool {
 	return true
 }
 
-// FilterCases returns cases matching the given IDs and categories. Empty
-// filters return all cases.
-func FilterCases(cases []Case, ids, categories []string) []Case {
+// FilterCases returns cases matching the given IDs. An empty filter returns
+// all cases.
+func FilterCases(cases []Case, ids []string) []Case {
 	idSet := toSet(ids)
-	catSet := toSet(categories)
+	if len(idSet) == 0 {
+		return cases
+	}
 	var out []Case
 	for _, c := range cases {
-		if len(idSet) > 0 {
-			if _, ok := idSet[c.ID]; !ok {
-				continue
-			}
+		if _, ok := idSet[c.ID]; ok {
+			out = append(out, c)
 		}
-		if len(catSet) > 0 {
-			if _, ok := catSet[c.Category]; !ok {
-				continue
-			}
-		}
-		out = append(out, c)
 	}
 	return out
 }
@@ -273,29 +228,27 @@ type Report struct {
 // CaseReport is the result for one evaluation case.
 type CaseReport struct {
 	CaseID                  string   `json:"case_id"`
-	Category                string   `json:"category"`
 	Passed                  bool     `json:"passed"`
 	ExpectedEmpty           bool     `json:"expected_empty"`
 	ExpectedDocumentCount   int      `json:"expected_document_count"`
-	ExpectedFactCount       int      `json:"expected_fact_count"`
 	Warnings                []string `json:"warnings"`
 	PacketCount             int      `json:"packet_count"`
 	DocumentRecallAtK       float64  `json:"document_recall_at_k"`
 	RRFirstExpectedDocument float64  `json:"rr_first_expected_document"`
 	NDCG                    float64  `json:"ndcg"`
-	FactRecall              float64  `json:"fact_recall"`
-	RRFirstFact             float64  `json:"rr_first_fact"`
-	// AnswerRank is the 1-based position of the first returned packet whose
-	// admitted text grounds an asserted fact, and 0 when none does. It is the
-	// same observation RRFirstFact carries, in the form a person reads a
-	// single run with: reciprocal rank averages well across a suite, a raw
-	// position says how far down the answer actually was. Neither gates a
-	// case — depth is watched as a trend, not asserted per case.
-	AnswerRank int `json:"answer_rank"`
-	// ExpectedDocumentRank is the same for the first expected document, and is
-	// the diagnostic that separates the two ways depth goes wrong: a good
-	// document rank with no answer rank means the budget dropped the text,
-	// while a poor document rank means the ranker did not find it.
+	// DeliveredRecall counts only expected documents whose text the shared
+	// budget actually admitted. The gap between it and DocumentRecallAtK is
+	// the budget dropping evidence retrieval had already found — a result
+	// plain recall reports as perfect while the caller receives a title and
+	// an empty body.
+	DeliveredRecall  float64 `json:"delivered_recall"`
+	RRFirstDelivered float64 `json:"rr_first_delivered"`
+	// DeliveredRank and ExpectedDocumentRank are 1-based positions, 0 when
+	// absent. Read together they separate the two ways a result fails a
+	// caller: equal ranks mean the evidence arrived, a rank with no delivery
+	// means the budget dropped it, and no rank at all means retrieval never
+	// found it. Neither gates a case — depth is watched as a trend.
+	DeliveredRank        int          `json:"delivered_rank"`
 	ExpectedDocumentRank int          `json:"expected_document_rank"`
 	DenseCandidates      int          `json:"dense_candidates"`
 	LexicalCandidates    int          `json:"lexical_candidates"`
@@ -329,19 +282,19 @@ type StageObservation struct {
 
 // Summary aggregates case-level results.
 type Summary struct {
-	TotalCases        int     `json:"total_cases"`
-	PassedCases       int     `json:"passed_cases"`
-	FailedCases       int     `json:"failed_cases"`
-	RankedCases       int     `json:"ranked_cases"`
-	MeanRecall        float64 `json:"mean_recall"`
-	MeanMRR           float64 `json:"mean_mrr"`
-	MeanNDCG          float64 `json:"mean_ndcg"`
-	MeanFactRecall    float64 `json:"mean_fact_recall"`
-	MeanFactMRR       float64 `json:"mean_fact_mrr"`
-	EmptyPassRate     float64 `json:"empty_pass_rate"`
-	TotalWarnings     int     `json:"total_warnings"`
-	BudgetTruncations int     `json:"budget_truncations"`
-	OverallPassed     bool    `json:"overall_passed"`
+	TotalCases          int     `json:"total_cases"`
+	PassedCases         int     `json:"passed_cases"`
+	FailedCases         int     `json:"failed_cases"`
+	RankedCases         int     `json:"ranked_cases"`
+	MeanRecall          float64 `json:"mean_recall"`
+	MeanMRR             float64 `json:"mean_mrr"`
+	MeanNDCG            float64 `json:"mean_ndcg"`
+	MeanDeliveredRecall float64 `json:"mean_delivered_recall"`
+	MeanDeliveredMRR    float64 `json:"mean_delivered_mrr"`
+	EmptyPassRate       float64 `json:"empty_pass_rate"`
+	TotalWarnings       int     `json:"total_warnings"`
+	BudgetTruncations   int     `json:"budget_truncations"`
+	OverallPassed       bool    `json:"overall_passed"`
 }
 
 // LatencyReport holds per-stage latency distributions.
@@ -420,7 +373,6 @@ type EvaluateConfig struct {
 	ReportPath  string
 	CommitSHA   string
 	FilterIDs   []string
-	FilterCats  []string
 	JSON        bool
 	RunHNSW     bool
 	EfSearch    int

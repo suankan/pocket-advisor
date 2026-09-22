@@ -93,7 +93,7 @@ func evidencePageOutputSchema() map[string]any {
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
 					"reference": map[string]any{"type": "string", "pattern": "^R[0-9a-f]{12}:E[1-9][0-9]*$"},
-					"relation":  map[string]any{"oneOf": []any{map[string]any{"enum": []string{"parent", "attachment", "same-thread"}}, map[string]any{"type": "null"}}},
+					"relation":  map[string]any{"oneOf": []any{map[string]any{"enum": []string{"parent", "attachment", "sibling-attachment"}}, map[string]any{"type": "null"}}},
 					"document":  map[string]any{"$ref": "#/$defs/document"}, "text": map[string]any{"type": "string", "minLength": 1},
 					"text_range": map[string]any{"$ref": "#/$defs/range"}, "text_complete": map[string]any{"type": "boolean"},
 				},
@@ -108,8 +108,8 @@ func documentSchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"document_id": map[string]any{"type": "string", "minLength": 1}, "parent_document_id": nullableStringSchema(),
-			"thread_id": nullableStringSchema(), "document_type": map[string]any{"type": "string", "minLength": 1},
-			"title": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"},
+			"document_type": map[string]any{"type": "string", "minLength": 1},
+			"title":         map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"},
 			"date":              map[string]any{"oneOf": []any{map[string]any{"type": "string", "format": "date-time"}, map[string]any{"type": "null"}}},
 			"source_locations":  map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			"extraction_sha256": map[string]any{"type": "string"}, "extraction_version": map[string]any{"type": "string"},
@@ -117,7 +117,7 @@ func documentSchema() map[string]any {
 			"workspace_relative_path":           nullableStringSchema(),
 			"container_workspace_relative_path": nullableStringSchema(),
 		},
-		"required": []string{"document_id", "parent_document_id", "thread_id", "document_type", "title", "from", "to", "date", "source_sha256", "source_ref", "workspace_relative_path", "container_workspace_relative_path"},
+		"required": []string{"document_id", "parent_document_id", "document_type", "title", "from", "to", "date", "source_sha256", "source_ref", "workspace_relative_path", "container_workspace_relative_path"},
 	}
 }
 

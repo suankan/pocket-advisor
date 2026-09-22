@@ -42,13 +42,13 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
 	var inserted bool
 	err = r.db.executor(ctx).QueryRow(ctx, `
         INSERT INTO documents (
-            doc_id, parent_doc_id, thread_id,
+            doc_id, parent_doc_id,
             processing_status, doc_type, mime_type, source_ref, raw_sha256,
             source_filename, metadata_headers)
-        SELECT $1::uuid,$2::uuid,$3,'PENDING',$4,$5,$6,$7::varchar,$8,$9::jsonb
+        SELECT $1::uuid,$2::uuid,'PENDING',$3,$4,$5,$6::varchar,$7,$8::jsonb
         ON CONFLICT (raw_sha256) DO UPDATE SET raw_sha256 = EXCLUDED.raw_sha256
         RETURNING doc_id::text, (xmax = 0)`,
-		d.DocID, parent, d.ThreadID,
+		d.DocID, parent,
 		d.DocType, d.MimeType, "source:"+d.DocID, d.RawSHA256, d.SourceName, meta).Scan(&id, &inserted)
 
 	if err != nil {
@@ -98,7 +98,7 @@ func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.
 // a loud failure (engine/email.decodeText holds the same line).
 var ErrInvalidText = errors.New("text is not valid UTF-8")
 
-func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threadID string) error {
+func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType string) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("save text %s: %w", docID, ErrInvalidText)
 	}
@@ -108,9 +108,8 @@ func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threa
             extraction_hash = encode(sha256(convert_to($2,'UTF8')),'hex'),
             extraction_version = 'canonical-v1',
             doc_type        = COALESCE(NULLIF($3,''), doc_type),
-            thread_id       = COALESCE(NULLIF($4,''), thread_id),
             updated_at      = now()
-        WHERE doc_id = $1`, docID, text, docType, threadID)
+        WHERE doc_id = $1`, docID, text, docType)
 	if err != nil {
 		return fmt.Errorf("save text %s: %w", docID, err)
 	}
@@ -120,11 +119,11 @@ func (r *DocumentRepo) SaveText(ctx context.Context, docID, text, docType, threa
 // SaveEmailText writes an email's body together with the RFC822 headers
 // promoted out of it. The headers become columns rather than staying inline in
 // normalized_text: they are metadata about a message, not prose the author
-// wrote into it, and they repeat identically across every message in a thread.
+// wrote into it, and they repeat identically across every reply.
 // Nothing re-attaches them to the indexed text — what a chunk belongs to is a
 // retrieval-time lookup, not part of its vector (§5.3, §5.6).
 func (r *DocumentRepo) SaveEmailText(
-	ctx context.Context, docID, text, threadID string, h domain.EmailHeaders,
+	ctx context.Context, docID, text string, h domain.EmailHeaders,
 ) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("save email text %s: %w", docID, ErrInvalidText)
@@ -139,14 +138,13 @@ func (r *DocumentRepo) SaveEmailText(
             extraction_hash = encode(sha256(convert_to($2,'UTF8')),'hex'),
             extraction_version = 'canonical-v1',
             doc_type        = 'email',
-            thread_id       = COALESCE(NULLIF($3,''), thread_id),
-            email_subject   = $4,
-            email_from      = $5,
-            email_to        = $6,
-            email_date      = $7,
+            email_subject   = $3,
+            email_from      = $4,
+            email_to        = $5,
+            email_date      = $6,
             updated_at      = now()
         WHERE doc_id = $1`,
-		docID, text, threadID, h.Subject, h.From, h.To, date)
+		docID, text, h.Subject, h.From, h.To, date)
 	if err != nil {
 		return fmt.Errorf("save email text %s: %w", docID, err)
 	}
@@ -273,18 +271,12 @@ func (r *DocumentRepo) StagedRoots(ctx context.Context) ([]StagedRoot, error) {
 func (r *DocumentRepo) DeleteWorkspace(ctx context.Context) (int64, error) {
 	var n int64
 	err := r.db.Transaction(ctx, func(ctx context.Context) error {
-		if _, err := r.db.executor(ctx).Exec(ctx, "SELECT set_config('pocket_advisor.topic_graph_remove','on',true)"); err != nil {
-			return err
-		}
-		if _, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM topic_graph_versions"); err != nil {
-			return err
-		}
 		tag, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM documents")
 		if err != nil {
 			return err
 		}
 		n = tag.RowsAffected()
-		for _, table := range []string{"email_identifier_nodes", "chunks", "source_scans", "source_roots"} {
+		for _, table := range []string{"chunks", "source_scans", "source_roots"} {
 			if _, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM "+table); err != nil {
 				return err
 			}

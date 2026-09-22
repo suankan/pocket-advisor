@@ -87,7 +87,6 @@ const (
 type Document struct {
 	DocID       string
 	ParentDocID string // empty for root documents
-	ThreadID    string
 	Status      Status
 	DocType     string
 	MimeType    string

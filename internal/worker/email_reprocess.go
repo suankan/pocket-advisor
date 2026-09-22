@@ -34,7 +34,7 @@ type EmailDocumentSelector interface {
 // EmailMetadataWriter is the single write path for browse metadata: one
 // message, one transaction, idempotent on doc_id.
 type EmailMetadataWriter interface {
-	SaveEmailMessage(ctx context.Context, m domain.EmailMessage) (domain.EmailConversation, error)
+	SaveEmailMessage(ctx context.Context, m domain.EmailMessage) error
 }
 
 // EmailSourceReader reads verified original files, the only authority for what a message says.
@@ -336,17 +336,11 @@ func (p *EmailMetadataReprocessor) reprocessOne(ctx context.Context, doc domain.
 		return nil
 	}
 
-	conv, err := p.Emails.SaveEmailMessage(ctx, emailMessageOf(doc.DocID, parsed))
-	if err != nil {
+	if err := p.Emails.SaveEmailMessage(ctx, emailMessageOf(doc.DocID, parsed)); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return &reprocessError{EmailReprocessFailed, ReasonReprocessWriteFailed, err}
-	}
-	if conv.DuplicateOf != "" {
-		// The repository retains the precise warning with the metadata row.
-		// Logging either message or document identifier would leak it.
-		p.log().Warn("duplicate message id while rebuilding metadata")
 	}
 	return nil
 }

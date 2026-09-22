@@ -20,12 +20,11 @@ func emailMessageOf(docID string, p *email.Parsed) domain.EmailMessage {
 	h := p.Headers
 
 	m := domain.EmailMessage{
-		DocID:             docID,
-		MessageID:         h.MessageID,
-		SubjectRaw:        p.Subject,
-		SubjectNormalized: email.NormalizeSubject(p.Subject),
-		AutomatedClass:    automatedClass(h.Automation),
-		ListID:            h.Automation.ListID,
+		DocID:          docID,
+		MessageID:      h.MessageID,
+		SubjectRaw:     p.Subject,
+		AutomatedClass: automatedClass(h.Automation),
+		ListID:         h.Automation.ListID,
 	}
 	if h.HasDate {
 		m.SentAt = h.Date

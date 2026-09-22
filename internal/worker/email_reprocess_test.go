@@ -103,12 +103,12 @@ type fakeWriter struct {
 	failFor map[string]bool
 }
 
-func (f *fakeWriter) SaveEmailMessage(_ context.Context, m domain.EmailMessage) (domain.EmailConversation, error) {
+func (f *fakeWriter) SaveEmailMessage(_ context.Context, m domain.EmailMessage) error {
 	atomic.AddInt32(&f.calls, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failFor[m.DocID] {
-		return domain.EmailConversation{}, errors.New("write failed")
+		return errors.New("write failed")
 	}
 	if f.saved == nil {
 		f.saved = map[string]domain.EmailMessage{}
@@ -119,7 +119,7 @@ func (f *fakeWriter) SaveEmailMessage(_ context.Context, m domain.EmailMessage) 
 	// Upsert, exactly like the repository: a second write of the same doc_id
 	// replaces the row instead of adding one.
 	f.saved[m.DocID] = m
-	return domain.EmailConversation{ConversationID: "conv-" + m.MessageID}, nil
+	return nil
 }
 
 const testWorkspace = "ws-test"

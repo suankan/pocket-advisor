@@ -12,7 +12,6 @@ type SpanHit struct {
 	RawSHA256  string
 	DocType    string
 	Title      string
-	ThreadID   string
 	Date       *time.Time
 	SourcePath string
 	// Context is the canonical text surrounding the first occurrence, with
@@ -73,7 +72,7 @@ func (r *DocumentRepo) FindSpans(ctx context.Context, spans []SpanQuery, context
 	// wildcards and quietly widen the match.
 	rows, err := r.db.executor(ctx).Query(ctx, `
 WITH folded AS (
-    SELECT raw_sha256, doc_type, thread_id, email_date,
+    SELECT raw_sha256, doc_type, email_date,
            COALESCE(NULLIF(email_subject, ''), source_filename) AS title,
            COALESCE(metadata_headers->>'source_path', '') AS source_path,
            regexp_replace(COALESCE(normalized_text, ''), '[[:space:]]+', ' ', 'g') AS canonical
@@ -81,7 +80,7 @@ WITH folded AS (
 ), needles AS (
     SELECT * FROM unnest($1::int[], $2::text[], $3::bool[]) AS n(idx, span, case_sensitive)
 )
-SELECT n.idx, d.raw_sha256, d.doc_type, d.title, d.thread_id, d.email_date, d.source_path,
+SELECT n.idx, d.raw_sha256, d.doc_type, d.title, d.email_date, d.source_path,
        substring(d.canonical FROM greatest(1, found.at - $4) FOR $5)
 FROM folded d
 CROSS JOIN needles n
@@ -103,7 +102,7 @@ ORDER BY n.idx, d.email_date NULLS LAST, d.raw_sha256`,
 		var h SpanHit
 		var index int32
 		if err := rows.Scan(&index, &h.RawSHA256, &h.DocType, &h.Title,
-			&h.ThreadID, &h.Date, &h.SourcePath, &h.Context); err != nil {
+			&h.Date, &h.SourcePath, &h.Context); err != nil {
 			return nil, err
 		}
 		h.SpanIndex = int(index)

@@ -81,7 +81,7 @@ func (s *Service) buildPackets(ctx context.Context, picked []scored, subQueries 
 		matched[id] = struct{}{}
 	}
 
-	byOrder := []Relation{RelationParent, RelationChild, RelationThreadPeer}
+	byOrder := []Relation{RelationParent, RelationChild, RelationSibling}
 	attached := map[string]struct{}{}
 	for _, rel := range byOrder {
 		for _, n := range neighbours {
@@ -110,8 +110,8 @@ func (s *Service) buildPackets(ctx context.Context, picked []scored, subQueries 
 }
 
 // ownerOf attaches a neighbour to exactly one packet — the first it relates
-// to. A thread's chronology is therefore carried once and referenced, not
-// repeated for every packet sharing that thread.
+// to. A container's other contents are therefore carried once and referenced,
+// not repeated for every packet sharing that container.
 func ownerOf(packets []Packet, n neighbour) int {
 	for i, p := range packets {
 		switch n.Relation {
@@ -123,8 +123,12 @@ func ownerOf(packets []Packet, n neighbour) int {
 			if n.ParentID == p.DocID {
 				return i
 			}
-		case RelationThreadPeer:
-			if p.ThreadID != "" && p.ThreadID == n.ThreadID {
+		case RelationSibling:
+			// A sibling belongs to the packet it shares a container with.
+			// parent_doc_id answers this for the common case; a shared
+			// attachment's own parent may name a different email, so fall
+			// back to the packet whose container the loader already matched.
+			if p.ParentID != "" && p.ParentID == n.ParentID {
 				return i
 			}
 		}

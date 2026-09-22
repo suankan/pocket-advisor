@@ -40,7 +40,7 @@ func syntheticTextResult(text string) *retrieval.Result {
 		Warnings: []string{retrieval.WarnBudgetTruncated}, Budget: retrieval.Budget{BytesUsed: len(text), BytesAllowed: len(text)},
 		Packets: []retrieval.Packet{{
 			Document: retrieval.Document{
-				DocID: "11111111-1111-1111-1111-111111111111", ThreadID: "thread-1", DocType: "email",
+				DocID: "11111111-1111-1111-1111-111111111111", DocType: "email",
 				Title: "Synthetic evidence", From: "sender@example.test", To: "reader@example.test", Date: &date,
 				SourceRef: "source:abc", SHA256: strings.Repeat("a", 64), CharCount: len(text),
 			},

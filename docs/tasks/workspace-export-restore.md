@@ -11,7 +11,7 @@ An operator can export the part of a workspace that re-ingestion cannot recreate
 
 ## Why this task is needed
 
-Original files are authoritative and live in configured directories outside this system, so ordinary file backup already covers the bytes. What it does not cover is everything PostgreSQL holds that is not derivable from those bytes: the random document UUIDs every citation, evaluation case, topic annotation and mailbox reference is stated in terms of; conversation components; promoted topic graph versions; and the source inventory that records which root a document was observed under and by what container route.
+Original files are authoritative and live in configured directories outside this system, so ordinary file backup already covers the bytes. What it does not cover is everything PostgreSQL holds that is not derivable from those bytes: the random document UUIDs every citation, evaluation case and mailbox reference is stated in terms of; and the source inventory that records which root a document was observed under and by what container route.
 
 Re-ingesting the same directories rebuilds an index, but it mints new UUIDs. Every private evaluation case, every stored reference an agent has cited, and every topic annotation is invalidated by that alone. A backup that has never completed a restore drill is not sufficient protection for personal content, and a rebuild that silently renumbers identity is not a restore.
 
@@ -29,7 +29,7 @@ When activated, implement it after the workspace doctor and ingestion recovery p
 
 Define a versioned artifact containing:
 
-- the workspace's derived database state: documents and their normalized text, chunks and placements, email metadata and the identifier graph, topic graph versions and annotations, and the source inventory and containment tables;
+- the workspace's derived database state: documents and their normalized text, chunks and placements, email metadata, and the source inventory and containment tables;
 - a source manifest naming every root binding and the root-relative path, size, content SHA-256 and observation status of every occurrence, so a restore can prove the artifact and the operator's original directories describe the same corpus;
 - a manifest checksum and per-section checksums;
 - workspace-independent format, schema and tool versions, including the embedding model and vector dimension the chunks were produced under; and
@@ -39,7 +39,7 @@ The artifact must not contain model API keys, absolute local corpus paths, or un
 
 Choose and document an encryption mechanism before writing real artifacts. Encryption at rest is the default. A plaintext export, if supported for synthetic tests, requires an explicit unsafe flag and a destination outside version control.
 
-Export and restore must round-trip every value that participates in identity or deterministic replay: document UUIDs, raw and extraction hashes, chunk byte offsets and slice hashes, container selectors, and conversation component ids.
+Export and restore must round-trip every value that participates in identity or deterministic replay: document UUIDs, raw and extraction hashes, chunk byte offsets and slice hashes, and container selectors.
 
 ### Supported commands
 
@@ -108,7 +108,7 @@ Restoring derived state is a convenience for everything except identity; identit
 
 ## Acceptance criteria
 
-- Export round-trips every identity-bearing value: document UUIDs, raw and extraction hashes, chunk offsets and slice hashes, container selectors, and conversation components.
+- Export round-trips every identity-bearing value: document UUIDs, raw and extraction hashes, chunk offsets and slice hashes, and container selectors.
 - Artifacts are encrypted by default, checksummed, versioned, and distinguishably complete.
 - Interrupted export never leaves an artifact that restore accepts as complete.
 - Restore rejects wrong keys, corrupt manifests, corrupt sections, unsafe paths, unsupported versions, mismatched embedding namespaces, and non-empty targets.

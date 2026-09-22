@@ -1,12 +1,12 @@
-// Package mailbox is the exact email browse and conversation read path: list
-// messages by mailbox and date, and fetch one conversation whole.
+// Package mailbox is the exact email browse read path: list messages by
+// mailbox and date, in a stated order, against a fixed snapshot.
 //
 // It is deliberately not part of internal/retrieval. Retrieval answers "what is
 // topically relevant to this question" and is allowed to be approximate;
-// browsing answers "which messages exist, in what order, and what replies to
-// what", where an approximation is a wrong answer. Nothing here embeds,
-// reranks, or scores: every result is a deterministic function of the stored
-// rows, the requested filters, and the snapshot the page was taken against.
+// browsing answers "which messages exist and in what order", where an
+// approximation is a wrong answer. Nothing here embeds, reranks, or scores:
+// every result is a deterministic function of the stored rows, the requested
+// filters, and the snapshot the page was taken against.
 //
 // The package is transport independent — no MCP, HTTP, or CLI types cross this
 // boundary — and its workspace scope is fixed when the Service is constructed.
@@ -35,19 +35,13 @@ type Config struct {
 	// reported, not rejected: a caller asking for too much still has a
 	// well-defined, resumable answer.
 	MaxLimit int
-	// MaxParticipants bounds the participant list on a conversation summary.
-	MaxParticipants int
-	// MaxCandidates bounds candidate conversations rendered by one request.
-	MaxCandidates int
 }
 
 // DefaultConfig is the compiled default bound set.
 func DefaultConfig() Config {
 	return Config{
-		DefaultLimit:    25,
-		MaxLimit:        200,
-		MaxParticipants: 12,
-		MaxCandidates:   100,
+		DefaultLimit: 25,
+		MaxLimit:     200,
 	}
 }
 
@@ -59,41 +53,15 @@ func (c Config) withDefaults() Config {
 	if c.MaxLimit <= 0 {
 		c.MaxLimit = d.MaxLimit
 	}
-	if c.MaxParticipants <= 0 {
-		c.MaxParticipants = d.MaxParticipants
-	}
-	if c.MaxCandidates <= 0 {
-		c.MaxCandidates = d.MaxCandidates
-	}
 	return c
 }
-
-// Relationship methods: how one message was linked to its parent, decided at
-// read time from the stored reply headers.
-const (
-	// RelationshipRoot is a message that named no parent and no ancestors.
-	RelationshipRoot = "root"
-	// RelationshipInReplyTo is the exact RFC 5322 linkage: one In-Reply-To
-	// identifier, owned by exactly one document in this workspace.
-	RelationshipInReplyTo = "in_reply_to"
-	// RelationshipReferencesRecovery is the labelled fallback: the parent
-	// itself is absent or unusable, so the nearest resolvable References
-	// ancestor stands in. It is an ancestor claim, never an exact parent one.
-	RelationshipReferencesRecovery = "references_recovery"
-	// RelationshipUnresolved is a message that named a parent or ancestors,
-	// none of which resolve to a single document here. The message stays in
-	// the conversation; it simply has no edge.
-	RelationshipUnresolved = "unresolved"
-)
 
 // Warning codes. Anything that quietly changes what a caller receives reports
 // itself here rather than in a log line nobody reads.
 const (
-	// WarnAmbiguousParent: In-Reply-To named more than one identifier, so no
-	// single parent claim can be honoured.
-	WarnAmbiguousParent = "ambiguous_parent"
-	// WarnDuplicateIdentifier: an identifier is claimed by more than one
-	// document, so linking to it would pick a copy arbitrarily.
+	// WarnDuplicateIdentifier: a Message-ID is carried by more than one
+	// document. Derived when the page is read, so it reflects the corpus as it
+	// stands rather than what was true when either copy was written.
 	WarnDuplicateIdentifier = "duplicate_identifier"
 	// WarnUndatedExcluded: a date bound was applied, and messages whose Date
 	// header was absent or unparsable cannot satisfy it.
@@ -105,14 +73,9 @@ const (
 // Omission reasons. An omission is content the result deliberately does not
 // carry; a warning is a caveat about the content it does.
 const (
-	// OmitCollapsedMessages: conversation collapse hid further matches.
-	OmitCollapsedMessages = "collapsed_messages"
-	// OmitMissingAncestor: identifiers this conversation refers to were never
-	// ingested here. Tolerated by design — the conversation is still returned.
+	// OmitMissingAncestor: identifiers a message refers to were never ingested
+	// here. Tolerated by design — the message is still returned.
 	OmitMissingAncestor = "missing_ancestor"
-	// OmitParticipantsTruncated: a summary listed more participants than the
-	// configured bound.
-	OmitParticipantsTruncated = "participants_truncated"
 )
 
 // Warning is one caveat, attributed to a document where it belongs to one.

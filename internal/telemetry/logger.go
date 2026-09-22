@@ -16,21 +16,20 @@ import (
 // that used to have a pod each — and `kubectl logs -l app=email-processor` was
 // how you read one of them in isolation. The files are that, restored.
 const (
-	RoleApp        = "pocket-advisor"
-	RoleMCP        = "mcp"
-	RoleRetention  = "retention"
-	RoleDiscover   = "discovery"
-	RoleEmail      = "email-processor"
-	RoleDocument   = "document-extractor"
-	RoleOffice     = "office-extractor"
-	RoleEmbed      = "embed-indexer"
-	RoleTopicGraph = "topic-graph"
+	RoleApp       = "pocket-advisor"
+	RoleMCP       = "mcp"
+	RoleRetention = "retention"
+	RoleDiscover  = "discovery"
+	RoleEmail     = "email-processor"
+	RoleDocument  = "document-extractor"
+	RoleOffice    = "office-extractor"
+	RoleEmbed     = "embed-indexer"
 )
 
 // Roles is every role that gets a log file, in pipeline order.
 var Roles = []string{
 	RoleApp, RoleMCP, RoleRetention, RoleDiscover,
-	RoleEmail, RoleDocument, RoleOffice, RoleEmbed, RoleTopicGraph,
+	RoleEmail, RoleDocument, RoleOffice, RoleEmbed,
 }
 
 // Logs owns the per-role log files for a run.

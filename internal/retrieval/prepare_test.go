@@ -64,18 +64,6 @@ func TestBudgeterEmptyTextAlwaysFits(t *testing.T) {
 	}
 }
 
-func TestWarnSetIsUniqueAndOrdered(t *testing.T) {
-	w := newWarnSet()
-	w.add(WarnThreadCapped)
-	w.add("")
-	w.add(WarnThreadCapped)
-	w.add(WarnBudgetTruncated)
-	got := w.list()
-	if len(got) != 2 || got[0] != WarnThreadCapped || got[1] != WarnBudgetTruncated {
-		t.Fatalf("got %q", got)
-	}
-}
-
 func TestFormatVectorIsPgvectorText(t *testing.T) {
 	if got := formatVector([]float32{1, -0.5, 0.25}); got != "[1,-0.5,0.25]" {
 		t.Fatalf("got %q", got)

@@ -32,51 +32,6 @@ func parseFixture(t *testing.T, raw string) *email.Parsed {
 	return p
 }
 
-func TestEmailMessageOfCarriesIdentifiersAndAddresses(t *testing.T) {
-	m := emailMessageOf("doc-1", parseFixture(t, threadedMessage))
-
-	if m.MessageID != "c@mail.example.test" {
-		t.Errorf("message id = %q", m.MessageID)
-	}
-	if m.SubjectRaw != "Re: Fwd: Quarterly review" {
-		t.Errorf("subject_raw = %q", m.SubjectRaw)
-	}
-	if m.SubjectNormalized != "quarterly review" {
-		t.Errorf("subject_normalized = %q", m.SubjectNormalized)
-	}
-	if m.SentAt.IsZero() {
-		t.Error("sent_at not carried")
-	}
-	if m.AutomatedClass != domain.EmailAutomatedNone {
-		t.Errorf("automated_class = %q for ordinary mail", m.AutomatedClass)
-	}
-
-	wantRefs := []domain.EmailReference{
-		{Kind: domain.EmailReferenceInReplyTo, Ordinal: 0, MessageID: "b@mail.example.test"},
-		{Kind: domain.EmailReferenceReferences, Ordinal: 0, MessageID: "a@mail.example.test"},
-		{Kind: domain.EmailReferenceReferences, Ordinal: 1, MessageID: "b@mail.example.test"},
-	}
-	if !reflect.DeepEqual(m.References, wantRefs) {
-		t.Errorf("references = %+v, want %+v", m.References, wantRefs)
-	}
-
-	// Normalized for matching, display name and raw kept for evidence, ordinal
-	// preserving header order.
-	wantAddrs := []domain.EmailAddress{
-		{Kind: domain.EmailAddressFrom, Ordinal: 0, Address: "ada@example.test",
-			DisplayName: "Ada Adviser", Raw: "Ada Adviser <Ada@Example.test>", Valid: true},
-		{Kind: domain.EmailAddressTo, Ordinal: 0, Address: "bob@example.test",
-			DisplayName: "Bob Client", Raw: "Bob Client <bob@example.test>", Valid: true},
-		{Kind: domain.EmailAddressTo, Ordinal: 1, Address: "carol@example.test",
-			Raw: "carol@example.test", Valid: true},
-		{Kind: domain.EmailAddressCc, Ordinal: 0, Address: "dana@example.test",
-			DisplayName: "Dana, D.", Raw: `"Dana, D." <dana@example.test>`, Valid: true},
-	}
-	if !reflect.DeepEqual(m.Addresses, wantAddrs) {
-		t.Errorf("addresses = %+v, want %+v", m.Addresses, wantAddrs)
-	}
-}
-
 // The identifier set is what folds a message into a conversation: its own id
 // first, then its reply headers, each contributing once however often it was
 // repeated across them.

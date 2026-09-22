@@ -14,7 +14,6 @@ import (
 	"github.com/suankan/pocket-advisor/internal/client/reranking"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
-	"github.com/suankan/pocket-advisor/internal/topicgraph"
 )
 
 // Warnings surfaced on a result. Silent degradation is the dominant failure
@@ -27,9 +26,7 @@ const (
 	WarnPoolFloorApplied         = "pool_floor_applied"
 	WarnRerankerUnavailable      = "reranker_unavailable"
 	WarnRelevanceFloorApplied    = "relevance_floor_applied"
-	WarnThreadCapped             = "thread_capped"
 	WarnBudgetTruncated          = "budget_truncated"
-	WarnTopicGraphUnavailable    = "topic_graph_unavailable"
 )
 
 // Service holds warm clients and nothing else. All state is in PostgreSQL.
@@ -46,7 +43,6 @@ type Service struct {
 
 	cfg       config.Query
 	workspace string
-	timeline  topicTimeline
 }
 
 // New wires a Service and asserts its scope.
@@ -54,17 +50,10 @@ func New(
 	db *postgres.DB, emb *embedding.Client, rr *reranking.Client, l *llm.Client,
 	cfg config.Query, workspace string, log *slog.Logger,
 ) *Service {
-	service := &Service{
+	return &Service{
 		DB: db, Embedder: emb, Reranker: rr, LLM: l,
 		cfg: cfg, workspace: workspace, Log: log,
 	}
-	// Construction cannot fail for a non-empty fixed workspace. Keep the
-	// optional graph collaborator separate so disabled ordinary retrieval never
-	// opens a graph snapshot or consults derived data.
-	if timeline, err := topicgraph.NewTimelineService(postgres.NewTopicTimelineStore(db)); err == nil {
-		service.timeline = timeline
-	}
-	return service
 }
 
 // AssertScope refuses to serve if the connected database holds anything but
@@ -96,6 +85,30 @@ func (s *Service) AssertScope(ctx context.Context) error {
 		return fmt.Errorf("database holds workspace %q but %q was requested",
 			meta.WorkspaceID, s.workspace)
 	}
+	return s.assertSchemaCurrent(ctx)
+}
+
+// assertSchemaCurrent refuses a database that still carries the retired email
+// grouping layer.
+//
+// Serving one would fail later, deep in a query, on a column this build no
+// longer selects — an error that reads as a corrupt workspace rather than as
+// an upgrade nobody ran. Failing at startup with the command to run is the
+// difference between a puzzle and an instruction. It never migrates on its
+// own: dropping data is an operator's decision.
+func (s *Service) assertSchemaCurrent(ctx context.Context) error {
+	applied, err := s.DB.ThreadingRemovalApplied(ctx)
+	if err != nil {
+		if postgres.IsUndefinedTable(err) {
+			return nil // not yet provisioned
+		}
+		return err
+	}
+	if !applied {
+		return fmt.Errorf("workspace %q needs a schema migration: run "+
+			"pocket-advisor --migrate-schema --workspace-id %s (preview with --dry-run)",
+			s.workspace, s.workspace)
+	}
 	return nil
 }
 
@@ -111,12 +124,11 @@ type Request struct {
 // is a human, or an agent that performs generation outside this codebase
 // (§6.1).
 type Result struct {
-	Question       string          `json:"question"`
-	SubQueries     []string        `json:"sub_queries"`
-	Packets        []Packet        `json:"packets"`
-	Warnings       []string        `json:"warnings"`
-	Budget         Budget          `json:"budget"`
-	GraphExpansion *GraphExpansion `json:"graph_expansion,omitempty"`
+	Question   string   `json:"question"`
+	SubQueries []string `json:"sub_queries"`
+	Packets    []Packet `json:"packets"`
+	Warnings   []string `json:"warnings"`
+	Budget     Budget   `json:"budget"`
 }
 
 type Budget struct {
@@ -223,9 +235,6 @@ func (s *Service) run(ctx context.Context, req Request, obs *runObservation) (*R
 	if sel.FlooredCount > 0 && len(sel.Picked) < topK {
 		warn.add(WarnRelevanceFloorApplied)
 	}
-	if sel.ThreadCapped {
-		warn.add(WarnThreadCapped)
-	}
 	obs.recordSelected(len(sel.Picked))
 
 	// 6. Expand through lineage and pack against the shared budget.
@@ -234,13 +243,10 @@ func (s *Service) run(ctx context.Context, req Request, obs *runObservation) (*R
 	if err != nil {
 		return nil, err
 	}
-	graph, graphWarnings := sub.expandTopicGraph(ctx, sel.Picked, budget)
 	doneExpand()
-	warn.addAll(graphWarnings)
 	if budget.truncated {
 		warn.add(WarnBudgetTruncated)
 	}
-	res.GraphExpansion = graph
 	// Always emit arrays rather than nulls. A zero-packet answer is a real,
 	// correct outcome — an off-domain question should return nothing — and a
 	// consumer should not have to distinguish "no results" from "field absent".

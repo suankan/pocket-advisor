@@ -77,19 +77,13 @@ type Options struct {
 	// Email metadata reprocessing (ingestion-design.md §2.5): a maintenance
 	// walk over one workspace's email message documents, not an ingest.
 	ReprocessEmail   bool
+	MigrateSchema    bool
 	ReprocessLimit   int
 	ReprocessConc    int
 	ReprocessMissing bool
 
 	// Topic graph mention build lifecycle. Each operation is fixed to the
 	// command's workspace and version IDs are opaque UUIDs.
-	TopicGraphBuild    bool
-	TopicGraphVersion  string
-	TopicGraphLimit    int
-	TopicGraphFinalize string
-	TopicGraphPromote  string
-	TopicGraphRetire   string
-	TopicGraphRemove   string
 
 	Evaluate       bool
 	EvalCases      string
@@ -130,6 +124,9 @@ Modes (exactly one):
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
+  --migrate-schema    apply pending workspace schema migrations. Preview with
+                      --dry-run; applying drops retired derived objects and
+                      keeps every parsed message fact. No re-ingestion follows.
   --reprocess-email-metadata
                       rebuild durable email browse metadata from originals for
                       every email message document in the workspace. For a
@@ -139,19 +136,10 @@ Modes (exactly one):
                       no queue, no re-extraction, no re-embedding —
                       and is idempotent, so repeating an interrupted run
                       converges (ingestion-design.md §2.5)
-  --topic-graph-build create a BUILDING topic graph version and populate it
                       with bounded source-backed email mentions, then classifies only
                       exact-reference candidate pairs with the local model. It
                       never changes the active version; finalize and promote are
                       separate operator actions.
-  --finalize-topic-graph <uuid>
-                      seal a complete BUILDING version for evaluation
-  --promote-topic-graph <uuid>
-                      atomically activate an evaluated READY version
-  --retire-topic-graph <uuid>
-                      explicitly deactivate the active version, retaining it
-  --remove-topic-graph <uuid>
-                      remove a BUILDING or RETIRED version and its annotations
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
@@ -216,8 +204,6 @@ Email metadata reprocessing options:
   --json                     machine-readable summary
 
 Topic graph build options:
-  --topic-graph-version <uuid>  new immutable version for --topic-graph-build
-  --topic-graph-limit N         required source-message cap (1-10000)
   --dry-run                     extract and report without creating or writing
   --json                        machine-readable aggregate summary
 
@@ -229,7 +215,7 @@ Evaluate options:
   --eval-hnsw                run exact vs HNSW dense search comparison
   --eval-ef-search N         HNSW ef_search for comparison (default 40)
   --eval-readiness           check readiness without running queries
-  --eval-thresholds <path>   thresholds JSON (default: built-in thresholds; optional topic_graph gates)
+  --eval-thresholds <path>   thresholds JSON (default: built-in thresholds)
 
 Options:
   --yes                     skip destructive confirmation prompts
@@ -247,9 +233,6 @@ Examples:
   pocket-advisor mcp stdio --workspace-id test
   pocket-advisor mcp start --workspace-id test
   pocket-advisor --reprocess-email-metadata --workspace-id test --dry-run
-  pocket-advisor --topic-graph-build --workspace-id test --topic-graph-version <uuid> --topic-graph-limit 500 --dry-run
-  pocket-advisor --finalize-topic-graph <uuid> --workspace-id test
-  pocket-advisor --promote-topic-graph <uuid> --workspace-id test
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -323,16 +306,10 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
 	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from original bytes")
+	fs.BoolVar(&o.MigrateSchema, "migrate-schema", false, "apply pending workspace schema migrations")
 	fs.IntVar(&o.ReprocessLimit, "reprocess-limit", 0, "stop after this many documents (0 = whole workspace)")
 	fs.IntVar(&o.ReprocessConc, "reprocess-concurrency", 0, "concurrent original-file reads and metadata writes (0 = default)")
 	fs.BoolVar(&o.ReprocessMissing, "reprocess-missing-only", false, "only documents with no email metadata row yet")
-	fs.BoolVar(&o.TopicGraphBuild, "topic-graph-build", false, "create and build a bounded topic graph version")
-	fs.StringVar(&o.TopicGraphVersion, "topic-graph-version", "", "new UUID version for --topic-graph-build")
-	fs.IntVar(&o.TopicGraphLimit, "topic-graph-limit", 0, "maximum source messages for --topic-graph-build")
-	fs.StringVar(&o.TopicGraphFinalize, "finalize-topic-graph", "", "seal a BUILDING topic graph UUID")
-	fs.StringVar(&o.TopicGraphPromote, "promote-topic-graph", "", "activate a READY topic graph UUID")
-	fs.StringVar(&o.TopicGraphRetire, "retire-topic-graph", "", "retire the active topic graph UUID")
-	fs.StringVar(&o.TopicGraphRemove, "remove-topic-graph", "", "remove a BUILDING or RETIRED topic graph UUID")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write the report somewhere other than the per-workspace runs directory")
@@ -383,11 +360,7 @@ func (o *Options) modes() []string {
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
 		{o.ReprocessEmail, "--reprocess-email-metadata"},
-		{o.TopicGraphBuild, "--topic-graph-build"},
-		{o.TopicGraphFinalize != "", "--finalize-topic-graph"},
-		{o.TopicGraphPromote != "", "--promote-topic-graph"},
-		{o.TopicGraphRetire != "", "--retire-topic-graph"},
-		{o.TopicGraphRemove != "", "--remove-topic-graph"},
+		{o.MigrateSchema, "--migrate-schema"},
 		{o.Evaluate, "--evaluate"},
 		{o.CorpusSearch != "", "--corpus-search"},
 	} {
@@ -408,7 +381,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
-			"--query, --doctor, --recover, --reprocess-email-metadata, --topic-graph-build, --finalize-topic-graph, --promote-topic-graph, --retire-topic-graph, --remove-topic-graph, --evaluate, --corpus-search, --delete-data, " +
+			"--query, --doctor, --recover, --reprocess-email-metadata, --migrate-schema, --evaluate, --corpus-search, --delete-data, " +
 			"--forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
@@ -420,30 +393,14 @@ func (o *Options) validate() error {
 	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
 	}
-	if o.DryRun && !(o.IngestAll || o.ReprocessEmail || o.TopicGraphBuild) {
-		return fmt.Errorf("--dry-run requires --ingest-all, --reprocess-email-metadata, or --topic-graph-build")
+	if o.DryRun && !(o.IngestAll || o.ReprocessEmail || o.MigrateSchema) {
+		return fmt.Errorf("--dry-run requires --ingest-all, --reprocess-email-metadata, or --migrate-schema")
 	}
 	if o.ReprocessLimit < 0 {
 		return fmt.Errorf("--reprocess-limit cannot be negative, got %d", o.ReprocessLimit)
 	}
 	if o.ReprocessConc < 0 {
 		return fmt.Errorf("--reprocess-concurrency cannot be negative, got %d", o.ReprocessConc)
-	}
-	if !o.TopicGraphBuild && o.DryRun && (o.TopicGraphFinalize != "" || o.TopicGraphPromote != "" || o.TopicGraphRetire != "" || o.TopicGraphRemove != "") {
-		return fmt.Errorf("--dry-run is supported only with --topic-graph-build")
-	}
-	if o.TopicGraphBuild {
-		if !validTopicGraphVersion(o.TopicGraphVersion) {
-			return fmt.Errorf("--topic-graph-build requires --topic-graph-version as a UUID")
-		}
-		if o.TopicGraphLimit <= 0 || o.TopicGraphLimit > 10000 {
-			return fmt.Errorf("--topic-graph-limit must be between 1 and 10000")
-		}
-	}
-	for _, id := range []string{o.TopicGraphFinalize, o.TopicGraphPromote, o.TopicGraphRetire, o.TopicGraphRemove} {
-		if id != "" && !validTopicGraphVersion(id) {
-			return fmt.Errorf("topic graph version must be a UUID")
-		}
 	}
 	if o.Forget != "" && len(o.Forget) != 64 {
 		return fmt.Errorf("--forget expects a 64-character sha256, got %d characters", len(o.Forget))
@@ -557,8 +514,8 @@ func Run(o *Options) error {
 		return runRecover(o, cfg, logs)
 	case o.ReprocessEmail:
 		return runReprocessEmail(o, cfg, logs)
-	case o.TopicGraphBuild || o.TopicGraphFinalize != "" || o.TopicGraphPromote != "" || o.TopicGraphRetire != "" || o.TopicGraphRemove != "":
-		return runTopicGraph(o, cfg, logs)
+	case o.MigrateSchema:
+		return runMigrateSchema(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

@@ -31,25 +31,6 @@ const (
 	EmailReferenceReferences EmailReferenceKind = "references"
 )
 
-// ConversationMethod records how a message was assigned to a conversation, so
-// a caller can tell an exact RFC linkage from a bounded heuristic.
-type ConversationMethod string
-
-const (
-	// ConversationByReferences means the message carried at least one usable
-	// identifier — its own, an In-Reply-To, or a References entry — and was
-	// folded into the identifier graph.
-	ConversationByReferences ConversationMethod = "references"
-	// ConversationBySubject is the labelled fallback for a message with no
-	// identifiers at all. It groups by normalized subject and is never
-	// presented as an exact conversation.
-	ConversationBySubject ConversationMethod = "subject_fallback"
-	// ConversationIsolated is a message with neither identifiers nor a
-	// subject: it is a conversation of one rather than a member of a bucket
-	// keyed on the empty string.
-	ConversationIsolated ConversationMethod = "isolated"
-)
-
 // EmailAutomatedClass is the stored form of the bounded automated-traffic
 // classification. The empty value means ordinary human-authored mail.
 type EmailAutomatedClass string
@@ -116,9 +97,6 @@ type EmailMessage struct {
 	MessageID string
 
 	SubjectRaw string
-	// SubjectNormalized is the conservative grouping form: lowercased, trimmed,
-	// reply and forward prefixes removed.
-	SubjectNormalized string
 
 	// SentAt is the parsed Date header, zero when absent or unparsable. It is
 	// deliberately distinct from the ingestion timestamp the repository
@@ -174,15 +152,4 @@ func (m EmailMessage) PrimarySender() string {
 		}
 	}
 	return ""
-}
-
-// EmailConversation is the assignment a write produced: which conversation the
-// message landed in, how that was decided, and whether another document already
-// owned its Message-ID.
-type EmailConversation struct {
-	ConversationID string
-	Method         ConversationMethod
-	// DuplicateOf is the document that already holds this Message-ID, empty
-	// when there is none. The identifier stays with that document.
-	DuplicateOf string
 }

@@ -30,7 +30,7 @@ import (
 // cursorVersion is the encoding version. It is checked rather than guessed at:
 // a cursor from an older build describes a page layout this one may no longer
 // produce, and silently reinterpreting it would repeat or skip messages.
-const cursorVersion = 2
+const cursorVersion = 3
 
 // cursorState is what a cursor encodes. Field names are short because the
 // encoded form travels through every transport above this package.
@@ -82,6 +82,29 @@ func decodeCursor(s string) (cursorState, error) {
 		return c, ErrCursorMalformed
 	}
 	return c, nil
+}
+
+// isUUID accepts only the canonical lowercase 8-4-4-4-12 form, which is how
+// Postgres renders a uuid and therefore the only spelling this process ever
+// issues. Accepting an uppercase variant would let two encodings of one key
+// compare unequal downstream.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // check refuses a cursor that does not belong to this request.
@@ -149,11 +172,6 @@ func (f Filters) fingerprint() string {
 	write(string(f.Direction))
 	write(timeFingerprint(f.After))
 	write(timeFingerprint(f.Before))
-	if f.Collapse {
-		write("collapse")
-	} else {
-		write("expanded")
-	}
 	// Half the digest: this is a mismatch detector between two values produced
 	// by the same process, not a signature.
 	return hex.EncodeToString(h.Sum(nil)[:16])

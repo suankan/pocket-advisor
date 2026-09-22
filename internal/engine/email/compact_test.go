@@ -62,17 +62,6 @@ func TestStripHTMLDropsScriptAndStyle(t *testing.T) {
 	}
 }
 
-func TestThreadKeyNormalisesReplyPrefixes(t *testing.T) {
-	a := ThreadKey("Re: Fwd: Settlement offer", "Jane@Example.com")
-	b := ThreadKey("Settlement offer", "jane@example.com")
-	if a != b {
-		t.Errorf("reply prefixes not normalised:\n %q\n %q", a, b)
-	}
-	if ThreadKey("Different subject", "jane@example.com") == b {
-		t.Error("distinct subjects collapsed into one thread")
-	}
-}
-
 func TestParseEmailExtractsAttachment(t *testing.T) {
 	raw := "From: a@example.com\r\n" +
 		"To: b@example.com\r\n" +

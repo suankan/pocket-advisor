@@ -17,6 +17,15 @@ import (
 // CaseSchemaVersion is the current evaluation case format version.
 const CaseSchemaVersion = 6
 
+// MeasurementVersion identifies the semantics of the measurements in a report,
+// independently of the case set they were taken over. It changes whenever a
+// reported number would mean something different for unchanged retrieval
+// behaviour, because a comparison across that boundary reports a movement
+// nothing moved. Version 2 attributes delivery to the document that returned
+// its own text; version 1 credited a document for text its neighbours
+// returned.
+const MeasurementVersion = 2
+
 // Case is a single evaluation case. Stable IDs allow comparing repeated runs
 // without using question text as an identifier.
 type Case struct {
@@ -202,27 +211,28 @@ func toSet(ss []string) map[string]struct{} {
 
 // Report is the machine-readable output of an evaluation run.
 type Report struct {
-	RunID         string            `json:"run_id"`
-	SetID         string            `json:"set_id"`
-	SetVersion    int               `json:"set_version"`
-	CaseSetSHA256 string            `json:"case_set_sha256"`
-	WorkspaceID   string            `json:"workspace_id"`
-	Timestamp     time.Time         `json:"timestamp"`
-	CommitSHA     string            `json:"commit_sha"`
-	EmbedModel    string            `json:"embed_model"`
-	EmbedDim      int               `json:"embed_dim"`
-	RerankModel   string            `json:"rerank_model"`
-	VecCandidates int               `json:"vec_candidates"`
-	FTSCandidates int               `json:"fts_candidates"`
-	RRFK          int               `json:"rrf_k"`
-	RerankEnabled bool              `json:"rerank_enabled"`
-	TopK          int               `json:"top_k"`
-	Cases         []CaseReport      `json:"cases"`
-	Summary       Summary           `json:"summary"`
-	Latency       LatencyReport     `json:"latency"`
-	ExactVsHNSW   *HNSWReport       `json:"exact_vs_hnsw,omitempty"`
-	Readiness     *ReadinessReport  `json:"readiness,omitempty"`
-	TopicGraph    *TopicGraphReport `json:"topic_graph,omitempty"`
+	RunID         string    `json:"run_id"`
+	SetID         string    `json:"set_id"`
+	SetVersion    int       `json:"set_version"`
+	CaseSetSHA256 string    `json:"case_set_sha256"`
+	WorkspaceID   string    `json:"workspace_id"`
+	Timestamp     time.Time `json:"timestamp"`
+	CommitSHA     string    `json:"commit_sha"`
+	EmbedModel    string    `json:"embed_model"`
+	EmbedDim      int       `json:"embed_dim"`
+	RerankModel   string    `json:"rerank_model"`
+	VecCandidates int       `json:"vec_candidates"`
+	FTSCandidates int       `json:"fts_candidates"`
+	RRFK          int       `json:"rrf_k"`
+	RerankEnabled bool      `json:"rerank_enabled"`
+	TopK          int       `json:"top_k"`
+	// MeasurementVersion gates comparison; see the constant.
+	MeasurementVersion int              `json:"measurement_version"`
+	Cases              []CaseReport     `json:"cases"`
+	Summary            Summary          `json:"summary"`
+	Latency            LatencyReport    `json:"latency"`
+	ExactVsHNSW        *HNSWReport      `json:"exact_vs_hnsw,omitempty"`
+	Readiness          *ReadinessReport `json:"readiness,omitempty"`
 }
 
 // CaseReport is the result for one evaluation case.
@@ -243,6 +253,13 @@ type CaseReport struct {
 	// an empty body.
 	DeliveredRecall  float64 `json:"delivered_recall"`
 	RRFirstDelivered float64 `json:"rr_first_delivered"`
+	// SupplementaryDeliveredRecall counts expected documents whose text
+	// arrived attached to another packet rather than as a packet of their
+	// own, and UnionDeliveredRecall counts either route. Reported beside
+	// primary delivery rather than folded into it: a change that moves
+	// evidence between the two is exactly what these separate.
+	SupplementaryDeliveredRecall float64 `json:"supplementary_delivered_recall"`
+	UnionDeliveredRecall         float64 `json:"union_delivered_recall"`
 	// DeliveredRank and ExpectedDocumentRank are 1-based positions, 0 when
 	// absent. Read together they separate the two ways a result fails a
 	// caller: equal ranks mean the evidence arrived, a rank with no delivery
@@ -282,19 +299,21 @@ type StageObservation struct {
 
 // Summary aggregates case-level results.
 type Summary struct {
-	TotalCases          int     `json:"total_cases"`
-	PassedCases         int     `json:"passed_cases"`
-	FailedCases         int     `json:"failed_cases"`
-	RankedCases         int     `json:"ranked_cases"`
-	MeanRecall          float64 `json:"mean_recall"`
-	MeanMRR             float64 `json:"mean_mrr"`
-	MeanNDCG            float64 `json:"mean_ndcg"`
-	MeanDeliveredRecall float64 `json:"mean_delivered_recall"`
-	MeanDeliveredMRR    float64 `json:"mean_delivered_mrr"`
-	EmptyPassRate       float64 `json:"empty_pass_rate"`
-	TotalWarnings       int     `json:"total_warnings"`
-	BudgetTruncations   int     `json:"budget_truncations"`
-	OverallPassed       bool    `json:"overall_passed"`
+	TotalCases                       int     `json:"total_cases"`
+	PassedCases                      int     `json:"passed_cases"`
+	FailedCases                      int     `json:"failed_cases"`
+	RankedCases                      int     `json:"ranked_cases"`
+	MeanRecall                       float64 `json:"mean_recall"`
+	MeanMRR                          float64 `json:"mean_mrr"`
+	MeanNDCG                         float64 `json:"mean_ndcg"`
+	MeanDeliveredRecall              float64 `json:"mean_delivered_recall"`
+	MeanDeliveredMRR                 float64 `json:"mean_delivered_mrr"`
+	MeanSupplementaryDeliveredRecall float64 `json:"mean_supplementary_delivered_recall"`
+	MeanUnionDeliveredRecall         float64 `json:"mean_union_delivered_recall"`
+	EmptyPassRate                    float64 `json:"empty_pass_rate"`
+	TotalWarnings                    int     `json:"total_warnings"`
+	BudgetTruncations                int     `json:"budget_truncations"`
+	OverallPassed                    bool    `json:"overall_passed"`
 }
 
 // LatencyReport holds per-stage latency distributions.
@@ -349,9 +368,6 @@ type ThresholdsConfig struct {
 	MinNDCG          float64 `json:"min_ndcg"`
 	MinEmptyPassRate float64 `json:"min_empty_pass_rate"`
 	MinApproxRecall  float64 `json:"min_approximate_recall"`
-	// TopicGraph is opt-in. When Mandatory is true, failed graph gates make
-	// --evaluate return non-zero; otherwise its graph measurements are informational.
-	TopicGraph *TopicGraphThresholds `json:"topic_graph,omitempty"`
 }
 
 // DefaultThresholds returns the mandatory thresholds for the

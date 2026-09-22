@@ -11,7 +11,7 @@ Pocket Advisor currently runs as a host CLI process. `internal/cli` parses comma
 - bounded ingestion and maintenance commands;
 - an interactive ingestion listener;
 - a direct query command; and
-- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence, fixed-workspace exact mailbox browse, deterministic document lookup, and bounded topic timelines, described in [MCP server design](mcp.md).
+- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence, fixed-workspace exact mailbox browse, and deterministic document lookup, described in [MCP server design](mcp.md).
 
 Answer generation is performed by the MCP client or another external consumer of evidence packets.
 

@@ -11,7 +11,7 @@ Pocket Advisor exposes retrieval evidence through two MCP transports:
 - a workspace-bound stdio MCP server over newline-delimited JSON-RPC; and
 - a workspace-bound Streamable HTTP MCP resource server, running as a local process, optionally authenticated against Google.
 
-Both transports expose the same typed JSON Schema 2020-12 compact-search, mailbox, deterministic document, and bounded topic-timeline results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
+Both transports expose the same typed JSON Schema 2020-12 compact-search, mailbox, and deterministic document results with a text compatibility representation. Each process is fixed to one workspace at startup. Stdio negotiates the connection-oriented final revisions through 2025-11-25. Streamable HTTP uses the official Go MCP SDK for the current stateless 2026-07-28 transport and 2025-11-25 compatibility required by OpenCode 1.18.15.
 
 The stdio adapter is the default local integration, started with `mcp stdio`. The HTTP adapter, started with `mcp start`, runs as a detached local background daemon bound to loopback by default (operated afterward through `mcp stop`/`mcp status`) and serves remote, browser, and hosted agent clients directly or behind an operator-supplied reverse proxy. Both adapters log to `<log_dir>/mcp.log`; `mcp stdio` also copies every line to stderr, which an MCP client typically captures into its own log view, since `mcp start` has no such reader to copy to. Authentication is optional; when enabled, Google is the sole supported identity provider. The Go process is the resource server: it verifies every bearer token as a Google-issued OIDC ID token against Google's published JWKS (signature, issuer, audience, expiry), checks the verified `email`/`email_verified` claims against an operator-maintained allowlist, then keys continuation state by issuer and subject. RFC 9728 protected-resource metadata advertises the Google issuer. There is no token-result cache, so an ID token remains valid for its own natural (Google-issued) lifetime — revoking a caller means removing their email from the allowlist and restarting the server.
 
@@ -19,23 +19,19 @@ The stdio adapter is the default local integration, started with `mcp stdio`. Th
 
 ### Tools
 
-Each workspace-bound MCP server exposes retrieval, deterministic mailbox, deterministic document lookup, and topic-timeline tools:
+Each workspace-bound MCP server exposes four tools — retrieval, evidence continuation, deterministic message browse, and deterministic document lookup:
 
 - `search` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
-- `list_messages` — lists exact email messages with a bounded normalized sender mailbox or sender-domain filter, recipient, date, direction, order, collapse, and cursor filters.
-- `fetch_conversation` — accepts only a server-issued message or conversation reference and returns the complete bounded chronological conversation.
-- `awaiting_reply_candidates` — returns bounded review candidates using configured owner identities; it is evidence for review, not a conclusion that action is required.
+- `list_messages` — lists exact email messages with a bounded normalized sender mailbox or sender-domain filter, recipient, date, direction, order, and cursor filters.
 - `fetch_document` — accepts exactly one of filename, sender+date, or subject+date and deterministically returns every matching document complete with its location, email attribution, bounded body text, and attachments.
-- `topic_timeline` — accepts only a server-issued topic mention or episode reference and bounded traversal direction, depth, node, and source-span byte limits. It returns the active graph version's cited chronological subgraph, derived relations, warnings, omissions, and budgets.
-
-No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, graph version, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
+No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
 
 Every tool advertises closed inputs, a typed JSON Schema 2020-12 output, and read-only, non-destructive, idempotent, closed-world annotations.
 
 ### Input bounds
 
-Stdio JSON-RPC frames are limited to 8 MiB. HTTP request bodies default to 1 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors and topic references are limited to 256 bytes. `top_k` is limited to 50. `topic_timeline` accepts `both`, `backward`, or `forward` direction; depth is 0–16, node count is 1–64, and cited UTF-8 source-span bytes are 1–65,536. Its latency budget is server controlled.
+Stdio JSON-RPC frames are limited to 8 MiB. HTTP request bodies default to 1 MiB. Request identifiers are limited to 256 encoded bytes. Questions are limited to 8,192 Unicode characters before whitespace trimming. Cursors are limited to 256 bytes. `top_k` is limited to 50.
 
 ### Tool metadata and description
 
@@ -47,11 +43,7 @@ The continuation description instructs the agent to accept only the opaque curso
 
 The fixed-workspace mailbox tools provide deterministic email evidence alongside semantic retrieval. They never accept a workspace, owner identity, SQL expression, document path, credential, or client-constructed reference.
 
-`list_messages` accepts one bounded exact normalized sender mailbox or bare sender domain, a bounded exact normalized recipient mailbox, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, optional conversation collapse, and an opaque cursor. A domain is an exact domain match, not a suffix or wildcard match. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
-
-`fetch_conversation` accepts exactly one server-issued message or conversation reference. It returns the complete bounded email-only conversation in stable chronological order. Each relationship is labelled `in_reply_to`, `references_recovery`, `root`, or `unresolved`; duplicate, ambiguous, missing, and malformed linkage remains visible as a warning rather than becoming an arbitrary edge.
-
-`awaiting_reply_candidates` accepts bounded participant and date filters and requires configured owner identities. It returns candidates whose latest relevant human inbound message has no later human owner-authored exact-reply descendant. A candidate is evidence for review, not a conclusion that action is required. Subject grouping, semantic similarity, and an unlinked outbound message never prove that a reply occurred. Automated, list, delivery, and third-party events remain labelled context rather than silently closing a candidate.
+`list_messages` accepts one bounded exact normalized sender mailbox or bare sender domain, a bounded exact normalized recipient mailbox, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, and an opaque cursor. A domain is an exact domain match, not a suffix or wildcard match. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
 
 Every returned message reports where to find it, exactly as retrieval evidence does: `source_path` is the message's own staged file, and `container_source_path` names the file it was extracted from when it has none of its own, such as a message nested inside another message or an archive. Both are workspace-relative, for the caller to relay to the user, never to fetch or infer.
 
@@ -64,18 +56,6 @@ Successful mailbox calls use the same typed structured-content, readable fallbac
 Every match reports its location the same way search and the mailbox tools do (`source_path` or `container_source_path`, workspace-relative, never fetched or inferred), an email's `from`/`to`/`cc` and body text (`text`, truncated and flagged `text_truncated` past a fixed size), and its direct attachments — each with their own location but no text of their own; fetch one by its filename for that. If more than one document matches, every match is returned rather than a guess at which one was meant. Zero matches means the attribute or date was not exact, not that the corpus holds nothing related — the caller must not substitute a different message found by `search` and present it as this one.
 
 `fetch_document` uses the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as the other tools in this contract.
-
-## Research dossier tools
-
-`internal/analysis` and `internal/mcp.AnalysisTool` implement two further tools that no transport currently constructs, so no running server advertises or accepts them. They are complete and covered by the package's own tests; wiring them into `newMCPTool` is the remaining step.
-
-`analyze_topic` takes a bounded question with optional participants, RFC 3339 or date-only `after`/`before` bounds, conversation references, an evidence budget and a continuation cursor. A deterministic planner turns that into a reproducible multi-pass research plan — exact participant filters, lexical and dense topic passes, thread expansion, chronological sampling and additional passes for underrepresented participants or time windows — and the executor runs it through the same retrieval service, assembling a typed dossier of cited evidence grouped by participant. `review_awaiting_reply` takes optional candidate references, a maximum item count and a cursor, and returns the deterministic awaiting-reply candidates with their bounded conversations for the client to classify.
-
-Both remain evidence tools under this contract's rules: the plan is deterministic, every statement is a citation into an evidence packet, classification is the client's inference rather than a stored fact, and nothing either tool produces is written back into the corpus. Their bounds are the same as the rest of the contract — an 8,192-rune question, at most 50 participants, 100 conversations, 20 passes, a 500,000 UTF-8 byte aggregate evidence budget, and the same 48 KiB page and 51,200-byte response ceilings.
-
-## Topic timelines
-
-`topic_timeline` follows only the active version of the fixed workspace's derived topic graph. Its `ref` input is an opaque mention or episode reference previously issued by the server; document citations are output-only and cannot seed traversal. The client may bound direction, depth, nodes, and aggregate cited source-span bytes, but cannot select a graph version, document, source range, or query expression. The server holds a repeatable-read graph snapshot for the walk and reports its version and timestamp. Each returned node preserves opaque mention and document references, UTF-8 offsets, and normalized-text and slice hashes for every cited span. Relations remain explicitly derived with a type and confidence; warnings and omitted-node counts make truncation and invalid evidence visible. A timeline has no continuation cursor: its bounded walk must fit the shared MCP response limits or fails safely so the client can lower its bounds and retry.
 
 ## Evidence interface
 

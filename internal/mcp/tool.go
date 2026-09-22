@@ -44,9 +44,6 @@ type QueryTool struct {
 	// Mailbox, when configured, exposes deterministic email browse tools in
 	// the same fixed workspace as retrieval.
 	Mailbox *MailboxTool
-	// Timeline, when configured, follows source-backed topic mentions from
-	// the active graph in this same fixed workspace.
-	Timeline *TimelineTool
 	// Document, when configured, deterministically fetches one document by
 	// an exact attribute (sender+date, subject+date, or filename), complete
 	// with its location, email attribution, body text, and attachments.
@@ -79,7 +76,6 @@ func (t *QueryTool) forCaller() *QueryTool {
 		Title:            t.Title,
 		Corpus:           append([]string(nil), t.Corpus...),
 		Mailbox:          t.Mailbox,
-		Timeline:         t.Timeline,
 		Document:         t.Document,
 		Log:              t.Log,
 		now:              t.now,
@@ -205,9 +201,6 @@ func (t *QueryTool) DescribeAll() []ToolDefinition {
 	if t.Mailbox != nil {
 		definitions = append(definitions, t.Mailbox.DescribeAll()...)
 	}
-	if t.Timeline != nil {
-		definitions = append(definitions, t.Timeline.Describe())
-	}
 	if t.Document != nil {
 		definitions = append(definitions, t.Document.Describe())
 	}
@@ -265,11 +258,8 @@ func (t *QueryTool) dispatch(ctx context.Context, raw json.RawMessage) (CallTool
 	if params.Name == "" {
 		return CallToolResult{}, &argumentError{message: "tool name is required"}
 	}
-	if t.Mailbox != nil && (params.Name == t.Mailbox.ListName() || params.Name == t.Mailbox.ConversationName() || params.Name == t.Mailbox.AwaitingReplyName()) {
+	if t.Mailbox != nil && params.Name == t.Mailbox.ListName() {
 		return t.Mailbox.Call(ctx, raw)
-	}
-	if t.Timeline != nil && params.Name == t.Timeline.Name() {
-		return t.Timeline.Call(ctx, raw)
 	}
 	if t.Document != nil && params.Name == t.Document.Name() {
 		return t.Document.Call(ctx, raw)

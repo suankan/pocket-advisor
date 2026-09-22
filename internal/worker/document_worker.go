@@ -282,14 +282,14 @@ func (w *DocumentWorker) fetch(ctx context.Context, uri, docID string) ([]byte, 
 }
 
 func (w *DocumentWorker) emit(ctx context.Context, meta *ingestionv1.DocumentMetadata, text, docType string, pages int) error {
-	if err := w.Docs.SaveText(ctx, meta.DocId, text, docType, meta.ThreadId); err != nil {
+	if err := w.Docs.SaveText(ctx, meta.DocId, text, docType); err != nil {
 		if errors.Is(err, postgres.ErrInvalidText) {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))
 		}
 		return WithDoc(meta.DocId, err)
 	}
 	tp := trace.Child(meta.Traceparent)
-	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, meta.ThreadId, tp)
+	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, tp)
 	if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 		Metadata: out, TextLength: int64(len(text)),
 	}, tp); err != nil {

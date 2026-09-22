@@ -144,7 +144,6 @@ func (s *Service) rerank(ctx context.Context, question string, pool []candidate)
 type selection struct {
 	Picked       []scored
 	FlooredCount int
-	ThreadCapped bool
 }
 
 // selectPackets narrows the reranked pool to what is returned.
@@ -155,14 +154,15 @@ type selection struct {
 // off-domain questions score every candidate below zero, so the system can
 // return nothing and mean it (§5.1).
 //
-// Then one match per document, best-ranked chunk winning. Then a cap per
-// thread, because per-document dedup does not see that 23 messages of one
-// conversation are 23 distinct documents — measured, a single thread took all
-// ten top results.
+// Then one match per document, best-ranked chunk winning.
 //
-// thread_id == "" is not a thread. It is the default for anything that never
-// went through email threading, so capping on it would treat every standalone
-// PDF as one conversation.
+// Nothing bounds how much of one conversation a single result set may carry.
+// The per-thread cap that used to did so on a grouping this system no longer
+// derives, and no replacement key was substituted: one email and its
+// attachments is a different shape from many messages of one exchange, so a
+// container-based cap would not have bounded what the old one bounded. The
+// consequence is recorded rather than papered over — see the open decision in
+// retrieval-design.md.
 //
 // Duplicate passages are dropped alongside per-document dedup, and for the
 // same reason that rule is not enough on its own: boilerplate is stored as its
@@ -172,7 +172,6 @@ type selection struct {
 // ever replaces a repeat with the next distinct passage.
 func (s *Service) selectPackets(ranked []scored, topK int) selection {
 	var sel selection
-	perThread := map[string]int{}
 	seenDoc := map[string]struct{}{}
 	seenText := map[string]struct{}{}
 
@@ -196,17 +195,9 @@ func (s *Service) selectPackets(ranked []scored, topK int) selection {
 				continue
 			}
 		}
-		if r.ThreadID != "" && s.cfg.MaxPerThread > 0 &&
-			perThread[r.ThreadID] >= s.cfg.MaxPerThread {
-			sel.ThreadCapped = true
-			continue
-		}
 		seenDoc[r.DocID] = struct{}{}
 		if textKey != "" {
 			seenText[textKey] = struct{}{}
-		}
-		if r.ThreadID != "" {
-			perThread[r.ThreadID]++
 		}
 		sel.Picked = append(sel.Picked, r)
 	}

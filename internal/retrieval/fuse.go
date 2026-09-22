@@ -10,7 +10,6 @@ import (
 type candidate struct {
 	ChunkID   string
 	DocID     string
-	ThreadID  string
 	Text      string
 	StartByte int
 	EndByte   int
@@ -88,7 +87,7 @@ fused AS (
            COALESCE(1.0 / ($6 + d.rank), 0) + COALESCE(1.0 / ($6 + l.rank), 0) AS rrf
     FROM dense d FULL OUTER JOIN lexical l USING (chunk_id)
 )
-SELECT f.chunk_id::text, p.doc_id::text, d.thread_id, convert_from(substring(convert_to(d.normalized_text,'UTF8') from p.start_char_offset+1 for p.end_char_offset-p.start_char_offset),'UTF8'),
+SELECT f.chunk_id::text, p.doc_id::text, convert_from(substring(convert_to(d.normalized_text,'UTF8') from p.start_char_offset+1 for p.end_char_offset-p.start_char_offset),'UTF8'),
        p.start_char_offset, p.end_char_offset,
        f.dense_rank, f.lex_rank, f.rrf
 FROM fused f
@@ -112,7 +111,7 @@ func (s *Service) fuse(ctx context.Context, vec []float32, query string, subIdx 
 	var out []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.ChunkID, &c.DocID, &c.ThreadID, &c.Text,
+		if err := rows.Scan(&c.ChunkID, &c.DocID, &c.Text,
 			&c.StartByte, &c.EndByte, &c.DenseRank, &c.LexRank, &c.RRF); err != nil {
 			return nil, err
 		}

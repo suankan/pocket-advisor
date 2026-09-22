@@ -5,13 +5,11 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
 func testService(t *testing.T, store Store) *Service {
 	t.Helper()
-	s, err := New(store, Config{DefaultLimit: 2, MaxLimit: 3, MaxParticipants: 2}, nil)
+	s, err := New(store, Config{DefaultLimit: 2, MaxLimit: 3}, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -166,75 +164,6 @@ func TestListMessagesRejectsCursorChanges(t *testing.T) {
 	}
 	_, err = s.ListMessages(context.Background(), ListRequest{Cursor: first.Page.NextCursor, Sender: "ada@example.test", Order: OrderOldestFirst})
 	if !errors.Is(err, ErrCursorOrder) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestListMessagesCollapsesConversations(t *testing.T) {
-	store := newFakeStore()
-	old := synthetic(1, 1, "ada@example.test", at(1, 9))
-	latest := synthetic(2, 1, "bob@example.test", at(3, 9))
-	other := synthetic(3, 2, "carol@example.test", at(2, 9))
-	store.ingest(old)
-	store.ingest(latest)
-	store.ingest(other)
-
-	res, err := testService(t, store).ListMessages(context.Background(), ListRequest{CollapseConversations: true, Limit: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Messages) != 2 || res.Messages[0].DocID != latest.DocID {
-		t.Fatalf("messages = %#v", res.Messages)
-	}
-	summary := res.Messages[0].Conversation
-	if summary == nil || summary.MessageCount != 2 || summary.MatchedCount != 2 {
-		t.Errorf("summary = %#v", summary)
-	}
-	if len(res.Omissions) == 0 || res.Omissions[0] != (Omission{Reason: OmitCollapsedMessages, Count: 1}) {
-		t.Errorf("omissions = %#v", res.Omissions)
-	}
-}
-
-func TestFetchConversationIsChronologicalAndComplete(t *testing.T) {
-	store := newFakeStore()
-	parent := synthetic(1, 1, "ada@example.test", at(2, 9))
-	parent.MessageID = "parent@mail.example.test"
-	reply := synthetic(2, 1, "owner@example.test", at(3, 9))
-	reply.MessageID = "reply@mail.example.test"
-	reply.References = []domain.EmailReference{{Kind: domain.EmailReferenceInReplyTo, MessageID: parent.MessageID}}
-	undated := synthetic(3, 1, "bob@example.test", zeroTime())
-	store.ingest(reply) // deliberately out of chronological ingestion order
-	store.ingest(undated)
-	store.ingest(parent)
-
-	s := testService(t, store)
-	list, err := s.ListMessages(context.Background(), ListRequest{Limit: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.FetchConversation(context.Background(), ConversationRequest{Ref: list.Messages[0].Ref})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Messages) != 3 {
-		t.Fatalf("message count = %d", len(got.Messages))
-	}
-	want := []string{parent.DocID, reply.DocID, undated.DocID}
-	for i, id := range want {
-		if got.Messages[i].DocID != id {
-			t.Errorf("message %d = %s, want %s", i, got.Messages[i].DocID, id)
-		}
-	}
-	if edge := got.Messages[1].Relationship; edge.Method != RelationshipInReplyTo || edge.ParentDocID != parent.DocID {
-		t.Errorf("reply relationship = %#v", edge)
-	}
-}
-
-func TestFetchConversationHidesReferenceExistence(t *testing.T) {
-	store := newFakeStore()
-	s := testService(t, store)
-	_, err := s.FetchConversation(context.Background(), ConversationRequest{Ref: encodeRef(refMessage, docID(3))})
-	if !errors.Is(err, ErrUnknownReference) {
 		t.Fatalf("err = %v", err)
 	}
 }

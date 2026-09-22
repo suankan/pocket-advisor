@@ -188,7 +188,7 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 		if !utf8.Valid(data) {
 			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonUnknownEncoding)
 		}
-		if err := s.Docs.SaveText(ctx, meta.DocId, string(data), route.DocType, ""); err != nil {
+		if err := s.Docs.SaveText(ctx, meta.DocId, string(data), route.DocType); err != nil {
 			return err
 		}
 		return s.Jobs.Publish(ctx, route.Subject, &ingestionv1.EmbedTextCommand{

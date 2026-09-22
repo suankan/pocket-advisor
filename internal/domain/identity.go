@@ -61,28 +61,6 @@ func NewEmailComponentID(messageID string) string {
 	return deterministicUUID(Namespace, "email-component\x00"+messageID)
 }
 
-// NewEmailSubjectConversationID is the conversation identity of the labelled
-// subject fallback. Messages with no identifiers at all group by normalized
-// subject *and* a participant, and nowhere else — each workspace is its own
-// database (deviation 34), so there is no wider scope to escape.
-//
-// The participant is what keeps the fallback conservative. Subjects like
-// "invoice" or "meeting" recur across unrelated correspondents, and grouping on
-// the subject alone would collapse strangers into one conversation on the
-// weakest signal the model has. Requiring the same sender means the guess is at
-// least about one person's mail.
-func NewEmailSubjectConversationID(subjectNormalized, participant string) string {
-	return deterministicUUID(Namespace,
-		"email-subject\x00"+subjectNormalized+"\x00"+participant)
-}
-
-// NewEmailIsolatedConversationID is the conversation of a message that offers
-// neither identifiers nor a subject. It is a conversation of one, keyed on the
-// document, rather than a shared bucket for everything unidentifiable.
-func NewEmailIsolatedConversationID(docID string) string {
-	return deterministicUUID(Namespace, "email-isolated\x00"+docID)
-}
-
 // deterministicUUID derives a reproducible identifier from namespace + name
 // using the same SHA-1 construction RFC 4122 §4.3 specifies for a name-based
 // UUID, but writes the version nibble as 4 rather than 5. Every deliberately

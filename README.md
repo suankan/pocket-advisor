@@ -77,8 +77,6 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 ## 3. Configuration
 
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
-`infra.topic_graph` fixes the bounded local-LLM topic-mention extraction and exact-reference relation-classification contracts: opaque extraction, configuration, relation, and prompt versions plus input, output, mention, candidate, and confidence limits. Change `config_version` before changing the configured model, prompt, threshold, or a bound, then build a replacement graph version; the configured `infra.llm` endpoint remains the private local model boundary.
-
 `workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the local directories it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
 - **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
@@ -182,27 +180,6 @@ File moves preserve document UUIDs; changed content creates a new identity. Work
 
 Roots are limited to regular files of at most 256 MiB each. Container replay is limited to eight levels and 512 MiB cumulative decoded bytes, with bounded member counts and archive expansion ratios. Incomplete source traversal prevents pruning. Registry edits require restarting listener mode. Original volumes can be offline for ordinary database-backed retrieval; reprocessing and index rebuilding require accessible originals.
 
-### Build email topic mentions
-
-Topic mentions are replaceable derived annotations over canonical root email body text. They do not alter documents, chunks, email metadata, or the active graph until an operator promotes an evaluated version. Start with a bounded dry run; it calls the local model but creates no version and writes no mentions:
-
-```sh
-./bin/pocket-advisor --topic-graph-build --workspace-id example \
-  --topic-graph-version <uuid> --topic-graph-limit 500 --dry-run
-```
-
-Repeat without `--dry-run` to create a `BUILDING` version and replace mentions only in that version. After a complete mention pass, the same explicit command uses the local model to classify a bounded set of pairs selected solely from exact email `In-Reply-To` and `References` links. It sends only the pairs' cited source spans, can decline a pair, and never runs during normal email ingestion. Its summary contains aggregate processed, replaced, mention, relation, and closed failure-reason counts only; it never prints or logs source text, labels, prompts, completions, or document/version identifiers. A failed extraction or relation classification ends the run non-zero, so finalize only a complete build.
-
-```sh
-./bin/pocket-advisor --topic-graph-build --workspace-id example \
-  --topic-graph-version <uuid> --topic-graph-limit 500
-./bin/pocket-advisor --finalize-topic-graph <uuid> --workspace-id example
-# Evaluate the sealed version through the approved operator process, then:
-./bin/pocket-advisor --promote-topic-graph <uuid> --workspace-id example
-```
-
-Promotion atomically retires the prior active version and activates the `READY` version. `--retire-topic-graph <uuid>` explicitly deactivates an active version while retaining its annotations; `--remove-topic-graph <uuid>` removes an incomplete `BUILDING` or inactive `RETIRED` version and its derived annotations after confirmation (or `--yes`). Neither command can remove an active version.
-
 ## 6. Observe ingestion
 
 During a terminal run, the dashboard shows source scan progress, queue depths, active lanes, retries, skips, dead letters, CPU slots, embedding sessions, and PostgreSQL pool use. Full JSON logs are written by role under the gitignored `logs/` directory. Ingestion diagnostics include local source paths and filenames, so treat these files as private workspace material.
@@ -260,7 +237,7 @@ The result shows:
 - warnings for degraded retrieval;
 - the shared evidence budget;
 - ranked passages with document metadata, UTF-8 byte offsets, and original-source citations;
-- lineage context such as parent documents, attachments, and same-thread messages; and
+- containment context: the documents a result sits inside, the documents it contains, and the documents sharing a container with it; and
 - where to find each result, relative to its configured staging directory (prefixed with the root's basename when there are several), either as the document's own file or the container it was extracted from.
 
 Useful query options:
@@ -481,8 +458,6 @@ Run evaluation using the convention-based case path (no `--eval-cases` needed):
 ```
 
 The evaluator looks for cases at `workspaces/evaluation/<workspace>/cases.json` by default. It prints a human-readable summary and exits with status 0 when all thresholds pass.
-If the workspace has an active topic graph, the run also reports aggregate graph coverage, relation confidence and warning counts, and bounded timeline validity, budget, and omission metrics. These graph fields contain no source content, labels, graph or document references, paths, or workspace identity. A private thresholds JSON file may contain a `topic_graph` object with `mandatory: true` and coverage, confidence, timeline, omission, or warning limits; failing a mandatory graph gate makes the command exit nonzero.
-
 ### Readiness check
 
 Run the optional preflight to report embedding and index readiness before an evaluation:
@@ -544,9 +519,13 @@ The evaluation reports:
 - **Document recall at k**: fraction of expected documents found in top-k results
 - **Reciprocal rank**: 1/rank of the first expected document
 - **nDCG**: normalized discounted cumulative gain using expected-document grades
+- **Delivered recall**: fraction of expected documents that returned their own text, which the shared byte budget admits whole or not at all
+- **Supplementary and union delivered recall**: expected documents whose text arrived attached to another packet, and the total reached by either route — reported beside primary delivery, never folded into it
 - **Delivered rank**: how far down the first expected document that arrived with its text appeared
 - **Empty pass rate**: off-domain queries correctly returning no results
 - **Stage latency**: per-stage timing (embed, dense, lexical, fuse, rerank, select, expand)
+
+Each report records the measurement version its numbers were taken under. Two runs compare only when that version and the case-set identity both match, so a change to what a metric means cannot appear as movement in the next delta.
 
 ### Interpretation
 
@@ -623,7 +602,16 @@ Upgrade the shared-store release with the supported wrapper:
 
 Always use the wrapper rather than invoking Helm directly: it provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml` after the release rolls out.
 
-Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then run `--audit-sources` for each workspace to confirm that every retained document is still reachable from a configured original. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage. `--bind-sources` then persists verified locations and replay recipes without replacing document UUIDs, normalized evidence, chunks, mailbox identities, or topic references. Recheck coverage with `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
+Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then run `--audit-sources` for each workspace to confirm that every retained document is still reachable from a configured original. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage. `--bind-sources` then persists verified locations and replay recipes without replacing document UUIDs, normalized evidence, chunks, or mailbox identities. Recheck coverage with `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
+
+Some upgrades retire database objects an older build created. `CREATE TABLE IF NOT EXISTS` cannot drop a column or a table, so those arrive as an explicit migration rather than as schema application. Preview one before applying it, and apply it with the workspace's readers stopped:
+
+```sh
+./bin/pocket-advisor --migrate-schema --workspace-id example --dry-run
+./bin/pocket-advisor --migrate-schema --workspace-id example
+```
+
+The preview reports, in counts only, what would be dropped. Applying is destructive and confirms first unless `--yes` is given. A migration reads stored schema state only: it probes no model endpoint, reads no original, and never re-ingests, re-extracts or re-embeds. Query and MCP entry points refuse a workspace with a pending migration and name the command rather than serving a half-upgraded database.
 
 Keep a recoverable database backup across any such upgrade: re-ingesting current originals rebuilds an index but cannot recover overwritten historical bytes or recreate previous document UUIDs and evaluation references.
 

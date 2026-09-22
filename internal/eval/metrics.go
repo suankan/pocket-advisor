@@ -166,18 +166,95 @@ func DistributionFrom(vals []float64) Distribution {
 // the retrieval package's Packet type. DocID is the Postgres document UUID
 // carried directly by the retrieval packet.
 //
-// Text is the evidence the run actually admitted for this packet, including
-// the related-document text delivered alongside it, and is empty exactly when
-// the shared budget dropped it. Carrying it is what lets a fact assertion see
+// Text is this document's own admitted text and nothing else. It is empty
+// exactly when the shared budget dropped it, which is what lets delivery see
 // the difference between "ranked this document" and "returned its text".
+//
+// Related carries the neighbours delivered in the same response as separate
+// identities. They are evidence the caller genuinely received, but they are
+// not this document, and folding their text into Text would let a covering
+// email prove that the statement attached to it arrived when the budget had
+// refused it.
 type packetRef struct {
+	DocID   string
+	Score   float64
+	Text    string
+	Related []relatedRef
+}
+
+// relatedRef is one neighbour delivered alongside a packet, kept under its own
+// identity so supplementary delivery is measured rather than assumed.
+type relatedRef struct {
 	DocID string
-	Score float64
 	Text  string
 }
 
-// DeliveredRecallAtK is document recall counting only expected documents whose
-// text the run actually returned.
+// deliveredPrimary is the set of documents that returned their own text.
+func deliveredPrimary(packets []packetRef, k int) map[string]struct{} {
+	if k <= 0 {
+		k = len(packets)
+	}
+	out := make(map[string]struct{}, len(packets))
+	for i, p := range packets {
+		if i >= k {
+			break
+		}
+		if p.Text != "" {
+			out[p.DocID] = struct{}{}
+		}
+	}
+	return out
+}
+
+// deliveredRelated is the set of documents that returned their own text as a
+// neighbour of some packet. A document that is also a primary packet is
+// excluded, so the two sets never double-count one identity.
+func deliveredRelated(packets []packetRef, k int) map[string]struct{} {
+	if k <= 0 {
+		k = len(packets)
+	}
+	primary := deliveredPrimary(packets, k)
+	out := make(map[string]struct{})
+	for i, p := range packets {
+		if i >= k {
+			break
+		}
+		for _, r := range p.Related {
+			if r.Text == "" {
+				continue
+			}
+			if _, isPrimary := primary[r.DocID]; isPrimary {
+				continue
+			}
+			out[r.DocID] = struct{}{}
+		}
+	}
+	return out
+}
+
+func expectedSetOf(expected []ResolvedDocument) map[string]struct{} {
+	want := make(map[string]struct{}, len(expected))
+	for _, e := range expected {
+		want[e.DocID] = struct{}{}
+	}
+	return want
+}
+
+func overlapFraction(have, want map[string]struct{}) float64 {
+	if len(want) == 0 {
+		return 1.0
+	}
+	found := 0
+	for id := range want {
+		if _, ok := have[id]; ok {
+			found++
+		}
+	}
+	return float64(found) / float64(len(want))
+}
+
+// DeliveredRecallAtK is document recall counting only expected documents that
+// returned their own text.
 //
 // The budget admits a document's text whole or not at all, so a delivered
 // document carries everything it says and an undelivered one carries nothing.
@@ -185,30 +262,42 @@ type packetRef struct {
 // test of whether a caller could work from the result: the API's job is to
 // return the documents holding the answer, and a title with an empty body does
 // not do that.
+//
+// A neighbour's text never counts here. Those documents reach the caller and
+// are measured by SupplementaryDeliveredRecallAtK, but crediting them to the
+// document they were attached to would report an expected document as
+// delivered on the strength of a covering email the budget happened to fit.
 func DeliveredRecallAtK(packets []packetRef, expected []ResolvedDocument, k int) float64 {
 	if len(expected) == 0 {
 		return 1.0
 	}
-	if k <= 0 {
-		k = len(packets)
+	return overlapFraction(deliveredPrimary(packets, k), expectedSetOf(expected))
+}
+
+// SupplementaryDeliveredRecallAtK is the fraction of expected documents whose
+// text arrived as a neighbour of some packet rather than as a packet of its
+// own. It is reported beside primary delivery rather than added to it: the two
+// answer different questions, and a change that moves evidence from one to the
+// other is a change worth seeing.
+func SupplementaryDeliveredRecallAtK(packets []packetRef, expected []ResolvedDocument, k int) float64 {
+	if len(expected) == 0 {
+		return 1.0
 	}
-	want := make(map[string]struct{}, len(expected))
-	for _, e := range expected {
-		want[e.DocID] = struct{}{}
+	return overlapFraction(deliveredRelated(packets, k), expectedSetOf(expected))
+}
+
+// UnionDeliveredRecallAtK is the fraction of expected documents whose text
+// reached the caller by either route. Each identity counts once however many
+// packets carried it.
+func UnionDeliveredRecallAtK(packets []packetRef, expected []ResolvedDocument, k int) float64 {
+	if len(expected) == 0 {
+		return 1.0
 	}
-	found := make(map[string]struct{}, len(expected))
-	for i, p := range packets {
-		if i >= k {
-			break
-		}
-		if p.Text == "" {
-			continue
-		}
-		if _, ok := want[p.DocID]; ok {
-			found[p.DocID] = struct{}{}
-		}
+	union := deliveredPrimary(packets, k)
+	for id := range deliveredRelated(packets, k) {
+		union[id] = struct{}{}
 	}
-	return float64(len(found)) / float64(len(expected))
+	return overlapFraction(union, expectedSetOf(expected))
 }
 
 // ReciprocalRankFirstDelivered is the reciprocal rank of the first expected

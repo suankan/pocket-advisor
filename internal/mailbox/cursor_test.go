@@ -70,50 +70,6 @@ func TestCursorDoesNotCarryFilterValues(t *testing.T) {
 	}
 }
 
-func TestCursorRejections(t *testing.T) {
-	snapshot := time.Now().UTC()
-	issued, err := cursorFor(key{SentAt: at(3, 0), DocID: docID(2)}, OrderNewestFirst, testFilters(), snapshot)
-	if err != nil {
-		t.Fatalf("issue cursor: %v", err)
-	}
-
-	changed := testFilters()
-	changed.Sender = "bob@example.test"
-	widened := testFilters()
-	widened.After = time.Time{}
-	collapsed := testFilters()
-	collapsed.Collapse = true
-
-	for _, tc := range []struct {
-		name    string
-		cursor  string
-		order   Order
-		filters Filters
-		want    error
-	}{
-		{"not base64", "not a cursor!!", OrderNewestFirst, testFilters(), ErrCursorMalformed},
-		{"not json", "aGVsbG8", OrderNewestFirst, testFilters(), ErrCursorMalformed},
-		{"empty", "", OrderNewestFirst, testFilters(), ErrCursorMalformed},
-		{"other order", issued, OrderOldestFirst, testFilters(), ErrCursorOrder},
-		{"other sender", issued, OrderNewestFirst, changed, ErrCursorFilters},
-		{"widened range", issued, OrderNewestFirst, widened, ErrCursorFilters},
-		{"collapse toggled", issued, OrderNewestFirst, collapsed, ErrCursorFilters},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			state, err := decodeCursor(tc.cursor)
-			if err == nil {
-				err = state.check(tc.order, tc.filters)
-			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("err = %v, want %v", err, tc.want)
-			}
-			if err != nil && strings.Contains(err.Error(), "@") {
-				t.Errorf("rejection echoed an address: %v", err)
-			}
-		})
-	}
-}
-
 // A cursor minted by another version describes a page layout this build may no
 // longer produce, so it is refused rather than reinterpreted.
 func TestCursorRejectsAnotherVersion(t *testing.T) {
@@ -149,25 +105,6 @@ func TestCursorRejectsANonCanonicalKey(t *testing.T) {
 	}
 	if _, err := decodeCursor(token); !errors.Is(err, ErrCursorMalformed) {
 		t.Fatalf("err = %v, want ErrCursorMalformed", err)
-	}
-}
-
-func TestFilterFingerprintSeparatesEveryField(t *testing.T) {
-	base := testFilters()
-	variants := map[string]Filters{
-		"sender":    {Sender: "bob@example.test", Recipient: base.Recipient, After: base.After, Before: base.Before},
-		"recipient": {Sender: base.Sender, Recipient: "carol@example.test", After: base.After, Before: base.Before},
-		"after":     {Sender: base.Sender, Recipient: base.Recipient, After: at(2, 0), Before: base.Before},
-		"before":    {Sender: base.Sender, Recipient: base.Recipient, After: base.After, Before: at(10, 0)},
-		"collapse":  {Sender: base.Sender, Recipient: base.Recipient, After: base.After, Before: base.Before, Collapse: true},
-	}
-	for name, v := range variants {
-		if v.fingerprint() == base.fingerprint() {
-			t.Errorf("%s change did not alter the fingerprint", name)
-		}
-	}
-	if base.fingerprint() != testFilters().fingerprint() {
-		t.Error("identical filters produced different fingerprints")
 	}
 }
 

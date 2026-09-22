@@ -161,7 +161,7 @@ func summariseRelated(rel []retrieval.Related) string {
 	}
 	var parts []string
 	for _, k := range []retrieval.Relation{
-		retrieval.RelationParent, retrieval.RelationChild, retrieval.RelationThreadPeer,
+		retrieval.RelationParent, retrieval.RelationChild, retrieval.RelationSibling,
 	} {
 		if n := counts[k]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, k))

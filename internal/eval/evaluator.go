@@ -19,13 +19,12 @@ import (
 
 // Evaluator runs evaluation cases against a workspace's retrieval path.
 type Evaluator struct {
-	DB              *postgres.DB
-	Embedder        *embedding.Client
-	Reranker        *reranking.Client
-	LLM             *llm.Client
-	Config          config.Query
-	Log             *slog.Logger
-	TopicGraphStore TopicGraphEvaluationStore
+	DB       *postgres.DB
+	Embedder *embedding.Client
+	Reranker *reranking.Client
+	LLM      *llm.Client
+	Config   config.Query
+	Log      *slog.Logger
 }
 
 // NewEvaluator creates an evaluator from infrastructure components.
@@ -39,7 +38,7 @@ func NewEvaluator(
 ) *Evaluator {
 	return &Evaluator{
 		DB: db, Embedder: emb, Reranker: rr, LLM: l,
-		Config: cfg, Log: log, TopicGraphStore: postgres.NewTopicGraphEvaluationStore(db),
+		Config: cfg, Log: log,
 	}
 }
 
@@ -70,20 +69,21 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 	}
 
 	report := &Report{
-		RunID:         fmt.Sprintf("eval-%s", time.Now().UTC().Format("20060102T150405Z")),
-		SetID:         cs.SetID,
-		SetVersion:    cs.Version,
-		CaseSetSHA256: CaseSetSHA256(cs),
-		WorkspaceID:   evalCfg.WorkspaceID,
-		Timestamp:     time.Now().UTC(),
-		CommitSHA:     commitSHA,
-		EmbedModel:    e.Embedder.Model(),
-		RerankModel:   e.Reranker.Model(),
-		VecCandidates: e.Config.VecCandidates,
-		FTSCandidates: e.Config.FTSCandidates,
-		RRFK:          e.Config.RRFK,
-		RerankEnabled: e.Config.RerankEnabled,
-		TopK:          e.Config.DefaultTopK,
+		RunID:              fmt.Sprintf("eval-%s", time.Now().UTC().Format("20060102T150405Z")),
+		SetID:              cs.SetID,
+		SetVersion:         cs.Version,
+		CaseSetSHA256:      CaseSetSHA256(cs),
+		WorkspaceID:        evalCfg.WorkspaceID,
+		Timestamp:          time.Now().UTC(),
+		CommitSHA:          commitSHA,
+		EmbedModel:         e.Embedder.Model(),
+		RerankModel:        e.Reranker.Model(),
+		VecCandidates:      e.Config.VecCandidates,
+		FTSCandidates:      e.Config.FTSCandidates,
+		RRFK:               e.Config.RRFK,
+		RerankEnabled:      e.Config.RerankEnabled,
+		TopK:               e.Config.DefaultTopK,
+		MeasurementVersion: MeasurementVersion,
 	}
 
 	// Build the retrieval service for this workspace.
@@ -136,21 +136,6 @@ func (e *Evaluator) Run(ctx context.Context, evalCfg EvaluateConfig) (*Report, e
 		} else {
 			report.ExactVsHNSW = hnswReport
 			applyHNSWThreshold(&report.Summary, hnswReport, thresholdsFor(evalCfg))
-		}
-	}
-
-	// A graph is evaluated only when the workspace has an active version. The
-	// private store keeps all graph identifiers inside this call; the report is
-	// aggregate-only. A missing graph is still represented when graph gates are
-	// configured, so a mandatory active-graph requirement cannot be bypassed.
-	if e.TopicGraphStore != nil {
-		graph, err := EvaluateTopicGraph(ctx, e.TopicGraphStore)
-		if err != nil {
-			return nil, fmt.Errorf("evaluate topic graph: %w", err)
-		}
-		if graph.ActiveVersion || thresholdsFor(evalCfg).TopicGraph != nil {
-			report.TopicGraph = graph
-			applyTopicGraphThresholds(&report.Summary, graph, thresholdsFor(evalCfg))
 		}
 	}
 
@@ -228,23 +213,19 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Resol
 		}
 	}
 
-	// Packets carry both the document id metrics compare and the text the run
-	// actually admitted. Related-document text counts as admitted evidence
-	// too: it reaches the caller in the same response, so a fact grounded
-	// there is genuinely groundable.
+	// Packets carry the document id metrics compare, the text this document
+	// itself returned, and its neighbours under their own identities. The
+	// neighbours are kept separate rather than folded in: they reach the
+	// caller in the same response and are measured as supplementary delivery,
+	// but a neighbour's text is not this document's text and must never stand
+	// in for it.
 	var packets []packetRef
 	for _, p := range sr.Packets {
-		text := p.Text
+		ref := packetRef{DocID: p.DocID, Score: p.Match.Score, Text: p.Text}
 		for _, related := range p.Related {
-			if related.Text != "" {
-				text += "\n" + related.Text
-			}
+			ref.Related = append(ref.Related, relatedRef{DocID: related.DocID, Text: related.Text})
 		}
-		packets = append(packets, packetRef{
-			DocID: p.DocID,
-			Score: p.Match.Score,
-			Text:  text,
-		})
+		packets = append(packets, ref)
 	}
 	cr.PacketCount = len(packets)
 	cr.SelectedPackets = len(packets)
@@ -282,6 +263,8 @@ func (e *Evaluator) runCase(ctx context.Context, svc *retrieval.Service, c Resol
 	cr.NDCG = NDCG(packets, c.Expected)
 	cr.DeliveredRecall = DeliveredRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
 	cr.RRFirstDelivered = ReciprocalRankFirstDelivered(packets, c.Expected)
+	cr.SupplementaryDeliveredRecall = SupplementaryDeliveredRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
+	cr.UnionDeliveredRecall = UnionDeliveredRecallAtK(packets, c.Expected, e.Config.DefaultTopK)
 	cr.DeliveredRank = FirstDeliveredRank(packets, c.Expected)
 	cr.ExpectedDocumentRank = FirstExpectedDocumentRank(packets, c.Expected)
 
@@ -347,6 +330,7 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 
 	var recallSum, mrrSum, ndcgSum float64
 	var deliveredRecallSum, deliveredMRRSum float64
+	var supplementaryRecallSum, unionRecallSum float64
 	var emptyPassed, emptyExpected int
 	thresholds := thresholdsFor(cfg)
 
@@ -375,6 +359,8 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 		if c.ExpectedDocumentCount > 0 {
 			deliveredRecallSum += c.DeliveredRecall
 			deliveredMRRSum += c.RRFirstDelivered
+			supplementaryRecallSum += c.SupplementaryDeliveredRecall
+			unionRecallSum += c.UnionDeliveredRecall
 		}
 		s.TotalWarnings += c.WarningCount
 		if c.BudgetTruncated {
@@ -391,6 +377,8 @@ func (e *Evaluator) buildSummary(cases []CaseReport, cfg EvaluateConfig) Summary
 	if s.RankedCases > 0 {
 		s.MeanDeliveredRecall = deliveredRecallSum / float64(s.RankedCases)
 		s.MeanDeliveredMRR = deliveredMRRSum / float64(s.RankedCases)
+		s.MeanSupplementaryDeliveredRecall = supplementaryRecallSum / float64(s.RankedCases)
+		s.MeanUnionDeliveredRecall = unionRecallSum / float64(s.RankedCases)
 	}
 	if emptyExpected > 0 {
 		s.EmptyPassRate = float64(emptyPassed) / float64(emptyExpected)

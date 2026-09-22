@@ -24,21 +24,17 @@ The transport-independent Go retrieval package, exact mailbox browse package, an
 3. For every sub-query, request an embedding and run dense search, lexical search, and reciprocal-rank fusion in one PostgreSQL round trip.
 4. Merge the candidate groups into a bounded rerank pool, reserving space for each sub-query and for dense-only candidates.
 5. Rerank the pool once against the original question. If reranking is disabled or unavailable, preserve fused order.
-6. Apply the relevance floor, keep at most one hit per document, and cap results from one email thread.
-7. Load matched documents and related parent, attachment, and same-thread documents, then fill one shared answer-context budget breadth-first.
-8. When topic-graph expansion is enabled, offer whatever remains of that same budget to the derived graph supplement.
-9. Return content packets, sub-queries, budget use, optional graph expansion, and structured warnings.
+6. Apply the relevance floor and keep at most one hit per document and per exact passage.
+7. Load matched documents and their recorded containers, contained documents and container siblings, then fill one shared answer-context budget breadth-first.
+8. Return content packets, sub-queries, budget use, and structured warnings.
 
-The service owns warm model clients but no request state. PostgreSQL owns indexed and lineage state.
-
+The service owns warm model clients but no request state. PostgreSQL owns indexed and containment state.
 
 ## Exact email browse
 
-`internal/mailbox` is a transport-independent, fixed-workspace read service over durable email metadata. It lists messages by exact normalized sender or recipient (To, Cc, or Bcc), parsed-date bounds, and owner-relative inbound, outbound, or either direction. Newest-first is the default; oldest-first is its exact reverse. Pages default to 25 and are bounded at 200; conversation collapse returns one matched message with a bounded summary.
+`internal/mailbox` is a transport-independent, fixed-workspace read service over durable email metadata. It lists messages by exact normalized sender or recipient (To, Cc, or Bcc), parsed-date bounds, and owner-relative inbound, outbound, or either direction. Newest-first is the default; oldest-first is its exact reverse. Pages default to 25 and are bounded at 200.
 
-Opaque cursors bind order and all filters to an `ingested_at` snapshot and a keyset position, so later ingestion cannot shift, repeat, or hide a page series. Date filters exclude undated messages and report that omission. A server-issued message or conversation reference fetches a deduplicated email-only conversation in stable chronological order, with relationship methods, bounded participants, warnings, and omission counts.
-
-Awaiting-reply candidates require configured owner identities and exact-reference conversations. A candidate is the latest relevant human inbound message with no later human owner-authored exact-reply descendant. Participant and date bounds select the inbound candidate but never hide later evidence; automated and third-party events remain labelled evidence. Subject grouping and similarity never prove a reply or close a candidate.
+Opaque cursors bind order and all filters to an `ingested_at` snapshot and a keyset position, so later ingestion cannot shift, repeat, or hide a page series. Date filters exclude undated messages and report that omission. A Message-ID carried by more than one document is reported as a warning on every row that shares it, derived from the indexed rows when the page is read rather than decided when either was written.
 
 The MCP tools in [MCP server design](mcp.md) adapt this service; semantic retrieval may remain independent of mailbox browse.
 
@@ -80,15 +76,14 @@ The model choices in `config.yaml` are configurable because endpoints vary by in
 
 ## Selection and evidence packets
 
-The compiled defaults are 15 returned matches, a reranker relevance floor of `0.0`, and at most three matches from one non-empty email thread. Selection proceeds in this order:
+The compiled defaults are 15 returned matches and a reranker relevance floor of `0.0`. Selection proceeds in this order:
 
 1. remove candidates below the relevance floor;
 2. keep only the highest-ranked chunk for each document;
-3. keep only the highest-ranked candidate for each exact whitespace-normalised passage text across documents;
-4. enforce the per-thread cap; and
-5. stop at the requested result count.
+3. keep only the highest-ranked candidate for each exact whitespace-normalised passage text across documents; and
+4. stop at the requested result count.
 
-An empty `thread_id` denotes a standalone document and is not capped as a shared conversation. A below-floor candidate is never restored merely to fill the requested count.
+A below-floor candidate is never restored merely to fill the requested count. Nothing bounds how much of one conversation a result set may carry; see [Open decisions](#open-decisions).
 
 Each returned packet contains document metadata, normalized source text, matched placement identity and UTF-8 byte range, ranking score, search legs, source hash, canonical extraction hash/version, and `source:<doc_id>`. Returned candidate text is sliced from the owning normalized document, so whitespace-deduplicated shared passages cannot substitute another document's spelling or offsets. `slice_sha256` identifies the exact placement bytes; the shortened snippet is display text.
 
@@ -96,23 +91,17 @@ Each returned packet contains document metadata, normalized source text, matched
 
 Ordinary retrieval does not reopen originals. Locations state inventory observations, not current file availability. Cached text and MCP continuation snapshots remain usable after a source changes or goes offline; the source hash and extraction hash identify the cited revision. The local CLI resolves configured roots for the operator's absolute path. MCP returns relative metadata and never grants arbitrary filesystem access.
 
-Related documents are labeled using stored facts:
+Related documents are labeled using recorded containment:
 
-- `parent` for the matched document's recorded parent;
-- `attachment` for a recorded child document; and
-- `same-thread` for another document with the same non-empty thread ID.
+- `parent` for a document that contains the matched document;
+- `attachment` for a document the matched document contains; and
+- `sibling-attachment` for a document sharing a container with it.
 
-Chronological adjacency is never represented as a reply edge.
+Containment comes from `document_placements`, which records every container, with the `parent_doc_id` edge unioned in as compatibility evidence. `parent_doc_id` alone is insufficient: content identity is unique per workspace, so an attachment carried by two emails has one parent — whichever arrived first — and its second containment exists only as a placement. A document reachable by several routes takes the first label in the order above, so one neighbour carries one deterministic relation.
 
-All packets share a default 120,000 UTF-8 byte context budget. The budgeter charges `len(text)`, exposes `bytes_used` and `bytes_allowed` in the transport-independent result, and labels the unit explicitly in MCP. It first offers each packet its matched document, then related documents, so a large conversation cannot consume the allowance before other primary matches are considered. Text that does not fit is omitted and produces `budget_truncated`; the document metadata and relationship remain available.
+Every relation is containment. None asserts that two documents share a subject, a thread or a topic: a shared container is a stored fact, and anything derived from subject text, chronology or reply membership would be a guess a reader could not detect.
 
-## Optional topic-graph expansion
-
-Graph expansion is a supplement to ordinary packets, not a candidate source. It is off by default (`infra.query.topic_graph_expansion_enabled`) so an ordinary query never reads derived graph data, and it runs only after packet construction, so ranked packets and their lineage context always consume the shared allowance first and can never be displaced or reordered by it.
-
-When enabled and a query selected at least one hit, the service derives seed mention references from the one `ACTIVE` graph version, admitting only mentions whose validated spans overlap a selected hit and that carry at least one supported edge. It then walks the timeline under the configured backward and forward depth, node count and byte ceiling — the byte ceiling further reduced to whatever the shared budget has left — with a two-second latency bound.
-
-The result carries the graph version, snapshot time, nodes, derived relations, warnings and an omitted-node count. A node is represented only by its canonical document and validated byte spans, each with the document's normalized-text hash and the slice hash: display labels are deliberately absent, so nothing derived from a model reaches the caller as a fact. A disabled gate, an absent graph, no seeds, an exhausted allowance or a failed walk are all visible degradations; none of them fails a query that ordinary retrieval already answered.
+All packets share a default 120,000 UTF-8 byte context budget. The budgeter charges `len(text)`, exposes `bytes_used` and `bytes_allowed` in the transport-independent result, and labels the unit explicitly in MCP. It first offers each packet its matched document, then parents, attachments and siblings in that order, so supplementary containment context cannot consume the allowance before other primary matches are considered. Text that does not fit is omitted and produces `budget_truncated`; the document metadata and relationship remain available.
 
 ## Results and degradation signals
 
@@ -128,11 +117,7 @@ Current warnings are:
 | `pool_floor_applied` | Candidate reservations were used and the rerank pool filled to its limit. |
 | `reranker_unavailable` | Reranking failed and fused order was returned. |
 | `relevance_floor_applied` | Below-floor candidates caused fewer than the requested results to be selected. |
-| `thread_capped` | A conversation produced more selected documents than the per-thread limit. |
 | `budget_truncated` | Some document text did not fit the shared UTF-8 byte allowance. |
-| `topic_graph_unavailable` | Graph expansion was enabled but its seeds or walk could not be produced; ordinary packets are unaffected. |
-
-An enabled graph walk may additionally surface its own bounded-traversal warnings — `topic_timeline_node_limit`, `topic_timeline_byte_limit`, `topic_timeline_depth_limit`, `topic_timeline_edge_limit`, `topic_timeline_cycle_guard` and `topic_timeline_invalid_evidence` — on the result alongside the graph expansion that produced them.
 
 Embedding, SQL, lineage-loading, and packet-building errors fail the query. Decomposition and reranking failures have defined fallbacks because the system can still produce a useful, explicitly degraded result.
 
@@ -150,13 +135,15 @@ Both the stdio and authenticated Streamable HTTP MCP transports are described in
 
 ## Evaluation
 
-`pocket-advisor --evaluate` runs a private workspace case set through the same retrieval service and reports document recall, delivered recall, reciprocal rank over both, nDCG, the position of the first expected document and of the first delivered one, warnings, candidate yields, and stage timing. A case passes only when it satisfies its explicit contract: an expected-empty case has no packets, a regular case returns at least one expected document, a case with `require_all_expected_documents` returns every expected document, and any expected document found is returned with its text. Aggregate ranking thresholds remain the run-level quality gate; an optional `--eval-hnsw` run also gates approximate-search recall.
+`pocket-advisor --evaluate` runs a private workspace case set through the same retrieval service and reports document recall, delivered recall, supplementary and union delivered recall, reciprocal rank over the first two, nDCG, the position of the first expected document and of the first delivered one, warnings, candidate yields, and stage timing. A case passes only when it satisfies its explicit contract: an expected-empty case has no packets, a regular case returns at least one expected document, a case with `require_all_expected_documents` returns every expected document, and any expected document found is returned with its text. Aggregate ranking thresholds remain the run-level quality gate; an optional `--eval-hnsw` run also gates approximate-search recall.
 
 The operator maintains the version 6 case set as a curated private golden suite outside version control. A case is an identifier, a question, and the documents that answer it: each `expected_documents` entry carries a `match.raw_sha256` and a relevance grade, and nothing else is recorded. Labels classifying a question's kind were removed with the answer spans — self-declared, unvalidated, and prone to drifting out of step whenever a question is edited, they were a second thing to maintain that no measurement depended on. Content hashes rather than document UUIDs, because a UUID is minted per database — rebuilding a workspace from the same original files renumbers every document and silently invalidates the whole suite, which reads as a total quality collapse rather than as the setup error it is. `raw_sha256` is the key `CreateStub` already upserts on, so "the same bytes are the same document" is enforced by the schema rather than assumed by the evaluator. The trade is deliberate: a UUID survives a document's bytes changing and nothing else, a content hash survives everything except that, and re-ingestion is far more common than re-export.
 
 A case is a question paired with the documents that answer it, and nothing more. It does not restate the answer: the document already holds it, and a copy in the case file is a second source of truth that goes stale the moment a PDF is re-extracted under a newer OCR build. What a caller can do with a result is established by delivering the document, not by asserting its wording.
 
-Delivery is therefore scored separately from retrieval. `DeliveredRecallAtK` counts only expected documents whose text the shared budget actually admitted, and the budget admits a document's text whole or not at all, so a delivered document carries everything it says. A case fails when an expected document is found and its text is not returned: recall reports a perfect result while the caller receives a title and an empty body, unable to answer. The gap between document recall and delivered recall is exactly the budget dropping evidence retrieval had already located.
+Delivery is therefore scored separately from retrieval, and attributed to the document that supplied the text. `DeliveredRecallAtK` counts only expected documents whose *own* text the shared budget admitted; the budget admits a document's text whole or not at all, so a delivered document carries everything it says. A neighbour's text never stands in for it: a covering email the budget happened to fit would otherwise prove that the statement attached to it arrived when the budget had refused it. Text that reached the caller attached to another packet is real delivery and is reported beside primary delivery as supplementary and union recall, not folded into it, because a change that moves evidence between the two is exactly what those separate. A case fails when an expected document is found and its own text is not returned: recall reports a perfect result while the caller receives a title and an empty body, unable to answer. The gap between document recall and delivered recall is exactly the budget dropping evidence retrieval had already located.
+
+A report also records the measurement version its numbers were taken under, and two runs are comparable only when that version and the case-set identity both match. Changing what a metric means, for unchanged retrieval behaviour, would otherwise surface as movement in the next delta — a regression nothing regressed into.
 
 Depth is measured, never asserted. Each case reports where the first expected document landed and where the first grounded answer landed, and the run reports the reciprocals averaged across the suite; no case declares a required position. A per-case rank bound would have to come from somewhere, and the only available source is what the system currently achieves — which pins present behaviour and calls it a specification. The same objection retired an earlier forbidden-document mechanism: a blocklist assembled from observed output enumerates one of the many near-misses a corpus contains, so it catches the wrong answer already seen and generalises to nothing. Depth belongs in the trend across runs, read against the recorded case-set identity, model names and commit.
 
@@ -164,9 +151,8 @@ Cases are authored against the corpus rather than against retrieval output. `--c
 
 Every complete run is therefore written to `workspaces/evaluation/<workspace>/runs/`, named by its run id so the directory sorts chronologically, and `--eval-report` redirects that single write rather than enabling a second one. A run reports how it moved against the most recent earlier run over the same case-set digest: the aggregate deltas, and the case ids that newly pass or newly fail — an equal number of fixes and regressions leaves every mean looking calm, so the lists are what make that visible. Runs narrowed by `--eval-filter-ids` are excluded from the series, because a summary over three hand-picked cases is not comparable with a summary over the suite.
 
-Every document reference resolves once, before the first query. An unresolved reference fails the run as a setup error naming the affected cases, never as a scored result, and `--eval-readiness` performs the same resolution so an unusable suite is visible without running anything. The evaluator never generates cases from workspace content. Each report records a SHA-256 identity of its case-set contents, and results are comparable only when that case-set identity is unchanged.
-When a workspace has an active topic graph, the same evaluation run also emits aggregate graph coverage, closed relation-type and warning counts, confidence distributions, and bounded timeline validity, budget, and omission measurements. The graph portion contains no source content, labels, graph references, document identifiers, paths, or workspace identity. An optional `topic_graph` threshold object can make its coverage, confidence, timeline validity, omission, and warning limits mandatory; a mandatory failure makes `--evaluate` fail without changing graph lifecycle state.
 
+Every document reference resolves once, before the first query. An unresolved reference fails the run as a setup error naming the affected cases, never as a scored result, and `--eval-readiness` performs the same resolution so an unusable suite is visible without running anything. The evaluator never generates cases from workspace content. Each report records a SHA-256 identity of its case-set contents, and results are comparable only when that case-set identity is unchanged.
 ## Target service boundary
 
 The broader user API remains one long-running retrieval workload per workspace, reached only through the authenticated API gateway described in [API server design](api-server-design.md). Future non-MCP HTTP adapters translate transport requests into the same `retrieval.Request` and return the same result semantics. They must not accept a caller-supplied workspace that bypasses the gateway's authenticated route.
@@ -185,6 +171,7 @@ Use the repository commands in [README §10](../README.md#10-verification). Retr
 - Decide whether retrieval startup must verify its configured embedding model and dimension against `schema_metadata`, matching ingestion's fail-fast check.
 - Calibrate representative question coverage and acceptance thresholds for model or tuning changes as corpora and models change.
 - Choose metrics buckets and labels that diagnose quality and latency without exposing workspace identifiers or query text.
+- Decide whether result diversity needs an explicit control. Nothing now bounds how much of one conversation a result set carries, which reopens a measured failure in which a single exchange supplied every returned match. No replacement key was substituted, because one email with its attachments is a different shape from many messages of one exchange and a container-based cap would not bound the latter. Revisit if evaluation shows one conversation dominating a result set.
 - Decide whether multi-turn question state belongs in the future generation service or solely in its client.
 
 ## Optional text-free storage experiment
@@ -195,4 +182,4 @@ The obstacle is lexical scoring. Vectors and whole-document hashes cannot reprod
 
 Reconstruction is the second obstacle. A `TextProvider` feeding reranking, exact evidence slicing, full document fetch and topic-evidence validation would need the raw hash, deterministic container recipes, extractor and configuration fingerprints, the canonical text hash and byte length, and exact placement ranges and hashes. A hash proves equality of reconstructed bytes; it cannot reconstruct them. Whitespace-collapsed passage identity is unsuitable as a lossless text address, and overlapping trimmed chunks cannot be concatenated back into a canonical document.
 
-Adoption would require comparing retained text, losslessly compressed text and on-demand extraction; preserving mailbox headers, exact conversation relationships, topic annotations and cited spans, since removing body text alone does not remove textual metadata; treating cold OCR and replay cost against unavailable historical originals as a real expense; and turning source unavailability into an explicit omission or failure rather than an unverified citation. The acceptance bar is exact lexical, scoring and byte-slice parity, unchanged private evaluation identities, passing retrieval thresholds, deterministic tooling, and agreed cold and warm p50/p95 latency and memory bounds.
+Adoption would require comparing retained text, losslessly compressed text and on-demand extraction; preserving mailbox headers, parsed reply identifiers, recorded containment and cited spans, since removing body text alone does not remove textual metadata; treating cold OCR and replay cost against unavailable historical originals as a real expense; and turning source unavailability into an explicit omission or failure rather than an unverified citation. The acceptance bar is exact lexical, scoring and byte-slice parity, unchanged private evaluation identities, passing retrieval thresholds, deterministic tooling, and agreed cold and warm p50/p95 latency and memory bounds.

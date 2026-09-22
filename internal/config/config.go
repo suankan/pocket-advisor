@@ -191,29 +191,6 @@ type LLM struct {
 	Timeout  time.Duration
 }
 
-// TopicGraph fixes the bounded local-model mention extraction and relation
-// classification contracts for one replaceable graph version. Version values
-// are operator-maintained opaque identifiers: change ConfigVersion before a
-// model, prompt, threshold, or bound changes.
-type TopicGraph struct {
-	ExtractionVersion       string
-	ConfigVersion           string
-	PromptVersion           string
-	MaxInputBytes           int
-	MaxOutputBytes          int
-	MaxOutputTokens         int
-	MaxMentionsPerDoc       int
-	MaxSpansPerMention      int
-	MaxDisplayLabelBytes    int
-	RelationVersion         string
-	RelationPromptVersion   string
-	RelationMaxInputBytes   int
-	RelationMaxOutputBytes  int
-	RelationMaxOutputTokens int
-	RelationMaxCandidates   int
-	RelationMinConfidence   float64
-}
-
 // Query is the read-path tuning surface. None of it invalidates the index.
 type Query struct {
 	VecCandidates        int
@@ -223,34 +200,21 @@ type Query struct {
 	RerankEnabled        bool
 	RerankCandidates     int
 	MinRelevanceScore    float64
-	MaxPerThread         int
 	AnswerContextBytes   int
 	DecomposeEnabled     bool
 	MaxSubQueries        int
 	PoolFloorDenseOnly   int
 	PoolFloorPerSubQuery int
-
-	// TopicGraphExpansionEnabled permits the optional, source-backed graph
-	// supplement after ordinary packet construction. It is disabled by default
-	// so ordinary retrieval never depends on derived graph data.
-	TopicGraphExpansionEnabled bool
-	TopicGraphMinConfidence    float64
-	TopicGraphBackwardDepth    int
-	TopicGraphForwardDepth     int
-	TopicGraphMaxNodes         int
-	TopicGraphMaxBytes         int
-	TopicGraphMaxSeeds         int
 }
 
 type Config struct {
-	Postgres   Postgres
-	NATS       NATS
-	Embedding  Embedding
-	Reranking  Reranking
-	LLM        LLM
-	TopicGraph TopicGraph
-	Query      Query
-	MCP        MCP
+	Postgres  Postgres
+	NATS      NATS
+	Embedding Embedding
+	Reranking Reranking
+	LLM       LLM
+	Query     Query
+	MCP       MCP
 
 	// WorkspacesConfigPath points at the workspace registry
 	// (config.yaml's workspaces.config — required, no fallback) — the same
@@ -298,32 +262,7 @@ type file struct {
 			Model    string `yaml:"model"`
 			Timeout  string `yaml:"timeout"`
 		} `yaml:"llm"`
-		TopicGraph struct {
-			ExtractionVersion       string  `yaml:"extraction_version"`
-			ConfigVersion           string  `yaml:"config_version"`
-			PromptVersion           string  `yaml:"prompt_version"`
-			MaxInputBytes           int     `yaml:"max_input_bytes"`
-			MaxOutputBytes          int     `yaml:"max_output_bytes"`
-			MaxOutputTokens         int     `yaml:"max_output_tokens"`
-			MaxMentionsPerDoc       int     `yaml:"max_mentions_per_doc"`
-			MaxSpansPerMention      int     `yaml:"max_spans_per_mention"`
-			MaxDisplayLabelBytes    int     `yaml:"max_display_label_bytes"`
-			RelationVersion         string  `yaml:"relation_version"`
-			RelationPromptVersion   string  `yaml:"relation_prompt_version"`
-			RelationMaxInputBytes   int     `yaml:"relation_max_input_bytes"`
-			RelationMaxOutputBytes  int     `yaml:"relation_max_output_bytes"`
-			RelationMaxOutputTokens int     `yaml:"relation_max_output_tokens"`
-			RelationMaxCandidates   int     `yaml:"relation_max_candidates"`
-			RelationMinConfidence   float64 `yaml:"relation_min_confidence"`
-		} `yaml:"topic_graph"`
 		Query struct {
-			TopicGraphExpansionEnabled bool    `yaml:"topic_graph_expansion_enabled"`
-			TopicGraphMinConfidence    float64 `yaml:"topic_graph_min_confidence"`
-			TopicGraphBackwardDepth    int     `yaml:"topic_graph_backward_depth"`
-			TopicGraphForwardDepth     int     `yaml:"topic_graph_forward_depth"`
-			TopicGraphMaxNodes         int     `yaml:"topic_graph_max_nodes"`
-			TopicGraphMaxBytes         int     `yaml:"topic_graph_max_bytes"`
-			TopicGraphMaxSeeds         int     `yaml:"topic_graph_max_seeds"`
 		} `yaml:"query"`
 		Observability struct {
 			MetricsPort int    `yaml:"metrics_port"`
@@ -427,32 +366,19 @@ func defaults() *Config {
 		},
 		Reranking: Reranking{Timeout: 60 * time.Second},
 		LLM:       LLM{Timeout: 30 * time.Second},
-		TopicGraph: TopicGraph{
-			ExtractionVersion: "topic-mentions-v1", ConfigVersion: "topic-mentions-config-v1", PromptVersion: "topic-mentions-prompt-v1",
-			MaxInputBytes: 262144, MaxOutputBytes: 65536, MaxOutputTokens: 1024,
-			MaxMentionsPerDoc: 64, MaxSpansPerMention: 8, MaxDisplayLabelBytes: 256,
-		},
 		Query: Query{
-			VecCandidates:              50,
-			FTSCandidates:              50,
-			RRFK:                       60,
-			DefaultTopK:                15,
-			RerankEnabled:              true,
-			RerankCandidates:           24,
-			MinRelevanceScore:          0.0,
-			MaxPerThread:               3,
-			AnswerContextBytes:         120000,
-			DecomposeEnabled:           true,
-			MaxSubQueries:              4,
-			PoolFloorDenseOnly:         6,
-			PoolFloorPerSubQuery:       4,
-			TopicGraphExpansionEnabled: false,
-			TopicGraphMinConfidence:    0.85,
-			TopicGraphBackwardDepth:    2,
-			TopicGraphForwardDepth:     2,
-			TopicGraphMaxNodes:         16,
-			TopicGraphMaxBytes:         16 << 10,
-			TopicGraphMaxSeeds:         8,
+			VecCandidates:        50,
+			FTSCandidates:        50,
+			RRFK:                 60,
+			DefaultTopK:          15,
+			RerankEnabled:        true,
+			RerankCandidates:     24,
+			MinRelevanceScore:    0.0,
+			AnswerContextBytes:   120000,
+			DecomposeEnabled:     true,
+			MaxSubQueries:        4,
+			PoolFloorDenseOnly:   6,
+			PoolFloorPerSubQuery: 4,
 		},
 		MetricsPort: 9090,
 		LogLevel:    "info",
@@ -563,65 +489,6 @@ func applyFile(c *Config, path string) error {
 		c.LLM.Timeout = d
 	}
 
-	setStr(&c.TopicGraph.ExtractionVersion, in.TopicGraph.ExtractionVersion)
-	setStr(&c.TopicGraph.ConfigVersion, in.TopicGraph.ConfigVersion)
-	setStr(&c.TopicGraph.PromptVersion, in.TopicGraph.PromptVersion)
-	if in.TopicGraph.MaxInputBytes > 0 {
-		c.TopicGraph.MaxInputBytes = in.TopicGraph.MaxInputBytes
-	}
-	if in.TopicGraph.MaxOutputBytes > 0 {
-		c.TopicGraph.MaxOutputBytes = in.TopicGraph.MaxOutputBytes
-	}
-	if in.TopicGraph.MaxOutputTokens > 0 {
-		c.TopicGraph.MaxOutputTokens = in.TopicGraph.MaxOutputTokens
-	}
-	if in.TopicGraph.MaxMentionsPerDoc > 0 {
-		c.TopicGraph.MaxMentionsPerDoc = in.TopicGraph.MaxMentionsPerDoc
-	}
-	if in.TopicGraph.MaxSpansPerMention > 0 {
-		c.TopicGraph.MaxSpansPerMention = in.TopicGraph.MaxSpansPerMention
-	}
-	if in.TopicGraph.MaxDisplayLabelBytes > 0 {
-		c.TopicGraph.MaxDisplayLabelBytes = in.TopicGraph.MaxDisplayLabelBytes
-	}
-	setStr(&c.TopicGraph.RelationVersion, in.TopicGraph.RelationVersion)
-	setStr(&c.TopicGraph.RelationPromptVersion, in.TopicGraph.RelationPromptVersion)
-	if in.TopicGraph.RelationMaxInputBytes > 0 {
-		c.TopicGraph.RelationMaxInputBytes = in.TopicGraph.RelationMaxInputBytes
-	}
-	if in.TopicGraph.RelationMaxOutputBytes > 0 {
-		c.TopicGraph.RelationMaxOutputBytes = in.TopicGraph.RelationMaxOutputBytes
-	}
-	if in.TopicGraph.RelationMaxOutputTokens > 0 {
-		c.TopicGraph.RelationMaxOutputTokens = in.TopicGraph.RelationMaxOutputTokens
-	}
-	if in.TopicGraph.RelationMaxCandidates > 0 {
-		c.TopicGraph.RelationMaxCandidates = in.TopicGraph.RelationMaxCandidates
-	}
-	if in.TopicGraph.RelationMinConfidence > 0 {
-		c.TopicGraph.RelationMinConfidence = in.TopicGraph.RelationMinConfidence
-	}
-
-	c.Query.TopicGraphExpansionEnabled = in.Query.TopicGraphExpansionEnabled
-	if in.Query.TopicGraphMinConfidence > 0 {
-		c.Query.TopicGraphMinConfidence = in.Query.TopicGraphMinConfidence
-	}
-	if in.Query.TopicGraphBackwardDepth > 0 {
-		c.Query.TopicGraphBackwardDepth = in.Query.TopicGraphBackwardDepth
-	}
-	if in.Query.TopicGraphForwardDepth > 0 {
-		c.Query.TopicGraphForwardDepth = in.Query.TopicGraphForwardDepth
-	}
-	if in.Query.TopicGraphMaxNodes > 0 {
-		c.Query.TopicGraphMaxNodes = in.Query.TopicGraphMaxNodes
-	}
-	if in.Query.TopicGraphMaxBytes > 0 {
-		c.Query.TopicGraphMaxBytes = in.Query.TopicGraphMaxBytes
-	}
-	if in.Query.TopicGraphMaxSeeds > 0 {
-		c.Query.TopicGraphMaxSeeds = in.Query.TopicGraphMaxSeeds
-	}
-
 	if in.Observability.MetricsPort > 0 {
 		c.MetricsPort = in.Observability.MetricsPort
 	}
@@ -665,8 +532,6 @@ func applyEnv(c *Config) {
 	c.Embedding.Model = env("EMBEDDING_MODEL", c.Embedding.Model)
 	c.Embedding.Timeout = envDuration("EMBEDDING_TIMEOUT", c.Embedding.Timeout)
 	c.Embedding.Concurrency = envInt("EMBEDDING_CONCURRENCY", c.Embedding.Concurrency)
-
-	c.Query.TopicGraphExpansionEnabled = envBool("TOPIC_GRAPH_EXPANSION_ENABLED", c.Query.TopicGraphExpansionEnabled)
 
 	c.MetricsPort = envInt("METRICS_PORT", c.MetricsPort)
 	c.LogLevel = env("LOG_LEVEL", c.LogLevel)

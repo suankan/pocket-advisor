@@ -18,7 +18,7 @@ import (
 // bootstrap. Every statement in that half is IF NOT EXISTS, so the two paths
 // are the same statements run under different circumstances rather than two
 // descriptions of one schema that could drift apart.
-const schemaSQL = coreSchemaSQL + placementSchemaSQL + emailSchemaSQL + topicGraphSchemaSQL
+const schemaSQL = coreSchemaSQL + placementSchemaSQL + emailSchemaSQL
 
 const coreSchemaSQL = `
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -67,7 +67,6 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 CREATE TABLE IF NOT EXISTS documents (
     doc_id            UUID PRIMARY KEY,
     parent_doc_id     UUID REFERENCES documents(doc_id) ON DELETE CASCADE,
-    thread_id         VARCHAR NOT NULL DEFAULT '',
     processing_status processing_status NOT NULL DEFAULT 'PENDING',
     doc_type          VARCHAR NOT NULL DEFAULT '',
     mime_type         VARCHAR NOT NULL DEFAULT '',
@@ -88,7 +87,6 @@ CREATE TABLE IF NOT EXISTS documents (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS documents_thread_idx     ON documents(thread_id);
 CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
 
 -- doc_id and raw_sha256 are deliberately independent: doc_id is an opaque,
@@ -234,7 +232,7 @@ END $$;
 ALTER TABLE schema_metadata ADD COLUMN IF NOT EXISTS placements_backfilled_at TIMESTAMPTZ;
 `
 
-// emailSchemaSQL is the durable email browse and conversation model
+// emailSchemaSQL is the durable email browse model
 // (ingestion-design.md §2.5). It is structural only: no data is rewritten, so
 // it is safe on an existing workspace and a no-op on every run after the first.
 const emailSchemaSQL = `
@@ -252,23 +250,16 @@ CREATE TABLE IF NOT EXISTS email_messages (
     doc_id              UUID PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
     message_id          TEXT        NOT NULL DEFAULT '',
     subject_raw         TEXT        NOT NULL DEFAULT '',
-    subject_normalized  TEXT        NOT NULL DEFAULT '',
     sent_at             TIMESTAMPTZ,
     ingested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- '' | 'list' | 'auto_submitted' | 'bounce'. A closed set derived from a
     -- closed set of header rules; '' is ordinary human-authored mail.
     automated_class     VARCHAR     NOT NULL DEFAULT '',
     list_id             TEXT        NOT NULL DEFAULT '',
-    conversation_id     UUID        NOT NULL,
-    -- 'references' | 'subject_fallback' | 'isolated'. Stored, not inferred at
-    -- read time: a heuristic grouping must never be presented as an exact one.
-    conversation_method VARCHAR     NOT NULL,
     parse_warnings      JSONB       NOT NULL DEFAULT '[]'::jsonb,
     parse_version       INT         NOT NULL DEFAULT 1
 );
 
-CREATE INDEX IF NOT EXISTS email_messages_conversation_idx
-    ON email_messages(conversation_id);
 -- The browse keyset. Matches the read order exactly — sent_at DESC NULLS LAST,
 -- then doc_id DESC as the tiebreak — so a cursor page is an index range scan
 -- and undated messages sort last instead of dropping out.
@@ -305,362 +296,14 @@ CREATE INDEX IF NOT EXISTS email_addresses_sender_domain_idx
     ON email_addresses ((reverse(split_part(reverse(address), '@', 1))))
     WHERE kind = 'from' AND valid AND address <> '';
 
--- In-Reply-To and References as stored, in header order. Kept as written even
--- though the identifier graph below is what conversations are read from: the
--- graph loses which header an edge came from, and only In-Reply-To is an exact
--- parent claim.
-CREATE TABLE IF NOT EXISTS email_references (
-    doc_id     UUID    NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    kind       VARCHAR NOT NULL,
-    ordinal    INT     NOT NULL,
-    message_id TEXT    NOT NULL,
-    PRIMARY KEY (doc_id, kind, ordinal)
-);
-
+-- In-Reply-To and References as stored, in header order, exactly as written.
+-- These are the exact reply claims a message makes about other messages. They
+-- are retained as parsed facts rather than as a grouping: nothing derives a
+-- conversation from them any more, and a later source-agnostic topic model
+-- would treat them as one high-precision evidence source among several.
 CREATE INDEX IF NOT EXISTS email_references_message_idx
     ON email_references(message_id);
 
--- The identifier graph: one node per identifier ever seen in the workspace,
--- whether or not the message it names was ever ingested. An identifier
--- mentioned only by a reply gets a placeholder node with a NULL doc_id — a
--- conversation must survive a missing ancestor, and no document row is ever
--- fabricated to stand in for one.
---
--- component_id is the connected component the identifier belongs to, which is
--- the conversation. Merges rewrite it to the lexicographically smallest of the
--- merged ids, so the outcome depends on the set of messages ingested and not on
--- the order they arrived in.
-CREATE TABLE IF NOT EXISTS email_identifier_nodes (
-    message_id   TEXT    NOT NULL PRIMARY KEY,
-    doc_id       UUID REFERENCES documents(doc_id) ON DELETE SET NULL,
-    component_id UUID    NOT NULL
-);
-
--- Drives the merge rewrite, which is by component rather than by identifier.
-CREATE INDEX IF NOT EXISTS email_identifier_nodes_component_idx
-    ON email_identifier_nodes(component_id);
-CREATE INDEX IF NOT EXISTS email_identifier_nodes_doc_idx
-    ON email_identifier_nodes(doc_id) WHERE doc_id IS NOT NULL;
-`
-
-// topicGraphSchemaSQL is the replaceable, source-backed topic graph layer. It
-// records validated mentions plus explicit deterministic relation candidates,
-// supported edges, and their derived episode memberships.
-const topicGraphSchemaSQL = `
--- Topic graph tables are entirely derived, replaceable, versioned evidence
--- (ingestion-design.md §2.6) — never authoritative, unlike documents or email
--- metadata.
-CREATE TABLE IF NOT EXISTS topic_graph_versions (
-    version_id              UUID PRIMARY KEY,
-    status                  VARCHAR NOT NULL CHECK (status IN ('BUILDING','READY','ACTIVE','RETIRED')),
-    extraction_version      VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
-    config_version          VARCHAR NOT NULL CHECK (octet_length(config_version) BETWEEN 1 AND 128),
-    max_mentions_per_doc    INT NOT NULL CHECK (max_mentions_per_doc > 0 AND max_mentions_per_doc <= 1000),
-    max_spans_per_mention   INT NOT NULL CHECK (max_spans_per_mention > 0 AND max_spans_per_mention <= 64),
-    max_display_label_bytes INT NOT NULL CHECK (max_display_label_bytes > 0 AND max_display_label_bytes <= 1024),
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- A partial unique index makes two ACTIVE rows impossible even if an operator
--- bypasses the repository. Promotion changes the old and replacement rows in
--- one transaction, so an existing active graph remains readable until that
--- transaction commits. Indexing a constant expression rather than a column is
--- the standard way to enforce "at most one row" for a whole table, which is
--- what one database per workspace makes this: there is no workspace column
--- left to key the partial index on.
-CREATE UNIQUE INDEX IF NOT EXISTS topic_graph_versions_one_active_idx
-    ON topic_graph_versions((1)) WHERE status = 'ACTIVE';
-CREATE INDEX IF NOT EXISTS topic_graph_versions_status_idx
-    ON topic_graph_versions(status);
-
-CREATE TABLE IF NOT EXISTS topic_mentions (
-    mention_id         UUID PRIMARY KEY,
-    version_id         UUID NOT NULL REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE,
-    doc_id             UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    display_label      VARCHAR NOT NULL DEFAULT '' CHECK (octet_length(display_label) <= 1024),
-    extraction_version VARCHAR NOT NULL CHECK (octet_length(extraction_version) BETWEEN 1 AND 128),
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Neither pair is a natural key on its own — mention_id alone already is,
-    -- via the primary key above. Both exist purely as reference targets for
-    -- compound foreign keys elsewhere in this schema, each proving a
-    -- different cross-column invariant: a span's doc_id actually matches its
-    -- mention's, and a relation's endpoints actually belong to the graph
-    -- version the relation itself belongs to.
-    UNIQUE (mention_id, doc_id),
-    UNIQUE (mention_id, version_id)
-);
-
-CREATE INDEX IF NOT EXISTS topic_mentions_source_idx
-    ON topic_mentions(doc_id, version_id);
-CREATE INDEX IF NOT EXISTS topic_mentions_version_idx
-    ON topic_mentions(version_id, doc_id);
-
-CREATE TABLE IF NOT EXISTS topic_mention_spans (
-    mention_id             UUID NOT NULL,
-    doc_id                 UUID NOT NULL,
-    ordinal                INT NOT NULL CHECK (ordinal >= 0),
-    start_byte             INT NOT NULL CHECK (start_byte >= 0),
-    end_byte               INT NOT NULL CHECK (end_byte > start_byte),
-    normalized_text_sha256 BYTEA NOT NULL CHECK (octet_length(normalized_text_sha256) = 32),
-    slice_sha256           BYTEA NOT NULL CHECK (octet_length(slice_sha256) = 32),
-    PRIMARY KEY (mention_id, ordinal),
-    FOREIGN KEY (mention_id, doc_id)
-        REFERENCES topic_mentions(mention_id, doc_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS topic_mention_spans_source_idx
-    ON topic_mention_spans(doc_id, start_byte, end_byte);
-
--- Relation candidates are explicitly supplied by a trusted deterministic
--- writer. They preserve even unsupported assessments for evaluation, while
--- topic_relation_edges contains only the candidates admitted as supported.
--- No label, embedding, or similarity value participates in this schema.
-CREATE TABLE IF NOT EXISTS topic_relation_candidates (
-    candidate_id       UUID PRIMARY KEY,
-    version_id         UUID NOT NULL,
-    earlier_mention_id UUID NOT NULL,
-    later_mention_id   UUID NOT NULL,
-    relation_type      VARCHAR NOT NULL CHECK (relation_type IN
-                           ('addresses','continues','elaborates','contradicts',
-                            'states_resolution','possibly_related')),
-    confidence         DOUBLE PRECISION NOT NULL CHECK
-                           (confidence >= 0 AND confidence <= 1
-                            AND confidence <> 'NaN'::double precision),
-    method             VARCHAR NOT NULL CHECK (octet_length(method) BETWEEN 1 AND 128),
-    method_version     VARCHAR NOT NULL CHECK (octet_length(method_version) BETWEEN 1 AND 128),
-    supported          BOOLEAN NOT NULL,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (candidate_id, version_id),
-    FOREIGN KEY (version_id)
-        REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE,
-    FOREIGN KEY (earlier_mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (later_mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
-    CHECK (earlier_mention_id <> later_mention_id)
-);
-
-CREATE INDEX IF NOT EXISTS topic_relation_candidates_version_idx
-    ON topic_relation_candidates(version_id, candidate_id);
-CREATE INDEX IF NOT EXISTS topic_relation_candidates_mentions_idx
-    ON topic_relation_candidates(version_id, earlier_mention_id, later_mention_id);
-
--- Supporting mention IDs are normalized so they receive the same strict graph
--- version foreign key as edge endpoints and can be inspected without storing
--- source text or prompt transcripts.
-CREATE TABLE IF NOT EXISTS topic_relation_candidate_supports (
-    candidate_id          UUID NOT NULL,
-    version_id            UUID NOT NULL,
-    supporting_mention_id UUID NOT NULL,
-    PRIMARY KEY (candidate_id, supporting_mention_id),
-    FOREIGN KEY (candidate_id, version_id)
-        REFERENCES topic_relation_candidates(candidate_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (supporting_mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS topic_relation_candidate_supports_mention_idx
-    ON topic_relation_candidate_supports(version_id, supporting_mention_id);
-
--- An edge is an immutable projection of one supported candidate in a BUILDING
--- version. Duplicating its traversal fields avoids joining candidates on every
--- bounded traversal while preserving the candidate as its explanation.
-CREATE TABLE IF NOT EXISTS topic_relation_edges (
-    candidate_id       UUID PRIMARY KEY,
-    version_id         UUID NOT NULL,
-    earlier_mention_id UUID NOT NULL,
-    later_mention_id   UUID NOT NULL,
-    relation_type      VARCHAR NOT NULL CHECK (relation_type IN
-                           ('addresses','continues','elaborates','contradicts',
-                            'states_resolution','possibly_related')),
-    confidence         DOUBLE PRECISION NOT NULL CHECK
-                           (confidence >= 0 AND confidence <= 1
-                            AND confidence <> 'NaN'::double precision),
-    FOREIGN KEY (candidate_id, version_id)
-        REFERENCES topic_relation_candidates(candidate_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (earlier_mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (later_mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE,
-    CHECK (earlier_mention_id <> later_mention_id)
-);
-CREATE INDEX IF NOT EXISTS topic_relation_edges_forward_idx
-    ON topic_relation_edges(version_id, earlier_mention_id, later_mention_id);
-CREATE INDEX IF NOT EXISTS topic_relation_edges_reverse_idx
-    ON topic_relation_edges(version_id, later_mention_id, earlier_mention_id);
-
--- Episodes are not classifier output. The repository recreates these rows as
--- the undirected connected components of supported edges; unconnected and
--- merely similar mentions have no episode membership.
-CREATE TABLE IF NOT EXISTS topic_episodes (
-    episode_id   UUID PRIMARY KEY,
-    version_id   UUID NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (episode_id, version_id),
-    FOREIGN KEY (version_id)
-        REFERENCES topic_graph_versions(version_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS topic_episodes_version_idx
-    ON topic_episodes(version_id, episode_id);
-
-CREATE TABLE IF NOT EXISTS topic_episode_memberships (
-    episode_id   UUID NOT NULL,
-    mention_id   UUID NOT NULL,
-    version_id   UUID NOT NULL,
-    PRIMARY KEY (episode_id, mention_id),
-    FOREIGN KEY (episode_id, version_id)
-        REFERENCES topic_episodes(episode_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (mention_id, version_id)
-        REFERENCES topic_mentions(mention_id, version_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS topic_episode_memberships_mention_idx
-    ON topic_episode_memberships(version_id, mention_id, episode_id);
-
--- Configuration and extraction metadata identify the evaluated build and are
--- immutable. Only the closed lifecycle transitions below may update a version.
-CREATE OR REPLACE FUNCTION topic_graph_version_guard() RETURNS trigger AS $$
-BEGIN
-    IF NEW.version_id IS DISTINCT FROM OLD.version_id
-       OR NEW.extraction_version IS DISTINCT FROM OLD.extraction_version
-       OR NEW.config_version IS DISTINCT FROM OLD.config_version
-       OR NEW.max_mentions_per_doc IS DISTINCT FROM OLD.max_mentions_per_doc
-       OR NEW.max_spans_per_mention IS DISTINCT FROM OLD.max_spans_per_mention
-       OR NEW.max_display_label_bytes IS DISTINCT FROM OLD.max_display_label_bytes
-       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
-        RAISE EXCEPTION 'topic graph version metadata is immutable';
-    END IF;
-    IF NOT ((OLD.status = 'BUILDING' AND NEW.status = 'READY')
-         OR (OLD.status = 'READY' AND NEW.status = 'ACTIVE')
-         OR (OLD.status = 'ACTIVE' AND NEW.status = 'RETIRED')) THEN
-        RAISE EXCEPTION 'invalid topic graph version lifecycle transition';
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS topic_graph_version_guard_trigger ON topic_graph_versions;
-CREATE TRIGGER topic_graph_version_guard_trigger
-    BEFORE UPDATE ON topic_graph_versions
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_version_guard();
-
--- Mention replacement is permitted only while the version is BUILDING. This
--- database guard keeps a stray SQL writer from mutating evaluated or active
--- evidence behind the repository's back.
-CREATE OR REPLACE FUNCTION topic_graph_mentions_building_guard() RETURNS trigger AS $$
-DECLARE
-    graph_status VARCHAR;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        SELECT status INTO graph_status FROM topic_graph_versions
-        WHERE version_id = OLD.version_id;
-    ELSE
-        SELECT status INTO graph_status FROM topic_graph_versions
-        WHERE version_id = NEW.version_id;
-    END IF;
-    IF graph_status IS DISTINCT FROM 'BUILDING'
-       AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
-        RAISE EXCEPTION 'topic mentions are mutable only while graph version is BUILDING';
-    END IF;
-    IF TG_OP = 'DELETE' THEN
-        RETURN OLD;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS topic_graph_mentions_building_guard_trigger ON topic_mentions;
-CREATE TRIGGER topic_graph_mentions_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_mentions
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_mentions_building_guard();
-
--- Candidates, supported edges, and component memberships are all replaceable
--- derived state. The guard gives them the same BUILDING-only lifecycle as
--- mention replacement and permits cascade deletion only during explicit graph
--- removal.
-CREATE OR REPLACE FUNCTION topic_graph_derived_building_guard() RETURNS trigger AS $$
-DECLARE
-    graph_status VARCHAR;
-    graph_version UUID;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        graph_version := OLD.version_id;
-    ELSE
-        graph_version := NEW.version_id;
-    END IF;
-    SELECT status INTO graph_status FROM topic_graph_versions
-    WHERE version_id = graph_version;
-    IF graph_status IS DISTINCT FROM 'BUILDING'
-       AND NOT (TG_OP = 'DELETE' AND current_setting('pocket_advisor.topic_graph_remove', true) = 'on') THEN
-        RAISE EXCEPTION 'topic graph derived state is mutable only while graph version is BUILDING';
-    END IF;
-    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS topic_relation_candidates_building_guard_trigger ON topic_relation_candidates;
-CREATE TRIGGER topic_relation_candidates_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_candidates
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
-DROP TRIGGER IF EXISTS topic_relation_candidate_supports_building_guard_trigger ON topic_relation_candidate_supports;
-CREATE TRIGGER topic_relation_candidate_supports_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_candidate_supports
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
-DROP TRIGGER IF EXISTS topic_relation_edges_building_guard_trigger ON topic_relation_edges;
-CREATE TRIGGER topic_relation_edges_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_relation_edges
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
-DROP TRIGGER IF EXISTS topic_episodes_building_guard_trigger ON topic_episodes;
-CREATE TRIGGER topic_episodes_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_episodes
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
-DROP TRIGGER IF EXISTS topic_episode_memberships_building_guard_trigger ON topic_episode_memberships;
-CREATE TRIGGER topic_episode_memberships_building_guard_trigger
-    BEFORE INSERT OR UPDATE OR DELETE ON topic_episode_memberships
-    FOR EACH ROW EXECUTE FUNCTION topic_graph_derived_building_guard();
-
--- Repository validation is the normal write path, but the edge guard repeats
--- its two safety invariants for a stray SQL writer: exact email chronology and
--- an acyclic directed edge set. NULL sent_at values sort after dated messages,
--- then doc_id is the immutable tie-breaker.
-CREATE OR REPLACE FUNCTION topic_relation_edge_chronology_cycle_guard() RETURNS trigger AS $$
-DECLARE
-    earlier_sent TIMESTAMPTZ;
-    later_sent TIMESTAMPTZ;
-    earlier_doc UUID;
-    later_doc UUID;
-    cycle_found BOOLEAN;
-BEGIN
-    SELECT em.sent_at, tm.doc_id INTO earlier_sent, earlier_doc
-    FROM topic_mentions tm JOIN email_messages em ON em.doc_id = tm.doc_id
-    WHERE tm.mention_id = NEW.earlier_mention_id AND tm.version_id = NEW.version_id;
-    SELECT em.sent_at, tm.doc_id INTO later_sent, later_doc
-    FROM topic_mentions tm JOIN email_messages em ON em.doc_id = tm.doc_id
-    WHERE tm.mention_id = NEW.later_mention_id AND tm.version_id = NEW.version_id;
-    IF (earlier_sent IS NULL AND (later_sent IS NOT NULL OR earlier_doc >= later_doc))
-       OR (earlier_sent IS NOT NULL AND later_sent IS NOT NULL
-           AND (earlier_sent > later_sent OR (earlier_sent = later_sent AND earlier_doc >= later_doc))) THEN
-        RAISE EXCEPTION 'topic relation edge violates sent_at/doc_id chronology';
-    END IF;
-    WITH RECURSIVE reachable(mention_id) AS (
-        SELECT NEW.later_mention_id
-        UNION
-        SELECT e.later_mention_id
-        FROM topic_relation_edges e JOIN reachable r ON e.earlier_mention_id = r.mention_id
-        WHERE e.version_id = NEW.version_id
-    )
-    SELECT EXISTS (SELECT 1 FROM reachable WHERE mention_id = NEW.earlier_mention_id)
-      INTO cycle_found;
-    IF cycle_found THEN
-        RAISE EXCEPTION 'topic relation edge creates a cycle';
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS topic_relation_edges_chronology_cycle_guard_trigger ON topic_relation_edges;
-CREATE TRIGGER topic_relation_edges_chronology_cycle_guard_trigger
-    BEFORE INSERT OR UPDATE ON topic_relation_edges
-    FOR EACH ROW EXECUTE FUNCTION topic_relation_edge_chronology_cycle_guard();
 `
 
 // searchIndexName is the lexical leg's BM25 index. Named, not anonymous,
@@ -745,9 +388,6 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		if err := d.applyEmailSchema(ctx); err != nil {
 			return err
 		}
-		if err := d.applyTopicGraphSchema(ctx); err != nil {
-			return err
-		}
 
 		return d.ApplySourceSchema(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) && !IsUndefinedTable(err) {
@@ -774,9 +414,6 @@ func (d *DB) ApplySchema(ctx context.Context, meta SchemaMetadata) error {
 		return err
 	}
 	if err := d.applyEmailSchema(ctx); err != nil {
-		return err
-	}
-	if err := d.applyTopicGraphSchema(ctx); err != nil {
 		return err
 	}
 	return d.ApplySourceSchema(ctx)
@@ -821,23 +458,6 @@ func (d *DB) applyEmailSchema(ctx context.Context) error {
 		return fmt.Errorf("apply email schema: %w", err)
 	}
 	return nil
-}
-
-// applyTopicGraphSchema upgrades a workspace with the replaceable topic
-// mention substrate. It is structural only: existing documents and canonical
-// email metadata are never backfilled or changed by schema application.
-func (d *DB) applyTopicGraphSchema(ctx context.Context) error {
-	if _, err := d.Pool.Exec(ctx, topicGraphSchemaSQL); err != nil {
-		return fmt.Errorf("apply topic graph schema: %w", err)
-	}
-	return nil
-}
-
-// ApplyTopicGraphSchema installs only the additive derived-graph tables. A
-// topic build does not need an embedding probe or permission to alter canonical
-// indexing state; it merely ensures its own committed substrate exists.
-func (d *DB) ApplyTopicGraphSchema(ctx context.Context) error {
-	return d.applyTopicGraphSchema(ctx)
 }
 
 // LoadSchemaMetadata reads what the index was built for. Every worker calls

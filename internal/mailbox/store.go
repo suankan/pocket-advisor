@@ -31,25 +31,17 @@ type Store interface {
 	// are never returned.
 	ListMessages(ctx context.Context, q PageQuery) ([]Message, error)
 
-	// Summaries aggregates whole conversations for the collapse view. The
 	// snapshot applies here too: a summary must describe the same set of
 	// messages the page was drawn from.
-	Summaries(ctx context.Context, conversationIDs []string, snapshot time.Time) (map[string]Aggregate, error)
 
-	// CandidateMessages returns complete exact-reference conversations that have
 	// at least one potentially eligible inbound human message. It returns every
 	// event in those conversations so a later reply cannot be hidden by a date
 	// or participant filter on the candidate itself.
-	CandidateMessages(ctx context.Context, q CandidateQuery) ([]Message, error)
 
-	// ConversationOf resolves one message document to its conversation.
 	// Returns ErrUnknownReference when the workspace holds no such message.
-	ConversationOf(ctx context.Context, docID string) (string, error)
 
-	// ConversationMessages returns every message of a conversation in
 	// chronological order. Returns ErrUnknownReference for a conversation with
 	// no messages in scope.
-	ConversationMessages(ctx context.Context, conversationID string, snapshot time.Time) ([]Message, error)
 }
 
 // PageQuery is one page request as the store receives it.
@@ -69,20 +61,10 @@ type PageQuery struct {
 	OwnerIdentities []string
 }
 
-// Message is one stored email message as browsing sees it.
-//
-// It carries the message's own metadata plus the two derived values a browse
-// result needs: the conversation it was assigned to, and — under collapse — how
-// many messages of that conversation matched the filters.
+// Message is one email row as the browse result needs it.
 type Message struct {
-	DocID          string
-	MessageID      string
-	ConversationID string
-	// ConversationMethod is how the message was assigned to its conversation
-	// at write time: an exact identifier component, the labelled subject
-	// fallback, or an isolated message.
-	ConversationMethod domain.ConversationMethod
-
+	DocID      string
+	MessageID  string
 	Subject    string
 	SentAt     time.Time
 	IngestedAt time.Time
@@ -112,34 +94,6 @@ type Message struct {
 	// ParseWarnings are the defects recorded when the message was parsed.
 	// Surfaced as warning codes only: their header values may hold addresses.
 	ParseWarnings []domain.EmailParseWarning
-
-	// ConversationMatches is how many messages of this conversation matched
-	// the filters, set only when the store collapsed conversations.
-	ConversationMatches int
 }
 
 func (m Message) key() key { return key{SentAt: m.SentAt, DocID: m.DocID} }
-
-// Aggregate is a whole conversation summarised, independent of which of its
-// messages matched.
-type Aggregate struct {
-	ConversationID string
-	Method         domain.ConversationMethod
-	MessageCount   int
-	FirstSentAt    time.Time
-	LastSentAt     time.Time
-	// Participants are the distinct normalized From mailboxes, ascending. The
-	// caller bounds how many it renders; the store returns what it found.
-	Participants []string
-}
-
-// CandidateQuery is the store-side, closed predicate for awaiting-reply work.
-// Date and participant bounds select possible inbound messages; they never
-// prune later events from a selected conversation.
-type CandidateQuery struct {
-	OwnerIdentities []string
-	Participant     string
-	After           time.Time
-	Before          time.Time
-	Snapshot        time.Time
-}

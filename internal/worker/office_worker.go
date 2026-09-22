@@ -58,7 +58,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
 
-	if err := w.Docs.SaveText(ctx, meta.DocId, text, "office/"+cmd.Subtype, meta.ThreadId); err != nil {
+	if err := w.Docs.SaveText(ctx, meta.DocId, text, "office/"+cmd.Subtype); err != nil {
 		if errors.Is(err, postgres.ErrInvalidText) {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))
 		}
@@ -66,7 +66,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	}
 
 	tp := trace.Child(meta.Traceparent)
-	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, meta.ThreadId, tp)
+	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, tp)
 	if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 		Metadata: out, TextLength: int64(len(text)),
 	}, tp); err != nil {

@@ -17,12 +17,6 @@ type EmailRepo struct{ db *DB }
 
 func NewEmailRepo(db *DB) *EmailRepo { return &EmailRepo{db: db} }
 
-// emailGraphLockKey is a fixed advisory lock key naming what is serialised —
-// the one identifier graph this database holds — rather than which
-// workspace, since each workspace is its own database (deviation 34) and an
-// advisory lock is already scoped to the connection's own database.
-const emailGraphLockKey = "email-identifier-graph"
-
 // SaveEmailMessage persists one message's browse metadata and reports the
 // conversation it was assigned to.
 //
@@ -36,45 +30,26 @@ const emailGraphLockKey = "email-identifier-graph"
 // delivery guarantees a document is eventually processed twice), and identifier
 // nodes converge on the same component because the component is derived from
 // the identifiers rather than minted per run.
-func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage) (domain.EmailConversation, error) {
-	var conv domain.EmailConversation
-
+// SaveEmailMessage records what the message says about itself. There is no
+// grouping decision and therefore no workspace-wide lock: the ON CONFLICT
+// upsert takes this document's row before its address and reference rows are
+// replaced, which serialises concurrent writes to the same document and leaves
+// unrelated messages free to proceed in parallel.
+//
+// Equal Message-IDs do not merge documents or elect an owner. Both rows are
+// kept, and whether an identifier is currently shared is a question the
+// indexed rows answer when read, not a fact frozen into whichever copy was
+// written first.
+func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage) error {
 	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
-		return conv, fmt.Errorf("begin email metadata: %w", err)
+		return fmt.Errorf("begin email metadata: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Component maintenance reads the graph, decides a merge, and rewrites
-	// rows the decision was based on. Two workers folding messages of one
-	// conversation in concurrently would each plan against a graph the other
-	// is changing, so the whole decision is serialised. It is a
-	// transaction-scoped lock, released by commit or rollback.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext($1))`, emailGraphLockKey); err != nil {
-		return conv, fmt.Errorf("lock email graph: %w", err)
-	}
-
-	conv, err = assignConversation(ctx, tx, m)
+	encoded, err := json.Marshal(orEmptyWarnings(m.Warnings))
 	if err != nil {
-		return conv, err
-	}
-
-	warnings := m.Warnings
-	if conv.DuplicateOf != "" {
-		// Recorded against this document, not the one that owns the
-		// identifier: the defect is that this copy exists, and the owner's row
-		// is not rewritten by someone else's ingest.
-		warnings = append(append([]domain.EmailParseWarning{}, warnings...),
-			domain.EmailParseWarning{
-				Code:   domain.WarnDuplicateMessageID,
-				Header: "Message-ID",
-				Value:  m.MessageID,
-			})
-	}
-	encoded, err := json.Marshal(orEmptyWarnings(warnings))
-	if err != nil {
-		return conv, fmt.Errorf("marshal parse warnings %s: %w", m.DocID, err)
+		return fmt.Errorf("marshal parse warnings %s: %w", m.DocID, err)
 	}
 
 	var sentAt any
@@ -88,152 +63,37 @@ func (r *EmailRepo) SaveEmailMessage(ctx context.Context, m domain.EmailMessage)
 	// caller has already seen reappear at the head of the next page.
 	if _, err := tx.Exec(ctx, `
         INSERT INTO email_messages (
-            doc_id, message_id, subject_raw, subject_normalized,
-            sent_at, automated_class, list_id, conversation_id,
-            conversation_method, parse_warnings, parse_version)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)
+            doc_id, message_id, subject_raw,
+            sent_at, automated_class, list_id, parse_warnings, parse_version)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
         ON CONFLICT (doc_id) DO UPDATE SET
-            message_id          = EXCLUDED.message_id,
-            subject_raw         = EXCLUDED.subject_raw,
-            subject_normalized  = EXCLUDED.subject_normalized,
-            sent_at             = EXCLUDED.sent_at,
-            automated_class     = EXCLUDED.automated_class,
-            list_id             = EXCLUDED.list_id,
-            conversation_id     = EXCLUDED.conversation_id,
-            conversation_method = EXCLUDED.conversation_method,
-            parse_warnings      = EXCLUDED.parse_warnings,
-            parse_version       = EXCLUDED.parse_version`,
-		m.DocID, m.MessageID, m.SubjectRaw, m.SubjectNormalized,
-		sentAt, string(m.AutomatedClass), m.ListID, conv.ConversationID,
-		string(conv.Method), string(encoded), domain.EmailParseVersion,
+            message_id      = EXCLUDED.message_id,
+            subject_raw     = EXCLUDED.subject_raw,
+            sent_at         = EXCLUDED.sent_at,
+            automated_class = EXCLUDED.automated_class,
+            list_id         = EXCLUDED.list_id,
+            parse_warnings  = EXCLUDED.parse_warnings,
+            parse_version   = EXCLUDED.parse_version`,
+		m.DocID, m.MessageID, m.SubjectRaw,
+		sentAt, string(m.AutomatedClass), m.ListID,
+		string(encoded), domain.EmailParseVersion,
 	); err != nil {
-		return conv, fmt.Errorf("save email message %s: %w", m.DocID, err)
+		return fmt.Errorf("save email message %s: %w", m.DocID, err)
 	}
 
 	if err := replaceAddresses(ctx, tx, m); err != nil {
-		return conv, err
+		return err
 	}
 	if err := replaceReferences(ctx, tx, m); err != nil {
-		return conv, err
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return conv, fmt.Errorf("commit email metadata %s: %w", m.DocID, err)
+		return fmt.Errorf("commit email metadata %s: %w", m.DocID, err)
 	}
-	return conv, nil
+	return nil
 }
 
-// assignConversation folds the message into the workspace's identifier graph,
-// or applies the labelled fallback when it carries no identifier at all.
-func assignConversation(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) (domain.EmailConversation, error) {
-	ids := m.Identifiers()
-	if len(ids) == 0 {
-		// A header orphan. Subject grouping is a guess, so it is stored under
-		// its own method and never merged into an identifier component. It also
-		// needs a participant to be worth making: a normalized subject on its
-		// own recurs across unrelated correspondents, so without a usable
-		// sender the message is a conversation of one rather than a member of a
-		// bucket keyed on a common phrase.
-		if sender := m.PrimarySender(); m.SubjectNormalized != "" && sender != "" {
-			return domain.EmailConversation{
-				ConversationID: domain.NewEmailSubjectConversationID(
-					m.SubjectNormalized, sender),
-				Method: domain.ConversationBySubject,
-			}, nil
-		}
-		return domain.EmailConversation{
-			ConversationID: domain.NewEmailIsolatedConversationID(m.DocID),
-			Method:         domain.ConversationIsolated,
-		}, nil
-	}
-
-	existing, err := loadIdentifierNodes(ctx, tx, ids)
-	if err != nil {
-		return domain.EmailConversation{}, err
-	}
-	seed := domain.NewEmailComponentID(smallestIdentifier(ids))
-	plan := planComponent(m.DocID, m.MessageID, ids, existing, seed)
-
-	if len(plan.MergeFrom) > 0 {
-		// By component, not by identifier: merging two conversations has to
-		// carry every node and every message already in them, including the
-		// ancestors neither of these two messages mentioned.
-		if _, err := tx.Exec(ctx, `
-            UPDATE email_identifier_nodes SET component_id = $1
-            WHERE component_id = ANY($2::uuid[])`,
-			plan.ComponentID, plan.MergeFrom); err != nil {
-			return domain.EmailConversation{}, fmt.Errorf("merge identifier components: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-            UPDATE email_messages SET conversation_id = $1
-            WHERE conversation_id = ANY($2::uuid[])`,
-			plan.ComponentID, plan.MergeFrom); err != nil {
-			return domain.EmailConversation{}, fmt.Errorf("merge conversations: %w", err)
-		}
-	}
-
-	if len(plan.Insert) > 0 {
-		msgIDs := make([]string, len(plan.Insert))
-		docIDs := make([]string, len(plan.Insert))
-		for i, n := range plan.Insert {
-			msgIDs[i], docIDs[i] = n.MessageID, n.DocID
-		}
-		// An empty doc_id is a placeholder ancestor: the identifier is known,
-		// the message behind it is not. NULLIF keeps that as a NULL reference
-		// rather than an invented document.
-		if _, err := tx.Exec(ctx, `
-            INSERT INTO email_identifier_nodes (message_id, doc_id, component_id)
-            SELECT v.message_id, NULLIF(v.doc_id, '')::uuid, $1::uuid
-            FROM unnest($2::text[], $3::text[]) AS v(message_id, doc_id)
-            ON CONFLICT (message_id) DO NOTHING`,
-			plan.ComponentID, msgIDs, docIDs); err != nil {
-			return domain.EmailConversation{}, fmt.Errorf("insert identifier nodes: %w", err)
-		}
-	}
-
-	if plan.AdoptOwn {
-		// The message an earlier reply only named has now been ingested. The
-		// doc_id IS NULL guard keeps this to placeholders: a node already
-		// backed by a document is never retargeted.
-		if _, err := tx.Exec(ctx, `
-            UPDATE email_identifier_nodes SET doc_id = $1
-            WHERE message_id = $2 AND doc_id IS NULL`,
-			m.DocID, m.MessageID); err != nil {
-			return domain.EmailConversation{}, fmt.Errorf("adopt placeholder node: %w", err)
-		}
-	}
-
-	return domain.EmailConversation{
-		ConversationID: plan.ComponentID,
-		Method:         domain.ConversationByReferences,
-		DuplicateOf:    plan.DuplicateOf,
-	}, nil
-}
-
-func loadIdentifierNodes(ctx context.Context, tx pgx.Tx, ids []string) (map[string]identifierNode, error) {
-	rows, err := tx.Query(ctx, `
-        SELECT message_id, COALESCE(doc_id::text, ''), component_id::text
-        FROM email_identifier_nodes
-        WHERE message_id = ANY($1::text[])`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("load identifier nodes: %w", err)
-	}
-	defer rows.Close()
-
-	out := make(map[string]identifierNode, len(ids))
-	for rows.Next() {
-		var n identifierNode
-		if err := rows.Scan(&n.MessageID, &n.DocID, &n.ComponentID); err != nil {
-			return nil, fmt.Errorf("load identifier nodes: %w", err)
-		}
-		out[n.MessageID] = n
-	}
-	return out, rows.Err()
-}
-
-// replaceAddresses rewrites a document's mailboxes. Delete-then-insert, never
-// append: a reprocessed message must not accumulate a second copy of its own
-// recipients, and a header that lost a mailbox must lose the row too.
 func replaceAddresses(ctx context.Context, tx pgx.Tx, m domain.EmailMessage) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM email_addresses WHERE doc_id = $1`, m.DocID); err != nil {
 		return fmt.Errorf("clear addresses %s: %w", m.DocID, err)

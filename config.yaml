@@ -88,41 +88,6 @@ infra:
     model: Qwen3.5-4B-MLX-4bit
     timeout: 30s
 
-  # Bounded, local extraction of source-backed email topic mentions. Change
-  # the opaque versions before changing a bound, the prompt, or the model.
-  # A build is then isolated in a replacement graph version until promotion.
-  topic_graph:
-    extraction_version: topic-mentions-v1
-    config_version: topic-mentions-config-v1
-    prompt_version: topic-mentions-prompt-v1
-    max_input_bytes: 262144
-    max_output_bytes: 65536
-    max_output_tokens: 1024
-    max_mentions_per_doc: 64
-    max_spans_per_mention: 8
-    max_display_label_bytes: 256
-    # Relation classification runs only in the explicit topic graph build after
-    # source-backed mentions are persisted. Its candidates are exact email
-    # references, never subject or embedding similarity.
-    relation_version: topic-relations-v1
-    relation_prompt_version: topic-relations-prompt-v1
-    relation_max_input_bytes: 524288
-    relation_max_output_bytes: 65536
-    relation_max_output_tokens: 1024
-    relation_max_candidates: 512
-    relation_min_confidence: 0.80
-
-  # Optional graph expansion is deliberately off: normal source-first retrieval
-  # does not read derived graph data unless an operator enables this gate.
-  query:
-    topic_graph_expansion_enabled: false
-    topic_graph_min_confidence: 0.85
-    topic_graph_backward_depth: 2
-    topic_graph_forward_depth: 2
-    topic_graph_max_nodes: 16
-    topic_graph_max_bytes: 16384
-    topic_graph_max_seeds: 8
-
   observability:
     metrics_port: 9090
     log_level: info

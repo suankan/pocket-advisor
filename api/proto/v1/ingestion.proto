@@ -18,9 +18,13 @@ message DocumentMetadata {
   // (deviation 34), so nothing ever read this field for a decision — it was
   // set at discovery and carried, unread, to wherever a command happened to
   // travel. Retired rather than reused, like field 4.
-  reserved 3, 4;
-  reserved "workspace_id", "collection_id";
-  string thread_id = 5;
+  // field 5 named the email thread a document was assigned to. Threading was
+  // a grouping derived at ingestion and consumed only by retrieval; both are
+  // gone, and the parsed reply headers it was derived from are retained in
+  // their own tables. Retired rather than reused, like fields 3 and 4: a new
+  // field here would be read as a thread id by an older binary.
+  reserved 3, 4, 5;
+  reserved "workspace_id", "collection_id", "thread_id";
   string source_filename = 6;
   string mime_type = 7;
   string raw_sha256 = 8;

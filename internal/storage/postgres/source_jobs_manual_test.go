@@ -75,7 +75,7 @@ func TestSourceJobAtomicHandoffAndDuplicate(t *testing.T) {
 		t.Fatal("retry changed identity")
 	}
 	handler := func(ctx context.Context) error {
-		if err := docs.SaveText(ctx, id, "canonical text", "pdf", ""); err != nil {
+		if err := docs.SaveText(ctx, id, "canonical text", "pdf"); err != nil {
 			return err
 		}
 		return jobs.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: cmd.Metadata}, "")

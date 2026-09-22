@@ -53,27 +53,8 @@ func runCorpusSearch(o *Options, cfg *config.Config, logs *telemetry.Logs, span 
 		return enc.Encode(hits)
 	}
 
-	// Only real conversations count. An empty thread id is "not part of a
-	// conversation", and folding those together would report four unrelated
-	// PDFs as one thread, which is the opposite of what the number is for.
-	threads := map[string]struct{}{}
-	standalone := 0
-	for _, h := range hits {
-		if h.ThreadID == "" {
-			standalone++
-			continue
-		}
-		threads[h.ThreadID] = struct{}{}
-	}
-	where := ""
-	switch {
-	case len(threads) > 0 && standalone > 0:
-		where = fmt.Sprintf(", across %d conversation(s) plus %d standalone document(s)", len(threads), standalone)
-	case len(threads) > 0:
-		where = fmt.Sprintf(", across %d conversation(s)", len(threads))
-	}
-	fmt.Printf("%d document(s) contain that text%s, scanned in %s\n\n",
-		len(hits), where, time.Since(started).Round(time.Second))
+	fmt.Printf("%d document(s) contain that text, scanned in %s\n\n",
+		len(hits), time.Since(started).Round(time.Second))
 
 	for _, h := range hits {
 		date := "no date"

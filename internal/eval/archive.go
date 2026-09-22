@@ -99,6 +99,13 @@ func PreviousComparableRun(dir string, cur *Report) (*Report, error) {
 		if prev.CaseSetSHA256 != cur.CaseSetSHA256 {
 			continue
 		}
+		// Same questions is not enough. A report taken under different
+		// measurement semantics answers a different question about the same
+		// run, so comparing across that boundary reports movement where
+		// nothing moved. Older reports carry no version and read as 0.
+		if prev.MeasurementVersion != cur.MeasurementVersion {
+			continue
+		}
 		return prev, nil
 	}
 	return nil, nil

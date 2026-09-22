@@ -57,7 +57,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
 
 	var children []email.Child
-	var bodyText, threadID string
+	var bodyText string
 	var headers domain.EmailHeaders
 	var parsed *email.Parsed
 
@@ -76,7 +76,6 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		}
 		parsed = p
 		children = parsed.Children
-		threadID = resolveThread(parsed)
 		headers = headersOf(parsed)
 		bodyText = strings.TrimSpace(parsed.BodyText)
 	}
@@ -84,32 +83,23 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	// Browse metadata before either body path, and independently of both: it
 	// describes the message rather than its text, so a bodyless message and a
 	// message whose body is still queued for embedding are equally answerable
-	// by sender, date and conversation. The document row it hangs off already
-	// exists — discovery stubbed it — and a rewrite of the same doc_id
-	// converges rather than accumulating (§2.5).
+	// by sender and date. The document row it hangs off already exists —
+	// discovery stubbed it — and a rewrite of the same doc_id converges
+	// rather than accumulating (§2.5).
 	if parsed != nil && w.Emails != nil {
-		conv, err := w.Emails.SaveEmailMessage(ctx, emailMessageOf(meta.DocId, parsed))
-		if err != nil {
+		if err := w.Emails.SaveEmailMessage(ctx, emailMessageOf(meta.DocId, parsed)); err != nil {
 			return WithDoc(meta.DocId, err)
-		}
-		if conv.DuplicateOf != "" {
-			// The identifier stays with whichever document claimed it first;
-			// this one is still stored and still browsable, it simply does not
-			// own the Message-ID. Worth saying once, because a corpus full of
-			// these means the same mailbox was ingested twice.
-			w.Log.Warn("duplicate message id",
-				"doc_id", meta.DocId, "owned_by", conv.DuplicateOf)
 		}
 	}
 
 	// Body text first: the embed command carries a reference, so the text has
 	// to be durable before the command goes out (§4.1).
 	if bodyText != "" {
-		if err := w.Docs.SaveEmailText(ctx, meta.DocId, bodyText, threadID, headers); err != nil {
+		if err := w.Docs.SaveEmailText(ctx, meta.DocId, bodyText, headers); err != nil {
 			return WithDoc(meta.DocId, err)
 		}
 		child := trace.Child(meta.Traceparent)
-		embedMeta := cloneMeta(meta, meta.DocId, meta.ParentDocId, threadID, child)
+		embedMeta := cloneMeta(meta, meta.DocId, meta.ParentDocId, child)
 		if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 			Metadata: embedMeta, TextLength: int64(len(bodyText)),
 		}, child); err != nil {
@@ -123,7 +113,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		// indexed, but the row stays answerable by subject, sender and date
 		// rather than being a blank record.
 		if headers != (domain.EmailHeaders{}) {
-			if err := w.Docs.SaveEmailText(ctx, meta.DocId, "", threadID, headers); err != nil {
+			if err := w.Docs.SaveEmailText(ctx, meta.DocId, "", headers); err != nil {
 				return WithDoc(meta.DocId, err)
 			}
 		}
@@ -133,7 +123,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 	}
 
 	for _, c := range children {
-		if err := w.dispatchChild(ctx, meta, threadID, c); err != nil {
+		if err := w.dispatchChild(ctx, meta, c); err != nil {
 			// All child intents must commit before the parent can acknowledge.
 			return WithDoc(meta.DocId, err)
 		}
@@ -141,12 +131,12 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 	w.Log.Info("email processed",
 		"doc_id", meta.DocId, "children", len(children),
-		"thread_id", threadID, "trace_id", trace.TraceID(meta.Traceparent))
+		"trace_id", trace.TraceID(meta.Traceparent))
 	return nil
 }
 
 // dispatchChild records a replayable member and its durable processing intent.
-func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.DocumentMetadata, threadID string, c email.Child) error {
+func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.DocumentMetadata, c email.Child) error {
 	if len(c.Data) == 0 {
 		return nil
 	}
@@ -159,7 +149,6 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		// the same way discovery's root documents do (domain.NewDocID).
 		DocID:       domain.NewDocID(),
 		ParentDocID: parent.DocId,
-		ThreadID:    threadID,
 		DocType:     route.DocType,
 		MimeType:    route.MimeType,
 		SourceRef:   "",
@@ -203,7 +192,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 	}
 
 	tp := trace.Child(parent.Traceparent)
-	meta := cloneMeta(parent, childID, parent.DocId, threadID, tp)
+	meta := cloneMeta(parent, childID, parent.DocId, tp)
 	meta.SourceFilename = c.Filename
 	meta.MimeType = route.MimeType
 	meta.RawSha256 = sum
@@ -231,7 +220,7 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		if !utf8.Valid(c.Data) {
 			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonUnknownEncoding)
 		}
-		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType, threadID); err != nil {
+		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType); err != nil {
 			return err
 		}
 		return w.Bus.Publish(ctx, route.Subject, &ingestionv1.EmbedTextCommand{
@@ -239,21 +228,6 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		}, tp)
 	}
 	return fmt.Errorf("no route for %q", route.Subject)
-}
-
-// resolveThread prefers header lineage and falls back to normalised subject
-// plus a shared participant.
-func resolveThread(p *email.Parsed) string {
-	if len(p.References) > 0 {
-		return p.References[0]
-	}
-	if p.InReplyTo != "" {
-		return p.InReplyTo
-	}
-	if p.MessageID != "" {
-		return p.MessageID
-	}
-	return email.ThreadKey(p.Subject, p.From)
 }
 
 // headersOf lifts the headers that carry evidential weight out of the message.
@@ -270,11 +244,10 @@ func headersOf(p *email.Parsed) domain.EmailHeaders {
 	}
 }
 
-func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, threadID, tp string) *ingestionv1.DocumentMetadata {
+func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, tp string) *ingestionv1.DocumentMetadata {
 	return &ingestionv1.DocumentMetadata{
 		DocId:          docID,
 		ParentDocId:    parentID,
-		ThreadId:       threadID,
 		SourceFilename: src.SourceFilename,
 		MimeType:       src.MimeType,
 		RawSha256:      src.RawSha256,

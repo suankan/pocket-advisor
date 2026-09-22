@@ -74,7 +74,6 @@ type EvidenceDocument struct {
 	ExtractionVersion string            `json:"extraction_version,omitempty"`
 	DocumentID        string            `json:"document_id"`
 	ParentDocumentID  *string           `json:"parent_document_id"`
-	ThreadID          *string           `json:"thread_id"`
 	DocumentType      string            `json:"document_type"`
 	Title             string            `json:"title"`
 	From              string            `json:"from"`
@@ -214,8 +213,8 @@ func evidenceDocument(document retrieval.Document) EvidenceDocument {
 	}
 	return EvidenceDocument{
 		DocumentID: document.DocID, ParentDocumentID: nullableString(document.ParentID),
-		ThreadID: nullableString(document.ThreadID), DocumentType: document.DocType,
-		Title: document.Title, From: document.From, To: document.To, Date: date,
+		DocumentType: document.DocType,
+		Title:        document.Title, From: document.From, To: document.To, Date: date,
 		SourceLocations: document.SourceLocations, ExtractionHash: document.ExtractionHash, ExtractionVersion: document.ExtractionVersion, SourceSHA256: document.SHA256, SourceRef: document.SourceRef,
 		WorkspaceRelativePath:          nullableString(document.SourcePath),
 		ContainerWorkspaceRelativePath: nullableString(document.ContainerPath),
@@ -325,7 +324,7 @@ func validateText(text *string, omitted bool) error {
 func validRelation(relation string) bool {
 	return relation == string(retrieval.RelationParent) ||
 		relation == string(retrieval.RelationChild) ||
-		relation == string(retrieval.RelationThreadPeer)
+		relation == string(retrieval.RelationSibling)
 }
 
 func (page *EvidencePage) Validate() error {

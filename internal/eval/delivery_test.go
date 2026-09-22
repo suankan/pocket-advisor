@@ -73,3 +73,84 @@ func TestDeliveredRecallRespectsK(t *testing.T) {
 		t.Errorf("DeliveredRecallAtK(k=2) = %v, want 1", got)
 	}
 }
+
+// The attribution failure: the budget refused the expected document's own
+// text and admitted its covering email instead. The caller received a title,
+// an empty body, and somebody else's prose — which is not the document.
+func TestPrimaryDeliveryNeverBorrowsNeighbourText(t *testing.T) {
+	expected := []ResolvedDocument{{DocID: "statement", Grade: 3}}
+	ranked := []packetRef{{
+		DocID:   "statement",
+		Text:    "",
+		Related: []relatedRef{{DocID: "covering-email", Text: "please find attached"}},
+	}}
+
+	if got := DeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("DeliveredRecallAtK() = %v, want 0 — the document's own text never arrived", got)
+	}
+	if got := FirstDeliveredRank(ranked, expected); got != 0 {
+		t.Errorf("FirstDeliveredRank() = %v, want 0", got)
+	}
+	if got := UnionDeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("UnionDeliveredRecallAtK() = %v, want 0 — the neighbour is a different document", got)
+	}
+}
+
+// Expected evidence that arrives only as somebody else's neighbour is real
+// delivery, but supplementary delivery, and must be reported as such.
+func TestExpectedEvidenceDeliveredOnlyAsNeighbour(t *testing.T) {
+	expected := []ResolvedDocument{{DocID: "statement", Grade: 3}}
+	ranked := []packetRef{{
+		DocID:   "covering-email",
+		Text:    "please find attached",
+		Related: []relatedRef{{DocID: "statement", Text: "closing balance"}},
+	}}
+
+	if got := DeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("DeliveredRecallAtK() = %v, want 0 — it was never a packet of its own", got)
+	}
+	if got := SupplementaryDeliveredRecallAtK(ranked, expected, 10); got != 1 {
+		t.Errorf("SupplementaryDeliveredRecallAtK() = %v, want 1", got)
+	}
+	if got := UnionDeliveredRecallAtK(ranked, expected, 10); got != 1 {
+		t.Errorf("UnionDeliveredRecallAtK() = %v, want 1 — the caller did receive it", got)
+	}
+}
+
+// A neighbour the budget dropped delivers nothing, however it is counted.
+func TestOmittedNeighbourDeliversNothing(t *testing.T) {
+	expected := []ResolvedDocument{{DocID: "statement", Grade: 3}}
+	ranked := []packetRef{{
+		DocID:   "covering-email",
+		Text:    "please find attached",
+		Related: []relatedRef{{DocID: "statement", Text: ""}},
+	}}
+
+	if got := SupplementaryDeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("SupplementaryDeliveredRecallAtK() = %v, want 0", got)
+	}
+	if got := UnionDeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("UnionDeliveredRecallAtK() = %v, want 0", got)
+	}
+}
+
+// One document delivered as a packet and repeated as another packet's
+// neighbour is one delivery, and belongs to the primary side.
+func TestDuplicatePrimaryAndRelatedIdentityCountsOnce(t *testing.T) {
+	expected := []ResolvedDocument{{DocID: "statement", Grade: 3}}
+	ranked := []packetRef{
+		{DocID: "statement", Text: "closing balance"},
+		{DocID: "covering-email", Text: "please find attached",
+			Related: []relatedRef{{DocID: "statement", Text: "closing balance"}}},
+	}
+
+	if got := DeliveredRecallAtK(ranked, expected, 10); got != 1 {
+		t.Errorf("DeliveredRecallAtK() = %v, want 1", got)
+	}
+	if got := SupplementaryDeliveredRecallAtK(ranked, expected, 10); got != 0 {
+		t.Errorf("SupplementaryDeliveredRecallAtK() = %v, want 0 — it is already a primary delivery", got)
+	}
+	if got := UnionDeliveredRecallAtK(ranked, expected, 10); got != 1 {
+		t.Errorf("UnionDeliveredRecallAtK() = %v, want 1, not 2", got)
+	}
+}

@@ -136,7 +136,7 @@ func TestEmailDocumentsCanSelectOnlyMissingMetadata(t *testing.T) {
 	done := reprocessDoc(t, db, strings.Repeat("7", 64), "email", true)
 	pending := reprocessDoc(t, db, strings.Repeat("8", 64), "email", true)
 
-	if _, err := repo.SaveEmailMessage(ctx,
+	if err := repo.SaveEmailMessage(ctx,
 		message(done, "seven@mail.example.test", "Quarterly review", "")); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -171,23 +171,23 @@ func TestEmailReprocessingLeavesTheDocumentRowAlone(t *testing.T) {
 
 	docID := reprocessDoc(t, db, strings.Repeat("9", 64), "email", true)
 	if _, err := db.Pool.Exec(ctx, `
-        UPDATE documents SET normalized_text = $2, thread_id = $3, email_subject = $4
-        WHERE doc_id = $1`, docID, "synthetic body", "thread-key", "Quarterly review"); err != nil {
+        UPDATE documents SET normalized_text = $2, email_subject = $3
+        WHERE doc_id = $1`, docID, "synthetic body", "Quarterly review"); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
 
 	type row struct {
-		text, thread, subject, status string
-		updated                       time.Time
+		text, subject, status string
+		updated               time.Time
 	}
 	read := func() row {
 		t.Helper()
 		var r row
 		if err := db.Pool.QueryRow(ctx, `
-            SELECT COALESCE(normalized_text,''), thread_id, email_subject,
+            SELECT COALESCE(normalized_text,''), email_subject,
                    processing_status::text, updated_at
             FROM documents WHERE doc_id = $1`, docID).Scan(
-			&r.text, &r.thread, &r.subject, &r.status, &r.updated); err != nil {
+			&r.text, &r.subject, &r.status, &r.updated); err != nil {
 			t.Fatalf("read document: %v", err)
 		}
 		return r
@@ -195,10 +195,10 @@ func TestEmailReprocessingLeavesTheDocumentRowAlone(t *testing.T) {
 
 	before := read()
 	m := message(docID, "nine@mail.example.test", "Quarterly review", "")
-	if _, err := repo.SaveEmailMessage(ctx, m); err != nil {
+	if err := repo.SaveEmailMessage(ctx, m); err != nil {
 		t.Fatalf("first rebuild: %v", err)
 	}
-	if _, err := repo.SaveEmailMessage(ctx, m); err != nil {
+	if err := repo.SaveEmailMessage(ctx, m); err != nil {
 		t.Fatalf("second rebuild: %v", err)
 	}
 	if after := read(); after != before {

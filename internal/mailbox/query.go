@@ -43,11 +43,8 @@ type Filters struct {
 	Recipient string
 	// After bounds the parsed Date inclusively, Before exclusively, so
 	// consecutive windows tile without overlapping or dropping a message.
-	After  time.Time
-	Before time.Time
-	// Collapse returns one row per conversation — the matching message that
-	// is extreme in the requested order — plus a summary of the conversation.
-	Collapse  bool
+	After     time.Time
+	Before    time.Time
 	Direction Direction
 }
 
@@ -62,9 +59,6 @@ type ListRequest struct {
 	Before    time.Time
 	Order     Order
 	Limit     int
-	// CollapseConversations returns the matched message plus conversation
-	// summary fields instead of every matching message.
-	CollapseConversations bool
 	// Cursor continues a previous page series. It must have been issued for
 	// the same filters and order.
 	Cursor string
@@ -82,7 +76,6 @@ type AppliedFilters struct {
 	Recipient    string     `json:"recipient,omitempty"`
 	After        *time.Time `json:"after,omitempty"`
 	Before       *time.Time `json:"before,omitempty"`
-	Collapse     bool       `json:"collapse_conversations"`
 	Direction    Direction  `json:"direction,omitempty"`
 }
 
@@ -99,17 +92,13 @@ type Page struct {
 
 // ListedMessage is one message in a browse result.
 type ListedMessage struct {
-	Ref                string     `json:"ref"`
-	DocID              string     `json:"doc_id"`
-	ConversationRef    string     `json:"conversation_ref"`
-	ConversationID     string     `json:"conversation_id"`
-	ConversationMethod string     `json:"conversation_method"`
-	Subject            string     `json:"subject"`
-	SentAt             *time.Time `json:"sent_at"`
-	Sender             string     `json:"sender"`
-	Recipients         []string   `json:"recipients"`
-	AutomatedClass     string     `json:"automated_class,omitempty"`
-	ListID             string     `json:"list_id,omitempty"`
+	DocID          string     `json:"doc_id"`
+	Subject        string     `json:"subject"`
+	SentAt         *time.Time `json:"sent_at"`
+	Sender         string     `json:"sender"`
+	Recipients     []string   `json:"recipients"`
+	AutomatedClass string     `json:"automated_class,omitempty"`
+	ListID         string     `json:"list_id,omitempty"`
 	// SourcePath is the message's original file location relative to the
 	// workspace's local staging directory. Informational only, for the
 	// human operator to open the original file themselves.
@@ -118,21 +107,6 @@ type ListedMessage struct {
 	// ContainerSourcePath is the staged file this message was extracted
 	// from, set exactly when SourcePath is empty.
 	ContainerSourcePath string `json:"container_source_path,omitempty"`
-
-	// Conversation is present only under collapse.
-	Conversation *ConversationSummary `json:"conversation,omitempty"`
-}
-
-// ConversationSummary describes the conversation a collapsed row stands for.
-type ConversationSummary struct {
-	ConversationRef string     `json:"conversation_ref"`
-	ConversationID  string     `json:"conversation_id"`
-	Method          string     `json:"method"`
-	MessageCount    int        `json:"message_count"`
-	MatchedCount    int        `json:"matched_count"`
-	FirstSentAt     *time.Time `json:"first_sent_at"`
-	LastSentAt      *time.Time `json:"last_sent_at"`
-	Participants    []string   `json:"participants"`
 }
 
 // ListResult is the deliverable of a browse query.
@@ -230,39 +204,11 @@ func (s *Service) ListMessages(ctx context.Context, req ListRequest) (*ListResul
 		},
 	}
 
-	summaries := map[string]Aggregate{}
-	if filters.Collapse && len(rows) > 0 {
-		ids := make([]string, 0, len(rows))
-		for _, m := range rows {
-			ids = append(ids, m.ConversationID)
-		}
-		summaries, err = s.store.Summaries(ctx, ids, snapshot)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	result.Messages = make([]ListedMessage, 0, len(rows))
 	for _, m := range rows {
 		listed := listedMessage(m)
 		for _, w := range m.ParseWarnings {
 			warn.add(w.Code, m.DocID)
-		}
-		if filters.Collapse {
-			// Every message beyond the representative is a match the caller
-			// asked not to see, which is an omission with a known size.
-			if m.ConversationMatches > 1 {
-				omit.add(OmitCollapsedMessages, m.ConversationMatches-1)
-			}
-			agg, ok := summaries[m.ConversationID]
-			if !ok {
-				// The conversation lost its rows between the page and the
-				// summary. Report the message rather than dropping it.
-				agg = Aggregate{ConversationID: m.ConversationID, Method: m.ConversationMethod}
-			}
-			summary, dropped := s.summarize(agg, m.ConversationMatches)
-			omit.add(OmitParticipantsTruncated, dropped)
-			listed.Conversation = &summary
 		}
 		result.Messages = append(result.Messages, listed)
 	}
@@ -309,7 +255,6 @@ func (s *Service) normalize(req ListRequest) (Filters, Order, error) {
 	f := Filters{
 		After:     req.After.UTC(),
 		Before:    req.Before.UTC(),
-		Collapse:  req.CollapseConversations,
 		Direction: req.Direction,
 	}
 	if req.After.IsZero() {
@@ -396,7 +341,7 @@ func verifyPage(rows []Message, order Order, after *key) error {
 }
 
 func appliedFilters(f Filters) AppliedFilters {
-	a := AppliedFilters{Sender: f.Sender, SenderDomain: f.SenderDomain, Recipient: f.Recipient, Collapse: f.Collapse, Direction: f.Direction}
+	a := AppliedFilters{Sender: f.Sender, SenderDomain: f.SenderDomain, Recipient: f.Recipient, Direction: f.Direction}
 	if !f.After.IsZero() {
 		after := f.After.UTC()
 		a.After = &after
@@ -410,42 +355,17 @@ func appliedFilters(f Filters) AppliedFilters {
 
 func listedMessage(m Message) ListedMessage {
 	listed := ListedMessage{
-		Ref:                encodeRef(refMessage, m.DocID),
-		DocID:              m.DocID,
-		ConversationRef:    encodeRef(refConversation, m.ConversationID),
-		ConversationID:     m.ConversationID,
-		ConversationMethod: string(m.ConversationMethod),
-		Subject:            m.Subject,
-		SentAt:             optionalTime(m.SentAt),
-		Sender:             m.Sender,
-		Recipients:         nonNilStrings(m.Recipients),
-		AutomatedClass:     string(m.AutomatedClass),
-		ListID:             m.ListID,
-		SourceLocations:    m.SourceLocations, SourcePath: m.SourcePath,
+		DocID:           m.DocID,
+		Subject:         m.Subject,
+		SentAt:          optionalTime(m.SentAt),
+		Sender:          m.Sender,
+		Recipients:      nonNilStrings(m.Recipients),
+		AutomatedClass:  string(m.AutomatedClass),
+		ListID:          m.ListID,
+		SourceLocations: m.SourceLocations, SourcePath: m.SourcePath,
 		ContainerSourcePath: m.ContainerPath,
 	}
 	return listed
-}
-
-// summarize bounds a conversation summary and reports how many participants it
-// had to leave out.
-func (s *Service) summarize(agg Aggregate, matched int) (ConversationSummary, int) {
-	participants := agg.Participants
-	dropped := 0
-	if len(participants) > s.cfg.MaxParticipants {
-		dropped = len(participants) - s.cfg.MaxParticipants
-		participants = participants[:s.cfg.MaxParticipants]
-	}
-	return ConversationSummary{
-		ConversationRef: encodeRef(refConversation, agg.ConversationID),
-		ConversationID:  agg.ConversationID,
-		Method:          string(agg.Method),
-		MessageCount:    agg.MessageCount,
-		MatchedCount:    matched,
-		FirstSentAt:     optionalTime(agg.FirstSentAt),
-		LastSentAt:      optionalTime(agg.LastSentAt),
-		Participants:    nonNilStrings(participants),
-	}, dropped
 }
 
 func optionalTime(t time.Time) *time.Time {

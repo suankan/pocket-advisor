@@ -11,17 +11,17 @@ An MCP-connected agent can ask about a topic and receive verbatim, non-paraphras
 
 ## Why this task is needed
 
-The topic graph described in [`docs/ingestion-design.md` §2.6](../ingestion-design.md) and the `topic_timeline` MCP tool in [`docs/mcp.md`](../mcp.md) are the only current mechanism for topic-scoped chronological evidence, and both have a scope this outcome needs beyond:
+There is no current mechanism for topic-scoped chronological evidence. Any mechanism built on email reply headers cannot supply one, for reasons this outcome must design around:
 
-- extraction runs only over root email `normalized_text`; PDFs, attachments, and other document types never enter the topic graph;
+- reply headers exist only on root email messages; PDFs, attachments, and other document types carry none;
 - relation candidates are selected solely from exact `In-Reply-To`/`References` header links, so two independent threads discussing the same subject are never connected, even within email; and
-- there is no persistent topic identity anywhere in the schema. `topic_mentions.display_label` is free text with no deduplication, and grouping happens only transitively through relation edges recomputed on every rebuild. The design already treats label similarity as untrustworthy ("similar or identically labelled mentions do not join one"), so a future mechanism should not reintroduce labels as identity.
+- there is no persistent topic identity anywhere in the schema, and a free-text label is not one: labels are unreliable as identity, so a mechanism must not group by them.
 
 This task is an early design exploration, not a scoped implementation. It records the open decisions the team has worked through so far and the direction judged most promising, ahead of committing changes to the authoritative design documents.
 
 ## Priority and dependencies
 
-Builds on the implemented chunking and embedding pipeline ([`docs/ingestion-design.md` §7](../ingestion-design.md#7-chunking-and-embedding)), the dense leg and HNSW index already used by [`docs/retrieval-design.md`](../retrieval-design.md), and the topic graph and `topic_timeline` tool it would extend or supersede. Complementary to [`p1-2-evidence-backed-email-analysis.md`](p1-2-evidence-backed-email-analysis.md), which covers chronology and per-party positions within the email-only exact-browse and semantic-search paths; this task is scoped to generalizing that capability across document types via topic identity rather than participant/date filters alone.
+Builds on the implemented chunking and embedding pipeline ([`docs/ingestion-design.md` §7](../ingestion-design.md#7-chunking-and-embedding)), and the dense leg and HNSW index already used by [`docs/retrieval-design.md`](../retrieval-design.md). It is scoped to a topic capability that spans document types rather than one derived from email reply headers, which is why no email-bound topic layer exists for it to extend.
 
 ## Scope
 
@@ -63,17 +63,17 @@ Open decisions, because naive pairwise-threshold grouping risks unbounded transi
 
 ### Chronological topic traversal
 
-Neither `search` (relevance-ranked against a query) nor `topic_timeline` (walks LLM-classified relation edges) currently returns "everything connected to this chunk's topic, ordered by date." Draft direction: a new bounded traversal primitive, similar in shape to today's `topic_timeline` (bounded depth/node count/byte budget, warnings, omitted-node counts, no continuation cursor) but walking similarity-graph membership instead of relation edges, returning verbatim cited chunks ordered by date and (where known) author, with explicit unknown-date/unknown-party chunks represented rather than dropped or defaulted. The read path returns evidence in order; it does not assert relation types such as `contradicts` or `elaborates` — that interpretation is left to the consuming agent, consistent with "retrieve source text only."
+`search` is relevance-ranked against a query and does not return "everything connected to this chunk's topic, ordered by date." Draft direction: a bounded traversal primitive with an explicit depth, node-count and byte budget, warnings, omitted-node counts and no continuation cursor, walking similarity-graph membership, returning verbatim cited chunks ordered by date and (where known) author, with explicit unknown-date/unknown-party chunks represented rather than dropped or defaulted. The read path returns evidence in order; it does not assert relation types such as `contradicts` or `elaborates` — that interpretation is left to the consuming agent, consistent with "retrieve source text only."
 
 ### Topic identity stability
 
-Open question, consequential for the storage model: does topic/cluster membership rebuild wholesale, the way today's topic graph is explicitly "replaceable... never authoritative" across `BUILDING`/`READY`/`ACTIVE`/`RETIRED` versions, or does it need to persist and evolve incrementally as new documents are classified against previously discovered topics, the way the original proposal for this capability was framed? Incremental classification implies a previously-issued topic reference can change meaning as membership shifts, which a wholesale-rebuild model avoids by making every reference version-scoped. This needs an explicit decision before implementation, not an implicit default.
+Open question, consequential for the storage model: does topic/cluster membership rebuild wholesale across immutable versions, or does it need to persist and evolve incrementally as new documents are classified against previously discovered topics, the way the original proposal for this capability was framed? Incremental classification implies a previously-issued topic reference can change meaning as membership shifts, which a wholesale-rebuild model avoids by making every reference version-scoped. This needs an explicit decision before implementation, not an implicit default.
 
 ## Non-goals
 
 - Do not implement relation-type classification (`contradicts`, `elaborates`, `states_resolution`, etc.) as part of this task; ordered, attributed citations are the target output, not asserted relations.
 - Do not implement cross-document party identity canonicalization; store raw per-document attribution only.
-- Do not change or remove the existing email-only topic graph and `topic_timeline` tool until an explicit decision is made on whether this generalizes or supersedes it.
+- Do not rebuild a topic layer whose candidate generation is bounded by email reply headers; a topic must be able to span threads, standalone documents and document types.
 - Do not implement answer generation or synthesis; this remains an evidence-retrieval capability per [`docs/generation-design.md`](../generation-design.md).
 - Do not invent a date or party attribution when the source does not support one.
 
@@ -98,6 +98,5 @@ Once resolved, fold the settled decisions into [`docs/ingestion-design.md`](../i
 
 ## Primary references
 
-- [`docs/ingestion-design.md` §2.6](../ingestion-design.md) — the current email-only topic graph this task extends or supersedes.
 - [`docs/retrieval-design.md`](../retrieval-design.md) — the dense leg and HNSW index this task's topic-identity mechanism reuses.
-- [`docs/mcp.md`](../mcp.md) — the `topic_timeline` tool contract this task's traversal primitive is shaped after.
+- [`docs/mcp.md`](../mcp.md) — the tool contract any traversal primitive must satisfy.

@@ -25,7 +25,7 @@ func TestSaveTextRefusesInvalidUTF8BeforeTheDatabase(t *testing.T) {
 	// sniffer routed as text.
 	bad := string([]byte{0xf1, 0x20, 0xd7, 0x20})
 
-	err := r.SaveText(context.Background(), "doc-1", bad, "text", "")
+	err := r.SaveText(context.Background(), "doc-1", bad, "text")
 	if !errors.Is(err, ErrInvalidText) {
 		t.Fatalf("SaveText error = %v, want ErrInvalidText", err)
 	}
@@ -33,7 +33,7 @@ func TestSaveTextRefusesInvalidUTF8BeforeTheDatabase(t *testing.T) {
 		t.Errorf("error %q does not name the document it refused", err)
 	}
 
-	err = r.SaveEmailText(context.Background(), "doc-2", bad, "", domain.EmailHeaders{})
+	err = r.SaveEmailText(context.Background(), "doc-2", bad, domain.EmailHeaders{})
 	if !errors.Is(err, ErrInvalidText) {
 		t.Fatalf("SaveEmailText error = %v, want ErrInvalidText", err)
 	}
@@ -49,5 +49,5 @@ func TestSaveTextAcceptsValidUTF8(t *testing.T) {
 			t.Fatal("valid UTF-8 was refused before the database instead of being written")
 		}
 	}()
-	_ = r.SaveText(context.Background(), "doc-3", "ñ × still perfectly valid UTF-8", "text", "")
+	_ = r.SaveText(context.Background(), "doc-3", "ñ × still perfectly valid UTF-8", "text")
 }

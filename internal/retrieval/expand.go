@@ -15,7 +15,6 @@ type Document struct {
 	ExtractionVersion string            `json:"extraction_version"`
 	DocID             string            `json:"doc_id"`
 	ParentID          string            `json:"parent_doc_id,omitempty"`
-	ThreadID          string            `json:"thread_id,omitempty"`
 	DocType           string            `json:"doc_type"`
 	Title             string            `json:"title"`
 	From              string            `json:"from,omitempty"`
@@ -42,17 +41,17 @@ type Document struct {
 
 // Relation labels how a related document reaches a packet.
 //
-// Chronological adjacency is never presented as a reply edge. A message that
-// merely follows another in time is labelled as such; only lineage recorded at
-// ingestion is a reply. Conflating them manufactures a conversational
-// structure that does not exist, which is exactly the error a reader cannot
-// detect downstream (§5.4).
+// Every relation is containment recorded at ingestion. None is a claim about
+// what a document is *about*: a sibling shares a container, which is a fact,
+// and says nothing about sharing a subject, which would be a guess. Presenting
+// a topical or chronological neighbour as an edge manufactures structure a
+// reader cannot detect is absent (§5.4).
 type Relation string
 
 const (
-	RelationParent     Relation = "parent"      // deterministic: parent_doc_id
-	RelationChild      Relation = "attachment"  // deterministic: parent_doc_id
-	RelationThreadPeer Relation = "same-thread" // deterministic: thread_id, ordered by date
+	RelationParent  Relation = "parent"             // deterministic: parent_doc_id
+	RelationChild   Relation = "attachment"         // deterministic: parent_doc_id
+	RelationSibling Relation = "sibling-attachment" // deterministic: a shared container
 )
 
 // Related is one expansion neighbour.
@@ -90,7 +89,7 @@ WITH RECURSIVE origins AS (
 
 SELECT d.doc_id::text,
        COALESCE(d.parent_doc_id::text, ''),
-       d.thread_id, d.doc_type,
+       d.doc_type,
        COALESCE(NULLIF(d.email_subject, ''), d.source_filename),
        d.email_from, d.email_to, d.email_date,
        d.source_ref, d.raw_sha256,d.extraction_hash,d.extraction_version,
@@ -116,7 +115,7 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 		var d Document
 		var text string
 		var date *time.Time
-		if err := rows.Scan(&d.DocID, &d.ParentID, &d.ThreadID, &d.DocType, &d.Title,
+		if err := rows.Scan(&d.DocID, &d.ParentID, &d.DocType, &d.Title,
 			&d.From, &d.To, &date, &d.SourceRef, &d.SHA256, &d.ExtractionHash, &d.ExtractionVersion, &d.CharCount, &text,
 			&d.SourcePath, &d.ContainerPath); err != nil {
 			return nil, nil, err
@@ -142,35 +141,63 @@ func (s *Service) loadDocuments(ctx context.Context, ids []string) (map[string]D
 }
 
 // neighbourSQL finds every document related to the matched set by recorded
-// lineage — parents, children, and thread members in chronological order.
+// containment — its containers, what it contains, and the documents sharing a
+// container with it.
 //
 // This is the only context mechanism. Ingestion deliberately declines to stamp
 // a document's subject or filename into its chunks, because what a passage is
 // *part of* is an exact stored fact rather than a similarity problem
 // (ingestion-design.md deviation 13). Recovering it is a join.
+//
+// document_placements rather than parent_doc_id alone, because content
+// identity is unique per workspace: an attachment carried by two emails has
+// one parent, pointing at whichever arrived first, and the second containment
+// lives only in placements. Siblings derived from parent_doc_id alone would
+// silently omit every shared attachment. The parent edge is unioned in anyway
+// as compatibility evidence, so a workspace whose placements predate this
+// table still resolves its lineage.
+//
+// A relation is containment and never a topical claim. A document sharing a
+// container is a fact about where the bytes were found; a document sharing a
+// subject line is a guess, and is not an edge.
 const neighbourSQL = `
-WITH RECURSIVE neighbours AS (
-    SELECT d.doc_id,
-           CASE
-             WHEN d.doc_id = m.parent_doc_id THEN 'parent'
-             WHEN d.parent_doc_id = m.doc_id THEN 'attachment'
-             ELSE 'same-thread'
-           END AS relation
-    FROM documents d
-    JOIN documents m ON m.doc_id = ANY($1::uuid[])
-    WHERE d.doc_id <> m.doc_id
-      AND d.processing_status = 'COMPLETED'
-      AND (d.doc_id = m.parent_doc_id
-           OR d.parent_doc_id = m.doc_id
-           OR (m.thread_id <> '' AND d.thread_id = m.thread_id))
+WITH matched AS (
+    SELECT doc_id, parent_doc_id FROM documents WHERE doc_id = ANY($1::uuid[])
 ),
-origins AS (
-    SELECT DISTINCT doc_id FROM neighbours
+containers AS (
+    SELECT p.container_doc_id AS container_id
+    FROM matched m JOIN document_placements p ON p.contained_doc_id = m.doc_id
+    UNION
+    SELECT m.parent_doc_id FROM matched m WHERE m.parent_doc_id IS NOT NULL
+),
+edges AS (
+    SELECT container_id AS doc_id, 1 AS rank FROM containers
+    UNION ALL
+    SELECT p.contained_doc_id, 2
+    FROM matched m JOIN document_placements p ON p.container_doc_id = m.doc_id
+    UNION ALL
+    SELECT d.doc_id, 2
+    FROM matched m JOIN documents d ON d.parent_doc_id = m.doc_id
+    UNION ALL
+    SELECT p.contained_doc_id, 3
+    FROM containers c JOIN document_placements p ON p.container_doc_id = c.container_id
+    UNION ALL
+    SELECT d.doc_id, 3
+    FROM containers c JOIN documents d ON d.parent_doc_id = c.container_id
+),
+-- The smallest rank wins, so a document reachable by several routes gets one
+-- deterministic label: containment first, then what it contains, then what it
+-- merely sits beside.
+neighbours AS (
+    SELECT doc_id, min(rank) AS rank
+    FROM edges
+    WHERE doc_id <> ALL($1::uuid[])
+    GROUP BY doc_id
 )
 
 SELECT d.doc_id::text,
        COALESCE(d.parent_doc_id::text, ''),
-       d.thread_id, d.doc_type,
+       d.doc_type,
        COALESCE(NULLIF(d.email_subject, ''), d.source_filename),
        d.email_from, d.email_to, d.email_date,
        d.source_ref, d.raw_sha256,d.extraction_hash,d.extraction_version,
@@ -178,10 +205,12 @@ SELECT d.doc_id::text,
        COALESCE(d.normalized_text, ''),
        COALESCE(d.metadata_headers->>'source_path', ''),
        ''::text,
-       n.relation
+       CASE n.rank WHEN 1 THEN 'parent' WHEN 2 THEN 'attachment'
+                   ELSE 'sibling-attachment' END
 FROM neighbours n
 JOIN documents d ON d.doc_id = n.doc_id
-ORDER BY d.email_date NULLS LAST, d.doc_id`
+WHERE d.processing_status = 'COMPLETED'
+ORDER BY n.rank, d.email_date NULLS LAST, d.doc_id`
 
 type neighbour struct {
 	Related
@@ -204,7 +233,7 @@ func (s *Service) loadNeighbours(ctx context.Context, matched []string) ([]neigh
 		var n neighbour
 		var date *time.Time
 		var rel string
-		if err := rows.Scan(&n.DocID, &n.ParentID, &n.ThreadID, &n.DocType, &n.Title,
+		if err := rows.Scan(&n.DocID, &n.ParentID, &n.DocType, &n.Title,
 			&n.From, &n.To, &date, &n.SourceRef, &n.SHA256, &n.ExtractionHash, &n.ExtractionVersion, &n.CharCount, &n.text,
 			&n.SourcePath, &n.ContainerPath, &rel); err != nil {
 			return nil, err

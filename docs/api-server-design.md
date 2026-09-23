@@ -43,7 +43,7 @@ The administrative surface authorizes, records, dispatches, and reports bounded 
 
 - workspace provisioning and removal;
 - schema application and compatibility checks;
-- ingest-all, scan, reconcile, and listener lifecycle;
+- ingest-all, reconcile, and listener lifecycle;
 - dataset reset and selected-source forgetting; and
 - operation status and failure details.
 

@@ -156,10 +156,7 @@ Documents whose originals you deleted or newly ignored stay retrievable until `-
 # Hash originals and report counts without touching databases, queues or models.
 ./bin/pocket-advisor --ingest-all --workspace-id example --dry-run
 
-# Additive source scan and ingestion.
-./bin/pocket-advisor --scan --workspace-id example
-
-# Refresh sources and redispatch unfinished jobs, including broker-lost work.
+# Scan originals, redispatch unfinished jobs including broker-lost work, and process them.
 ./bin/pocket-advisor --reconcile --workspace-id example
 
 # Scan at startup and every minute while processing jobs.

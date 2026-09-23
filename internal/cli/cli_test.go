@@ -9,7 +9,6 @@ func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
 	cases := map[string][]string{
 		"ingest-all":  {"--ingest-all", "--workspace-id", "test"},
 		"delete-data": {"--delete-data", "--workspace-id", "test"},
-		"scan":        {"--scan", "--workspace-id", "test"},
 		"reconcile":   {"--reconcile", "--workspace-id", "test"},
 		"doctor":      {"--doctor", "--workspace-id", "test"},
 		"recover":     {"--recover", "--workspace-id", "test"},
@@ -38,6 +37,13 @@ func TestParseRejectsRemovedFixtureGenerationFlags(t *testing.T) {
 	}
 }
 
+// --scan ran exactly what --reconcile runs and was folded into it.
+func TestParseRejectsRemovedScanMode(t *testing.T) {
+	if _, err := Parse([]string{"--scan", "--workspace-id", "test"}); err == nil {
+		t.Error("Parse accepted removed mode --scan")
+	}
+}
+
 func TestParseRejectsMultipleModes(t *testing.T) {
 	_, err := Parse([]string{"--ingest-all", "--delete-data", "--workspace-id", "test"})
 	if err == nil {
@@ -59,7 +65,7 @@ func TestParseRequiresAMode(t *testing.T) {
 // (workspace-isolation.md §13).
 func TestParseRequiresWorkspace(t *testing.T) {
 	for _, mode := range []string{
-		"--ingest-all", "--delete-data", "--scan", "--reconcile",
+		"--ingest-all", "--delete-data", "--reconcile",
 		"--doctor", "--recover", "--reprocess-email-metadata",
 	} {
 		if _, err := Parse([]string{mode}); err == nil {
@@ -81,7 +87,7 @@ func TestParseValidatesForgetHash(t *testing.T) {
 func TestDryRunRejectsModesWithoutAReadOnlyPreview(t *testing.T) {
 	for _, args := range [][]string{
 		{"--forget", strings.Repeat("a", 64)},
-		{"--delete-data"}, {"--scan"}, {"--reconcile"}, {"--listen"},
+		{"--delete-data"}, {"--reconcile"}, {"--listen"},
 	} {
 		args = append(args, "--dry-run", "--workspace-id", "synthetic")
 		if _, err := Parse(args); err == nil {
@@ -94,7 +100,7 @@ func TestDryRunRejectsModesWithoutAReadOnlyPreview(t *testing.T) {
 // mode that enqueued without running the pools would publish into a void.
 func TestNeedsPipelineCoversEveryEnqueueingMode(t *testing.T) {
 	enqueues := map[string]bool{
-		"--ingest-all": true, "--scan": true, "--reconcile": true,
+		"--ingest-all": true, "--reconcile": true,
 		"--delete-data": false, "--doctor": false, "--recover": false,
 		"--reprocess-email-metadata": false,
 	}

@@ -33,7 +33,6 @@ type Options struct {
 	AuditSources bool
 	BindSources  bool
 	IngestAll    bool
-	Scan         bool
 	Reconcile    bool
 	Listen       bool
 	DeleteData   bool
@@ -93,8 +92,8 @@ const usage = `pocket-advisor — ingestion pipeline for a local RAG corpus.
 Modes (exactly one):
   --ingest-all        scan configured originals and process queued jobs; never
                       deletes (see --reconcile-deletions)
-  --scan              scan configured originals and process queued jobs
-  --reconcile         refresh sources and redispatch unfinished durable jobs
+  --reconcile         scan configured originals, redispatch unfinished durable
+                      jobs including broker-lost work, and process them
   --listen            scan at startup and every minute while processing jobs
   --audit-sources     verify retained source coverage without writing
   --bind-sources      verify coverage and persist source locations and replay recipes
@@ -274,7 +273,6 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.AuditSources, "audit-sources", false, "read-only source coverage audit")
 	fs.BoolVar(&o.BindSources, "bind-sources", false, "bind existing documents to original source files")
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "scan originals, enqueue and process to completion")
-	fs.BoolVar(&o.Scan, "scan", false, "enqueue un-stubbed original sources, then process")
 	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
 	fs.BoolVar(&o.Listen, "listen", false, "scan originals every minute while running the pipeline")
 	fs.BoolVar(&o.DeleteData, "delete-data", false, "clear derived database state and queues; preserve original files")
@@ -329,7 +327,6 @@ func (o *Options) modes() []string {
 		{o.AuditSources, "--audit-sources"},
 		{o.BindSources, "--bind-sources"},
 		{o.IngestAll, "--ingest-all"},
-		{o.Scan, "--scan"},
 		{o.Reconcile, "--reconcile"},
 		{o.Listen, "--listen"},
 		{o.DeleteData, "--delete-data"},
@@ -359,7 +356,7 @@ func (o *Options) validate() error {
 	modes := o.modes()
 	switch {
 	case len(modes) == 0:
-		return fmt.Errorf("no mode selected; pass one of --ingest-all, --scan, --reconcile, --listen, " +
+		return fmt.Errorf("no mode selected; pass one of --ingest-all, --reconcile, --listen, " +
 			"--query, --doctor, --recover, --reprocess-email-metadata, --migrate-schema, --evaluate, --corpus-search, --delete-data, " +
 			"--forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
@@ -391,7 +388,7 @@ func (o *Options) validate() error {
 // drain it. In a monolith an enqueueing mode that did not run the pools would
 // publish into a void: nothing else is listening.
 func (o *Options) NeedsPipeline() bool {
-	return o.IngestAll || o.Scan || o.Reconcile || o.Listen
+	return o.IngestAll || o.Reconcile || o.Listen
 }
 
 // Mode is the selected mode's name, for the dashboard header.

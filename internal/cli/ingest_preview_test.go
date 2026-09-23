@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -36,7 +37,7 @@ func TestIngestDryRunNeedsNoDatabaseBrokerOrModelAndNeverWrites(t *testing.T) {
 }
 
 func TestPruneDryRunDoesNotLoadWorkspaceOrTouchStores(t *testing.T) {
-	if err := prune(context.Background(), &Options{DryRun: true}, nil); err != nil {
+	if err := prune(context.Background(), &Options{DryRun: true}, nil, postgres.SourceScan{}); err != nil {
 		t.Fatal(err)
 	}
 }

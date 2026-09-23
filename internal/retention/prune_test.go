@@ -15,11 +15,57 @@ import (
 // itself is SQL and is exercised against a live database in the manual suite;
 // what is hermetic here is everything guarding it.
 type fakePruneStore struct {
+	scanResult   postgres.ScanRetention
+	scanErr      error
 	backfilledAt time.Time
 	unreachable  []postgres.PruneCandidate
 	total        int
 	deletedIDs   []string
 	deleteErr    error
+}
+
+func (f *fakePruneStore) RetentionForScan(context.Context, postgres.SourceScan) (postgres.ScanRetention, error) {
+	return f.scanResult, f.scanErr
+}
+func (f *fakePruneStore) ValidateRetentionScan(context.Context, postgres.SourceScan) error {
+	return f.scanErr
+}
+
+func TestScanPlanGuardsAndApplyValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result postgres.ScanRetention
+		want   error
+	}{
+		{"empty", postgres.ScanRetention{}, ErrStagingEmpty},
+		{"unknown containment", postgres.ScanRetention{Files: 1, UnestablishedContainers: 1}, ErrPlacementsIncomplete},
+		{"large sweep", postgres.ScanRetention{Files: 1, Total: 2, Candidates: []postgres.PruneCandidate{{DocID: "removed"}}}, ErrBlastRadius},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakePruneStore{scanResult: tc.result}
+			_, err := NewPruner(store, quietLogger()).PlanScan(context.Background(), postgres.SourceScan{}, 0)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+			if len(store.deletedIDs) != 0 {
+				t.Fatal("planning deleted documents")
+			}
+		})
+	}
+	store := &fakePruneStore{scanResult: postgres.ScanRetention{Files: 1, Total: 100,
+		Candidates: []postgres.PruneCandidate{{DocID: "removed"}}}}
+	p := NewPruner(store, quietLogger())
+	report, err := p.PlanScan(context.Background(), postgres.SourceScan{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.scanErr = postgres.ErrInvalidRetentionScan
+	if err := p.Apply(context.Background(), "synthetic", report); !errors.Is(err, postgres.ErrInvalidRetentionScan) {
+		t.Fatalf("stale plan accepted: %v", err)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatal("stale plan deleted documents")
+	}
 }
 
 func (f *fakePruneStore) PlacementsBackfilledAt(context.Context) (time.Time, error) {
@@ -60,7 +106,7 @@ func backfilled() time.Time { return time.Now().Add(-time.Hour) }
 // refusal is the whole reason the marker exists.
 func TestPlanRefusesUntilContainmentIsBackfilled(t *testing.T) {
 	store := &fakePruneStore{total: 10} // zero backfilledAt
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	_, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{stagedDir(t, "a.eml")},
@@ -74,7 +120,7 @@ func TestPlanRefusesUntilContainmentIsBackfilled(t *testing.T) {
 // unmounted volume presents exactly the same way.
 func TestPlanRefusesEmptyStaging(t *testing.T) {
 	store := &fakePruneStore{backfilledAt: backfilled(), total: 10}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	_, err := p.Plan(context.Background(), PruneOptions{AbsPaths: []string{t.TempDir()}})
 	if !errors.Is(err, ErrStagingEmpty) {
@@ -89,7 +135,7 @@ func TestPlanRefusesDirectoryWithNoRegularFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &fakePruneStore{backfilledAt: backfilled(), total: 10}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	_, err := p.Plan(context.Background(), PruneOptions{AbsPaths: []string{root}})
 	if !errors.Is(err, ErrStagingEmpty) {
@@ -100,7 +146,7 @@ func TestPlanRefusesDirectoryWithNoRegularFiles(t *testing.T) {
 // A missing directory is an error, never an empty walk.
 func TestPlanFailsOnMissingDirectory(t *testing.T) {
 	store := &fakePruneStore{backfilledAt: backfilled(), total: 10}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	_, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{filepath.Join(t.TempDir(), "absent")},
@@ -121,7 +167,7 @@ func TestBlastRadiusRefusesAnImplausiblyLargeSweep(t *testing.T) {
 		total:        100,
 		unreachable:  make([]postgres.PruneCandidate, 50),
 	}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	report, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{stagedDir(t, "a.eml")},
@@ -141,7 +187,7 @@ func TestBlastRadiusAllowsAnOrdinarySweep(t *testing.T) {
 		total:        1000,
 		unreachable:  make([]postgres.PruneCandidate, 20), // 2%
 	}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	if _, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{stagedDir(t, "a.eml")},
@@ -158,7 +204,7 @@ func TestBlastRadiusCanBeDisabled(t *testing.T) {
 		total:        100,
 		unreachable:  make([]postgres.PruneCandidate, 100),
 	}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	if _, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{stagedDir(t, "a.eml")},
@@ -181,7 +227,7 @@ func TestPlanSplitsRootsFromContained(t *testing.T) {
 			{DocID: "3", SourceName: "another.pdf"},
 		},
 	}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	report, err := p.Plan(context.Background(), PruneOptions{
 		AbsPaths: []string{stagedDir(t, "a.eml")},
@@ -198,7 +244,7 @@ func TestPlanSplitsRootsFromContained(t *testing.T) {
 // report claiming it was still only a plan.
 func TestApplyWithNoCandidatesDeletesNothing(t *testing.T) {
 	store := &fakePruneStore{backfilledAt: backfilled(), total: 10}
-	p := NewPruner(store, nil, quietLogger())
+	p := NewPruner(store, quietLogger())
 
 	report := &PruneReport{DryRun: true}
 	if err := p.Apply(context.Background(), "ws", report); err != nil {

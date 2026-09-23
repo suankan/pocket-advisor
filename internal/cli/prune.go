@@ -8,39 +8,24 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/retention"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/worker"
-	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
-// prune removes unreachable documents before this process starts its pools.
+// prune removes unreachable documents after all workers have stopped.
 // It requires complete containment and enforces a bounded deletion share.
-func prune(ctx context.Context, o *Options, a *app.App) error {
+func prune(ctx context.Context, o *Options, a *app.App, scan postgres.SourceScan) error {
 	if o.DryRun {
 		return nil
 	}
-	ws, err := workspace.Load(o.WorkspaceConfig, o.WorkspaceID)
-	if err != nil {
-		return err
-	}
 	log := a.Logger(telemetry.RoleRetention)
-
-	if err := ensureContainment(ctx, a, log); err != nil {
-		return err
-	}
-
-	reset := retention.NewResetter(a.Docs, a.Bus, log)
-	pruner := retention.NewPruner(a.Docs, reset, log)
-
-	report, err := pruner.Plan(ctx, retention.PruneOptions{
-		AbsPaths: ws.AbsPaths,
-		Ignore:   ws.Ignore.Match,
-		MaxShare: o.PruneMaxShare,
-	})
+	pruner := retention.NewPruner(a.Docs, log)
+	report, err := pruner.PlanScan(ctx, scan, o.PruneMaxShare)
 	switch {
 	case errors.Is(err, retention.ErrBlastRadius):
-		// Report the refusal and continue with the additive intake phase.
-		renderPrunePlan(report, ws.ID)
+		// Intake has finished; report the refused sweep without deleting.
+		renderPrunePlan(report, o.WorkspaceID)
 		fmt.Printf("\n%v\n", err)
 		fmt.Printf("Review the plan above. If it is correct, re-run with " +
 			"--prune-max-share 1 to allow it.\n")
@@ -51,20 +36,20 @@ func prune(ctx context.Context, o *Options, a *app.App) error {
 
 	if len(report.Candidates) == 0 {
 		log.Info("prune: nothing to remove",
-			"workspace_id", ws.ID, "documents", report.TotalDocuments)
+			"workspace_id", o.WorkspaceID, "documents", report.TotalDocuments)
 		return nil
 	}
 
-	renderPrunePlan(report, ws.ID)
-	if err := pruner.Apply(ctx, ws.ID, report); err != nil {
+	renderPrunePlan(report, o.WorkspaceID)
+	if err := pruner.Apply(ctx, o.WorkspaceID, report); err != nil {
 		return err
 	}
 	fmt.Printf("pruned:   %d document(s) removed\n", report.Deleted)
 	return nil
 }
 
-// ensureContainment brings the placement table up to date before any sweep
-// reads it.
+// ensureContainment prepares the workspace-wide backfill for explicit
+// source maintenance. Automatic pruning uses per-container completeness.
 //
 // It runs at most once per workspace, and only because the alternative is
 // worse: pruning against the parent_doc_id floor deletes attachments that

@@ -301,6 +301,14 @@ CREATE INDEX IF NOT EXISTS email_addresses_sender_domain_idx
 -- are retained as parsed facts rather than as a grouping: nothing derives a
 -- conversation from them any more, and a later source-agnostic topic model
 -- would treat them as one high-precision evidence source among several.
+CREATE TABLE IF NOT EXISTS email_references (
+    doc_id     UUID    NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    kind       VARCHAR NOT NULL,
+    ordinal    INT     NOT NULL,
+    message_id TEXT    NOT NULL,
+    PRIMARY KEY (doc_id, kind, ordinal)
+);
+
 CREATE INDEX IF NOT EXISTS email_references_message_idx
     ON email_references(message_id);
 
@@ -330,17 +338,6 @@ func (d *DB) BuildSearchIndex(ctx context.Context) error {
 		 USING bm25 (chunk_text) WITH (text_config='simple')`, searchIndexName))
 	if err != nil {
 		return fmt.Errorf("build search index: %w", err)
-	}
-	return nil
-}
-
-// DropSearchIndex removes the BM25 index before a bulk ingest run begins, so
-// pg_textsearch never has to maintain it incrementally against a stream of
-// individual inserts — see BuildSearchIndex.
-func (d *DB) DropSearchIndex(ctx context.Context) error {
-	_, err := d.Pool.Exec(ctx, fmt.Sprintf(`DROP INDEX IF EXISTS %s`, searchIndexName))
-	if err != nil {
-		return fmt.Errorf("drop search index: %w", err)
 	}
 	return nil
 }

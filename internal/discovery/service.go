@@ -17,7 +17,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
-	"time"
 	"unicode/utf8"
 )
 
@@ -31,42 +30,20 @@ type Service struct {
 	Log       *slog.Logger
 }
 
-func (s *Service) Scan(ctx context.Context, high, low uint64) (int, error) {
-	scan, err := s.Inventory.BeginScan(ctx, s.Sources.RootKeys())
+func (s *Service) Scan(ctx context.Context) (postgres.SourceScan, error) {
+	scan, err := s.Inventory.StartScan(ctx, s.Sources.RootKeys())
 	if err != nil {
-		return 0, err
+		return scan, err
 	}
-	count := 0
 	if s.Progress != nil {
 		s.Progress.Start(0)
 		defer s.Progress.Finish()
 	}
 	err = s.Sources.Walk(ctx, func(f source.File, data []byte) error {
-		if high > 0 {
-			paused := false
-			for {
-				_, unfinished, _, _, err := s.Jobs.Counts(ctx)
-				if err != nil {
-					return err
-				}
-				if !paused && uint64(unfinished) < high {
-					break
-				}
-				paused = true
-				if uint64(unfinished) <= low {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(time.Second):
-				}
-			}
-		}
 		if s.Progress != nil {
 			s.Progress.AddTotal(1)
 		}
-		if err := s.admit(ctx, scan, f, data); err != nil {
+		if err := s.admit(ctx, scan.ID(), f, data); err != nil {
 			if s.Progress != nil {
 				s.Progress.Failed()
 			}
@@ -77,13 +54,12 @@ func (s *Service) Scan(ctx context.Context, high, low uint64) (int, error) {
 			s.Progress.Scanned(f.Size)
 		}
 		telemetry.DiscoveryFiles.WithLabelValues("scan", "observed").Inc()
-		count++
 		return nil
 	})
 	if err != nil {
-		return count, err
+		return scan, err
 	}
-	return count, s.Inventory.FinishScan(ctx, scan)
+	return s.Inventory.CompleteScan(ctx, scan)
 }
 func (s *Service) admit(ctx context.Context, scan string, f source.File, data []byte) error {
 	return s.DB.Transaction(ctx, func(ctx context.Context) error {
@@ -127,9 +103,16 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 	}
 	children, err := source.Children(data, route.MimeType, name)
 	if err != nil {
+		if s.Log != nil {
+			s.Log.Debug("container enumeration failed; existing containment retained", "doc_id", id)
+		}
 		return nil
 	}
+	complete := true
 	for _, c := range children {
+		if len(c.Data) == 0 {
+			continue
+		}
 		*budget -= int64(len(c.Data))
 		if *budget < 0 {
 			return fmt.Errorf("source replay byte limit exceeded")
@@ -139,6 +122,7 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 			return err
 		}
 		if child == "" || child == id {
+			complete = false
 			continue
 		}
 		if err := s.Inventory.RecordMember(ctx, id, child, c.Selector); err != nil {
@@ -150,6 +134,9 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 		if err := s.backfillBounded(ctx, child, c.Data, Classify(c.Data, c.Filename), c.Filename, depth+1, budget); err != nil {
 			return err
 		}
+	}
+	if complete {
+		return s.Docs.MarkContainmentEstablished(ctx, id)
 	}
 	return nil
 }
@@ -290,8 +277,14 @@ func (s *Service) Audit(ctx context.Context) (Coverage, error) {
 
 // ResumeLegacy admits nonterminal rows predating the durable job table. Existing
 // normalized evidence goes straight to embedding; other stages reopen sources.
-func (s *Service) ResumeLegacy(ctx context.Context) error {
-	rows, err := s.DB.Pool.Query(ctx, `SELECT d.doc_id::text,d.raw_sha256,d.source_filename,d.mime_type,d.doc_type,COALESCE(d.normalized_text,'') FROM documents d WHERE d.processing_status IN ('PENDING','PROCESSING') AND NOT EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.doc_id=d.doc_id)`)
+func (s *Service) ResumeLegacy(ctx context.Context, scan postgres.SourceScan) error {
+	if err := s.Docs.ValidateRetentionScan(ctx, scan); err != nil {
+		return err
+	}
+	rows, err := s.DB.Pool.Query(ctx, `WITH RECURSIVE retained AS (
+ SELECT doc_id FROM source_occurrences WHERE scan_id=$1 AND available
+ UNION SELECT p.contained_doc_id FROM document_placements p JOIN retained r ON r.doc_id=p.container_doc_id
+) SELECT d.doc_id::text,d.raw_sha256,d.source_filename,d.mime_type,d.doc_type,COALESCE(d.normalized_text,'') FROM documents d JOIN retained r USING(doc_id) WHERE d.processing_status IN ('PENDING','PROCESSING') AND NOT EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.doc_id=d.doc_id)`, scan.ID())
 	if err != nil {
 		return err
 	}

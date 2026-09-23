@@ -50,6 +50,11 @@ type Pipeline struct {
 
 	roles []*role
 	wg    sync.WaitGroup
+
+	// sampling serializes consumer.Info across the depth poller and the drain
+	// check. jetstream's pull consumer caches the reply into itself, so two
+	// concurrent Info calls on one consumer write the same field.
+	sampling sync.Mutex
 }
 
 // Options carries what the pipeline cannot derive for itself.
@@ -225,6 +230,8 @@ func (p *Pipeline) pollDepth(ctx context.Context) {
 }
 
 func (p *Pipeline) samplePending(ctx context.Context) {
+	p.sampling.Lock()
+	defer p.sampling.Unlock()
 	for _, r := range p.roles {
 		info, err := r.consumer.Info(ctx)
 		if err != nil {

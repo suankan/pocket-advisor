@@ -273,19 +273,30 @@ func TestSourceWaitAndGenerationFence(t *testing.T) {
 	}
 }
 
-func TestSourceWipeRemovesActiveGraph(t *testing.T) {
-	db, docs, _, _, _ := setupSourceJob(t)
+func TestSourceWipeRemovesInventoryAndJobs(t *testing.T) {
+	db, docs, jobs, id, cmd := setupSourceJob(t)
 	ctx := context.Background()
-	if _, err := db.Pool.Exec(ctx, `INSERT INTO topic_graph_versions(version_id,status,extraction_version,config_version,max_mentions_per_doc,max_spans_per_mention,max_display_label_bytes) VALUES(gen_random_uuid(),'BUILDING','synthetic','synthetic',1,1,20);
-INSERT INTO topic_mentions(mention_id,version_id,doc_id,extraction_version) SELECT gen_random_uuid(),v.version_id,d.doc_id,'synthetic' FROM topic_graph_versions v CROSS JOIN documents d;
-UPDATE topic_graph_versions SET status='READY'; UPDATE topic_graph_versions SET status='ACTIVE'`); err != nil {
+	inv := NewSourceRepo(db)
+	scan, err := inv.BeginScan(ctx, []string{"synthetic-root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inv.Observe(ctx, scan, id, source.File{RootKey: "synthetic-root", RelativePath: "file.pdf", DisplayPath: "file.pdf", ModifiedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := inv.FinishScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := docs.DeleteWorkspace(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM topic_graph_versions`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("retained graph: %d %v", n, err)
+	for _, table := range []string{"documents", "source_roots", "source_occurrences", "source_members", "source_scans", "ingestion_jobs"} {
+		var n int
+		if err := db.Pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("reset retained %s: %d %v", table, n, err)
+		}
 	}
 }

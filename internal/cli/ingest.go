@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -40,7 +41,10 @@ func previewSources(ctx context.Context, o *Options) error {
 	return err
 }
 func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
-	ctx := context.Background()
+	return runIngestContext(context.Background(), o, cfg, logs)
+}
+
+func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	if o.DryRun {
 		return previewSources(ctx, o)
 	}
@@ -71,20 +75,6 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	fetchCtx, workCtx, stopSignals := interrupts(ctx, a.Log)
 	defer stopSignals()
 	svc := discoveryService(a)
-	// Binding is separate from intake: destructive planning sees complete
-	// recorded containment and no worker can write children during the sweep.
-	if err := svc.BindExisting(fetchCtx); err != nil {
-		return err
-	}
-	if o.IngestAll && !o.NoPrune {
-		if err := prune(fetchCtx, o, a); err != nil {
-			return err
-		}
-	}
-	// A stopped prior process owns no active jobs because of the workspace lock.
-	if err := a.Jobs.Reconcile(fetchCtx, 0); err != nil {
-		return err
-	}
 	stats := telemetry.NewStats()
 	svc.Progress = &stats.Scan
 	pipe, err := pipeline.New(ctx, a, stats, embedder, pipeline.Options{OCRLangs: o.OCRLangs})
@@ -92,7 +82,6 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return err
 	}
 	defer pipe.Close()
-	pipe.Start(fetchCtx, workCtx)
 	view := dashboard.New(dashboard.Source{Stats: stats, CPU: a.CPU, Embedder: embedder, DB: a.DB, Mode: o.Mode(), Workspace: o.WorkspaceID, LogDir: logs.Dir()}, os.Stdout)
 	viewCtx, stopView := context.WithCancel(ctx)
 	defer stopView()
@@ -103,10 +92,19 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 			view.Run(viewCtx)
 		}
 	}()
-	var feedErr error
-	_, feedErr = svc.Scan(fetchCtx, o.HighWater, o.LowWater)
+	// Admission fills the durable outbox before any worker resolves a source.
+	// This refreshes renamed paths without a preparatory binding traversal.
+	scan, feedErr := svc.Scan(fetchCtx)
 	if feedErr == nil {
-		feedErr = svc.ResumeLegacy(fetchCtx)
+		feedErr = svc.ResumeLegacy(fetchCtx, scan)
+	}
+	if feedErr == nil {
+		feedErr = a.Jobs.Reconcile(fetchCtx, 0)
+	}
+	workerFetch, stopWorkers := context.WithCancel(fetchCtx)
+	defer stopWorkers()
+	if feedErr == nil || o.Listen {
+		pipe.Start(workerFetch, workCtx)
 	}
 	if o.Listen {
 		ticker := time.NewTicker(time.Minute)
@@ -118,8 +116,11 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 			select {
 			case <-fetchCtx.Done():
 			case <-ticker.C:
-				// Periodic scans are additive. A deliberate bounded ingest owns pruning.
-				_, feedErr = svc.Scan(fetchCtx, o.HighWater, o.LowWater)
+				// Listener scans are additive and never authorize deletion.
+				scan, feedErr = svc.Scan(fetchCtx)
+				if feedErr == nil {
+					feedErr = svc.ResumeLegacy(fetchCtx, scan)
+				}
 				if feedErr == nil {
 					feedErr = a.Jobs.ResumeSources(fetchCtx)
 				}
@@ -132,30 +133,30 @@ func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		ticker.Stop()
 	}
 	var drainErr error
-	if !o.Listen {
+	if !o.Listen && feedErr == nil {
 		drainErr = pipe.WaitDrained(workCtx, settle)
 	}
-	if o.Listen {
-		pipe.Wait()
-	}
-	cancelErr := workCtx.Err()
-	stopSignals()
+	// A quiet queue is not a barrier. Stop dispatch/fetch and join every
+	// handler before planning any deletion; retain the maintenance lock.
+	stopWorkers()
 	pipe.Wait()
 	stopView()
 	<-done
+	runErr := errors.Join(feedErr, drainErr, fetchCtx.Err(), workCtx.Err())
+	if o.IngestAll && !o.NoPrune {
+		if runErr != nil {
+			fmt.Println("prune skipped: source scan or ingestion was incomplete or interrupted")
+		} else {
+			if err := prune(fetchCtx, o, a, scan); err != nil {
+				fmt.Printf("prune skipped: %v\n", err)
+				runErr = errors.Join(runErr, err)
+			}
+		}
+	}
+	// Keep BM25 available during intake; create it after writes and deletion.
+	if fetchCtx.Err() == nil && workCtx.Err() == nil {
+		runErr = errors.Join(runErr, a.DB.BuildSearchIndex(fetchCtx))
+	}
 	fmt.Print(view.Summary())
-	// Keep BM25 available during intake; build it if this is the first ingest.
-	if err := a.DB.BuildSearchIndex(ctx); err != nil {
-		return err
-	}
-	if feedErr != nil {
-		return feedErr
-	}
-	if drainErr != nil {
-		return drainErr
-	}
-	if cancelErr != nil {
-		return cancelErr
-	}
-	return a.Jobs.CheckResolved(ctx)
+	return errors.Join(runErr, a.Jobs.CheckResolved(ctx))
 }

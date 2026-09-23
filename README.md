@@ -28,7 +28,7 @@ The `pocket-advisor-infra` Helm chart deploys only the two shared stores. The MC
 - The registry's `paths` and `ignore` rules define authoritative originals. Historical bytes require source-side versioning or backups.
 - Ingestion hashes configured files, preserves content identities across moves and copies, and drains durable PostgreSQL jobs through NATS. Completed unchanged content is not re-extracted or re-embedded.
 - PostgreSQL retains normalized text and derived metadata/indexes. Rebuilding requires hash-recoverable originals; restore a database backup when existing UUIDs and evaluation references must survive.
-- Full ingestion prunes documents no longer reachable from staged content before starting its workers. `--no-prune` disables this sweep; `--reconcile-deletions` previews it separately.
+- Full ingestion scans original files, processes queued work, then prunes documents no longer reachable from that completed scan after its workers stop. `--no-prune` disables this sweep; `--reconcile-deletions` previews it separately.
 - Retrieval returns cited evidence packets, not generated prose.
 
 The authoritative designs are:
@@ -148,9 +148,9 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 ./bin/pocket-advisor --ingest-all --workspace-id example
 ```
 
-`--ingest-all` resolves original directories, applies the source/job schema, refreshes known source occurrences and containment, and conservatively prunes before starting workers. It then hashes and admits current files, dispatches transactional jobs, and waits for durable work and queues to drain. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
+`--ingest-all` resolves original directories, applies the source/job schema, and hashes and admits current files in one source scan. The dashboard reports scanning before workers start. Admission records durable jobs without waiting for the queue to shrink; workers start after source locations have been refreshed, process queued work, and stop before pruning. The sweep uses that completed scan and recorded containment without another source traversal. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
 
-Pruning refuses an empty or incompletely traversed source set and incomplete containment. The default deletion-share limit is 10%; exceeding it prints the plan and continues additive ingestion. Inspect `--reconcile-deletions --json` before explicitly allowing a larger sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
+Pruning refuses an empty or incompletely traversed source set and any retained container whose containment has not been established. Failed or waiting jobs alone do not decide retention: an unreachable document and its waiting jobs can be removed, while a retained document survives even if embedding failed. Interrupted runs skip pruning. The default deletion-share limit is 10%; exceeding it prints the plan and leaves the completed ingestion additive. This workspace-wide limit cannot detect every partially synced or temporarily empty root. Inspect `--reconcile-deletions --json` before explicitly allowing a larger sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
 
 ```sh
 # Hash originals and report counts without touching databases, queues or models.
@@ -175,6 +175,8 @@ Pruning refuses an empty or incompletely traversed source set and incomplete con
 ./bin/pocket-advisor --reprocess-email-metadata --workspace-id example --dry-run --reprocess-limit 100
 ./bin/pocket-advisor --reprocess-email-metadata --workspace-id example
 ```
+
+Admission has no queue-depth thresholds; the durable backlog can grow to fit the source collection, while worker concurrency remains bounded.
 
 File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if waiting or failed jobs remain. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
 

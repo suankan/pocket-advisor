@@ -15,8 +15,8 @@ import (
 
 // runReconcileDeletions removes documents nothing stages any more.
 //
-// It is the same sweep --ingest-all runs before its pools start, reached
-// explicitly and without ingesting anything: the way to look at a plan, and
+// It uses the same reachability rule as ingest-all, reached explicitly
+// with its own source inventory and without admitting new content: the way to look at a plan, and
 // the way to apply one that --ingest-all's blast-radius guard refused. The
 // guard is off here because the operator typed the command and is shown the
 // plan before being asked — that is a better check than a ratio.
@@ -58,8 +58,7 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 		return err
 	}
 
-	reset := retention.NewResetter(a.Docs, a.Bus, log)
-	pruner := retention.NewPruner(a.Docs, reset, log)
+	pruner := retention.NewPruner(a.Docs, log)
 
 	report, err := pruner.Plan(ctx, retention.PruneOptions{
 		AbsPaths: ws.AbsPaths,

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS source_occurrences (
  scan_id uuid NOT NULL REFERENCES source_scans, observed_at timestamptz NOT NULL DEFAULT now(),
  available boolean NOT NULL DEFAULT true, PRIMARY KEY(root_id,relative_path));
 CREATE INDEX IF NOT EXISTS source_occurrences_document_idx ON source_occurrences(doc_id) WHERE available;
+CREATE INDEX IF NOT EXISTS source_occurrences_scan_idx ON source_occurrences(scan_id);
 CREATE TABLE IF NOT EXISTS source_members (
  parent_id uuid NOT NULL REFERENCES documents ON DELETE CASCADE,
  selector text NOT NULL, child_id uuid NOT NULL REFERENCES documents ON DELETE CASCADE,
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS source_members (
 CREATE INDEX IF NOT EXISTS source_members_child_idx ON source_members(child_id);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_hash text NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_version text NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS containment_established_at timestamptz;
 ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS slice_sha256 bytea;
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
  job_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), doc_id uuid NOT NULL REFERENCES documents ON DELETE CASCADE,
@@ -37,6 +39,26 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
  reason text NOT NULL DEFAULT '', UNIQUE(doc_id,subject,revision));
 CREATE INDEX IF NOT EXISTS ingestion_jobs_ready_idx ON ingestion_jobs(created_at) WHERE state='READY';
 INSERT INTO application_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
+
+-- A workspace created after the grouping layer was retired is already in the
+-- post-migration state: schemaSQL never creates those objects, so there is
+-- nothing for --migrate-schema to do. Recording the migration here is what
+-- stops the read path refusing a freshly provisioned workspace and naming a
+-- command that would drop nothing. Guarded on every retired object being
+-- absent, so a database that still carries one stays unrecorded and keeps
+-- being refused until the migration has genuinely run.
+INSERT INTO application_migrations(version)
+SELECT 2
+WHERE to_regclass('topic_graph_versions') IS NULL
+  AND to_regclass('email_identifier_nodes') IS NULL
+  AND NOT EXISTS (SELECT 1 FROM pg_attribute
+      WHERE attrelid = to_regclass('email_messages')
+        AND attname IN ('conversation_id','conversation_method','subject_normalized')
+        AND NOT attisdropped)
+  AND NOT EXISTS (SELECT 1 FROM pg_attribute
+      WHERE attrelid = to_regclass('documents')
+        AND attname = 'thread_id' AND NOT attisdropped)
+ON CONFLICT DO NOTHING;
 `
 
 // ApplySourceSchema applies the source inventory, containment and durable-job

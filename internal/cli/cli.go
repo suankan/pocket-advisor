@@ -44,8 +44,8 @@ type Options struct {
 	// it only with --yes and confirmation.
 	ReconcileDeletions bool
 
-	// NoPrune turns off the sweep --ingest-all runs before its worker
-	// pools start. The sweep is what makes an ignore pattern and a deleted file
+	// NoPrune turns off the sweep --ingest-all runs after its worker
+	// pools stop. The sweep is what makes an ignore pattern and a deleted file
 	// take effect on documents already indexed, so switching it off leaves
 	// the corpus describing a staging directory that no longer exists.
 	NoPrune bool
@@ -95,8 +95,6 @@ type Options struct {
 	EvalThresholds string
 
 	StaleAfter time.Duration
-	HighWater  uint64
-	LowWater   uint64
 }
 
 const usage = `pocket-advisor — ingestion pipeline for a local RAG corpus.
@@ -151,8 +149,8 @@ Modes (exactly one):
                       refuses if the directory is empty. Reports the plan and
                       deletes nothing unless --yes is supplied. May prepare
                       derived containment metadata before reporting the plan.
-  --no-prune          skip the sweep --ingest-all runs before its worker
-                      pools start. The sweep removes documents nothing stages any
+  --no-prune          skip the sweep --ingest-all runs after its worker
+                      pools stop. The sweep removes documents nothing stages any
                       more: a file deleted from the workspace, a file an
                       ignore: pattern now excludes, and anything left held by
                       nothing else once those go.
@@ -297,7 +295,7 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.ReconcileDeletions, "reconcile-deletions", false,
 		"remove documents whose staged file is gone (plans unless --yes)")
 	fs.BoolVar(&o.NoPrune, "no-prune", false,
-		"skip the pre-ingest sweep that removes documents nothing stages any more")
+		"skip the post-ingest sweep that removes documents nothing stages any more")
 	fs.Float64Var(&o.PruneMaxShare, "prune-max-share", 0,
 		"share of the corpus one sweep may remove before refusing (0 = 10%, 1 = no limit)")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
@@ -332,8 +330,6 @@ func Parse(args []string) (*Options, error) {
 	fs.BoolVar(&o.NoDashboard, "no-dashboard", false, "plain line output instead of the live display")
 
 	fs.DurationVar(&o.StaleAfter, "stale-after", 30*time.Minute, "PENDING age that counts as stalled")
-	fs.Uint64Var(&o.HighWater, "high-water", 10_000, "pause enqueueing above this many pending messages")
-	fs.Uint64Var(&o.LowWater, "low-water", 2_000, "resume enqueueing below this many pending messages")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

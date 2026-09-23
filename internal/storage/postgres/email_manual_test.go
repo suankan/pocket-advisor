@@ -283,29 +283,20 @@ func TestEmailMessagePersistsMetadata(t *testing.T) {
 	}
 }
 
-// An ancestor nobody ingested stays a placeholder: a node with no document
-// behind it, never a fabricated document row.
-func TestEmailMissingAncestorStaysAPlaceholder(t *testing.T) {
-	db, repo := applied(t, "placeholder")
+// Reply identifiers are retained as claims without inventing documents.
+func TestEmailMissingAncestorRetainsReferenceOnly(t *testing.T) {
+	db, repo := applied(t, "missing_ancestor")
 	ctx := context.Background()
-
 	docID := document(t, db, strings.Repeat("1", 64))
-	if err := repo.SaveEmailMessage(ctx, message(docID, "b@mail.example.test",
-		"Re: Review", "gone@mail.example.test", "gone@mail.example.test")); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	var placeholders, documents int
-	if err := db.Pool.QueryRow(ctx, `
-        SELECT (SELECT count(*) FROM email_identifier_nodes WHERE doc_id IS NULL),
-               (SELECT count(*) FROM documents)`).Scan(&placeholders, &documents); err != nil {
+	if err := repo.SaveEmailMessage(ctx, message(docID, "b@mail.example.test", "Re: Review", "gone@mail.example.test", "gone@mail.example.test")); err != nil {
 		t.Fatal(err)
 	}
-	if placeholders != 1 {
-		t.Errorf("%d placeholders, want 1", placeholders)
+	var references, documents int
+	if err := db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM email_references WHERE message_id='gone@mail.example.test'),(SELECT count(*) FROM documents)`).Scan(&references, &documents); err != nil {
+		t.Fatal(err)
 	}
-	if documents != 1 {
-		t.Errorf("%d documents, want 1: no row may be invented for an absent ancestor", documents)
+	if references != 2 || documents != 1 {
+		t.Fatalf("references=%d documents=%d; want two claims and one real document", references, documents)
 	}
 }
 
@@ -333,20 +324,19 @@ func TestEmailReIngestionIsIdempotent(t *testing.T) {
 		t.Fatalf("second ingest: %v", err)
 	}
 
-	var messages, addresses, references, nodes int
+	var messages, addresses, references int
 	var after time.Time
 	if err := db.Pool.QueryRow(ctx, `
         SELECT (SELECT count(*) FROM email_messages),
                (SELECT count(*) FROM email_addresses),
                (SELECT count(*) FROM email_references),
-               (SELECT count(*) FROM email_identifier_nodes),
                (SELECT ingested_at FROM email_messages WHERE doc_id = $1)`, docID,
-	).Scan(&messages, &addresses, &references, &nodes, &after); err != nil {
+	).Scan(&messages, &addresses, &references, &after); err != nil {
 		t.Fatal(err)
 	}
-	if messages != 1 || addresses != 2 || references != 2 || nodes != 2 {
-		t.Errorf("re-ingestion accumulated rows: %d messages, %d addresses, %d references, %d nodes",
-			messages, addresses, references, nodes)
+	if messages != 1 || addresses != 2 || references != 2 {
+		t.Errorf("re-ingestion accumulated rows: %d messages, %d addresses, %d references",
+			messages, addresses, references)
 	}
 	if !after.Equal(ingestedAt) {
 		t.Errorf("ingested_at moved from %v to %v", ingestedAt, after)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +18,14 @@ import (
 	"testing"
 	"time"
 
+	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/retention"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
@@ -63,6 +67,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	}
 	setup.Close()
 	var embeds atomic.Int32
+	var cancelNext atomic.Pointer[context.CancelFunc]
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == "GET" {
@@ -77,6 +82,9 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 			return
 		}
 		embeds.Add(int32(len(req.Input)))
+		if cancel := cancelNext.Swap(nil); cancel != nil {
+			(*cancel)()
+		}
 		data := []map[string]any{}
 		for i := range req.Input {
 			data = append(data, map[string]any{"index": i, "embedding": []float32{1, .2, .3, .4, .5, .6, .7, .8}})
@@ -125,7 +133,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logs.Close()
-	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, HighWater: 100, LowWater: 50, NoDashboard: true, OCRLangs: "eng", PruneMaxShare: 1}
+	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, NoDashboard: true, OCRLangs: "eng", PruneMaxShare: 1}
 	if err := runIngest(o, cfg, logs); err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +165,10 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if before != after {
 		t.Fatal("rename changed UUID")
 	}
+	var scans int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM source_scans`).Scan(&scans); err != nil || scans != 2 {
+		t.Fatalf("ingestion did not use exactly one scan per run: %d %v", scans, err)
+	}
 	locations, err := postgres.NewSourceRepo(db).Locations(ctx, []string{before})
 	if err != nil || len(locations[before]) < 2 {
 		t.Fatalf("lost duplicate/container locations %v %v", locations, err)
@@ -175,6 +187,96 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 			t.Fatal("missing exact provenance")
 		}
 	}
+	// Queue work before another rename. Workers must resolve the refreshed
+	// occurrence, not park the job against the previous path.
+	if _, err := db.Pool.Exec(ctx, `UPDATE ingestion_jobs SET state='WAITING_SOURCE' WHERE doc_id=$1`, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "renamed.txt"), filepath.Join(root, "final.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIngest(o, cfg, logs); err != nil {
+		t.Fatalf("renamed queued source did not recover: %v", err)
+	}
+	// A removed original with a waiting job must not prevent its own cleanup.
+	missingHash := domain.SHA256Hex([]byte("removed synthetic original"))
+	missing, _, err := docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf", SourceName: "missing.pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := postgres.NewJobs(db)
+	if err := jobs.Publish(ctx, bus.SubjectPDFs, &ingestionv1.ProcessPdfCommand{
+		Metadata: &ingestionv1.DocumentMetadata{DocId: missing, RawSha256: missingHash, Traceparent: "00-11111111111111111111111111111111-1111111111111111-01"}, SourceRef: source.Ref(missing)}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(ctx, `UPDATE ingestion_jobs SET state='WAITING_SOURCE' WHERE doc_id=$1`, missing); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIngest(o, cfg, logs); err != nil {
+		t.Fatalf("removed waiting source blocked pruning: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || exists {
+		t.Fatalf("removed waiting document survived: %v", err)
+	}
+	// A newly retained container that cannot be enumerated must block deletion
+	// of otherwise unheld content. Excluding it permits cleanup next run.
+	bad := []byte("From: sender@example.test\r\nSubject: Synthetic bad charset\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=not-a-real-charset\r\n\r\nBody.\r\n")
+	if err := os.WriteFile(filepath.Join(root, "bad.eml"), bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	missing, _, err = docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runIngest(o, cfg, logs); !errors.Is(err, retention.ErrPlacementsIncomplete) {
+		t.Fatalf("unparsed retained container did not block pruning: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
+		t.Fatalf("unsafe sweep deleted candidate: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "bad.eml")); err != nil {
+		t.Fatal(err)
+	}
+	// Stop staging the direct attachment; the retained email still holds it.
+	if err := os.Remove(filepath.Join(root, "final.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIngest(o, cfg, logs); err != nil {
+		t.Fatalf("unreachable failed container blocked cleanup: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, before); err != nil || !exists {
+		t.Fatalf("lost attachment carried by retained email: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || exists {
+		t.Fatalf("candidate survived resolved containment: %v", err)
+	}
+	// Cancellation after scanning must not authorize a sweep, even if the
+	// remaining source set and containment would otherwise permit deletion.
+	missing, _, err = docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cancel.txt"), []byte("Synthetic work cancelled before pruning."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancelNext.Store(&cancel)
+	err = runIngestContext(cancelCtx, o, cfg, logs)
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("interruption not reported: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
+		t.Fatalf("interrupted run deleted candidate: %v", err)
+	}
+	o.NoPrune = true
+	if err := runIngest(o, cfg, logs); err != nil {
+		t.Fatalf("additive recovery failed: %v", err)
+	}
+	o.NoPrune = false
+	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
+		t.Fatalf("no-prune removed candidate: %v", err)
+	}
 	// Offline roots do not invalidate cached evidence or prevent derived reset.
 	offline := filepath.Join(t.TempDir(), "offline")
 	if err := os.Rename(root, offline); err != nil {
@@ -187,7 +289,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if err := runReset(&Options{DeleteData: true, Yes: true, WorkspaceID: id, WorkspaceConfig: registry}, cfg, logs); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string][]byte{"renamed.txt": text, "message.eml": mail} {
+	for name, want := range map[string][]byte{"message.eml": mail, "cancel.txt": []byte("Synthetic work cancelled before pruning.")} {
 		got, err := os.ReadFile(filepath.Join(offline, name))
 		if err != nil || string(got) != string(want) {
 			t.Fatalf("source modified: %s", name)

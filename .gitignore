@@ -2,10 +2,16 @@
 # journal, eval). Platform code stays case-free. See
 # docs/design.md.
 workspaces/
-# Tool-specific dirs — local convenience only.
+# AI-assistant and editor configuration is local convenience only. Agents
+# share project knowledge through AGENTS.md and docs/, which every tool
+# reads; nothing tool-specific is committed (AGENTS.md hard rule 6).
 # Platform config.yaml is committed (no case data).
 .claude/
+.codex/
 .cursor/
+.mcp.json
+CLAUDE.md
+CLAUDE.local.md
 # Local environment
 .venv/
 __pycache__/

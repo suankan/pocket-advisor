@@ -153,12 +153,10 @@ MCP (a subcommand, not a mode flag):
                       binary (retrieval-design.md §6.1)
   mcp start --workspace-id <id> [options]
                       start the same fixed-workspace tools over Streamable
-                      HTTP as a detached background daemon, on loopback by
-                      default, and return once it is confirmed running.
-                      Optionally authenticated against Google as the sole
-                      identity provider (config.yaml's mcp.oauth:
-                      google_client_id + allowed_emails); omit both to run
-                      unauthenticated for local development. See docs/mcp.md.
+                      HTTP as a detached background daemon on loopback,
+                      and return once it is confirmed running.
+                      Plain, unauthenticated HTTP; TLS and
+                      authentication belong to a gateway. See docs/mcp.md.
   mcp stop --workspace-id <id>
                       stop a running "mcp start" server for that workspace
   mcp status --workspace-id <id>

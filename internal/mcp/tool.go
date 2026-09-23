@@ -64,28 +64,6 @@ type QueryTool struct {
 	maxSnapshotBytes int
 }
 
-// forCaller returns a tool with the same immutable retrieval dependencies and
-// presentation metadata, but an independent continuation namespace. HTTP uses
-// one such tool per authenticated subject so a cursor can survive token
-// renewal without becoming usable by another caller. Stdio already creates
-// one QueryTool per process and therefore does not need this clone.
-func (t *QueryTool) forCaller() *QueryTool {
-	return &QueryTool{
-		Service:          t.Service,
-		Workspace:        t.Workspace,
-		Title:            t.Title,
-		Corpus:           append([]string(nil), t.Corpus...),
-		Mailbox:          t.Mailbox,
-		Document:         t.Document,
-		Log:              t.Log,
-		now:              t.now,
-		random:           t.random,
-		snapshotTTL:      t.snapshotTTL,
-		maxSnapshots:     t.maxSnapshots,
-		maxSnapshotBytes: t.maxSnapshotBytes,
-	}
-}
-
 type ToolDefinition struct {
 	Name         string          `json:"name"`
 	Title        string          `json:"title"`

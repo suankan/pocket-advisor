@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor's read path. It describ
 
 ## Status
 
-The transport-independent Go retrieval package, exact mailbox browse package, and host CLI query mode are current. The workspace-bound stdio MCP server and authenticated Streamable HTTP MCP adapter are described in [MCP server design](mcp.md). A general HTTP user API and an in-repository answer-generation service remain target state.
+The transport-independent Go retrieval package, exact mailbox browse package, and host CLI query mode are current. The workspace-bound stdio MCP server and loopback Streamable HTTP MCP adapter are described in [MCP server design](mcp.md). A general HTTP user API and an in-repository answer-generation service remain target state.
 
 ## Principles
 
@@ -131,7 +131,7 @@ The current process emits structured logs and includes warning codes in CLI and 
 
 ### MCP transports
 
-Both the stdio and authenticated Streamable HTTP MCP transports are described in [MCP server design](mcp.md). They expose the same tool contract, evidence interface, citation system, pagination, and response bounds over the retrieval package. The retrieval package remains transport-independent; both MCP adapters are thin boundaries over `internal/retrieval` and the shared `internal/mcp.QueryTool`.
+Both the stdio and loopback Streamable HTTP MCP transports are described in [MCP server design](mcp.md). They expose the same tool contract, evidence interface, citation system, pagination, and response bounds over the retrieval package. The retrieval package remains transport-independent; both MCP adapters are thin boundaries over `internal/retrieval` and the shared `internal/mcp.QueryTool`.
 
 ## Evaluation
 

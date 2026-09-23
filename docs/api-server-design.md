@@ -11,13 +11,13 @@ Pocket Advisor currently runs as a host CLI process. `internal/cli` parses comma
 - bounded ingestion and maintenance commands;
 - an interactive ingestion listener;
 - a direct query command; and
-- MCP transports (stdio and authenticated Streamable HTTP) for retrieval evidence, fixed-workspace exact mailbox browse, and deterministic document lookup, described in [MCP server design](mcp.md).
+- MCP transports (stdio and plain loopback Streamable HTTP) for retrieval evidence, fixed-workspace exact mailbox browse, and deterministic document lookup, described in [MCP server design](mcp.md).
 
 Answer generation is performed by the MCP client or another external consumer of evidence packets.
 
 ## Target architecture
 
-The intended architecture expands the implemented authenticated MCP edge into a broader gateway and control plane over specialized workloads:
+The intended architecture puts a gateway and control plane in front of specialized workloads, including the plain HTTP MCP server:
 
 ```mermaid
 flowchart TB
@@ -59,7 +59,7 @@ The Web UI is a client of these APIs. It must not introduce a parallel backend o
 
 ## Identity and workspace routing
 
-For HTTP MCP, the authentication and authorization model is described in [MCP server design](mcp.md#authentication-and-authorization). The application release and OAuth client registrations fix one public resource URI to one workspace workload. A workspace ID in a URL, request body, OAuth claim, MCP argument, mirrored header, or tool name cannot change that workload's configured database or credentials. The general future gateway will apply the same rule to non-MCP APIs.
+The HTTP MCP process performs no authentication; it binds to loopback and is fixed to one workspace at startup, as described in [MCP server design](mcp.md#workspace-isolation). When MCP is exposed beyond the local machine, the gateway in front of it owns TLS, authentication, and authorization, and routes one public route to one workspace workload. A workspace ID in a URL, request body, identity claim, MCP argument, mirrored header, or tool name cannot change that workload's configured database or credentials. The gateway applies the same rule to non-MCP APIs.
 
 Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
 
@@ -67,7 +67,7 @@ Administrative access is distinct from user query access. Destructive operations
 
 ## Service topology
 
-Authenticated HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote-access options such as SSH tunneling or a reverse proxy) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL and NATS.
+HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote access through an SSH tunnel) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL and NATS.
 
 The target general control plane is a separate long-running workload — unlike MCP, one that is expected to run in Kubernetes. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
 

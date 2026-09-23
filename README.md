@@ -47,7 +47,6 @@ The authoritative designs are:
 - Tesseract and the required language packs for scanned PDFs and images.
 - A local OpenAI-compatible model endpoint serving the embedding, reranking, and query-preparation models named in `config.yaml`.
 - Helm, `kubectl`, Docker, `psql`, `natscli`, `yq`, and `envsubst`.
-- For authenticated HTTP MCP: an OAuth 2.0 Client ID registered in Google Cloud Console (see [MCP server design](docs/mcp.md#google-oauth-client-configuration)).
 
 On macOS:
 
@@ -252,7 +251,7 @@ Zero packets is a valid result when nothing relevant exists in the workspace.
 
 ### MCP
 
-The MCP server exposes retrieval evidence through stdio and Streamable HTTP, both run locally by the same binary. HTTP authentication is optional (§ [HTTP MCP](#http-mcp) below). The tool contract, evidence interface, citation system, pagination, response bounds, authentication, and transport design are described in [MCP server design](docs/mcp.md).
+The MCP server exposes retrieval evidence through stdio and Streamable HTTP, both run locally by the same binary. The tool contract, evidence interface, citation system, pagination, response bounds, and transport design are described in [MCP server design](docs/mcp.md).
 
 Both transports log to `<log_dir>/mcp.log` (`logs/mcp.log` by default). `mcp stdio` also copies every log line to stderr, so a client that captures its child's stderr into its own log view (as Claude Desktop does) keeps seeing it there too — logs/mcp.log is the durable, complete record either way. `mcp start` logs to the file only, since it runs as a detached background daemon with no controlling terminal to capture; its own raw stdout/stderr are redirected into the same file instead.
 
@@ -283,37 +282,32 @@ The synthetic fixture at `internal/mcp/testdata/synthetic_server` exercises clie
 
 ### HTTP MCP
 
-The HTTP adapter serves the same tools over Streamable HTTP, bound to loopback by default. Authentication is optional and, when enabled, supports Google as the sole identity provider: every bearer token is verified as a Google-issued ID token against Google's published JWKS, then checked against an operator-maintained email allowlist. Authorization and client configuration are described in [MCP server design](docs/mcp.md#authentication-and-authorization).
+The HTTP adapter serves the same tools over plain Streamable HTTP on loopback. It has no authentication and no TLS, and it refuses to bind anything but a loopback address. Exposing it beyond the local machine is a job for an API gateway or other infrastructure in front of it, which would own TLS and authentication; the server itself stays a plain HTTP service.
 
-`config.yaml`'s committed `mcp:` section already points `resource_uri` and `mcp.tls` at a self-signed loopback certificate, so the server always serves real HTTPS on `127.0.0.1:8080` — authenticated or not. Generate that certificate once (it's gitignored under `workspaces/`, so every clone needs its own):
-
-```sh
-mkdir -p workspaces/mcp-tls
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout workspaces/mcp-tls/key.pem -out workspaces/mcp-tls/cert.pem \
-  -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
-```
-
-Both modes are started the same way. `mcp start` forks a detached background daemon and returns once it is confirmed running, so it never blocks the shell and does not need `&` or `nohup`:
+`mcp start` forks a detached background daemon and returns once it is confirmed running, so it never blocks the shell and does not need `&` or `nohup`:
 
 ```sh
 ./bin/pocket-advisor mcp start --workspace-id test
 # mcp server for workspace "test" started (pid 12345); logging to logs/mcp.log
+curl http://127.0.0.1:8080/readyz
+# {"status":"ok"}
 ```
 
-Optional CLI overrides for either mode:
+It reads `config.yaml`'s `mcp.http` section:
+
+```yaml
+mcp:
+  http:
+    addr: "127.0.0.1:8080"
+    endpoint: "/mcp"
+    max_concurrent: 8
+```
+
+Optional CLI overrides:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--addr` | From config | Listen address |
-| `--resource-uri` | From config | Public MCP resource URI |
-| `--google-client-id` | From config | Google OAuth client ID |
-| `--allowed-emails` | From config | Comma-separated allowed Google account emails |
-| `--cert-file` | From config | TLS certificate file |
-| `--key-file` | From config | TLS key file |
-| `--allowed-origins` | none | Comma-separated exact allowed browser origins |
-| `--allowed-hosts` | resource URI host | Comma-separated exact allowed public Host values |
-| `--trusted-proxy-cidrs` | none | Comma-separated trusted proxy CIDRs |
+| `--addr` | From config | Loopback listen address |
 | `--max-concurrent` | From config | Maximum concurrent HTTP requests |
 
 Check on or stop a running daemon:
@@ -323,68 +317,9 @@ Check on or stop a running daemon:
 ./bin/pocket-advisor mcp stop --workspace-id test
 ```
 
-#### Unauthenticated (local development)
-
-The committed `mcp:` config as-is — `oauth.google_client_id` and `allowed_emails` are both empty, which is what runs the server without authentication:
-
-```yaml
-mcp:
-  http:
-    addr: "127.0.0.1:8080"
-    endpoint: "/mcp"
-    resource_uri: "https://127.0.0.1:8080/mcp"
-    max_concurrent: 8
-  oauth:
-    google_client_id: ""
-    allowed_emails: []
-  tls:
-    cert_file: "workspaces/mcp-tls/cert.pem"
-    key_file: "workspaces/mcp-tls/key.pem"
-```
-
-```sh
-./bin/pocket-advisor mcp start --workspace-id test
-curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/readyz
-# {"status":"ok"}
-```
-
-Any bearer token, or none at all, is accepted. This mode is for the local machine only — do not expose port 8080 beyond loopback without turning on authentication.
-
-#### Authenticated (Google)
-
-Fill in `oauth.google_client_id` and `allowed_emails` — everything else is already the config above. `google_client_id` is the OAuth 2.0 Client ID registered in Google Cloud Console (see [Prerequisites](#2-prerequisites)); `allowed_emails` must be non-empty or the server refuses to start:
-
-```yaml
-mcp:
-  oauth:
-    google_client_id: "1234567890-abc.apps.googleusercontent.com"
-    allowed_emails:
-      - "you@example.com"
-```
-
-Or leave `config.yaml` unauthenticated and pass both on the command line instead, which overrides it for that run only:
-
-```sh
-./bin/pocket-advisor mcp start --workspace-id test \
-  --google-client-id "1234567890-abc.apps.googleusercontent.com" \
-  --allowed-emails "you@example.com"
-```
-
-`resource_uri: https://127.0.0.1:8080/mcp` genuinely matches what's served — no reverse proxy, DNS name, or `Host` header override needed. Verify it locally without a real Google token (a real client authenticates through the browser flow in [MCP client configuration](#mcp-client-configuration) below, not a hand-crafted bearer token):
-
-```sh
-curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/mcp
-# 401 Unauthorized: no bearer token
-
-curl --cacert workspaces/mcp-tls/cert.pem https://127.0.0.1:8080/.well-known/oauth-protected-resource/mcp
-# {"resource":"https://127.0.0.1:8080/mcp","authorization_servers":["https://accounts.google.com"],...}
-```
-
-For a real remote deployment, `resource_uri` and `mcp.tls`/reverse proxy need a hostname other clients can actually reach — see [MCP server design](docs/mcp.md#tls-optional).
-
 ### MCP client configuration
 
-For OpenCode on macOS, using Google as the identity provider, matching the loopback setup above:
+For OpenCode, matching the loopback setup above:
 
 ```json
 {
@@ -392,20 +327,14 @@ For OpenCode on macOS, using Google as the identity provider, matching the loopb
   "mcp": {
     "pocket-advisor": {
       "type": "remote",
-      "url": "https://127.0.0.1:8080/mcp",
-      "enabled": true,
-      "oauth": {
-        "clientId": "1234567890-abc.apps.googleusercontent.com",
-        "scope": "openid email",
-        "callbackPort": 19876,
-        "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
-      }
+      "url": "http://127.0.0.1:8080/mcp",
+      "enabled": true
     }
   }
 }
 ```
 
-`workspaces/mcp-tls/cert.pem` is self-signed, so the client also needs to trust it (or the equivalent for a real deployment's own certificate) — consult OpenCode's own docs for how it trusts a custom CA. Run `opencode mcp auth pocket-advisor`, complete the browser flow, then use `opencode mcp debug pocket-advisor` and `opencode mcp list`.
+Use `opencode mcp debug pocket-advisor` and `opencode mcp list` to confirm the connection.
 
 ## 8. Evaluate retrieval quality
 

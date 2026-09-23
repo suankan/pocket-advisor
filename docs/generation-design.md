@@ -2,7 +2,7 @@
 
 This document is the design authority for cited answer generation, answer-model access, evidence isolation, and the intended generation service. It describes target state. Pocket Advisor does not currently run an in-repository generation service.
 
-In the current system, the workspace-bound MCP server — stdio or authenticated Streamable HTTP — returns retrieval evidence to an external agent, and that agent writes any answer. [Retrieval design](retrieval-design.md) owns evidence selection, [API server design](api-server-design.md) owns authentication and routing, and [workspace isolation](workspace-isolation.md) owns credential boundaries.
+In the current system, the workspace-bound MCP server — stdio or loopback Streamable HTTP — returns retrieval evidence to an external agent, and that agent writes any answer. [Retrieval design](retrieval-design.md) owns evidence selection, [API server design](api-server-design.md) owns authentication and routing, and [workspace isolation](workspace-isolation.md) owns credential boundaries.
 
 ## Purpose and boundary
 

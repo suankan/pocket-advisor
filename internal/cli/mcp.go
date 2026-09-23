@@ -97,16 +97,6 @@ func assertMCPEndpoints(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-func splitCSV(raw string) []string {
-	var out []string
-	for _, value := range strings.Split(raw, ",") {
-		if value = strings.TrimSpace(value); value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
 // describeCorpus renders the workspace registry as human-readable contents.
 //
 // Failure is deliberately soft: an undescribed tool is worse than an
@@ -336,21 +326,11 @@ func scanFlagValue(args []string, name string) string {
 // runMCPHTTPServer is the daemon child's actual server. It is a sibling of
 // mcpStdioCmd, not a second implementation: both are thin adapters over the
 // same retrieval.Query, which is why §7 requires that package to be
-// transport-agnostic. Authentication is optional: leave
-// --google-client-id/--allowed-emails (and config.yaml's mcp.oauth) unset to
-// serve unauthenticated on loopback, for local development.
+// transport-agnostic. It serves plain, unauthenticated HTTP on loopback.
 func runMCPHTTPServer(cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("mcp start", flag.ExitOnError)
 	workspaceID := fs.String("workspace-id", "", "workspace to serve")
-	addr := fs.String("addr", "", "listen address (default from config)")
-	resourceURI := fs.String("resource-uri", "", "public MCP resource URI (default from config)")
-	googleClientID := fs.String("google-client-id", "", "Google OAuth client ID (default from config)")
-	allowedEmails := fs.String("allowed-emails", "", "comma-separated Google account emails allowed to authenticate (default from config)")
-	certFile := fs.String("cert-file", "", "TLS certificate file (default from config)")
-	keyFile := fs.String("key-file", "", "TLS key file (default from config)")
-	allowedOrigins := fs.String("allowed-origins", "", "comma-separated exact allowed browser origins")
-	allowedHosts := fs.String("allowed-hosts", "", "comma-separated exact allowed public Host values (default: resource URI host)")
-	trustedProxyCIDRs := fs.String("trusted-proxy-cidrs", "", "comma-separated trusted proxy CIDRs")
+	addr := fs.String("addr", "", "loopback listen address (default from config)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent HTTP requests (default from config)")
 
 	if err := fs.Parse(args); err != nil {
@@ -360,44 +340,17 @@ func runMCPHTTPServer(cfg *config.Config, args []string) error {
 		return fmt.Errorf("--workspace-id is required")
 	}
 
-	// Apply flag overrides to config
 	if *addr != "" {
 		cfg.MCP.HTTP.Addr = *addr
-	}
-	if *resourceURI != "" {
-		cfg.MCP.HTTP.ResourceURI = *resourceURI
-	}
-	if *googleClientID != "" {
-		cfg.MCP.OAuth.GoogleClientID = *googleClientID
-	}
-	if *allowedEmails != "" {
-		cfg.MCP.OAuth.AllowedEmails = splitCSV(*allowedEmails)
-	}
-	if *certFile != "" {
-		cfg.MCP.TLS.CertFile = *certFile
-	}
-	if *keyFile != "" {
-		cfg.MCP.TLS.KeyFile = *keyFile
 	}
 	if *maxConcurrent > 0 {
 		cfg.MCP.HTTP.MaxConcurrent = *maxConcurrent
 	}
-
-	// Set defaults
 	if cfg.MCP.HTTP.Addr == "" {
 		cfg.MCP.HTTP.Addr = "127.0.0.1:8080"
 	}
 	if cfg.MCP.HTTP.Endpoint == "" {
 		cfg.MCP.HTTP.Endpoint = "/mcp"
-	}
-
-	// Derive resource_uri from addr if not set. Google auth requires an HTTPS
-	// resource URI (internal/mcp.normalizeHTTPOptions enforces this), so this
-	// plain-HTTP default only actually serves the common unauthenticated-local
-	// case; an operator turning on Google auth must set resource_uri (and
-	// terminate TLS via cert/key or a reverse proxy) explicitly.
-	if cfg.MCP.HTTP.ResourceURI == "" {
-		cfg.MCP.HTTP.ResourceURI = "http://" + cfg.MCP.HTTP.Addr + cfg.MCP.HTTP.Endpoint
 	}
 
 	logs, err := telemetry.OpenLogs(cfg.LogDir, cfg.LogLevel)
@@ -428,12 +381,8 @@ func runMCPHTTPServer(cfg *config.Config, args []string) error {
 	}
 	defer os.Remove(pidPath)
 
-	server, err := mcp.NewHTTPServer(ctx, tool, mcp.HTTPOptions{
-		Address: cfg.MCP.HTTP.Addr, Endpoint: cfg.MCP.HTTP.Endpoint, ResourceURI: cfg.MCP.HTTP.ResourceURI,
-		GoogleClientID: cfg.MCP.OAuth.GoogleClientID, AllowedEmails: cfg.MCP.OAuth.AllowedEmails,
-		CertFile: cfg.MCP.TLS.CertFile, KeyFile: cfg.MCP.TLS.KeyFile,
-		AllowedOrigins: splitCSV(*allowedOrigins), AllowedHosts: splitCSV(*allowedHosts),
-		TrustedProxyCIDRs: splitCSV(*trustedProxyCIDRs), MaxConcurrent: cfg.MCP.HTTP.MaxConcurrent,
+	server, err := mcp.NewHTTPServer(tool, mcp.HTTPOptions{
+		Address: cfg.MCP.HTTP.Addr, Endpoint: cfg.MCP.HTTP.Endpoint, MaxConcurrent: cfg.MCP.HTTP.MaxConcurrent,
 		Readiness: func(readyCtx context.Context) error {
 			if err := svc.AssertScope(readyCtx); err != nil {
 				return fmt.Errorf("workspace database unavailable")
@@ -449,8 +398,7 @@ func runMCPHTTPServer(cfg *config.Config, args []string) error {
 		"transport", "streamable_http",
 		"workspace", *workspaceID,
 		"addr", cfg.MCP.HTTP.Addr,
-		"resource_uri", cfg.MCP.HTTP.ResourceURI,
-		"authenticated", cfg.MCP.OAuth.GoogleClientID != "",
+		"endpoint", cfg.MCP.HTTP.Endpoint,
 		"corpus_entries", len(tool.Corpus))
 
 	return server.Serve(ctx)

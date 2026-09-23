@@ -122,31 +122,14 @@ type NATS struct {
 
 // MCP holds the MCP server configuration for local execution.
 type MCP struct {
-	HTTP  MCPHTTP
-	OAuth MCPOAuth
-	TLS   MCPTLS
+	HTTP MCPHTTP
 }
 
-// MCPHTTP holds HTTP server settings.
+// MCPHTTP holds the plain loopback HTTP server's settings.
 type MCPHTTP struct {
 	Addr          string
 	Endpoint      string
-	ResourceURI   string
 	MaxConcurrent int
-}
-
-// MCPOAuth holds Google-IDP settings for authenticated HTTP mode. Leaving
-// GoogleClientID empty runs the HTTP server unauthenticated on loopback
-// (local development); setting it requires AllowedEmails to be non-empty.
-type MCPOAuth struct {
-	GoogleClientID string
-	AllowedEmails  []string
-}
-
-// MCPTLS holds TLS configuration for local HTTPS.
-type MCPTLS struct {
-	CertFile string
-	KeyFile  string
 }
 
 // Workspace is the selected database role/name and namespaced broker scope.
@@ -275,17 +258,8 @@ type file struct {
 		HTTP struct {
 			Addr          string `yaml:"addr"`
 			Endpoint      string `yaml:"endpoint"`
-			ResourceURI   string `yaml:"resource_uri"`
 			MaxConcurrent int    `yaml:"max_concurrent"`
 		} `yaml:"http"`
-		OAuth struct {
-			GoogleClientID string   `yaml:"google_client_id"`
-			AllowedEmails  []string `yaml:"allowed_emails"`
-		} `yaml:"oauth"`
-		TLS struct {
-			CertFile string `yaml:"cert_file"`
-			KeyFile  string `yaml:"key_file"`
-		} `yaml:"tls"`
 	} `yaml:"mcp"`
 
 	// Workspaces is a top-level key, sibling to infra — it only points at
@@ -440,21 +414,9 @@ func applyFile(c *Config, path string) error {
 	// MCP configuration
 	setStr(&c.MCP.HTTP.Addr, f.MCP.HTTP.Addr)
 	setStr(&c.MCP.HTTP.Endpoint, f.MCP.HTTP.Endpoint)
-	setStr(&c.MCP.HTTP.ResourceURI, f.MCP.HTTP.ResourceURI)
 	if f.MCP.HTTP.MaxConcurrent > 0 {
 		c.MCP.HTTP.MaxConcurrent = f.MCP.HTTP.MaxConcurrent
 	}
-	setStr(&c.MCP.OAuth.GoogleClientID, f.MCP.OAuth.GoogleClientID)
-	if len(f.MCP.OAuth.AllowedEmails) > 0 {
-		c.MCP.OAuth.AllowedEmails = f.MCP.OAuth.AllowedEmails
-	}
-	setStr(&c.MCP.TLS.CertFile, f.MCP.TLS.CertFile)
-	setStr(&c.MCP.TLS.KeyFile, f.MCP.TLS.KeyFile)
-	// Same reasoning as LogDir/WorkspacesConfigPath above: a client launching
-	// `mcp start --config <path>` from a directory other than the repo root
-	// needs these anchored to where config.yaml lives, not to its own cwd.
-	c.MCP.TLS.CertFile = resolveAgainst(dir, c.MCP.TLS.CertFile)
-	c.MCP.TLS.KeyFile = resolveAgainst(dir, c.MCP.TLS.KeyFile)
 
 	setStr(&c.Embedding.Endpoint, in.Embedding.Endpoint)
 	setStr(&c.Embedding.Model, in.Embedding.Model)

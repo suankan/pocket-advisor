@@ -128,9 +128,6 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 			return WithDoc(meta.DocId, err)
 		}
 	}
-	if err := w.Docs.MarkContainmentEstablished(ctx, meta.DocId); err != nil {
-		return WithDoc(meta.DocId, err)
-	}
 
 	w.Log.Info("email processed",
 		"doc_id", meta.DocId, "children", len(children),

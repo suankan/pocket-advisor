@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,7 +24,6 @@ import (
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/retention"
 	"github.com/suankan/pocket-advisor/internal/retrieval"
 	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -133,7 +133,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logs.Close()
-	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, NoDashboard: true, OCRLangs: "eng", PruneMaxShare: 1}
+	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, NoDashboard: true, OCRLangs: "eng"}
 	if err := runIngest(o, cfg, logs); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,8 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if err := runIngest(o, cfg, logs); err != nil {
 		t.Fatalf("renamed queued source did not recover: %v", err)
 	}
-	// A removed original with a waiting job must not prevent its own cleanup.
+	// Ingestion never deletes. A removed original's waiting job is reported as
+	// unresolved, naming the sweep, and its document survives the run.
 	missingHash := domain.SHA256Hex([]byte("removed synthetic original"))
 	missing, _, err := docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf", SourceName: "missing.pdf"})
 	if err != nil {
@@ -212,51 +213,79 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if _, err := db.Pool.Exec(ctx, `UPDATE ingestion_jobs SET state='WAITING_SOURCE' WHERE doc_id=$1`, missing); err != nil {
 		t.Fatal(err)
 	}
-	if err := runIngest(o, cfg, logs); err != nil {
-		t.Fatalf("removed waiting source blocked pruning: %v", err)
+	if err := runIngest(o, cfg, logs); err == nil || !strings.Contains(err.Error(), "--reconcile-deletions") {
+		t.Fatalf("waiting job on a removed original was not reported: %v", err)
 	}
-	if exists, err := docs.Exists(ctx, missing); err != nil || exists {
-		t.Fatalf("removed waiting document survived: %v", err)
+	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
+		t.Fatalf("ingestion deleted a document: %v", err)
 	}
-	// A newly retained container that cannot be enumerated must block deletion
-	// of otherwise unheld content. Excluding it permits cleanup next run.
+	// A container that cannot be parsed fails extraction and produces no
+	// members. Stop staging the direct attachment as well; the retained email
+	// still carries it.
 	bad := []byte("From: sender@example.test\r\nSubject: Synthetic bad charset\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=not-a-real-charset\r\n\r\nBody.\r\n")
 	if err := os.WriteFile(filepath.Join(root, "bad.eml"), bad, 0600); err != nil {
 		t.Fatal(err)
 	}
-	missing, _, err = docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runIngest(o, cfg, logs); !errors.Is(err, retention.ErrPlacementsIncomplete) {
-		t.Fatalf("unparsed retained container did not block pruning: %v", err)
-	}
-	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
-		t.Fatalf("unsafe sweep deleted candidate: %v", err)
-	}
-	if err := os.Remove(filepath.Join(root, "bad.eml")); err != nil {
-		t.Fatal(err)
-	}
-	// Stop staging the direct attachment; the retained email still holds it.
 	if err := os.Remove(filepath.Join(root, "final.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := runIngest(o, cfg, logs); err != nil {
-		t.Fatalf("unreachable failed container blocked cleanup: %v", err)
+	if err := runIngest(o, cfg, logs); err == nil {
+		t.Fatal("failed extraction and a removed original were not reported")
+	}
+	badDoc, err := docs.DocIDBySHA(ctx, domain.SHA256Hex(bad))
+	if err != nil || badDoc == "" {
+		t.Fatalf("unparsable container not admitted: %v", err)
+	}
+	// The sweep is its own command. A preview deletes nothing; applying needs
+	// --yes and a typed confirmation.
+	answer := confirm
+	defer func() { confirm = answer }()
+	prompts := 0
+	confirm = func(string) bool { prompts++; return true }
+	sweep := &Options{ReconcileDeletions: true, WorkspaceID: id, WorkspaceConfig: registry}
+	if err := runReconcileDeletions(sweep, cfg, logs); err != nil {
+		t.Fatalf("sweep preview: %v", err)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || !exists || prompts != 0 {
+		t.Fatalf("preview deleted or prompted: %d %v", prompts, err)
+	}
+	sweep.Yes = true
+	if err := runReconcileDeletions(sweep, cfg, logs); err != nil {
+		t.Fatalf("unparsable retained container blocked the sweep: %v", err)
+	}
+	if prompts != 1 {
+		t.Fatalf("sweep applied without one confirmation: %d", prompts)
+	}
+	if exists, err := docs.Exists(ctx, missing); err != nil || exists {
+		t.Fatalf("unreachable document survived the sweep: %v", err)
 	}
 	if exists, err := docs.Exists(ctx, before); err != nil || !exists {
 		t.Fatalf("lost attachment carried by retained email: %v", err)
 	}
-	if exists, err := docs.Exists(ctx, missing); err != nil || exists {
-		t.Fatalf("candidate survived resolved containment: %v", err)
+	if exists, err := docs.Exists(ctx, badDoc); err != nil || !exists {
+		t.Fatalf("swept a container whose original is present: %v", err)
 	}
-	// Cancellation after scanning must not authorize a sweep, even if the
-	// remaining source set and containment would otherwise permit deletion.
+	// Once its original goes, the failed container is swept with its job and
+	// ingestion resolves cleanly.
+	if err := os.Remove(filepath.Join(root, "bad.eml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runReconcileDeletions(sweep, cfg, logs); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := docs.Exists(ctx, badDoc); err != nil || exists {
+		t.Fatalf("failed container survived the sweep: %v", err)
+	}
+	if err := runIngest(o, cfg, logs); err != nil {
+		t.Fatalf("swept workspace did not resolve: %v", err)
+	}
+	// Interruption is reported. A jobless row whose original is gone is left
+	// alone by the next run rather than resumed into a missing source.
 	missing, _, err = docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: missingHash, DocType: "pdf"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "cancel.txt"), []byte("Synthetic work cancelled before pruning."), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "cancel.txt"), []byte("Synthetic work cancelled mid-run."), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
@@ -266,16 +295,11 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("interruption not reported: %v", err)
 	}
-	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
-		t.Fatalf("interrupted run deleted candidate: %v", err)
-	}
-	o.NoPrune = true
 	if err := runIngest(o, cfg, logs); err != nil {
-		t.Fatalf("additive recovery failed: %v", err)
+		t.Fatalf("run after interruption did not resolve: %v", err)
 	}
-	o.NoPrune = false
 	if exists, err := docs.Exists(ctx, missing); err != nil || !exists {
-		t.Fatalf("no-prune removed candidate: %v", err)
+		t.Fatalf("ingestion deleted a document: %v", err)
 	}
 	// Offline roots do not invalidate cached evidence or prevent derived reset.
 	offline := filepath.Join(t.TempDir(), "offline")
@@ -289,7 +313,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	if err := runReset(&Options{DeleteData: true, Yes: true, WorkspaceID: id, WorkspaceConfig: registry}, cfg, logs); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string][]byte{"message.eml": mail, "cancel.txt": []byte("Synthetic work cancelled before pruning.")} {
+	for name, want := range map[string][]byte{"message.eml": mail, "cancel.txt": []byte("Synthetic work cancelled mid-run.")} {
 		got, err := os.ReadFile(filepath.Join(offline, name))
 		if err != nil || string(got) != string(want) {
 			t.Fatalf("source modified: %s", name)

@@ -3,7 +3,6 @@ package retention
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -25,10 +24,12 @@ import (
 // held by many messages at once. Reachability handles both without a special
 // case, and terminates on its own if lineage were ever cyclic.
 //
-// Two guards sit in front of it, because this is the one part of ingestion
-// that deletes. ErrPlacementsIncomplete refuses to sweep against containment
-// data that is known to be under-counted, and ErrBlastRadius refuses a sweep
-// whose size says the staging directory is missing rather than changed.
+// It runs only as its own maintenance command, never inside ingestion, so no
+// worker can add a document or an edge while a plan is being judged. Two
+// guards sit in front of it: ErrPlacementsIncomplete refuses to sweep against
+// containment data that is known to be under-counted, and ErrStagingEmpty
+// refuses a source set with nothing in it. The operator reviews every plan
+// before it is applied.
 
 // ErrPlacementsIncomplete stops a sweep before the containment backfill has
 // re-derived what ingest originally discarded.
@@ -39,34 +40,15 @@ import (
 // the exact loss the placements table exists to prevent, and nothing afterwards
 // records that it happened.
 var ErrPlacementsIncomplete = errors.New(
-	"containment is incomplete: pruning could delete retained attachments")
-
-// ErrBlastRadius stops a sweep that would remove more of the corpus than a
-// change to the staging directory plausibly explains.
-//
-// An unmounted volume, a half-finished mail sync and a deliberately emptied
-// folder are indistinguishable from here — all three simply present fewer
-// files — and only one of them means the documents should go. ErrStagingEmpty
-// already refuses the total case; this refuses the shape of it, where a
-// directory is present but most of it is not.
-var ErrBlastRadius = errors.New(
-	"pruning would remove an implausible share of the corpus: refusing in case staging is incomplete")
-
-// DefaultBlastRadius is the share of a workspace's documents a single sweep
-// may remove before it refuses without an explicit override. A tenth is far
-// above any ordinary edit to a staging directory and far below the shape of a
-// directory that failed to mount.
-const DefaultBlastRadius = 0.10
+	"containment backfill has not completed: pruning would treat shared attachments as unheld")
 
 // PruneReport is the outcome of one sweep. Counts and identifiers only; a
 // document's text never appears here.
 type PruneReport struct {
-	scan *postgres.SourceScan
 	// Documents the sweep found unreachable, in reporting order.
 	Candidates []postgres.PruneCandidate `json:"candidates"`
 	// StagedContents is how many distinct contents the staging directories
-	// hold, and TotalDocuments how many the workspace holds. Together they are
-	// what the blast-radius guard judged.
+	// hold, and TotalDocuments how many the workspace holds.
 	StagedContents int `json:"staged_contents"`
 	StagedFiles    int `json:"staged_files"`
 	// Unexpandable is how many staged containers could not be re-derived into
@@ -85,8 +67,6 @@ type PruneReport struct {
 
 // PruneStore is the database half of a sweep.
 type PruneStore interface {
-	RetentionForScan(context.Context, postgres.SourceScan) (postgres.ScanRetention, error)
-	ValidateRetentionScan(context.Context, postgres.SourceScan) error
 	PlacementsBackfilledAt(ctx context.Context) (time.Time, error)
 	UnreachableDocuments(ctx context.Context, stagedSHAs []string) ([]postgres.PruneCandidate, error)
 	CountDocuments(ctx context.Context) (int, error)
@@ -103,32 +83,6 @@ func NewPruner(docs PruneStore, log *slog.Logger) *Pruner {
 	return &Pruner{docs: docs, log: log}
 }
 
-// PlanScan uses the completed admission scan and recorded containment, without
-// opening originals. The caller must stop workers before calling it and keep
-// the same maintenance lock until Apply returns.
-func (p *Pruner) PlanScan(ctx context.Context, scan postgres.SourceScan, maxShare float64) (*PruneReport, error) {
-	s, err := p.docs.RetentionForScan(ctx, scan)
-	if err != nil {
-		return nil, err
-	}
-	if s.Files == 0 {
-		return nil, ErrStagingEmpty
-	}
-	if s.UnestablishedContainers > 0 {
-		return nil, fmt.Errorf("%w: %d retained container(s) lack established containment; repair or exclude their sources, or use --no-prune for additive ingestion", ErrPlacementsIncomplete, s.UnestablishedContainers)
-	}
-	report := &PruneReport{scan: &scan, Candidates: s.Candidates, StagedFiles: s.Files,
-		StagedContents: s.Contents, TotalDocuments: s.Total, DryRun: true}
-	for _, c := range s.Candidates {
-		if c.SourcePath != "" {
-			report.Roots++
-		} else {
-			report.Contained++
-		}
-	}
-	return report, report.withinBlastRadius(maxShare)
-}
-
 // PruneOptions bounds one sweep.
 type PruneOptions struct {
 	// AbsPaths and Ignore describe what the workspace currently stages, and
@@ -137,9 +91,6 @@ type PruneOptions struct {
 	// added, or keep what was just excluded.
 	AbsPaths []string
 	Ignore   func(rel string) bool
-	// MaxShare overrides DefaultBlastRadius. A share of 1 or more disables the
-	// guard, which is only ever right when an operator has looked at the plan.
-	MaxShare float64
 }
 
 // Plan reports what a sweep would remove, and writes nothing.
@@ -195,26 +146,7 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 		}
 	}
 
-	if err := report.withinBlastRadius(o.MaxShare); err != nil {
-		return report, err
-	}
 	return report, nil
-}
-
-// withinBlastRadius judges the sweep's size against the corpus it would cut.
-func (r *PruneReport) withinBlastRadius(maxShare float64) error {
-	if maxShare <= 0 {
-		maxShare = DefaultBlastRadius
-	}
-	if maxShare >= 1 || r.TotalDocuments == 0 || len(r.Candidates) == 0 {
-		return nil
-	}
-	share := float64(len(r.Candidates)) / float64(r.TotalDocuments)
-	if share <= maxShare {
-		return nil
-	}
-	return fmt.Errorf("%w: %d of %d documents (%.1f%%, limit %.1f%%)",
-		ErrBlastRadius, len(r.Candidates), r.TotalDocuments, share*100, maxShare*100)
 }
 
 // Apply deletes the planned candidates.
@@ -222,11 +154,6 @@ func (r *PruneReport) withinBlastRadius(maxShare float64) error {
 // Every derived row a candidate owns is removed in one transaction, so a
 // failed sweep leaves the workspace describing exactly what it did before.
 func (p *Pruner) Apply(ctx context.Context, workspaceID string, report *PruneReport) error {
-	if report.scan != nil {
-		if err := p.docs.ValidateRetentionScan(ctx, *report.scan); err != nil {
-			return err
-		}
-	}
 	if len(report.Candidates) == 0 {
 		report.DryRun = false
 		return nil

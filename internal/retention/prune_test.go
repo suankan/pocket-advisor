@@ -15,57 +15,11 @@ import (
 // itself is SQL and is exercised against a live database in the manual suite;
 // what is hermetic here is everything guarding it.
 type fakePruneStore struct {
-	scanResult   postgres.ScanRetention
-	scanErr      error
 	backfilledAt time.Time
 	unreachable  []postgres.PruneCandidate
 	total        int
 	deletedIDs   []string
 	deleteErr    error
-}
-
-func (f *fakePruneStore) RetentionForScan(context.Context, postgres.SourceScan) (postgres.ScanRetention, error) {
-	return f.scanResult, f.scanErr
-}
-func (f *fakePruneStore) ValidateRetentionScan(context.Context, postgres.SourceScan) error {
-	return f.scanErr
-}
-
-func TestScanPlanGuardsAndApplyValidation(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		result postgres.ScanRetention
-		want   error
-	}{
-		{"empty", postgres.ScanRetention{}, ErrStagingEmpty},
-		{"unknown containment", postgres.ScanRetention{Files: 1, UnestablishedContainers: 1}, ErrPlacementsIncomplete},
-		{"large sweep", postgres.ScanRetention{Files: 1, Total: 2, Candidates: []postgres.PruneCandidate{{DocID: "removed"}}}, ErrBlastRadius},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := &fakePruneStore{scanResult: tc.result}
-			_, err := NewPruner(store, quietLogger()).PlanScan(context.Background(), postgres.SourceScan{}, 0)
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("got %v, want %v", err, tc.want)
-			}
-			if len(store.deletedIDs) != 0 {
-				t.Fatal("planning deleted documents")
-			}
-		})
-	}
-	store := &fakePruneStore{scanResult: postgres.ScanRetention{Files: 1, Total: 100,
-		Candidates: []postgres.PruneCandidate{{DocID: "removed"}}}}
-	p := NewPruner(store, quietLogger())
-	report, err := p.PlanScan(context.Background(), postgres.SourceScan{}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.scanErr = postgres.ErrInvalidRetentionScan
-	if err := p.Apply(context.Background(), "synthetic", report); !errors.Is(err, postgres.ErrInvalidRetentionScan) {
-		t.Fatalf("stale plan accepted: %v", err)
-	}
-	if len(store.deletedIDs) != 0 {
-		t.Fatal("stale plan deleted documents")
-	}
 }
 
 func (f *fakePruneStore) PlacementsBackfilledAt(context.Context) (time.Time, error) {
@@ -156,61 +110,6 @@ func TestPlanFailsOnMissingDirectory(t *testing.T) {
 	}
 	if errors.Is(err, ErrStagingEmpty) {
 		t.Fatal("a missing directory must not be reported as an empty one")
-	}
-}
-
-// The guard exists for the shape of a directory that failed to mount: present,
-// but with most of its contents absent.
-func TestBlastRadiusRefusesAnImplausiblyLargeSweep(t *testing.T) {
-	store := &fakePruneStore{
-		backfilledAt: backfilled(),
-		total:        100,
-		unreachable:  make([]postgres.PruneCandidate, 50),
-	}
-	p := NewPruner(store, quietLogger())
-
-	report, err := p.Plan(context.Background(), PruneOptions{
-		AbsPaths: []string{stagedDir(t, "a.eml")},
-	})
-	if !errors.Is(err, ErrBlastRadius) {
-		t.Fatalf("expected ErrBlastRadius for half the corpus, got %v", err)
-	}
-	// The plan comes back with the refusal, or an operator cannot judge it.
-	if report == nil || len(report.Candidates) != 50 {
-		t.Error("a refused sweep must still report what it would have removed")
-	}
-}
-
-func TestBlastRadiusAllowsAnOrdinarySweep(t *testing.T) {
-	store := &fakePruneStore{
-		backfilledAt: backfilled(),
-		total:        1000,
-		unreachable:  make([]postgres.PruneCandidate, 20), // 2%
-	}
-	p := NewPruner(store, quietLogger())
-
-	if _, err := p.Plan(context.Background(), PruneOptions{
-		AbsPaths: []string{stagedDir(t, "a.eml")},
-	}); err != nil {
-		t.Fatalf("an ordinary sweep was refused: %v", err)
-	}
-}
-
-// An operator who has read the plan is a better check than a ratio, which is
-// what --reconcile-deletions relies on.
-func TestBlastRadiusCanBeDisabled(t *testing.T) {
-	store := &fakePruneStore{
-		backfilledAt: backfilled(),
-		total:        100,
-		unreachable:  make([]postgres.PruneCandidate, 100),
-	}
-	p := NewPruner(store, quietLogger())
-
-	if _, err := p.Plan(context.Background(), PruneOptions{
-		AbsPaths: []string{stagedDir(t, "a.eml")},
-		MaxShare: 1,
-	}); err != nil {
-		t.Fatalf("MaxShare 1 must disable the guard, got %v", err)
 	}
 }
 

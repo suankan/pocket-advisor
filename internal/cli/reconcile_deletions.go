@@ -15,11 +15,12 @@ import (
 
 // runReconcileDeletions removes documents nothing stages any more.
 //
-// It uses the same reachability rule as ingest-all, reached explicitly
-// with its own source inventory and without admitting new content: the way to look at a plan, and
-// the way to apply one that --ingest-all's blast-radius guard refused. The
-// guard is off here because the operator typed the command and is shown the
-// plan before being asked — that is a better check than a ratio.
+// It is the only sweep. Ingestion is additive, so deletion happens here, in
+// its own process under the maintenance lock, where no worker can add a
+// document or an edge while the plan is judged. It takes its own source
+// inventory and admits nothing. The operator is shown the plan and must
+// confirm it; that review is the check against a directory that failed to
+// mount, beyond the refusal of an empty one.
 func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
@@ -63,7 +64,6 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	report, err := pruner.Plan(ctx, retention.PruneOptions{
 		AbsPaths: ws.AbsPaths,
 		Ignore:   ws.Ignore.Match,
-		MaxShare: 1,
 	})
 	if err != nil {
 		return err

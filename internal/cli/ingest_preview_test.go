@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/suankan/pocket-advisor/internal/config"
-	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -33,11 +31,5 @@ func TestIngestDryRunNeedsNoDatabaseBrokerOrModelAndNeverWrites(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(root, "document.txt"))
 	if err != nil || string(data) != "synthetic content" {
 		t.Fatalf("source changed: %q, %v", data, err)
-	}
-}
-
-func TestPruneDryRunDoesNotLoadWorkspaceOrTouchStores(t *testing.T) {
-	if err := prune(context.Background(), &Options{DryRun: true}, nil, postgres.SourceScan{}); err != nil {
-		t.Fatal(err)
 	}
 }

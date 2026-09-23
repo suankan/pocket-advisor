@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS source_members (
 CREATE INDEX IF NOT EXISTS source_members_child_idx ON source_members(child_id);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_hash text NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_version text NOT NULL DEFAULT '';
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS containment_established_at timestamptz;
 ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS slice_sha256 bytea;
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
  job_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), doc_id uuid NOT NULL REFERENCES documents ON DELETE CASCADE,

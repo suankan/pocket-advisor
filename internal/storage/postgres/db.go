@@ -5,15 +5,13 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type DB struct {
-	Pool        *pgxpool.Pool
-	maintenance atomic.Pointer[maintenanceLease]
+	Pool *pgxpool.Pool
 }
 
 // Connect opens the Tier 2/3 pool.

@@ -28,7 +28,7 @@ The `pocket-advisor-infra` Helm chart deploys only the two shared stores. The MC
 - The registry's `paths` and `ignore` rules define authoritative originals. Historical bytes require source-side versioning or backups.
 - Ingestion hashes configured files, preserves content identities across moves and copies, and drains durable PostgreSQL jobs through NATS. Completed unchanged content is not re-extracted or re-embedded.
 - PostgreSQL retains normalized text and derived metadata/indexes. Rebuilding requires hash-recoverable originals; restore a database backup when existing UUIDs and evaluation references must survive.
-- Full ingestion scans original files, processes queued work, then prunes documents no longer reachable from that completed scan after its workers stop. `--no-prune` disables this sweep; `--reconcile-deletions` previews it separately.
+- Ingestion is additive: it scans original files and processes queued work, and never deletes. `--reconcile-deletions` is the separate, confirmed sweep that removes documents no longer reachable from staged content.
 - Retrieval returns cited evidence packets, not generated prose.
 
 The authoritative designs are:
@@ -148,9 +148,9 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 ./bin/pocket-advisor --ingest-all --workspace-id example
 ```
 
-`--ingest-all` resolves original directories, applies the source/job schema, and hashes and admits current files in one source scan. The dashboard reports scanning before workers start. Admission records durable jobs without waiting for the queue to shrink; workers start after source locations have been refreshed, process queued work, and stop before pruning. The sweep uses that completed scan and recorded containment without another source traversal. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
+`--ingest-all` resolves original directories, applies the source/job schema, and hashes and admits current files in one source scan. The dashboard reports scanning before workers start. Admission records durable jobs without waiting for the queue to shrink; workers start once source locations have been refreshed, so leftover work for a renamed original reads its new path, and stop when the queue has drained. Ingestion never deletes. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
 
-Pruning refuses an empty or incompletely traversed source set and any retained container whose containment has not been established. Failed or waiting jobs alone do not decide retention: an unreachable document and its waiting jobs can be removed, while a retained document survives even if embedding failed. Interrupted runs skip pruning. The default deletion-share limit is 10%; exceeding it prints the plan and leaves the completed ingestion additive. This workspace-wide limit cannot detect every partially synced or temporarily empty root. Inspect `--reconcile-deletions --json` before explicitly allowing a larger sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
+Documents whose originals you deleted or newly ignored stay retrievable until `--reconcile-deletions` removes them (below). Their outstanding jobs wait for a source, so the ingest run ends with an unresolved-work error that names the sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
 
 ```sh
 # Hash originals and report counts without touching databases, queues or models.
@@ -549,7 +549,7 @@ Remove documents whose file you deleted from the workspace directory:
 ./bin/pocket-advisor --reconcile-deletions --workspace-id example
 ```
 
-`--reconcile-deletions` reports documents unreachable from the currently staged, non-ignored content. It prepares the containment schema and backfill when needed, including on an older workspace, but deletes no documents unless `--yes` is supplied and the displayed confirmation is accepted. `--json` emits the complete plan. Matching is by content, so another staged copy retains the document and renaming alone does not delete it. Empty staging is refused. Shared attachments remain when another retained container carries them. This explicit command has no percentage limit.
+`--reconcile-deletions` is the only sweep; ingestion never runs it. It reports documents unreachable from the currently staged, non-ignored content. It prepares the containment schema and backfill when needed, including on an older workspace, but deletes no documents unless `--yes` is supplied and the displayed confirmation is accepted. `--json` emits the complete plan. Matching is by content, so another staged copy retains the document and renaming alone does not delete it. Empty staging is refused. Shared attachments remain when another retained container carries them. There is no percentage limit, so read the plan before confirming: a root that failed to mount or a sync that has not finished looks like deleted files.
 
 Deletion changes derived PostgreSQL state only. It also removes associated jobs and unreferenced passage text/vectors. Original files are never deleted or edited.
 

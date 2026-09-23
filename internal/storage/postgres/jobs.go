@@ -187,7 +187,14 @@ func (r *Jobs) CheckResolved(ctx context.Context) error {
 		return err
 	}
 	if u+w+f > 0 {
-		return fmt.Errorf("ingestion unresolved: %d unfinished, %d waiting for sources, %d failed jobs", u, w, f)
+		err := fmt.Errorf("ingestion unresolved: %d unfinished, %d waiting for sources, %d failed jobs", u, w, f)
+		if w > 0 {
+			// Ingestion never deletes, so work whose original was removed
+			// stays waiting until the operator prunes or restores it.
+			err = fmt.Errorf("%w; --reconcile-deletions removes documents whose originals are gone, "+
+				"--reconcile retries restored originals", err)
+		}
+		return err
 	}
 	return nil
 }

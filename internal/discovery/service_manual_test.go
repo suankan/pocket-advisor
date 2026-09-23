@@ -4,7 +4,6 @@ package discovery
 
 import (
 	"context"
-	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -76,11 +75,7 @@ func TestScanAdmitsWithLargeUndrainedBacklog(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("A new synthetic document."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	scan, err := s.Scan(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Docs.ValidateRetentionScan(ctx, scan); err != nil {
+	if _, err := s.Scan(ctx); err != nil {
 		t.Fatal(err)
 	}
 	ready, _, _, _, err := s.Jobs.Counts(ctx)
@@ -89,56 +84,29 @@ func TestScanAdmitsWithLargeUndrainedBacklog(t *testing.T) {
 	}
 }
 
-func TestPartialScanCannotAuthorizePruning(t *testing.T) {
-	s, root := scanFixture(t)
-	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("Observed before traversal fails."), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Create(filepath.Join(root, "z.bin"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Truncate(257 << 20); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
-	scan, err := s.Scan(context.Background())
-	if err == nil {
-		t.Fatal("oversized original did not fail the scan")
-	}
-	if err := s.Docs.ValidateRetentionScan(context.Background(), scan); !errors.Is(err, postgres.ErrInvalidRetentionScan) {
-		t.Fatalf("partial scan authorized pruning: %v", err)
-	}
-	var count int
-	if err := s.DB.Pool.QueryRow(context.Background(), `SELECT count(*) FROM source_occurrences`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("test did not exercise partial admission: %d %v", count, err)
-	}
-}
-
-func TestBackfillEstablishesFailedContainerWithoutChangingStatus(t *testing.T) {
+// Ingestion never deletes, so a jobless PENDING row whose original is gone
+// survives until --reconcile-deletions. Resuming it would fail to open the
+// source and end every run; it must be skipped, not retried.
+func TestResumeLegacySkipsRowsWhoseOriginalsAreGone(t *testing.T) {
 	s, root := scanFixture(t)
 	ctx := context.Background()
-	data := []byte("From: sender@example.test\r\nSubject: Synthetic\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nBody.\r\n")
-	id, _, err := s.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex(data), DocType: "email"})
+	orphan, _, err := s.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(),
+		RawSHA256: domain.SHA256Hex([]byte("removed synthetic original")), DocType: "pdf", MimeType: "application/pdf"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Docs.UpdateStatus(ctx, id, domain.StatusFailed, domain.ReasonEmailParseFailed); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "message.eml"), data, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "present.txt"), []byte("A present synthetic document."), 0600); err != nil {
 		t.Fatal(err)
 	}
 	scan, err := s.Scan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := s.Docs.Status(ctx, id)
-	if err != nil || state != domain.StatusFailed {
-		t.Fatalf("backfill changed status: %s %v", state, err)
+	if err := s.ResumeLegacy(ctx, scan); err != nil {
+		t.Fatalf("unreachable legacy row failed the run: %v", err)
 	}
-	retained, err := s.Docs.RetentionForScan(ctx, scan)
-	if err != nil || retained.UnestablishedContainers != 0 {
-		t.Fatalf("failed status blocked established containment: %+v %v", retained, err)
+	var jobs int
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ingestion_jobs WHERE doc_id=$1`, orphan).Scan(&jobs); err != nil || jobs != 0 {
+		t.Fatalf("unreachable legacy row was resumed: %d %v", jobs, err)
 	}
 }

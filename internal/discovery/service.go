@@ -30,10 +30,13 @@ type Service struct {
 	Log       *slog.Logger
 }
 
-func (s *Service) Scan(ctx context.Context) (postgres.SourceScan, error) {
-	scan, err := s.Inventory.StartScan(ctx, s.Sources.RootKeys())
+// Scan admits every current original and returns the completed scan's id.
+// It never deletes: documents whose originals are gone are left for the
+// explicit --reconcile-deletions sweep.
+func (s *Service) Scan(ctx context.Context) (string, error) {
+	scan, err := s.Inventory.BeginScan(ctx, s.Sources.RootKeys())
 	if err != nil {
-		return scan, err
+		return "", err
 	}
 	if s.Progress != nil {
 		s.Progress.Start(0)
@@ -43,7 +46,7 @@ func (s *Service) Scan(ctx context.Context) (postgres.SourceScan, error) {
 		if s.Progress != nil {
 			s.Progress.AddTotal(1)
 		}
-		if err := s.admit(ctx, scan.ID(), f, data); err != nil {
+		if err := s.admit(ctx, scan, f, data); err != nil {
 			if s.Progress != nil {
 				s.Progress.Failed()
 			}
@@ -57,9 +60,9 @@ func (s *Service) Scan(ctx context.Context) (postgres.SourceScan, error) {
 		return nil
 	})
 	if err != nil {
-		return scan, err
+		return "", err
 	}
-	return s.Inventory.CompleteScan(ctx, scan)
+	return scan, s.Inventory.FinishScan(ctx, scan)
 }
 func (s *Service) admit(ctx context.Context, scan string, f source.File, data []byte) error {
 	return s.DB.Transaction(ctx, func(ctx context.Context) error {
@@ -108,7 +111,6 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 		}
 		return nil
 	}
-	complete := true
 	for _, c := range children {
 		if len(c.Data) == 0 {
 			continue
@@ -122,7 +124,6 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 			return err
 		}
 		if child == "" || child == id {
-			complete = false
 			continue
 		}
 		if err := s.Inventory.RecordMember(ctx, id, child, c.Selector); err != nil {
@@ -134,9 +135,6 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 		if err := s.backfillBounded(ctx, child, c.Data, Classify(c.Data, c.Filename), c.Filename, depth+1, budget); err != nil {
 			return err
 		}
-	}
-	if complete {
-		return s.Docs.MarkContainmentEstablished(ctx, id)
 	}
 	return nil
 }
@@ -277,14 +275,15 @@ func (s *Service) Audit(ctx context.Context) (Coverage, error) {
 
 // ResumeLegacy admits nonterminal rows predating the durable job table. Existing
 // normalized evidence goes straight to embedding; other stages reopen sources.
-func (s *Service) ResumeLegacy(ctx context.Context, scan postgres.SourceScan) error {
-	if err := s.Docs.ValidateRetentionScan(ctx, scan); err != nil {
-		return err
-	}
+//
+// Only rows reachable from the completed scan are resumed. Ingestion never
+// deletes, so a row whose original is gone stays until --reconcile-deletions;
+// resuming it would fail on a missing source and end every run.
+func (s *Service) ResumeLegacy(ctx context.Context, scan string) error {
 	rows, err := s.DB.Pool.Query(ctx, `WITH RECURSIVE retained AS (
  SELECT doc_id FROM source_occurrences WHERE scan_id=$1 AND available
  UNION SELECT p.contained_doc_id FROM document_placements p JOIN retained r ON r.doc_id=p.container_doc_id
-) SELECT d.doc_id::text,d.raw_sha256,d.source_filename,d.mime_type,d.doc_type,COALESCE(d.normalized_text,'') FROM documents d JOIN retained r USING(doc_id) WHERE d.processing_status IN ('PENDING','PROCESSING') AND NOT EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.doc_id=d.doc_id)`, scan.ID())
+) SELECT d.doc_id::text,d.raw_sha256,d.source_filename,d.mime_type,d.doc_type,COALESCE(d.normalized_text,'') FROM documents d JOIN retained r USING(doc_id) WHERE d.processing_status IN ('PENDING','PROCESSING') AND NOT EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.doc_id=d.doc_id)`, scan)
 	if err != nil {
 		return err
 	}

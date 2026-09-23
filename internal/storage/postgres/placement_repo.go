@@ -199,13 +199,6 @@ func (r *DocumentRepo) DeleteDocuments(ctx context.Context, ids []string) (int64
 
 // deleteDocuments commits row removal and passage cleanup together.
 func deleteDocuments(ctx context.Context, tx pgx.Tx, ids []string) (int64, error) {
-	// Forgetting a child removes its edge even when the original container
-	// survives. Its old completeness proof must not outlive those placements.
-	if _, err := tx.Exec(ctx, `UPDATE documents SET containment_established_at=NULL
-		WHERE doc_id IN (SELECT container_doc_id FROM document_placements WHERE contained_doc_id=ANY($1::uuid[]))
-		AND NOT (doc_id=ANY($1::uuid[]))`, ids); err != nil {
-		return 0, fmt.Errorf("invalidate containment: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `
         UPDATE documents d
         SET parent_doc_id = (

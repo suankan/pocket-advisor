@@ -92,8 +92,10 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 			view.Run(viewCtx)
 		}
 	}()
-	// Admission fills the durable outbox before any worker resolves a source.
-	// This refreshes renamed paths without a preparatory binding traversal.
+	// Admission fills the durable outbox before any worker resolves a source,
+	// so a leftover job for a renamed original reads its refreshed location
+	// rather than parking against the old one. Ingestion never deletes; that
+	// is --reconcile-deletions' job, run on its own.
 	scan, feedErr := svc.Scan(fetchCtx)
 	if feedErr == nil {
 		feedErr = svc.ResumeLegacy(fetchCtx, scan)
@@ -116,7 +118,6 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 			select {
 			case <-fetchCtx.Done():
 			case <-ticker.C:
-				// Listener scans are additive and never authorize deletion.
 				scan, feedErr = svc.Scan(fetchCtx)
 				if feedErr == nil {
 					feedErr = svc.ResumeLegacy(fetchCtx, scan)
@@ -136,24 +137,14 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	if !o.Listen && feedErr == nil {
 		drainErr = pipe.WaitDrained(workCtx, settle)
 	}
-	// A quiet queue is not a barrier. Stop dispatch/fetch and join every
-	// handler before planning any deletion; retain the maintenance lock.
+	// A quiet queue is not a stop. End dispatch and fetching, and join every
+	// handler before building the search index.
 	stopWorkers()
 	pipe.Wait()
 	stopView()
 	<-done
 	runErr := errors.Join(feedErr, drainErr, fetchCtx.Err(), workCtx.Err())
-	if o.IngestAll && !o.NoPrune {
-		if runErr != nil {
-			fmt.Println("prune skipped: source scan or ingestion was incomplete or interrupted")
-		} else {
-			if err := prune(fetchCtx, o, a, scan); err != nil {
-				fmt.Printf("prune skipped: %v\n", err)
-				runErr = errors.Join(runErr, err)
-			}
-		}
-	}
-	// Keep BM25 available during intake; create it after writes and deletion.
+	// Keep BM25 available during intake; create it once writes have landed.
 	if fetchCtx.Err() == nil && workCtx.Err() == nil {
 		runErr = errors.Join(runErr, a.DB.BuildSearchIndex(fetchCtx))
 	}

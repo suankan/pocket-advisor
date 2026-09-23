@@ -12,9 +12,6 @@ type SourceRepo struct{ db *DB }
 
 func NewSourceRepo(db *DB) *SourceRepo { return &SourceRepo{db: db} }
 func (r *SourceRepo) BeginScan(ctx context.Context, keys []string) (string, error) {
-	if lease := r.db.maintenance.Load(); lease != nil {
-		lease.scanGeneration.Add(1)
-	}
 	var id string
 	err := r.db.Transaction(ctx, func(ctx context.Context) error {
 		for _, k := range keys {

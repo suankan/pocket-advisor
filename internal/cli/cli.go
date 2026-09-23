@@ -40,19 +40,10 @@ type Options struct {
 	Forget       string
 	Query        string
 
-	// ReconcileDeletions previews the same sweep as ingest-all and applies
-	// it only with --yes and confirmation.
+	// ReconcileDeletions is the sweep for documents whose originals are gone.
+	// Ingestion is additive; this previews the sweep and applies it only with
+	// --yes and a typed confirmation.
 	ReconcileDeletions bool
-
-	// NoPrune turns off the sweep --ingest-all runs after its worker
-	// pools stop. The sweep is what makes an ignore pattern and a deleted file
-	// take effect on documents already indexed, so switching it off leaves
-	// the corpus describing a staging directory that no longer exists.
-	NoPrune bool
-	// PruneMaxShare overrides the share of a workspace a single sweep may
-	// remove before refusing. Zero uses retention.DefaultBlastRadius; 1 or
-	// more disables the guard, which is only right after reading a plan.
-	PruneMaxShare float64
 
 	TopK        int
 	JSON        bool
@@ -100,7 +91,8 @@ type Options struct {
 const usage = `pocket-advisor — ingestion pipeline for a local RAG corpus.
 
 Modes (exactly one):
-  --ingest-all        scan configured originals, prune safely, and process queued jobs
+  --ingest-all        scan configured originals and process queued jobs; never
+                      deletes (see --reconcile-deletions)
   --scan              scan configured originals and process queued jobs
   --reconcile         refresh sources and redispatch unfinished durable jobs
   --listen            scan at startup and every minute while processing jobs
@@ -144,20 +136,15 @@ Modes (exactly one):
   --delete-data       clear derived database state and queues; preserve original files
   --forget <sha256>   remove one document by content hash
   --reconcile-deletions
-                      remove documents whose staged file is no longer in the
-                      workspace directory. Compares content, not filenames, and
-                      refuses if the directory is empty. Reports the plan and
-                      deletes nothing unless --yes is supplied. May prepare
-                      derived containment metadata before reporting the plan.
-  --no-prune          skip the sweep --ingest-all runs after its worker
-                      pools stop. The sweep removes documents nothing stages any
-                      more: a file deleted from the workspace, a file an
-                      ignore: pattern now excludes, and anything left held by
-                      nothing else once those go.
-  --prune-max-share <f>
-                      share of the corpus one sweep may remove before it
-                      refuses (default 0.10). A sweep larger than this usually
-                      means a directory failed to mount rather than changed.
+                      sweep away documents nothing stages any more; ingestion
+                      never does this itself. That covers a file deleted from
+                      the workspace, a file an ignore: pattern now excludes,
+                      and anything left held by nothing else once those go.
+                      Compares content, not filenames, and refuses if the
+                      directory is empty. Reports the plan and deletes nothing
+                      unless --yes is supplied and the deletion is confirmed.
+                      May prepare derived containment metadata before
+                      reporting the plan.
 
 MCP (a subcommand, not a mode flag):
   mcp stdio --workspace-id <id>
@@ -294,10 +281,6 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.BoolVar(&o.ReconcileDeletions, "reconcile-deletions", false,
 		"remove documents whose staged file is gone (plans unless --yes)")
-	fs.BoolVar(&o.NoPrune, "no-prune", false,
-		"skip the post-ingest sweep that removes documents nothing stages any more")
-	fs.Float64Var(&o.PruneMaxShare, "prune-max-share", 0,
-		"share of the corpus one sweep may remove before refusing (0 = 10%, 1 = no limit)")
 	fs.StringVar(&o.Query, "query", "", "ask the corpus a question and print the matching sources")
 	fs.StringVar(&o.CorpusSearch, "corpus-search", "",
 		"find documents containing this exact text, bypassing retrieval")
@@ -571,8 +554,8 @@ func interrupts(parent context.Context, log interface{ Info(string, ...any) }) (
 // have been redelivered anyway.
 const drainGrace = 2 * time.Minute
 
-// confirm gates a destructive action on stdin.
-func confirm(prompt string) bool {
+// confirm gates a destructive action on stdin. A variable so tests can answer.
+var confirm = func(prompt string) bool {
 	fmt.Printf("%s\nType 'yes' to continue: ", prompt)
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {

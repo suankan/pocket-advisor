@@ -169,3 +169,49 @@ func TestListMessagesRejectsCursorChanges(t *testing.T) {
 }
 
 func zeroTime() time.Time { return time.Time{} }
+
+// Truncate shortens a page and re-issues its cursor so the dropped messages
+// start the next page, each delivered exactly once.
+func TestTruncateContinuesAfterTheLastKeptMessage(t *testing.T) {
+	store := newFakeStore()
+	var all []Message
+	for i := 1; i <= 5; i++ {
+		m := synthetic(i, i, "ada@example.test", at(10-i, 9))
+		all = append(all, m)
+		store.ingest(m)
+	}
+	s := testService(t, store)
+	page, err := s.ListMessages(context.Background(), ListRequest{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := page.Truncate(1); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 1 || page.Page.Returned != 1 || !page.Page.HasMore || page.Page.NextCursor == "" {
+		t.Fatalf("truncated page = %#v", page.Page)
+	}
+	next, err := s.ListMessages(context.Background(), ListRequest{Limit: 3, Cursor: page.Page.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Messages) != 3 || next.Messages[0].DocID != all[1].DocID || next.Messages[2].DocID != all[3].DocID {
+		t.Fatalf("next page = %#v", next.Messages)
+	}
+	if err := next.Truncate(3); err == nil {
+		t.Fatal("truncating to the whole page should be refused")
+	}
+}
+
+// A mass mailing lists a bounded number of recipients and counts the rest.
+func TestListedMessageBoundsRecipients(t *testing.T) {
+	m := synthetic(1, 1, "ada@example.test", at(4, 9))
+	m.Recipients = nil
+	for i := 0; i < MaxListedRecipients+7; i++ {
+		m.Recipients = append(m.Recipients, "r@example.test")
+	}
+	listed := listedMessage(m)
+	if len(listed.Recipients) != MaxListedRecipients || listed.RecipientsOmitted != 7 {
+		t.Fatalf("recipients = %d, omitted = %d", len(listed.Recipients), listed.RecipientsOmitted)
+	}
+}

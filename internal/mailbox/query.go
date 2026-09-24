@@ -92,13 +92,16 @@ type Page struct {
 
 // ListedMessage is one message in a browse result.
 type ListedMessage struct {
-	DocID          string     `json:"doc_id"`
-	Subject        string     `json:"subject"`
-	SentAt         *time.Time `json:"sent_at"`
-	Sender         string     `json:"sender"`
-	Recipients     []string   `json:"recipients"`
-	AutomatedClass string     `json:"automated_class,omitempty"`
-	ListID         string     `json:"list_id,omitempty"`
+	DocID      string     `json:"doc_id"`
+	Subject    string     `json:"subject"`
+	SentAt     *time.Time `json:"sent_at"`
+	Sender     string     `json:"sender"`
+	Recipients []string   `json:"recipients"`
+	// RecipientsOmitted counts recipients past MaxListedRecipients. A browse
+	// row identifies a message; fetching the message lists more of them.
+	RecipientsOmitted int    `json:"recipients_omitted,omitempty"`
+	AutomatedClass    string `json:"automated_class,omitempty"`
+	ListID            string `json:"list_id,omitempty"`
 	// SourcePath is the message's original file location relative to the
 	// workspace's local staging directory. Informational only, for the
 	// human operator to open the original file themselves.
@@ -117,6 +120,39 @@ type ListResult struct {
 	Page      Page            `json:"page"`
 	Omissions []Omission      `json:"omissions"`
 	Warnings  []Warning       `json:"warnings"`
+
+	// The page series this result belongs to, kept so Truncate can issue a
+	// cursor at a shorter boundary.
+	filters  Filters
+	snapshot time.Time
+}
+
+// MaxListedRecipients bounds the recipients one listed message carries, so a
+// single mass mailing cannot outgrow a transport's response bound.
+const MaxListedRecipients = 20
+
+// Truncate shortens the page to its first n messages and re-issues the
+// cursor after the last one kept. A transport with a response bound uses it
+// to return fewer messages rather than fail; the dropped messages are the
+// start of the next page, exactly once.
+func (r *ListResult) Truncate(n int) error {
+	if n < 1 || n >= len(r.Messages) {
+		return fmt.Errorf("truncate a page of %d messages to %d", len(r.Messages), n)
+	}
+	last := r.Messages[n-1]
+	k := key{DocID: last.DocID}
+	if last.SentAt != nil {
+		k.SentAt = *last.SentAt
+	}
+	cursor, err := cursorFor(k, r.Order, r.filters, r.snapshot)
+	if err != nil {
+		return fmt.Errorf("issue pagination cursor: %w", err)
+	}
+	r.Messages = r.Messages[:n]
+	r.Page.Returned = n
+	r.Page.HasMore = true
+	r.Page.NextCursor = cursor
+	return nil
 }
 
 // ListMessages returns one page of messages.
@@ -194,8 +230,10 @@ func (s *Service) ListMessages(ctx context.Context, req ListRequest) (*ListResul
 	}
 
 	result := &ListResult{
-		Filters: appliedFilters(filters),
-		Order:   order,
+		Filters:  appliedFilters(filters),
+		Order:    order,
+		filters:  filters,
+		snapshot: snapshot,
 		Page: Page{
 			Limit:    limit,
 			Returned: len(rows),
@@ -364,6 +402,10 @@ func listedMessage(m Message) ListedMessage {
 		ListID:          m.ListID,
 		SourceLocations: m.SourceLocations, SourcePath: m.SourcePath,
 		ContainerSourcePath: m.ContainerPath,
+	}
+	if len(listed.Recipients) > MaxListedRecipients {
+		listed.RecipientsOmitted = len(listed.Recipients) - MaxListedRecipients
+		listed.Recipients = listed.Recipients[:MaxListedRecipients]
 	}
 	return listed
 }

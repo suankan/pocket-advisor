@@ -165,13 +165,13 @@ func TestFindByFilenameResolvesContainerAncestryAcrossMultipleHops(t *testing.T)
 }
 
 // FindByFilename bounds its match count rather than returning an unbounded
-// scan: a large hit count on an exact filename signals an under-specified
-// query, not a browse that needs paging.
+// scan, returning one row past the bound so the tool can report that more
+// documents matched.
 func TestFindByFilenameIsBoundedByMaxResults(t *testing.T) {
 	db, repo := documentRepo(t, "bound")
 	ctx := context.Background()
 
-	for i := 0; i < fetchDocumentMaxResults+1; i++ {
+	for i := 0; i < FetchDocumentMaxResults+2; i++ {
 		insertDoc(t, db, docSpec{docType: "pdf", mimeType: "application/pdf", sourceFilename: "repeated.pdf", sourcePath: "workspaces/data/main/repeated.pdf"})
 	}
 
@@ -179,8 +179,8 @@ func TestFindByFilenameIsBoundedByMaxResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find: %v", err)
 	}
-	if len(got) != fetchDocumentMaxResults {
-		t.Errorf("got %d matches, want the bound of %d", len(got), fetchDocumentMaxResults)
+	if len(got) != FetchDocumentMaxResults+1 {
+		t.Errorf("got %d matches, want the bound of %d plus one", len(got), FetchDocumentMaxResults)
 	}
 }
 

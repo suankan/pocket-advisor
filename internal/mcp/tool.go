@@ -331,6 +331,15 @@ type resultSizeError struct{ limit int }
 
 func (e *resultSizeError) Error() string { return fmt.Sprintf("tool result exceeds %d bytes", e.limit) }
 
+// isResponseBoundError reports whether err is a page that outgrew the shared
+// response bounds, which a paging tool answers by delivering less, not by
+// failing.
+func isResponseBoundError(err error) bool {
+	var size *resultSizeError
+	var lines *resultLineError
+	return errors.As(err, &size) || errors.As(err, &lines)
+}
+
 type resultLineError struct{ limit int }
 
 func (e *resultLineError) Error() string {
@@ -346,9 +355,9 @@ func errorResult(err error) CallToolResult {
 	case errors.As(err, &args):
 		message = "Invalid arguments: " + args.message + ". Correct the request and retry."
 	case errors.As(err, &size):
-		message = fmt.Sprintf("An evidence page could not fit the %d-byte safe response limit. Narrow the question and run the search again.", size.limit)
+		message = fmt.Sprintf("A single result item could not fit the %d-byte safe response limit. Retry with a narrower request.", size.limit)
 	case errors.As(err, &lines):
-		message = fmt.Sprintf("An evidence page could not fit the %d-line safe response limit. Narrow the question and run the search again.", lines.limit)
+		message = fmt.Sprintf("A single result item could not fit the %d-line safe response limit. Retry with a narrower request.", lines.limit)
 	}
 	return CallToolResult{Content: []TextContent{{Type: "text", Text: message}}, IsError: true}
 }

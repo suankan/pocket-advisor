@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,4 +107,37 @@ func assertMailboxBound(t *testing.T, result CallToolResult) {
 	if lines := readableLines(result.Content[0].Text); lines > targetReadableLines {
 		t.Fatalf("result = %d lines", lines)
 	}
+}
+
+// A page whose rows outgrow the response bound returns the rows that fit and
+// a cursor for the rest, rather than failing.
+func TestMailboxListShrinksAnOversizedPage(t *testing.T) {
+	base := time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)
+	var messages []mailbox.Message
+	for i := range 200 {
+		var recipients []string
+		for j := range 40 {
+			recipients = append(recipients, fmt.Sprintf("recipient-%03d-%02d@example.test", i, j))
+		}
+		messages = append(messages, mailbox.Message{
+			DocID: fmt.Sprintf("00000000-0000-4000-8000-%012d", i), Subject: strings.Repeat("Long synthetic subject ", 12),
+			SentAt: base.Add(time.Duration(i) * time.Minute), Sender: "sender@example.test", Recipients: recipients,
+		})
+	}
+	service, err := mailbox.New(&syntheticMailboxStore{messages: messages, now: base.Add(24 * time.Hour)}, mailbox.DefaultConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := &MailboxTool{Service: service, Workspace: "synthetic", Title: "Synthetic mailbox"}
+	result := mailboxCall(t, tool, tool.ListName(), map[string]any{"limit": 200})
+	assertMailboxBound(t, result)
+	page := result.StructuredContent.(*mailboxResult)
+	listed := page.Result.(*mailbox.ListResult)
+	if len(listed.Messages) == 0 || len(listed.Messages) >= 200 || !listed.Page.HasMore || listed.Page.NextCursor == "" {
+		t.Fatalf("page = %d messages, has_more=%v", len(listed.Messages), listed.Page.HasMore)
+	}
+	if listed.Messages[0].RecipientsOmitted != 40-mailbox.MaxListedRecipients {
+		t.Fatalf("recipients_omitted = %d", listed.Messages[0].RecipientsOmitted)
+	}
+	validateMailboxResultSchema(t, mailboxListOutputSchema(), page)
 }

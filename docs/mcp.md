@@ -26,7 +26,8 @@ Each workspace-bound MCP server exposes four tools — retrieval, evidence conti
 - `search` — accepts a bounded question and optional `top_k`, runs retrieval once, creates an immutable session-local snapshot, and returns a compact ranked evidence index.
 - `read_evidence` — accepts only an opaque cursor returned by that session and returns admitted text segments.
 - `list_messages` — lists exact email messages with a bounded normalized sender mailbox or sender-domain filter, recipient, date, direction, order, and cursor filters.
-- `fetch_document` — accepts exactly one of filename, sender+date, or subject+date and deterministically returns every matching document complete with its location, email attribution, bounded body text, and attachments.
+- `fetch_document` — accepts exactly one of filename, sender+date, or subject+date and deterministically returns every matching document with its location, email attribution, body text, and attachments, paged by cursor when larger than one response.
+
 No tool accepts a workspace, result identifier, document identifier, source URI, credential, raw byte range, or other client-selected scope. The workspace is fixed at process startup and absent from tool arguments.
 
 Every tool advertises closed inputs, a typed JSON Schema 2020-12 output, and read-only, non-destructive, idempotent, closed-world annotations.
@@ -47,15 +48,21 @@ The fixed-workspace mailbox tools provide deterministic email evidence alongside
 
 `list_messages` accepts one bounded exact normalized sender mailbox or bare sender domain, a bounded exact normalized recipient mailbox, optional RFC 3339 or date-only bounds, `newest_first` or `oldest_first` order, an optional direction when owner identities are configured, a bounded result limit, and an opaque cursor. A domain is an exact domain match, not a suffix or wildcard match. The cursor binds the filters and order to an ingestion snapshot; it must be returned unchanged. Results report applied filters, ordering, paging state, summaries, omissions, and warnings.
 
+`limit` is a maximum, not a promise. When the requested rows do not fit the response bounds, the page carries the longest prefix that does, with `has_more` and a cursor positioned after its last message, so the rest arrive on the next page exactly once. Each message lists at most 20 recipients; `recipients_omitted` counts the remainder.
+
 Every returned message reports where to find it, exactly as retrieval evidence does: `source_path` is the message's own staged file, and `container_source_path` names the file it was extracted from when it has none of its own, such as a message nested inside another message or an archive. Both are workspace-relative, for the caller to relay to the user, never to fetch or infer.
 
 Successful mailbox calls use the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as retrieval tools.
 
 ## Deterministic document lookup
 
-`fetch_document` answers "what is this one document" completely in a single call, using an exact attribute a caller already has — from `list_messages`, `search`, or an earlier `fetch_document` call — rather than a similarity search. It accepts exactly one of: `filename` (a document's original filename); `sender` plus `date` (an email's exact normalized sender mailbox and the day it was sent); or `subject` plus `date` (an email's exact subject text and the day it was sent). `date` accepts an RFC 3339 timestamp or a `YYYY-MM-DD` date and is always matched by day, never by exact instant.
+`fetch_document` answers "what is this one document" using an exact attribute a caller already has — from `list_messages`, `search`, or an earlier `fetch_document` call — rather than a similarity search. It accepts exactly one of: `filename` (a document's original filename); `sender` plus `date` (an email's exact normalized sender mailbox and the day it was sent); or `subject` plus `date` (an email's exact subject text and the day it was sent). `date` accepts an RFC 3339 timestamp or a `YYYY-MM-DD` date and is always matched by day, never by exact instant.
 
-Every match reports its location the same way search and the mailbox tools do (`source_path` or `container_source_path`, workspace-relative, never fetched or inferred), an email's `from`/`to`/`cc` and body text (`text`, truncated and flagged `text_truncated` past a fixed size), and its direct attachments — each with their own location but no text of their own; fetch one by its filename for that. If more than one document matches, every match is returned rather than a guess at which one was meant. Zero matches means the attribute or date was not exact, not that the corpus holds nothing related — the caller must not substitute a different message found by `search` and present it as this one.
+Every match reports its location the same way search and the mailbox tools do (`source_path` or `container_source_path`, workspace-relative, never fetched or inferred), an email's `from`/`to`/`cc`, its whole body text, and all of its direct attachments — each with their own location but no text of their own; fetch one by its filename for that. `to` and `cc` each list at most 50 addresses, with `to_omitted` and `cc_omitted` counting the remainder. If more than one document matches, every match is returned rather than a guess at which one was meant, up to 20 matches; `more_matches` reports that more documents matched and the lookup should be narrowed.
+
+A result is delivered in order: each match's identity, location, and attribution, then its text, then its attachments. A page carries as much of that sequence as fits the response bounds, repeating a match's identity on every page that carries part of it. `text_range` gives the UTF-8 byte range of the body on the page, `text_length` the whole body, and `text_complete` whether the body's end has been delivered; `attachments_offset` and `attachment_count` place the listed attachments within the whole list. Text boundaries follow the evidence-page rules: valid UTF-8, preferring a paragraph break.
+
+When `complete` is false, the caller repeats the call with the same arguments plus `next_cursor`, and `continuation_tool` names `fetch_document`. The cursor is stateless: it records a fingerprint of the lookup, the match and position to resume at, and a hash of that match's text, and continuation re-runs the lookup. Matches are ordered by date, creation time, and identifier, so a rerun meets them in the same sequence. A cursor presented with different arguments is rejected as invalid, and one whose match has disappeared or whose text has changed is rejected as stale, telling the caller to fetch again, rather than splicing two revisions of a document. Zero matches means the attribute or date was not exact, not that the corpus holds nothing related — the caller must not substitute a different message found by `search` and present it as this one.
 
 `fetch_document` uses the same typed structured-content, readable fallback, response bounds, safe errors, fixed workspace, and read-only annotations as the other tools in this contract.
 
@@ -103,21 +110,22 @@ The MCP server validates its result shape and provenance fields. It does not val
 
 ### Cursor and snapshot contract
 
+This section describes `search` and `read_evidence`. `list_messages` and `fetch_document` issue stateless cursors described with those tools.
+
 The initial search creates an immutable bounded in-memory snapshot. Opaque unguessable cursors address server-selected pages in that snapshot and never rerun decomposition, embedding, retrieval, reranking, selection, or expansion.
 
 Cursors are:
 
 - cryptographically random and opaque;
-- bound to the current MCP session and fixed workspace;
-- bound by construction to the authorization issuer and subject (HTTP) or connection (stdio);
+- bound to the fixed workspace and to the snapshot store that issued them: the stdio connection, or the HTTP process;
 - idempotent on retry;
 - safe under concurrent calls;
 - subject to a documented sliding TTL and least-recently-used memory eviction; and
-- released on shutdown or caller-state expiry.
+- released on shutdown.
 
-Invalid, expired, evicted, malformed, wrong-session, and wrong-workspace cursors return a bounded correctable error. Token renewal by the same subject preserves continuation; another caller or workspace receives the same bounded cursor error. A supplied session header has no authority over identity or state.
+Invalid, expired, evicted, malformed, and wrong-workspace cursors return a bounded correctable error. A supplied session header has no authority over state.
 
-The HTTP adapter retains at most 128 active caller namespaces and closes the least recently used namespace before admitting another. Each state namespace retains at most eight snapshots and 2 MiB of encoded snapshot data, evicts the least recently used snapshot when necessary, and expires after fifteen idle minutes. Access extends a ten-minute expiry. Snapshots and cursors are released on shutdown or caller-state expiry.
+A snapshot store retains at most eight snapshots and 2 MiB of encoded snapshot data and evicts the least recently used snapshot when necessary. Access extends a ten-minute expiry. Snapshots and cursors are released on shutdown.
 
 When `complete` is false, the readable fallback prominently instructs the model to call the named reader with exactly `next_cursor`. MCP does not automatically paginate arbitrary tool results: the model chooses whether to continue. It may stop after enough cited evidence for a narrow answer, but it cannot make an exhaustive or negative admitted-evidence claim until continuation reaches `complete: true`.
 
@@ -129,9 +137,11 @@ Each encoded `CallToolResult`, including `structuredContent` and readable `conte
 
 The compact index is paged at packet boundaries when necessary. Admitted primary and related text is paged independently, so one document larger than a response is delivered without loss. Text boundaries preserve valid UTF-8 and prefer a paragraph boundary in the latter half of the largest fitting segment.
 
+Every tool whose output size depends on the data follows the same rule: it builds each page to fit these bounds, reports `complete` or `has_more` with a cursor for the remainder, and never fails because a result is large. Every item that cannot be split, such as a recipient list or a match count, is capped so that it fits a page on its own. A tool added to this server meets the same rule.
+
 ### Error contract
 
-Separate protocol errors from tool execution errors according to MCP semantics. Invalid arguments are correctable by the model. Unknown tools are protocol errors. Retrieval, topic-timeline, and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. Evidence metadata that cannot fit a bounded result is rejected with an instruction to narrow and rerun the request. Internal details are never returned to the client.
+Separate protocol errors from tool execution errors according to MCP semantics. Invalid arguments are correctable by the model. Unknown tools are protocol errors. Retrieval, topic-timeline, and dependency failures return a bounded generic tool error, and the MCP log records only a safe failure kind rather than endpoint, SQL, question, or evidence details. A single indivisible item that cannot fit a response page is rejected with an instruction to narrow the request; the paging rule above makes this a defect rather than an expected outcome. Internal details are never returned to the client.
 
 ## Transports
 
@@ -217,7 +227,9 @@ The committed synthetic suite covers:
 - wrong-session and wrong-workspace cursor rejection;
 - cancellation before continuation access;
 - complete JSON-RPC response size enforcement;
-- closed, bounded topic-timeline inputs and typed cited-span results; and
+- closed, bounded topic-timeline inputs and typed cited-span results;
+- `fetch_document` paging: a 200 KiB multibyte body reassembled byte-for-byte, twenty large matches delivered in order, 600 attachments listed across pages, recipient caps, and cursors refused under other arguments or after the text changes;
+- `list_messages` shrinking an oversized page to the rows that fit and continuing exactly once after them; and
 - protocol lifecycle, concurrent tool calls, serialized writes, cancellation, safe errors, and clean shutdown.
 
 ### HTTP tests

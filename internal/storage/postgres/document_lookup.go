@@ -33,13 +33,18 @@ type DocumentLocation struct {
 	ContainerPath   string
 }
 
-// fetchDocumentMaxResults bounds every exact lookup below. These are point
+// FetchDocumentMaxResults bounds every exact lookup below. These are point
 // lookups on values a caller already has in hand (a sender+date, a subject
 // the corpus actually contains, an exact filename), so a large match count
 // signals an under-specified query rather than a browse that needs paging.
-const fetchDocumentMaxResults = 20
+// Each lookup returns one row past the bound so the caller can say that more
+// documents matched instead of silently dropping them.
+const FetchDocumentMaxResults = 20
 
-// documentsSelectSQL loads exact evidence; source locations are hydrated separately.
+// documentsSelectSQL loads exact evidence; source locations are hydrated
+// separately. The order is total and callers apply their bound after it, so
+// a continuation that re-runs the same lookup meets the same matches in the
+// same sequence.
 const documentsSelectSQL = `
 SELECT d.doc_id::text, COALESCE(d.parent_doc_id::text, ''), d.doc_type, d.mime_type,
        d.source_filename, d.email_subject, d.email_from, d.email_to, d.email_date,
@@ -48,7 +53,19 @@ SELECT d.doc_id::text, COALESCE(d.parent_doc_id::text, ''), d.doc_type, d.mime_t
        ''::text
 FROM documents d
 JOIN origins o ON o.doc_id = d.doc_id
-ORDER BY d.email_date DESC NULLS LAST, d.created_at DESC`
+ORDER BY d.email_date DESC NULLS LAST, d.created_at DESC, d.doc_id`
+
+// childrenSelectSQL is documentsSelectSQL without body text: a parent lists
+// its children by identity and location, and a container can hold hundreds.
+const childrenSelectSQL = `
+SELECT d.doc_id::text, COALESCE(d.parent_doc_id::text, ''), d.doc_type, d.mime_type,
+       d.source_filename, d.email_subject, d.email_from, d.email_to, d.email_date,
+       ''::text,
+       COALESCE(d.metadata_headers->>'source_path', ''),
+       ''::text
+FROM documents d
+WHERE d.parent_doc_id = $1
+ORDER BY d.email_date DESC NULLS LAST, d.created_at DESC, d.doc_id`
 
 func (r *DocumentRepo) documentsFrom(ctx context.Context, query string, args ...any) ([]DocumentLocation, error) {
 	rows, err := r.db.Pool.Query(ctx, query, args...)
@@ -94,9 +111,10 @@ func (r *DocumentRepo) documentsFrom(ctx context.Context, query string, args ...
 func (r *DocumentRepo) FindByFilename(ctx context.Context, filename string) ([]DocumentLocation, error) {
 	return r.documentsFrom(ctx, `
         WITH RECURSIVE origins AS (
-            SELECT doc_id FROM documents WHERE source_filename = $1 LIMIT $2
+            SELECT doc_id FROM documents WHERE source_filename = $1
         )
-        `+documentsSelectSQL, filename, fetchDocumentMaxResults)
+        `+documentsSelectSQL+`
+        LIMIT $2`, filename, FetchDocumentMaxResults+1)
 }
 
 // FindEmailsBySenderDate matches email documents from exactly this sender
@@ -108,9 +126,9 @@ func (r *DocumentRepo) FindEmailsBySenderDate(ctx context.Context, sender string
             FROM documents d
             JOIN email_addresses a ON a.doc_id = d.doc_id AND a.kind = 'from' AND a.valid
             WHERE a.address = $1 AND d.email_date >= $2 AND d.email_date < $3
-            LIMIT $4
         )
-        `+documentsSelectSQL, sender, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
+        `+documentsSelectSQL+`
+        LIMIT $4`, sender, day, day.Add(24*time.Hour), FetchDocumentMaxResults+1)
 }
 
 // FindEmailsBySubjectDate matches email documents whose subject, exactly as
@@ -121,19 +139,16 @@ func (r *DocumentRepo) FindEmailsBySubjectDate(ctx context.Context, subject stri
             SELECT doc_id FROM documents
             WHERE doc_type = 'email' AND email_subject = $1
               AND email_date >= $2 AND email_date < $3
-            LIMIT $4
         )
-        `+documentsSelectSQL, subject, day, day.Add(24*time.Hour), fetchDocumentMaxResults)
+        `+documentsSelectSQL+`
+        LIMIT $4`, subject, day, day.Add(24*time.Hour), FetchDocumentMaxResults+1)
 }
 
-// Children lists the direct descendants of one document — an email's
-// attachments, or an office document's extracted parts.
+// Children lists every direct descendant of one document — an email's
+// attachments, or an office document's extracted parts — without their text.
+// Ingestion's container expansion limits bound how many there are.
 func (r *DocumentRepo) Children(ctx context.Context, docID string) ([]DocumentLocation, error) {
-	return r.documentsFrom(ctx, `
-        WITH RECURSIVE origins AS (
-            SELECT doc_id FROM documents WHERE parent_doc_id = $1 LIMIT $2
-        )
-        `+documentsSelectSQL, docID, fetchDocumentMaxResults)
+	return r.documentsFrom(ctx, childrenSelectSQL, docID)
 }
 
 // EmailRecipients splits one email's To and Cc addresses, exactly as

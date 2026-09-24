@@ -131,7 +131,7 @@ func (t *MailboxTool) Call(ctx context.Context, raw json.RawMessage) (CallToolRe
 		t.logger().Info("list_messages", "sender", args.Sender, "recipient", args.Recipient,
 			"direction", args.Direction, "limit", args.Limit, "cursor_set", cursor != "",
 			"returned", len(result.Messages), "has_more", result.Page.HasMore)
-		return finalizeMailboxResult("message_list", result)
+		return finalizeMailboxList(result)
 	default:
 		return CallToolResult{}, &unknownToolError{}
 	}
@@ -171,6 +171,39 @@ func finalizeMailboxResult(kind string, value any) (CallToolResult, error) {
 	return result, nil
 }
 
+// finalizeMailboxList returns the longest prefix of the page that fits the
+// response bounds, re-issuing the cursor after its last message, so a page of
+// unusually large rows continues rather than fails.
+func finalizeMailboxList(result *mailbox.ListResult) (CallToolResult, error) {
+	out, err := finalizeMailboxResult("message_list", result)
+	if err == nil || !isResponseBoundError(err) || len(result.Messages) < 2 {
+		return out, err
+	}
+	low, high, best := 1, len(result.Messages)-1, 0
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate := *result
+		if err := candidate.Truncate(middle); err != nil {
+			return CallToolResult{}, err
+		}
+		if _, err := finalizeMailboxResult("message_list", &candidate); err == nil {
+			best = middle
+			low = middle + 1
+		} else if isResponseBoundError(err) {
+			high = middle - 1
+		} else {
+			return CallToolResult{}, err
+		}
+	}
+	if best == 0 {
+		return CallToolResult{}, err
+	}
+	if err := result.Truncate(best); err != nil {
+		return CallToolResult{}, err
+	}
+	return finalizeMailboxResult("message_list", result)
+}
+
 // formatSentAt renders the exact date sent_at always carries in
 // structuredContent into the human-readable text block too — clients
 // commonly summarize from the prose rather than parse structured content, so
@@ -189,6 +222,9 @@ func renderMailboxResult(page *mailboxResult) string {
 		fmt.Fprintf(&b, "Mailbox message list: %d message(s), %s order.\n", len(result.Messages), result.Order)
 		for _, m := range result.Messages {
 			fmt.Fprintf(&b, "[%s] %s — %s — %s\n", m.DocID, formatSentAt(m.SentAt), m.Subject, m.Sender)
+			if m.RecipientsOmitted > 0 {
+				fmt.Fprintf(&b, "  to: %s and %d more\n", strings.Join(m.Recipients, ", "), m.RecipientsOmitted)
+			}
 		}
 		if result.Page.HasMore {
 			fmt.Fprintf(&b, "More messages are available. Call this tool again with exactly {\"cursor\":%q} and the same filters.\n", result.Page.NextCursor)
@@ -228,7 +264,7 @@ func mailboxListOutputSchema() map[string]any {
 
 func mailboxMessageSchema(extra map[string]any, nullableTime, stringArray map[string]any) map[string]any {
 	properties := map[string]any{
-		"doc_id": map[string]any{"type": "string", "minLength": 1}, "subject": map[string]any{"type": "string"}, "sent_at": nullableTime, "sender": map[string]any{"type": "string"}, "recipients": stringArray, "automated_class": map[string]any{"type": "string"}, "list_id": map[string]any{"type": "string"}, "source_locations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
+		"doc_id": map[string]any{"type": "string", "minLength": 1}, "subject": map[string]any{"type": "string"}, "sent_at": nullableTime, "sender": map[string]any{"type": "string"}, "recipients": stringArray, "recipients_omitted": map[string]any{"type": "integer", "minimum": 1}, "automated_class": map[string]any{"type": "string"}, "list_id": map[string]any{"type": "string"}, "source_locations": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "source_path": map[string]any{"type": "string"}, "container_source_path": map[string]any{"type": "string"},
 	}
 	required := []string{"doc_id", "subject", "sent_at", "sender", "recipients"}
 	for name, schema := range extra {

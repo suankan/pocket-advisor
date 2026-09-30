@@ -169,11 +169,14 @@ func (r *Jobs) Fail(ctx context.Context, id string, reason domain.FailureReason)
 	})
 }
 
-// Reconcile explicitly reissues unfinished published jobs, including those lost
-// from the broker. Completed and terminal jobs are never silently redriven.
+// Reconcile reissues published jobs the broker may have lost, with a new
+// dispatch generation. It must run before any consumer exists: reissuing a job
+// a worker is already handling supersedes its message. Source waits are retried
+// by ResumeSources once a scan has refreshed locations. Completed and terminal
+// jobs are never silently redriven.
 func (r *Jobs) Reconcile(ctx context.Context, older time.Duration) error {
 	_, err := r.db.Pool.Exec(ctx, `UPDATE ingestion_jobs SET state='READY',generation=generation+1,dispatch_lease_until=NULL
- WHERE state IN ('DISPATCHED','WAITING_SOURCE') AND COALESCE(dispatched_at,created_at)<now()-$1::interval`, older.String())
+ WHERE state='DISPATCHED' AND COALESCE(dispatched_at,created_at)<now()-$1::interval`, older.String())
 	return err
 }
 func (r *Jobs) Counts(ctx context.Context) (ready, unfinished, waiting, failed int, err error) {

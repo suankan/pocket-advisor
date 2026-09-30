@@ -15,6 +15,7 @@ import (
 	"github.com/suankan/pocket-advisor/internal/pipeline"
 	"github.com/suankan/pocket-advisor/internal/provision"
 	"github.com/suankan/pocket-advisor/internal/source"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/workspace"
 )
@@ -82,6 +83,13 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 		return err
 	}
 	defer pipe.Close()
+	// Broker-lost work is reissued once, before any consumer exists. Running it
+	// beside live workers would supersede messages they are already handling.
+	// Source waits are not touched here: they are retried after the scan, when
+	// locations are current.
+	if err := a.Jobs.Reconcile(fetchCtx, 0); err != nil {
+		return err
+	}
 	view := dashboard.New(dashboard.Source{Stats: stats, CPU: a.CPU, Embedder: embedder, DB: a.DB, Mode: o.Mode(), Workspace: o.WorkspaceID, LogDir: logs.Dir()}, os.Stdout)
 	viewCtx, stopView := context.WithCancel(ctx)
 	defer stopView()
@@ -92,22 +100,15 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 			view.Run(viewCtx)
 		}
 	}()
-	// Admission fills the durable outbox before any worker resolves a source,
-	// so a leftover job for a renamed original reads its refreshed location
-	// rather than parking against the old one. Ingestion never deletes; that
-	// is --reconcile-deletions' job, run on its own.
-	scan, feedErr := svc.Scan(fetchCtx)
-	if feedErr == nil {
-		feedErr = svc.ResumeLegacy(fetchCtx, scan)
-	}
-	if feedErr == nil {
-		feedErr = a.Jobs.Reconcile(fetchCtx, 0)
-	}
+	// Workers run while the scan admits: a job commits together with the source
+	// occurrence it reads, so new work is always resolvable. Only leftover work
+	// for a renamed original can race a scan that has not reached its new path;
+	// it parks as WAITING_SOURCE and feed retries it once the scan completes.
+	// Ingestion never deletes; that is --reconcile-deletions' job, run on its own.
 	workerFetch, stopWorkers := context.WithCancel(fetchCtx)
 	defer stopWorkers()
-	if feedErr == nil || o.Listen {
-		pipe.Start(workerFetch, workCtx)
-	}
+	pipe.Start(workerFetch, workCtx)
+	feedErr := feed(fetchCtx, svc, a.Jobs)
 	if o.Listen {
 		ticker := time.NewTicker(time.Minute)
 		if feedErr != nil {
@@ -118,13 +119,7 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 			select {
 			case <-fetchCtx.Done():
 			case <-ticker.C:
-				scan, feedErr = svc.Scan(fetchCtx)
-				if feedErr == nil {
-					feedErr = svc.ResumeLegacy(fetchCtx, scan)
-				}
-				if feedErr == nil {
-					feedErr = a.Jobs.ResumeSources(fetchCtx)
-				}
+				feedErr = feed(fetchCtx, svc, a.Jobs)
 			}
 			if feedErr != nil {
 				a.Log.Warn("source scan incomplete; retrying on next interval", "error", feedErr)
@@ -134,8 +129,10 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 		ticker.Stop()
 	}
 	var drainErr error
-	if !o.Listen && feedErr == nil {
-		drainErr = pipe.WaitDrained(workCtx, settle)
+	if !o.Listen && fetchCtx.Err() == nil {
+		// A failed scan still leaves valid admitted work; finish it and report
+		// the scan error afterwards.
+		drainErr = drain(workCtx, pipe, a.Jobs, feedErr == nil)
 	}
 	// A quiet queue is not a stop. End dispatch and fetching, and join every
 	// handler before building the search index.
@@ -150,4 +147,35 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	}
 	fmt.Print(view.Summary())
 	return errors.Join(runErr, a.Jobs.CheckResolved(ctx))
+}
+
+// feed runs one complete admission pass: scan, resume jobless rows reachable
+// from it, then retry source waits now that locations are current.
+func feed(ctx context.Context, svc *discovery.Service, jobs *postgres.Jobs) error {
+	scan, err := svc.Scan(ctx)
+	if err != nil {
+		return err
+	}
+	if err := svc.ResumeLegacy(ctx, scan); err != nil {
+		return err
+	}
+	return jobs.ResumeSources(ctx)
+}
+
+// drain waits for the pipeline to go quiet. A worker can decide a source is
+// unavailable just before the scan completes and record the wait just after
+// feed retried it, so when the scan completed, waits are retried once more:
+// originals that are genuinely gone park again immediately.
+func drain(ctx context.Context, pipe *pipeline.Pipeline, jobs *postgres.Jobs, scanned bool) error {
+	if err := pipe.WaitDrained(ctx, settle); err != nil || !scanned {
+		return err
+	}
+	_, _, waiting, _, err := jobs.Counts(ctx)
+	if err != nil || waiting == 0 {
+		return err
+	}
+	if err := jobs.ResumeSources(ctx); err != nil {
+		return err
+	}
+	return pipe.WaitDrained(ctx, settle)
 }

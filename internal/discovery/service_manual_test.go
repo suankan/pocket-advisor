@@ -110,3 +110,47 @@ func TestResumeLegacySkipsRowsWhoseOriginalsAreGone(t *testing.T) {
 		t.Fatalf("unreachable legacy row was resumed: %d %v", jobs, err)
 	}
 }
+
+// Admission of content that already exists must not queue behind a worker's
+// open transaction on that document. CreateStub's upsert takes the row lock
+// even when the row exists, so a duplicate copy met mid-scan stalled the whole
+// serial walk for as long as the worker's handler ran.
+func TestAdmitDoesNotWaitOnDocumentRowLockedByWorker(t *testing.T) {
+	s, root := scanFixture(t)
+	ctx := context.Background()
+	content := []byte("A synthetic document a worker is busy with.")
+	id, _, err := s.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex(content), DocType: "text", MimeType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Docs.UpdateStatus(ctx, id, domain.StatusCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "copy.txt"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A worker's stage transaction: it has written the document row and has
+	// not committed.
+	worker, err := s.DB.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Rollback(ctx)
+	if _, err := worker.Exec(ctx, `UPDATE documents SET updated_at=now() WHERE doc_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := s.Inventory.BeginScan(ctx, s.Sources.RootKeys())
+	if err != nil {
+		t.Fatal(err)
+	}
+	walkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	err = s.Sources.Walk(walkCtx, func(f source.File, data []byte) error { return s.admit(walkCtx, scan, f, data) })
+	if err != nil {
+		t.Fatalf("admission waited on the worker's row lock: %v", err)
+	}
+	var seen int
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM source_occurrences WHERE doc_id=$1 AND scan_id=$2`, id, scan).Scan(&seen); err != nil || seen != 1 {
+		t.Fatalf("duplicate was not observed: %d %v", seen, err)
+	}
+}

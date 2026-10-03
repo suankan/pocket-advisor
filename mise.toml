@@ -1,5 +1,5 @@
 [tools]
-go = "1.25"
+go = "1.27"
 
 [env]
 # Tesseract is linked via CGo, so the toolchain must not be in pure-Go mode.

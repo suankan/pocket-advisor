@@ -1,6 +1,6 @@
 module github.com/suankan/pocket-advisor
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.6

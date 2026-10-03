@@ -155,7 +155,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 		"restore the expected originals, then run --reconcile")
 	addFinding(&findings, "DOCUMENTS_WITHOUT_SOURCES", SeverityWarning, d.checks.DocumentsWithoutSources,
 		"documents without an observed original-file route",
-		"run --audit-sources; restore expected originals or review the pruning plan")
+		"restore expected originals and run --reconcile, or review the pruning plan")
 
 	// 6. Stale document rows
 	addFinding(&findings, "STALE_PENDING", SeverityWarning, d.checks.StalePending,

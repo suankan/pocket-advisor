@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/app"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
-	"github.com/suankan/pocket-advisor/internal/dashboard"
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/pipeline"
 	"github.com/suankan/pocket-advisor/internal/provision"
@@ -77,7 +75,6 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	defer stopSignals()
 	svc := discoveryService(a)
 	stats := telemetry.NewStats()
-	svc.Progress = &stats.Scan
 	pipe, err := pipeline.New(ctx, a, stats, embedder, pipeline.Options{OCRLangs: o.OCRLangs})
 	if err != nil {
 		return err
@@ -90,16 +87,6 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	if err := a.Jobs.Reconcile(fetchCtx, 0); err != nil {
 		return err
 	}
-	view := dashboard.New(dashboard.Source{Stats: stats, CPU: a.CPU, Embedder: embedder, DB: a.DB, Mode: o.Mode(), Workspace: o.WorkspaceID, LogDir: logs.Dir()}, os.Stdout)
-	viewCtx, stopView := context.WithCancel(ctx)
-	defer stopView()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if !o.NoDashboard {
-			view.Run(viewCtx)
-		}
-	}()
 	// Workers run while the scan admits: a job commits together with the source
 	// occurrence it reads, so new work is always resolvable. Only leftover work
 	// for a renamed original can race a scan that has not reached its new path;
@@ -138,14 +125,11 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	// handler before building the search index.
 	stopWorkers()
 	pipe.Wait()
-	stopView()
-	<-done
 	runErr := errors.Join(feedErr, drainErr, fetchCtx.Err(), workCtx.Err())
 	// Keep BM25 available during intake; create it once writes have landed.
 	if fetchCtx.Err() == nil && workCtx.Err() == nil {
 		runErr = errors.Join(runErr, a.DB.BuildSearchIndex(fetchCtx))
 	}
-	fmt.Print(view.Summary())
 	return errors.Join(runErr, a.Jobs.CheckResolved(ctx))
 }
 

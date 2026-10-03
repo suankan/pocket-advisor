@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// Live run state for the dashboard.
+// Live run state for drain detection.
 //
 // Deliberately separate from the Prometheus metrics above rather than derived
 // from them: the interesting numbers here are point-in-time (how many lanes are
@@ -22,21 +22,12 @@ type Queue struct {
 	Role    string
 	Lanes   int
 
-	active    atomic.Int64
-	completed atomic.Int64
-	skipped   atomic.Int64
-	retried   atomic.Int64
-	dlq       atomic.Int64
-	pending   atomic.Int64
+	active  atomic.Int64
+	pending atomic.Int64
 }
 
 func (q *Queue) LaneStarted()  { q.active.Add(1) }
 func (q *Queue) LaneFinished() { q.active.Add(-1) }
-
-func (q *Queue) Completed()    { q.completed.Add(1) }
-func (q *Queue) Skipped()      { q.skipped.Add(1) }
-func (q *Queue) Retried()      { q.retried.Add(1) }
-func (q *Queue) DeadLettered() { q.dlq.Add(1) }
 
 // SetPending records queue depth, polled from the consumer rather than counted
 // here — the broker is the only authority on how much work is still waiting.
@@ -50,90 +41,15 @@ func (q *Queue) Idle() bool {
 	return q.active.Load() == 0 && q.pending.Load() == 0
 }
 
-type QueueSnapshot struct {
-	Subject   string
-	Role      string
-	Lanes     int
-	Active    int64
-	Completed int64
-	Skipped   int64
-	Retried   int64
-	DLQ       int64
-	Pending   int64
-}
-
-func (q *Queue) Snapshot() QueueSnapshot {
-	return QueueSnapshot{
-		Subject:   q.Subject,
-		Role:      q.Role,
-		Lanes:     q.Lanes,
-		Active:    q.active.Load(),
-		Completed: q.completed.Load(),
-		Skipped:   q.skipped.Load(),
-		Retried:   q.retried.Load(),
-		DLQ:       q.dlq.Load(),
-		Pending:   q.pending.Load(),
-	}
-}
-
-// Scan is the live state of the source scan stage.
-type Scan struct {
-	total     atomic.Int64
-	scanned   atomic.Int64
-	duplicate atomic.Int64
-	failed    atomic.Int64
-	bytes     atomic.Int64
-	running   atomic.Bool
-}
-
-func (u *Scan) Start(total int64) {
-	u.total.Store(total)
-	u.running.Store(true)
-}
-
-func (u *Scan) Finish() { u.running.Store(false) }
-
-func (u *Scan) AddTotal(n int64) { u.total.Add(n) }
-func (u *Scan) Scanned(n int64)  { u.scanned.Add(1); u.bytes.Add(n) }
-func (u *Scan) Duplicate()       { u.duplicate.Add(1) }
-func (u *Scan) Failed()          { u.failed.Add(1) }
-
-type ScanSnapshot struct {
-	Running   bool
-	Total     int64
-	Scanned   int64
-	Duplicate int64
-	Failed    int64
-	Bytes     int64
-}
-
-// Done counts every file the scaner has finished deciding about, which is
-// what a progress bar measures — not just the ones whose bytes moved.
-func (s ScanSnapshot) Done() int64 { return s.Scanned + s.Duplicate + s.Failed }
-
-func (u *Scan) Snapshot() ScanSnapshot {
-	return ScanSnapshot{
-		Running:   u.running.Load(),
-		Total:     u.total.Load(),
-		Scanned:   u.scanned.Load(),
-		Duplicate: u.duplicate.Load(),
-		Failed:    u.failed.Load(),
-		Bytes:     u.bytes.Load(),
-	}
-}
-
 // Stats is every live number for one run.
 type Stats struct {
-	Scan Scan
-
 	mu     sync.RWMutex
 	queues []*Queue
 }
 
 func NewStats() *Stats { return &Stats{} }
 
-// RegisterQueue adds a pool to the dashboard. Registration order is display
-// order, so callers register in pipeline order.
+// RegisterQueue adds a pool to the drain check.
 func (s *Stats) RegisterQueue(role, subject string, lanes int) *Queue {
 	q := &Queue{Subject: subject, Role: role, Lanes: lanes}
 	s.mu.Lock()
@@ -148,17 +64,6 @@ func (s *Stats) Queues() []*Queue {
 	return append([]*Queue(nil), s.queues...)
 }
 
-func (s *Stats) QueueSnapshots() []QueueSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make([]QueueSnapshot, 0, len(s.queues))
-	for _, q := range s.queues {
-		out = append(out, q.Snapshot())
-	}
-	return out
-}
-
 // Idle reports whether every pool is idle with an empty queue — the condition
 // a one-shot run exits on.
 func (s *Stats) Idle() bool {
@@ -171,17 +76,4 @@ func (s *Stats) Idle() bool {
 		}
 	}
 	return true
-}
-
-// DeadLettered totals dead-lettered work across every pool, so a run that
-// finished but lost documents cannot report itself as a clean success.
-func (s *Stats) DeadLettered() int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var n int64
-	for _, q := range s.queues {
-		n += q.dlq.Load()
-	}
-	return n
 }

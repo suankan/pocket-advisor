@@ -87,8 +87,8 @@ type Runtime struct {
 	// pod's real parallelism was 1 and scaling meant adding replicas.
 	Lanes int
 
-	// Stats is the live counter set for this subject. Optional: nil disables
-	// dashboard reporting without affecting behaviour.
+	// Stats tracks this subject's active lanes for drain detection. Optional:
+	// nil leaves the subject out of it.
 	Stats *telemetry.Queue
 }
 
@@ -385,7 +385,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	switch {
 	case err == nil:
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "completed").Inc()
-		r.stat((*telemetry.Queue).Completed)
 		_ = msg.Ack()
 		return
 
@@ -394,7 +393,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		errors.As(err, &d)
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
 		telemetry.Skipped.WithLabelValues(string(d.Reason)).Inc()
-		r.stat((*telemetry.Queue).Skipped)
 		if d.DocID != "" && r.Docs != nil && r.Jobs == nil {
 			if uerr := r.Docs.UpdateStatus(ctx, d.DocID, domain.StatusSkipped, d.Reason); uerr != nil {
 				r.Log.Error("record skip", "doc_id", d.DocID, "error", uerr)
@@ -428,7 +426,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	// application's usual failure threshold. NAK does not reset NumDelivered.
 	if ctx.Err() != nil {
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
-		r.stat((*telemetry.Queue).Retried)
 		r.Log.Info("work returned unfinished: the run was shutting down",
 			"worker_type", r.Name, "error", err)
 		_ = msg.Nak()
@@ -447,7 +444,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		if exists, cerr := r.Docs.Exists(ctx, id); cerr == nil && !exists {
 			telemetry.IngestionTasks.WithLabelValues(r.Name, "skipped").Inc()
 			telemetry.Skipped.WithLabelValues(string(domain.ReasonDocumentPruned)).Inc()
-			r.stat((*telemetry.Queue).Skipped)
 			r.Log.Info("work discarded: its document was pruned",
 				"doc_id", id, "worker_type", r.Name)
 			_ = msg.Ack()
@@ -480,7 +476,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 		}
 		telemetry.IngestionTasks.WithLabelValues(r.Name, "dlq").Inc()
 		telemetry.DLQ.WithLabelValues(r.Name, string(reason)).Inc()
-		r.stat((*telemetry.Queue).DeadLettered)
 
 		if id := docIDOf(err); id != "" && r.Docs != nil && r.Jobs == nil {
 			_ = r.Docs.UpdateStatus(ctx, id, domain.StatusFailed, reason)
@@ -492,7 +487,6 @@ func (r *Runtime) handle(ctx context.Context, msg jetstream.Msg, h Handler) {
 	}
 
 	telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
-	r.stat((*telemetry.Queue).Retried)
 	delay := nakBackoff(deliveries)
 	r.Log.Warn("transient failure, will redeliver",
 		"error", err, "delivery", deliveries, "max", bus.MaxDeliver, "retry_in", delay)
@@ -527,13 +521,6 @@ func nakBackoff(deliveries uint64) time.Duration {
 	// Half fixed, half spread: every retry waits out the cooldown, and no two
 	// arrive at the same instant.
 	return d/2 + time.Duration(rand.Int64N(int64(d/2)))
-}
-
-// stat applies a counter method when the dashboard is attached.
-func (r *Runtime) stat(f func(*telemetry.Queue)) {
-	if r.Stats != nil {
-		f(r.Stats)
-	}
 }
 
 func isDeclined(err error) bool {

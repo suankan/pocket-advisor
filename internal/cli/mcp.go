@@ -159,8 +159,8 @@ func mcpStdioCmd(cfg *config.Config, args []string) error {
 		wsConfig = *workspaceConfig
 	}
 
-	// stdio is the protocol channel. Nothing here may print to stdout: the
-	// dashboard is never started, and stdout is reserved for JSON-RPC frames.
+	// stdio is the protocol channel. Nothing here may print to stdout: it
+	// is reserved for JSON-RPC frames.
 	// Logs go to both logs/mcp.log (RoleMCP, the same file mcp start writes
 	// to) and stderr, which an MCP client typically captures into its own log
 	// view — the durable record and the client-visible one, at once.

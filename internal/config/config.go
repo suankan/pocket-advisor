@@ -210,8 +210,8 @@ type Config struct {
 
 	MetricsPort int
 	LogLevel    string
-	// LogDir holds one file per role. The terminal belongs to the dashboard
-	// while a run is live, so the files are the only full record.
+	// LogDir holds one file per role. A run prints nothing live, so
+	// the files are the only full record.
 	LogDir string
 }
 

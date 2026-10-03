@@ -147,7 +147,7 @@ The application applies the Tier 2/3 schema on the first ingest because the `hal
 ./bin/pocket-advisor --ingest-all --workspace-id example
 ```
 
-`--ingest-all` resolves original directories, applies the source/job schema, and hashes and admits current files in one source scan. Workers run while the scan admits, and the dashboard shows both. Admission records durable jobs without waiting for the queue to shrink. Leftover work for a renamed original may briefly wait for its new path; it is retried when the scan completes. Workers stop when the queue has drained. Ingestion never deletes. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
+`--ingest-all` resolves original directories, applies the source/job schema, and hashes and admits current files in one source scan. Workers run while the scan admits. Admission records durable jobs without waiting for the queue to shrink. Leftover work for a renamed original may briefly wait for its new path; it is retried when the scan completes. Workers stop when the queue has drained. Ingestion never deletes. Normalized text, vectors and BM25 remain in PostgreSQL. Original and attachment bytes are never copied anywhere: a container's members are replayed from the verified original whenever they are needed again.
 
 Documents whose originals you deleted or newly ignored stay retrievable until `--reconcile-deletions` removes them (below). Their outstanding jobs wait for a source, so the ingest run ends with an unresolved-work error that names the sweep. A database advisory lock permits only one ingestion or maintenance process per workspace.
 
@@ -160,16 +160,6 @@ Documents whose originals you deleted or newly ignored stay retrievable until `-
 
 # Scan at startup and every minute while processing jobs.
 ./bin/pocket-advisor --listen --workspace-id example
-
-# Verify retained originals and container replay without writing.
-./bin/pocket-advisor --audit-sources --workspace-id example --json
-
-# Verify coverage and persist source occurrences and member recipes.
-./bin/pocket-advisor --bind-sources --workspace-id example
-
-# Preview or rebuild email metadata from verified original bytes.
-./bin/pocket-advisor --reprocess-email-metadata --workspace-id example --dry-run --reprocess-limit 100
-./bin/pocket-advisor --reprocess-email-metadata --workspace-id example
 ```
 
 Admission has no queue-depth thresholds; the durable backlog can grow to fit the source collection, while worker concurrency remains bounded.
@@ -180,7 +170,7 @@ Roots are limited to regular files of at most 256 MiB each. Container replay is 
 
 ## 6. Observe ingestion
 
-During a terminal run, the dashboard shows source scan progress, queue depths, active lanes, retries, skips, dead letters, CPU slots, embedding sessions, and PostgreSQL pool use. Full JSON logs are written by role under the gitignored `logs/` directory. Ingestion diagnostics include local source paths and filenames, so treat these files as private workspace material.
+A run prints nothing live. Full JSON logs are written by role under the gitignored `logs/` directory. Ingestion diagnostics include local source paths and filenames, so treat these files as private workspace material.
 
 ```sh
 ls logs/
@@ -530,18 +520,9 @@ Upgrade the shared-store release with the supported wrapper:
 
 Always use the wrapper rather than invoking Helm directly: it provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml` after the release rolls out.
 
-Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then run `--audit-sources` for each workspace to confirm that every retained document is still reachable from a configured original. Restore missing originals or explicitly resolve retention exceptions before proceeding; configuration paths alone do not prove source coverage. `--bind-sources` then persists verified locations and replay recipes without replacing document UUIDs, normalized evidence, chunks, or mailbox identities. Recheck coverage with `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
+Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then check `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
 
-Some upgrades retire database objects an older build created. `CREATE TABLE IF NOT EXISTS` cannot drop a column or a table, so those arrive as an explicit migration rather than as schema application. Preview one before applying it, and apply it with the workspace's readers stopped:
-
-```sh
-./bin/pocket-advisor --migrate-schema --workspace-id example --dry-run
-./bin/pocket-advisor --migrate-schema --workspace-id example
-```
-
-The preview reports, in counts only, what would be dropped. Applying is destructive and confirms first unless `--yes` is given. A migration reads stored schema state only: it probes no model endpoint, reads no original, and never re-ingests, re-extracts or re-embeds. Query and MCP entry points refuse a workspace with a pending migration and name the command rather than serving a half-upgraded database.
-
-Keep a recoverable database backup across any such upgrade: re-ingesting current originals rebuilds an index but cannot recover overwritten historical bytes or recreate previous document UUIDs and evaluation references.
+Keep a recoverable database backup across any upgrade: re-ingesting current originals rebuilds an index but cannot recover overwritten historical bytes or recreate previous document UUIDs and evaluation references.
 
 StatefulSet volume claim templates are immutable. Changing a configured storage size requires deliberately recreating the relevant StatefulSet and claim. A PostgreSQL major-version change also requires a new data volume and re-ingestion.
 

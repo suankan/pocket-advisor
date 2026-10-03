@@ -26,7 +26,6 @@ type Service struct {
 	Inventory *postgres.SourceRepo
 	Docs      *postgres.DocumentRepo
 	Jobs      *postgres.Jobs
-	Progress  *telemetry.Scan
 	Log       *slog.Logger
 }
 
@@ -38,23 +37,10 @@ func (s *Service) Scan(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if s.Progress != nil {
-		s.Progress.Start(0)
-		defer s.Progress.Finish()
-	}
 	err = s.Sources.Walk(ctx, func(f source.File, data []byte) error {
-		if s.Progress != nil {
-			s.Progress.AddTotal(1)
-		}
 		if err := s.admit(ctx, scan, f, data); err != nil {
-			if s.Progress != nil {
-				s.Progress.Failed()
-			}
 			telemetry.DiscoveryFiles.WithLabelValues("scan", "failed").Inc()
 			return err
-		}
-		if s.Progress != nil {
-			s.Progress.Scanned(f.Size)
 		}
 		telemetry.DiscoveryFiles.WithLabelValues("scan", "observed").Inc()
 		return nil
@@ -225,63 +211,6 @@ func (s *Service) BindExisting(ctx context.Context) error {
 		return err
 	}
 	return s.Inventory.FinishScan(ctx, scan)
-}
-
-type Coverage struct {
-	Documents     int `json:"documents"`
-	Available     int `json:"available"`
-	Missing       int `json:"missing"`
-	Files         int `json:"files"`
-	ParseFailures int `json:"parse_failures"`
-}
-
-func (s *Service) Audit(ctx context.Context) (Coverage, error) {
-	known, err := s.Inventory.SourceDocuments(ctx)
-	if err != nil {
-		return Coverage{}, err
-	}
-	report := Coverage{Documents: len(known)}
-	seen := map[string]bool{}
-	var walk func([]byte, string, int, *int64) error
-	walk = func(data []byte, name string, depth int, budget *int64) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		*budget -= int64(len(data))
-		if *budget < 0 {
-			return fmt.Errorf("coverage replay exceeds byte limit")
-		}
-		hash := domain.SHA256Hex(data)
-		if _, ok := known[hash]; ok {
-			seen[hash] = true
-		}
-		route := Classify(data, name)
-		if route.Subject != bus.SubjectEmails || depth >= 8 {
-			return nil
-		}
-		children, err := source.Children(data, route.MimeType, name)
-		if err != nil {
-			report.ParseFailures++
-			return nil
-		}
-		for _, c := range children {
-			if err := walk(c.Data, c.Filename, depth+1, budget); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	err = s.Sources.Walk(ctx, func(f source.File, data []byte) error {
-		report.Files++
-		if _, ok := known[f.SHA256]; !ok {
-			return nil
-		}
-		budget := source.MaxReplayBytes
-		return walk(data, f.Filename, 0, &budget)
-	})
-	report.Available = len(seen)
-	report.Missing = report.Documents - report.Available
-	return report, err
 }
 
 // ResumeLegacy admits nonterminal rows predating the durable job table. Existing

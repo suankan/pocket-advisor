@@ -99,8 +99,7 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 	office := &worker.OfficeWorker{Sources: a.Sources, Docs: a.Docs, Bus: a.Jobs, Log: a.Logger(telemetry.RoleOffice)}
 	embed := &worker.EmbedWorker{Docs: a.Docs, Chunks: a.Chunks, Embedder: embedder, Log: a.Logger(telemetry.RoleEmbed)}
 
-	// Registration order is display order on the dashboard, so these follow the
-	// pipeline rather than the alphabet.
+	// Roles follow the pipeline rather than the alphabet.
 	specs := []*role{
 		{name: telemetry.RoleEmail, subject: bus.SubjectEmails, durable: "email-processor",
 			lanes: limits.EmailLanes(), handler: email.Handle},
@@ -120,12 +119,11 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 
 	// Concurrently, because each of these is a JetStream round trip and they
 	// do not depend on one another. Sequentially they dominated startup —
-	// ~1.05s of the ~2s before the dashboard could render anything, measured
+	// ~1.05s of the ~2s before the first stage could start, measured
 	// consistently across runs.
 	//
-	// The roles are still assembled in spec order afterwards: the dashboard
-	// lists queues in the order declared above, and a map-iteration order
-	// would reshuffle them between runs.
+	// The roles are still assembled in spec order afterwards, so a
+	// map-iteration order does not reshuffle them between runs.
 	group, gctx := errgroup.WithContext(ctx)
 	for _, r := range specs {
 		if r.stream == "" {
@@ -210,7 +208,7 @@ func (p *Pipeline) Start(fetchCtx, workCtx context.Context) {
 // Wait blocks until every pool has drained and exited.
 func (p *Pipeline) Wait() { p.wg.Wait() }
 
-// pollDepth keeps queue depth current on the dashboard.
+// pollDepth keeps queue depth current for drain detection.
 //
 // Depth comes from the consumer rather than being counted here: the broker is
 // the only thing that knows what is still waiting, including work this process

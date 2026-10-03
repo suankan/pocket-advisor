@@ -47,9 +47,3 @@ func Connect(ctx context.Context, dsn string, maxConns int32) (*DB, error) {
 }
 
 func (d *DB) Close() { d.Pool.Close() }
-
-// PoolStats reports acquired and total connections for the dashboard.
-func (d *DB) PoolStats() (acquired, max int32) {
-	s := d.Pool.Stat()
-	return s.AcquiredConns(), s.MaxConns()
-}

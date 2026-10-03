@@ -133,7 +133,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logs.Close()
-	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, NoDashboard: true, OCRLangs: "eng"}
+	o := &Options{IngestAll: true, WorkspaceID: id, WorkspaceConfig: registry, OCRLangs: "eng"}
 	if err := runIngest(o, cfg, logs); err != nil {
 		t.Fatal(err)
 	}

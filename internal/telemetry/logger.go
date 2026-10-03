@@ -34,7 +34,7 @@ var Roles = []string{
 
 // Logs owns the per-role log files for a run.
 //
-// The terminal belongs to the dashboard while a run is live, so these files are
+// A run prints nothing live, so these files are
 // the only complete record of what happened. Nothing here writes to stdout.
 type Logs struct {
 	dir   string
@@ -183,7 +183,7 @@ func parseLevel(level string) slog.Level {
 
 // NewLogger returns a stderr logger for the paths that run before, or instead
 // of, the per-role files: flag validation, config errors, and any failure that
-// has to be visible when the dashboard never starts.
+// has to be visible when no run ever starts.
 func NewLogger(role, level string) *slog.Logger {
 	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(level)})
 	return slog.New(h).With("worker_type", role)

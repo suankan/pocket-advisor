@@ -15,7 +15,6 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
 func quietLogger() *slog.Logger {
@@ -200,45 +199,6 @@ func TestConsumeDrainsInFlightWorkAfterFetchStops(t *testing.T) {
 	if consumer.acked.Load() < completed.Load() {
 		t.Errorf("acked %d but completed %d — drained work was not acked",
 			consumer.acked.Load(), completed.Load())
-	}
-}
-
-func TestConsumeCountsOutcomesForTheDashboard(t *testing.T) {
-	consumer := newFakeConsumer(4)
-	stats := telemetry.NewStats()
-	q := stats.RegisterQueue("test", "test.subject", 2)
-
-	rt := &Runtime{
-		Name: "test", Subject: "test.subject", Log: quietLogger(),
-		Lanes: 2, Bus: &fakeDLQ{}, Stats: q,
-	}
-
-	var seen atomic.Int64
-	fetchCtx, stopFetch := context.WithCancel(context.Background())
-	go func() {
-		for seen.Load() < 4 {
-			time.Sleep(time.Millisecond)
-		}
-		stopFetch()
-	}()
-
-	_ = rt.Consume(fetchCtx, context.Background(), consumer,
-		func(context.Context, jetstream.Msg) error {
-			if seen.Add(1)%2 == 0 {
-				return Decline("doc-1", "UNSUPPORTED")
-			}
-			return nil
-		})
-
-	snap := q.Snapshot()
-	if snap.Completed == 0 {
-		t.Error("no completions recorded")
-	}
-	if snap.Skipped == 0 {
-		t.Error("declines were not recorded as skips")
-	}
-	if snap.Active != 0 {
-		t.Errorf("Active = %d after drain, want 0", snap.Active)
 	}
 }
 

@@ -91,7 +91,7 @@ infra:
   observability:
     metrics_port: 9090
     log_level: info
-    # One file per role. The terminal belongs to the live dashboard, so these
+    # One file per role. A run prints nothing live, so these
     # files are the complete record of what each role did.
     log_dir: logs
 

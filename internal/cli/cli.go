@@ -30,14 +30,12 @@ type Options struct {
 	WorkspaceConfig string
 	WorkspaceID     string
 
-	AuditSources bool
-	BindSources  bool
-	IngestAll    bool
-	Reconcile    bool
-	Listen       bool
-	DeleteData   bool
-	Forget       string
-	Query        string
+	IngestAll  bool
+	Reconcile  bool
+	Listen     bool
+	DeleteData bool
+	Forget     string
+	Query      string
 
 	// ReconcileDeletions is the sweep for documents whose originals are gone.
 	// Ingestion is additive; this previews the sweep and applies it only with
@@ -53,7 +51,6 @@ type Options struct {
 	OCRLangs    string
 	EmbedConc   int
 	LogDir      string
-	NoDashboard bool
 
 	Doctor  bool
 	Recover bool
@@ -63,17 +60,6 @@ type Options struct {
 	// answer came from the ranker can never fail for the ranker missing a
 	// document, which is the failure worth catching.
 	CorpusSearch string
-
-	// Email metadata reprocessing (ingestion-design.md §2.5): a maintenance
-	// walk over one workspace's email message documents, not an ingest.
-	ReprocessEmail   bool
-	MigrateSchema    bool
-	ReprocessLimit   int
-	ReprocessConc    int
-	ReprocessMissing bool
-
-	// Topic graph mention build lifecycle. Each operation is fixed to the
-	// command's workspace and version IDs are opaque UUIDs.
 
 	Evaluate       bool
 	EvalCases      string
@@ -95,8 +81,6 @@ Modes (exactly one):
   --reconcile         scan configured originals, redispatch unfinished durable
                       jobs including broker-lost work, and process them
   --listen            scan at startup and every minute while processing jobs
-  --audit-sources     verify retained source coverage without writing
-  --bind-sources      verify coverage and persist source locations and replay recipes
   --query <question>  ask the corpus a question and print the matching
                       sources, with citations. Returns evidence, not an
                       answer: generation happens outside this binary
@@ -113,22 +97,6 @@ Modes (exactly one):
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
-  --migrate-schema    apply pending workspace schema migrations. Preview with
-                      --dry-run; applying drops retired derived objects and
-                      keeps every parsed message fact. No re-ingestion follows.
-  --reprocess-email-metadata
-                      rebuild durable email browse metadata from originals for
-                      every email message document in the workspace. For a
-                      workspace ingested before those tables existed: the
-                      schema upgrade adds them empty and synthesises nothing.
-                      Reads originals and writes derived email metadata —
-                      no queue, no re-extraction, no re-embedding —
-                      and is idempotent, so repeating an interrupted run
-                      converges (ingestion-design.md §2.5)
-                      with bounded source-backed email mentions, then classifies only
-                      exact-reference candidate pairs with the local model. It
-                      never changes the active version; finalize and promote are
-                      separate operator actions.
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
@@ -176,19 +144,6 @@ Query options:
   --no-rerank               skip the cross-encoder; serve fused order
   --no-decompose            do not split a multi-topic question
 
-Email metadata reprocessing options:
-  --reprocess-limit N        stop after this many documents (0 = the whole
-                             workspace)
-  --reprocess-concurrency N  concurrent original-file reads and metadata writes
-                             (default 4)
-  --reprocess-missing-only   only documents that have no metadata row yet
-  --dry-run                  read and parse, report the counts, write nothing
-  --json                     machine-readable summary
-
-Topic graph build options:
-  --dry-run                     extract and report without creating or writing
-  --json                        machine-readable aggregate summary
-
 Evaluate options:
   --eval-cases <path>        evaluation case set JSON (default: workspaces/evaluation/<workspace>/cases.json)
   --eval-report <path>       write the report somewhere other than the
@@ -201,11 +156,10 @@ Evaluate options:
 
 Options:
   --yes                     skip destructive confirmation prompts
-  --dry-run                 report what would be admitted, write nothing
+  --dry-run                 with --ingest-all: report file and byte counts, write nothing
   --embedding-concurrency N concurrent embedding sessions (default 8)
   --ocr-langs <langs>       tesseract languages (default eng+rus)
   --log-dir <path>          per-role log files (default logs)
-  --no-dashboard            plain line output instead of the live display
 
 Every other pool is sized from the host's CPU count and is not configurable.
 
@@ -214,7 +168,6 @@ Examples:
   pocket-advisor --query "what did we agree about the school holidays?" --workspace-id test
   pocket-advisor mcp stdio --workspace-id test
   pocket-advisor mcp start --workspace-id test
-  pocket-advisor --reprocess-email-metadata --workspace-id test --dry-run
   pocket-advisor --delete-data --workspace-id test
 `
 
@@ -268,8 +221,6 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.WorkspaceConfig, "workspace-config", "", "workspace registry path override (default: infra config's workspaces.config, resolved relative to it)")
 	fs.StringVar(&o.WorkspaceID, "workspace-id", "", "workspace id within the registry")
 
-	fs.BoolVar(&o.AuditSources, "audit-sources", false, "read-only source coverage audit")
-	fs.BoolVar(&o.BindSources, "bind-sources", false, "bind existing documents to original source files")
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "scan originals, enqueue and process to completion")
 	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
 	fs.BoolVar(&o.Listen, "listen", false, "scan originals every minute while running the pipeline")
@@ -282,11 +233,6 @@ func Parse(args []string) (*Options, error) {
 		"find documents containing this exact text, bypassing retrieval")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
-	fs.BoolVar(&o.ReprocessEmail, "reprocess-email-metadata", false, "rebuild email browse metadata from original bytes")
-	fs.BoolVar(&o.MigrateSchema, "migrate-schema", false, "apply pending workspace schema migrations")
-	fs.IntVar(&o.ReprocessLimit, "reprocess-limit", 0, "stop after this many documents (0 = whole workspace)")
-	fs.IntVar(&o.ReprocessConc, "reprocess-concurrency", 0, "concurrent original-file reads and metadata writes (0 = default)")
-	fs.BoolVar(&o.ReprocessMissing, "reprocess-missing-only", false, "only documents with no email metadata row yet")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write the report somewhere other than the per-workspace runs directory")
@@ -306,7 +252,6 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.OCRLangs, "ocr-langs", "eng+rus", "tesseract languages")
 	fs.IntVar(&o.EmbedConc, "embedding-concurrency", 0, "concurrent embedding sessions (0 = config default)")
 	fs.StringVar(&o.LogDir, "log-dir", "", "per-role log directory (empty = config default)")
-	fs.BoolVar(&o.NoDashboard, "no-dashboard", false, "plain line output instead of the live display")
 
 	fs.DurationVar(&o.StaleAfter, "stale-after", 30*time.Minute, "PENDING age that counts as stalled")
 
@@ -322,8 +267,6 @@ func (o *Options) modes() []string {
 		on   bool
 		name string
 	}{
-		{o.AuditSources, "--audit-sources"},
-		{o.BindSources, "--bind-sources"},
 		{o.IngestAll, "--ingest-all"},
 		{o.Reconcile, "--reconcile"},
 		{o.Listen, "--listen"},
@@ -333,8 +276,6 @@ func (o *Options) modes() []string {
 		{o.Query != "", "--query"},
 		{o.Doctor, "--doctor"},
 		{o.Recover, "--recover"},
-		{o.ReprocessEmail, "--reprocess-email-metadata"},
-		{o.MigrateSchema, "--migrate-schema"},
 		{o.Evaluate, "--evaluate"},
 		{o.CorpusSearch != "", "--corpus-search"},
 	} {
@@ -355,7 +296,7 @@ func (o *Options) validate() error {
 	switch {
 	case len(modes) == 0:
 		return fmt.Errorf("no mode selected; pass one of --ingest-all, --reconcile, --listen, " +
-			"--query, --doctor, --recover, --reprocess-email-metadata, --migrate-schema, --evaluate, --corpus-search, --delete-data, " +
+			"--query, --doctor, --recover, --evaluate, --corpus-search, --delete-data, " +
 			"--forget, or the mcp subcommand (--help for details)")
 	case len(modes) > 1:
 		return fmt.Errorf("modes are mutually exclusive, got %s", strings.Join(modes, " and "))
@@ -367,14 +308,8 @@ func (o *Options) validate() error {
 	if o.WorkspaceID == "" {
 		return fmt.Errorf("%s requires --workspace-id", modes[0])
 	}
-	if o.DryRun && !(o.IngestAll || o.ReprocessEmail || o.MigrateSchema) {
-		return fmt.Errorf("--dry-run requires --ingest-all, --reprocess-email-metadata, or --migrate-schema")
-	}
-	if o.ReprocessLimit < 0 {
-		return fmt.Errorf("--reprocess-limit cannot be negative, got %d", o.ReprocessLimit)
-	}
-	if o.ReprocessConc < 0 {
-		return fmt.Errorf("--reprocess-concurrency cannot be negative, got %d", o.ReprocessConc)
+	if o.DryRun && !o.IngestAll {
+		return fmt.Errorf("--dry-run requires --ingest-all")
 	}
 	if o.Forget != "" && len(o.Forget) != 64 {
 		return fmt.Errorf("--forget expects a 64-character sha256, got %d characters", len(o.Forget))
@@ -389,7 +324,7 @@ func (o *Options) NeedsPipeline() bool {
 	return o.IngestAll || o.Reconcile || o.Listen
 }
 
-// Mode is the selected mode's name, for the dashboard header.
+// Mode is the selected mode's name.
 func (o *Options) Mode() string {
 	if m := o.modes(); len(m) > 0 {
 		return strings.TrimPrefix(m[0], "--")
@@ -460,8 +395,6 @@ func Run(o *Options) error {
 	defer logs.Close()
 
 	switch {
-	case o.AuditSources, o.BindSources:
-		return runSources(o, cfg, logs)
 	case o.DeleteData, o.Forget != "":
 		return runReset(o, cfg, logs)
 	case o.ReconcileDeletions:
@@ -486,10 +419,6 @@ func Run(o *Options) error {
 		return runDoctor(o, cfg, logs)
 	case o.Recover:
 		return runRecover(o, cfg, logs)
-	case o.ReprocessEmail:
-		return runReprocessEmail(o, cfg, logs)
-	case o.MigrateSchema:
-		return runMigrateSchema(o, cfg, logs)
 	case o.Listen:
 		return runListen(o, cfg, logs)
 	default:

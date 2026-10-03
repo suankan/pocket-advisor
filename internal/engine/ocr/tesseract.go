@@ -122,8 +122,8 @@ func (e *Engine) Bytes(ctx context.Context, data []byte) (string, error) {
 	// logger entirely, so a page they dislike floods the terminal with lines
 	// like "Image too small to scale!! (2x36 vs min width of 3)" and "Scaling
 	// pix of size 10, 823 by factor 0.0437 made null pix!!". A 208-page
-	// bilevel fax scan emits thousands of them, which shreds the live
-	// dashboard — the one surface an operator watches during a run.
+	// bilevel fax scan emits thousands of them, which shreds the progress
+	// output — the one surface an operator watches during a run.
 	//
 	// None of it is a failure: they are per-line notes about degenerate
 	// regions, typically the vertical rules and signature lines of a scanned

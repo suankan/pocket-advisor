@@ -32,7 +32,7 @@ func OfficeLanes() int { return CPUs }
 func DocumentLanes() int { return CPUs }
 
 // Labels for the CPU semaphore, so the two competing consumers stay
-// distinguishable on the dashboard.
+// distinguishable in telemetry.
 const (
 	LabelOCR       = "ocr"
 	LabelRasterize = "rasterize"

@@ -75,7 +75,7 @@ Startup verifies that the endpoint’s model and vector width match `schema_meta
 
 **Target state:** a model change is handled as an explicit re-embed into a distinct model namespace, with the existing namespace remaining queryable until backfill and cutover complete. The migration and backfill workflow is not implemented.
 
-The source inventory, containment, and durable-job tables are applied by the same bootstrap, as a second transactional and repeatable step recorded in `application_migrations`. It preserves document UUIDs and existing evidence. Extraction records an exact canonical SHA-256 and an `extraction_version` of `canonical-v1`; that version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately.
+The source inventory, containment, and durable-job tables are applied by the same bootstrap, as a second transactional and repeatable step. It preserves document UUIDs and existing evidence. Extraction records an exact canonical SHA-256 and an `extraction_version` of `canonical-v1`; that version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately.
 
 ### 2.5 Email message metadata
 
@@ -95,14 +95,6 @@ Indexes cover exact address-and-kind matching, exact sender-domain matching, the
 
 One message's metadata is written in a single transaction. There is no workspace-wide lock: the row upsert takes this document's row before its address and reference rows are replaced, which serializes concurrent writes to the same document and leaves unrelated messages free to proceed in parallel. The write is idempotent for a given `doc_id` — mailboxes and reply headers are replaced rather than appended — so re-ingesting a message from verified originals reproduces the same rows.
 
-#### Reprocessing existing documents
-
-`--reprocess-email-metadata` is the supported way for documents older than these tables to gain the metadata. It walks one workspace's email message documents in `doc_id` order, reads each one's authoritative original source, and writes the result through the same parser, the same header mapping, and the same repository transaction the email worker uses. There is no second parser and no second write path.
-
-It is a maintenance walk rather than an ingest: nothing is admitted, enqueued, extracted, re-chunked, or re-embedded, and the `documents` row, its text, and its processing status are left untouched. Archives and non-email documents are out of scope. An email row with no original source is selected and reported as unreadable; it is never rebuilt from Tier 2 values. Concurrency is bounded, the keyset cursor makes an interrupted run resumable, and cancellation stops the walk and reports what it completed.
-
-A run reports processed, updated, unreadable, and failed counts, with a closed set of reason codes behind the last two. `unreadable` is a document whose original bytes could not be read at all; `failed` is bytes that were read and could not be turned into metadata. Neither is repaired and neither is skipped silently — nothing but the message can say what the message said — and a run that ends with either count above zero exits with failure. `--dry-run` reports the same counts without writing, `--reprocess-missing-only` narrows selection to documents with no metadata row yet, and `--reprocess-limit` bounds one run. Only aggregate counts and closed-set outcome codes are logged: no subject, address, identifier, or source path reaches a summary or a log line.
-
 Exact browse reads these tables, using configured workspace owner identities for direction; its semantics are described in [retrieval design](retrieval-design.md). Reply identifiers are retained as evidence rather than read as a graph: they are the exact claims a message makes about other messages, and a later source-agnostic topic capability may use them as one high-precision signal without treating them as its candidate boundary.
 
 ## 3. Discovery and reconciliation
@@ -116,8 +108,6 @@ Discovery reads one original at a time and writes reference-only jobs to the dur
 Ingestion is additive: it admits and processes, and never deletes. `--ingest-all` and `--reconcile` run the same path: one source scan, which also refreshes known locations, preceded by a reissue of broker-lost commands with a new dispatch generation before any consumer starts, and followed by a retry of source waits and a drain. Only `--ingest-all` accepts `--dry-run`. `BindExisting` is the non-admitting source refresh used by the explicit maintenance commands. A `PENDING` or `PROCESSING` document row that has no durable job at all and is reachable from the completed scan is re-admitted: straight to embedding when it already holds normalized text, and through classification of its verified original otherwise. A jobless row whose original is gone is left for the sweep in §6.4 rather than resumed into a missing source. Terminal failures require explicit recovery.
 
 `--ingest-all --dry-run` only hashes configured files and reports file/byte counts. It opens no database, broker, or model connection and writes no derived state.
-
-`--audit-sources` reads configured files and recursively checks the hashes of retained documents. The conservative audit requires a known original document at each replay chain's root. It reports aggregate availability and parsing failures without persisting anything. `--bind-sources` requires that coverage, persists occurrences and replay recipes, verifies resolvability, and completes containment backfill.
 
 ## 4. Routing and extraction
 
@@ -261,7 +251,7 @@ PDFium uses the wazero WebAssembly backend. Its instance pool is lazy and sized 
 
 ## 9. Run lifecycle
 
-A finite run reissues broker-lost jobs, starts the dashboard, then starts the dispatcher and all stage pools and runs discovery beside them. When the scan completes it resumes reachable jobless work and retries source waits. It then waits for both unfinished durable jobs and broker/in-flight work to remain empty for three seconds; if source waits remain it retries them once more, since a worker can record a wait just after the first retry, and drains again. It then stops fetching and dispatching, joins every worker, and creates the search index. If the scan fails, work already admitted is still drained and the scan error is reported. WAITING_SOURCE and FAILED jobs are reported as unresolved. A listener performs the same initial source scan, then scans periodically alongside workers and runs until interrupted.
+A finite run reissues broker-lost jobs, then starts the dispatcher and all stage pools and runs discovery beside them. When the scan completes it resumes reachable jobless work and retries source waits. It then waits for both unfinished durable jobs and broker/in-flight work to remain empty for three seconds; if source waits remain it retries them once more, since a worker can record a wait just after the first retry, and drains again. It then stops fetching and dispatching, joins every worker, and creates the search index. If the scan fails, work already admitted is still drained and the scan error is reported. WAITING_SOURCE and FAILED jobs are reported as unresolved. A listener performs the same initial source scan, then scans periodically alongside workers and runs until interrupted.
 
 The first interrupt stops intake and fetching while handlers drain. A second interrupt or grace-period expiry cancels handlers. Downstream intents committed during shutdown remain durable for the next run even if no dispatcher remains active.
 
@@ -290,7 +280,7 @@ Implemented metrics include:
 
 The process creates and propagates W3C `traceparent` values and records their trace ids in logs. It does not currently export spans to an external tracing backend.
 
-During ingestion, the terminal dashboard owns stdout and shows source scan progress, queue depth, active lanes, retry/skip/dead-letter counts, CPU slots, embedding sessions, and PostgreSQL pool use. Non-terminal output falls back to summaries. `--query` and the `mcp` subcommands log to stderr instead of role files. Current ingestion logs include local source paths and filenames for diagnosis; `logs/` is gitignored and must be treated as private workspace material.
+Ingestion prints nothing live; progress is read from the role logs and the Prometheus metrics. `--query` and the `mcp` subcommands log to stderr instead of role files. Current ingestion logs include local source paths and filenames for diagnosis; `logs/` is gitignored and must be treated as private workspace material.
 
 ## 12. Deployment boundary
 

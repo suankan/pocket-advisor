@@ -85,30 +85,6 @@ func (s *Service) AssertScope(ctx context.Context) error {
 		return fmt.Errorf("database holds workspace %q but %q was requested",
 			meta.WorkspaceID, s.workspace)
 	}
-	return s.assertSchemaCurrent(ctx)
-}
-
-// assertSchemaCurrent refuses a database that still carries the retired email
-// grouping layer.
-//
-// Serving one would fail later, deep in a query, on a column this build no
-// longer selects — an error that reads as a corrupt workspace rather than as
-// an upgrade nobody ran. Failing at startup with the command to run is the
-// difference between a puzzle and an instruction. It never migrates on its
-// own: dropping data is an operator's decision.
-func (s *Service) assertSchemaCurrent(ctx context.Context) error {
-	applied, err := s.DB.ThreadingRemovalApplied(ctx)
-	if err != nil {
-		if postgres.IsUndefinedTable(err) {
-			return nil // not yet provisioned
-		}
-		return err
-	}
-	if !applied {
-		return fmt.Errorf("workspace %q needs a schema migration: run "+
-			"pocket-advisor --migrate-schema --workspace-id %s (preview with --dry-run)",
-			s.workspace, s.workspace)
-	}
 	return nil
 }
 

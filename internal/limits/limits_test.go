@@ -55,7 +55,7 @@ func TestCPUBoundsConcurrency(t *testing.T) {
 
 // The two CPU-heavy consumers must stay distinguishable while sharing one
 // budget, because "are we saturating the machine" and "on what" are different
-// questions on the dashboard.
+// questions in telemetry.
 func TestCPUTracksLabelsSeparately(t *testing.T) {
 	c := NewCPU(4)
 	ctx := context.Background()

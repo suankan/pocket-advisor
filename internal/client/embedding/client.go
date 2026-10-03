@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/config"
@@ -34,8 +33,7 @@ type Client struct {
 	// match. Without that pairing Go caps idle connections per host at 2, so a
 	// wider semaphore would spend its extra concurrency dialling and discarding
 	// connections instead of embedding.
-	sem      chan struct{}
-	inFlight atomic.Int64
+	sem chan struct{}
 }
 
 func New(cfg config.Embedding) *Client {
@@ -62,12 +60,7 @@ func New(cfg config.Embedding) *Client {
 
 func (c *Client) Model() string { return c.model }
 
-// Concurrency and InFlight feed the dashboard's session gauge.
 func (c *Client) Concurrency() int { return cap(c.sem) }
-func (c *Client) InFlight() int    { return int(c.inFlight.Load()) }
-
-// BreakerState reports the circuit breaker's current state.
-func (c *Client) BreakerState() string { return c.breaker.State() }
 
 type request struct {
 	Model string   `json:"model"`
@@ -99,11 +92,7 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	c.inFlight.Add(1)
-	defer func() {
-		c.inFlight.Add(-1)
-		<-c.sem
-	}()
+	defer func() { <-c.sem }()
 
 	if err := c.breaker.Allow(); err != nil {
 		return nil, err

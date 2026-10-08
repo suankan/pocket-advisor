@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/doctor"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -35,7 +37,15 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	checks.PGRaw = pgDB != nil
 	if pgDB != nil {
 		defer pgDB.Close()
+		// Scope is asserted before any queue or document read.
+		if err := pgDB.AssertWorkspaceScope(ctx, o.WorkspaceID); errors.Is(err, postgres.ErrScopeMismatch) {
+			checks.ScopeMismatch = true
+			pgDB = nil
+		}
+	}
+	if pgDB != nil {
 		fillSchemaChecks(ctx, pgDB, cfg, &checks, log)
+		fillQueueChecks(ctx, pgDB, &checks, log)
 		fillDocumentChecks(ctx, pgDB, &checks, log)
 	}
 
@@ -43,20 +53,12 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	sourcesOK := checkSources(ctx, cfg, o.WorkspaceID, log)
 	checks.SourcesRaw = sourcesOK
 
-	// 4. NATS and JetStream
-	natsOK, busConn := connectNATS(ctx, cfg, o.WorkspaceID, log)
-	checks.NATSRaw = natsOK
-	if busConn != nil {
-		defer busConn.Close()
-		fillJetStreamChecks(ctx, busConn, &checks, log)
-	}
-
-	// 5. Tier 1/Tier 2 gaps
+	// 4. Tier 1/Tier 2 gaps
 	if pgDB != nil && sourcesOK {
 		fillSourceChecks(ctx, pgDB, &checks, log)
 	}
 
-	// 6. Partial reset detection
+	// 5. Partial reset detection
 	if pgDB != nil {
 		fillResetChecks(ctx, pgDB, &checks, log)
 	}
@@ -80,6 +82,7 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 
 // printReport renders the report in human-readable form.
 func printReport(r *doctor.Report) {
+	defer printQueue(r)
 	if r.Healthy {
 		fmt.Printf("workspace %s: healthy\n", r.WorkspaceID)
 		return
@@ -90,6 +93,24 @@ func printReport(r *doctor.Report) {
 		fmt.Printf("    %s\n", f.Summary)
 		fmt.Printf("    → %s\n\n", f.NextAction)
 	}
+}
+
+// printQueue summarises the job queue after the findings. Live RUNNING work
+// appears here as a count, never as a finding.
+func printQueue(r *doctor.Report) {
+	if len(r.Queue) == 0 {
+		return
+	}
+	states := make([]string, 0, len(r.Queue))
+	for state := range r.Queue {
+		states = append(states, state)
+	}
+	sort.Strings(states)
+	parts := make([]string, 0, len(states))
+	for _, state := range states {
+		parts = append(parts, fmt.Sprintf("%s=%d", state, r.Queue[state]))
+	}
+	fmt.Printf("queue: %s\n", strings.Join(parts, " "))
 }
 
 // connectPG opens a minimal PostgreSQL connection for doctor checks.
@@ -105,20 +126,6 @@ func connectPG(ctx context.Context, cfg *config.Config, wsID string, log *slog.L
 		return nil
 	}
 	return db
-}
-
-// connectNATS opens a NATS connection for doctor checks.
-func connectNATS(ctx context.Context, cfg *config.Config, wsID string, log *slog.Logger) (bool, *bus.Bus) {
-	w, err := cfg.Workspace(wsID)
-	if err != nil {
-		return false, nil
-	}
-	b, err := bus.Connect(ctx, w.NATSURL, wsID)
-	if err != nil {
-		log.Debug("nats unreachable", "error", err)
-		return false, nil
-	}
-	return true, b
 }
 
 // checkSources stats configured roots; the coverage audit verifies file bytes.
@@ -180,14 +187,14 @@ func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Che
 	q := postgres.NewDoctorQueries(db)
 	threshold := doctor.StalenessThreshold
 
-	sp, err := q.StalePendingCount(ctx, threshold)
+	sp, err := q.StalePendingCount(ctx, threshold, checks.QueueSchemaReady)
 	if err != nil {
 		log.Warn("stale pending count failed", "error", err)
 	} else {
 		checks.StalePending = sp
 	}
 
-	sproc, err := q.StaleProcessingCount(ctx, threshold)
+	sproc, err := q.StaleProcessingCount(ctx, threshold, checks.QueueSchemaReady)
 	if err != nil {
 		log.Warn("stale processing count failed", "error", err)
 	} else {
@@ -209,30 +216,41 @@ func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Che
 	}
 }
 
-// fillJetStreamChecks inspects stream and consumer state. Stream names go
-// through b.StreamInfo rather than b.JS() directly so this stays agnostic
-// to the workspace-namespaced names internal/bus/bus.go actually uses.
-func fillJetStreamChecks(ctx context.Context, b *bus.Bus, checks *doctor.Checks, log *slog.Logger) {
-	for _, name := range []string{bus.StreamName, bus.StreamDLQ} {
-		info, err := b.StreamInfo(ctx, name)
-		if err != nil {
-			continue
-		}
-		checks.StreamsOK = true
-		switch name {
-		case bus.StreamName:
-			checks.IngestionMsgs = info.State.Msgs
-		case bus.StreamDLQ:
-			checks.DLQMsgs = info.State.Msgs
-		}
+// fillQueueChecks reads the job queue, but only after proving the layout
+// supports it: on the pre-upgrade layout doctor reports the upgrade and runs no
+// job query, because those columns do not exist. Everything here is a SELECT.
+func fillQueueChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
+	if !checks.PGSchemaOK {
+		return
 	}
+	ready, err := db.QueueSchemaReady(ctx)
+	if err != nil {
+		log.Warn("queue schema check failed", "error", err)
+		return
+	}
+	checks.QueueSchemaChecked = true
+	checks.QueueSchemaReady = ready
+	if !ready {
+		return
+	}
+	stats, err := postgres.NewDoctorQueries(db).JobStats(ctx)
+	if err != nil {
+		log.Warn("job statistics failed", "error", err)
+		return
+	}
+	checks.JobsByState = stats.ByState
+	checks.ExpiredLeases = stats.ExpiredLeases
+	checks.ExhaustedBudgets = stats.ExhaustedBudgets
+	checks.FailedJobsByReason = stats.FailedByReason
 }
 
 // fillSourceChecks reports waiting jobs and inventory gaps.
 func fillSourceChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
-	_, _, waiting, _, jobErr := postgres.NewJobs(db).Counts(ctx)
-	if jobErr == nil {
-		checks.SourceWaitingJobs = waiting
+	if checks.QueueSchemaReady {
+		_, _, waiting, _, jobErr := postgres.NewJobs(db).Counts(ctx)
+		if jobErr == nil {
+			checks.SourceWaitingJobs = waiting
+		}
 	}
 	q := postgres.NewDoctorQueries(db)
 	t2missing, err := q.DocumentsWithoutSources(ctx)
@@ -246,7 +264,7 @@ func fillSourceChecks(ctx context.Context, db *postgres.DB, checks *doctor.Check
 // fillResetChecks detects incomplete wipe or forget operations.
 func fillResetChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
 	q := postgres.NewDoctorQueries(db)
-	stale, err := q.StalePendingCount(ctx, 24*time.Hour)
+	stale, err := q.StalePendingCount(ctx, 24*time.Hour, checks.QueueSchemaReady)
 	if err != nil {
 		return
 	}

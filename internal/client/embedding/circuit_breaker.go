@@ -7,13 +7,13 @@ import (
 )
 
 // ErrCircuitOpen is returned while the breaker is tripped. It is transient by
-// nature: the worker naks and the message is redelivered, so a model endpoint
-// restart costs latency rather than documents.
+// nature: the worker returns the job to the queue with a delay, so a model
+// endpoint restart costs latency rather than documents.
 var ErrCircuitOpen = errors.New("embedding endpoint circuit open")
 
 // Breaker stops hammering an endpoint that is already failing. Without it, a
-// model restart turns into MaxDeliver redeliveries per in-flight document and
-// a DLQ full of work that was never broken.
+// model restart spends every retry attempt of each in-flight document and
+// leaves failed jobs for work that was never broken.
 type Breaker struct {
 	mu           sync.Mutex
 	failures     int

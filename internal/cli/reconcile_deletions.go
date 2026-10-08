@@ -37,7 +37,7 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	// container's Tier 1 bytes back through the verified resolver, which only
 	// ever opens configured originals read-only.
 	a, err := app.New(ctx, cfg, logs,
-		app.Needs{Sources: true, Postgres: true, NATS: true}, o.WorkspaceID)
+		app.Needs{Sources: true, Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}

@@ -61,13 +61,13 @@ The Web UI is a client of these APIs. It must not introduce a parallel backend o
 
 The HTTP MCP process performs no authentication; it binds to loopback and is fixed to one workspace at startup, as described in [MCP server design](mcp.md#workspace-isolation). When MCP is exposed beyond the local machine, the gateway in front of it owns TLS, authentication, and authorization, and routes one public route to one workspace workload. A workspace ID in a URL, request body, identity claim, MCP argument, mirrored header, or tool name cannot change that workload's configured database or credentials. The gateway applies the same rule to non-MCP APIs.
 
-Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database and NATS boundaries defined in [workspace isolation](workspace-isolation.md).
+Each retrieval and generation workload is configured for exactly one workspace and receives only that workspace's least-privilege credentials. Downstream requests must not override that fixed scope. This preserves the separate database boundary, which also confines each workspace's job queue, defined in [workspace isolation](workspace-isolation.md).
 
 Administrative access is distinct from user query access. Destructive operations require explicit permissions, an auditable operation record, and confirmation semantics suitable for non-interactive clients. The API must not expose shared PostgreSQL administrative credentials.
 
 ## Service topology
 
-HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote access through an SSH tunnel) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL and NATS.
+HTTP MCP runs as a local process, not a Kubernetes workload; its deployment (and remote access through an SSH tunnel) is described in [MCP server design](mcp.md#deployment). The existing `pocket-advisor-infra` chart remains responsible only for PostgreSQL.
 
 The target general control plane is a separate long-running workload — unlike MCP, one that is expected to run in Kubernetes. Generation follows the same workspace boundary when enabled. The same image may support several roles, but each workload has a distinct command, credentials, network policy, health check, and failure domain.
 

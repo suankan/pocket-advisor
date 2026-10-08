@@ -61,7 +61,6 @@ func expandEnvironmentPlaceholders(value, field string) (string, error) {
 
 func expandFilePlaceholders(f *file) error {
 	fields := map[string]*string{
-		"infra.nats.url":                &f.Infra.NATS.URL,
 		"infra.postgres.host":           &f.Infra.Postgres.Host,
 		"infra.postgres.sslmode":        &f.Infra.Postgres.SSLMode,
 		"infra.embedding.endpoint":      &f.Infra.Embedding.Endpoint,
@@ -95,8 +94,7 @@ type Postgres struct {
 	// WorkspacePostgresDSN.
 
 	// Host is the shared Postgres StatefulSet's Service. Not templated by
-	// workspace: there is one address, in the release namespace, the same as
-	// NATS.URL's.
+	// workspace: there is one address, in the release namespace.
 	Host string
 	Port int
 	// SSLMode is `disable`, not `require`. CloudNativePG issued its own
@@ -116,10 +114,6 @@ type Postgres struct {
 	MaxConns int32
 }
 
-type NATS struct {
-	URL string
-}
-
 // MCP holds the MCP server configuration for local execution.
 type MCP struct {
 	HTTP MCPHTTP
@@ -132,12 +126,10 @@ type MCPHTTP struct {
 	MaxConcurrent int
 }
 
-// Workspace is the selected database role/name and namespaced broker scope.
-// PostgreSQL role ownership enforces database access; local NATS uses naming.
+// Workspace is the selected database role and name. PostgreSQL role ownership
+// enforces database access, and the job queue lives in that same database.
 type Workspace struct {
 	ID string
-
-	NATSURL string
 
 	PostgresHost string
 	DBName       string
@@ -192,7 +184,6 @@ type Query struct {
 
 type Config struct {
 	Postgres  Postgres
-	NATS      NATS
 	Embedding Embedding
 	Reranking Reranking
 	LLM       LLM
@@ -203,9 +194,9 @@ type Config struct {
 	// (config.yaml's workspaces.config — required, no fallback) — the same
 	// file internal/workspace reads for each workspace's single recursively
 	// walked path. There is no separate credentials file any more: every
-	// workspace's Postgres role and NATS subjects/streams
-	// are named after its id by fixed convention (see Workspace), so
-	// nothing per-workspace needs its own registry entry.
+	// workspace's Postgres role and database are named after its id by fixed
+	// convention (see Workspace), so nothing per-workspace needs its own
+	// registry entry.
 	WorkspacesConfigPath string
 
 	MetricsPort int
@@ -220,9 +211,6 @@ type Config struct {
 // legacy sections stay harmless.
 type file struct {
 	Infra struct {
-		NATS struct {
-			URL string `yaml:"url"`
-		} `yaml:"nats"`
 		Postgres struct {
 			Host     string `yaml:"host"`
 			Port     int    `yaml:"port"`
@@ -298,9 +286,6 @@ func Load(path string) (*Config, error) {
 // sources of truth for the same field.
 func requireInfra(c *Config) error {
 	var missing []string
-	if c.NATS.URL == "" {
-		missing = append(missing, "infra.nats.url")
-	}
 	if c.Postgres.Host == "" {
 		missing = append(missing, "infra.postgres.host")
 	}
@@ -379,8 +364,6 @@ func applyFile(c *Config, path string) error {
 		return fmt.Errorf("expand %s: %w", path, err)
 	}
 	in := f.Infra
-
-	setStr(&c.NATS.URL, in.NATS.URL)
 
 	setStr(&c.Postgres.Host, in.Postgres.Host)
 	setStr(&c.Postgres.SSLMode, in.Postgres.SSLMode)
@@ -482,8 +465,6 @@ func applyEnv(c *Config) {
 	c.LLM.APIKey = env("LLM_API_KEY", c.LLM.APIKey)
 	c.LLM.Model = env("LLM_MODEL", c.LLM.Model)
 
-	c.NATS.URL = env("NATS_URL", c.NATS.URL)
-
 	c.Postgres.Host = env("POSTGRES_HOST", c.Postgres.Host)
 	c.Postgres.MaxConns = int32(envInt("POSTGRES_MAX_CONNS", int(c.Postgres.MaxConns)))
 
@@ -519,8 +500,6 @@ func (c *Config) Workspace(id string) (Workspace, error) {
 	}
 	return Workspace{
 		ID: id,
-
-		NATSURL: c.NATS.URL,
 
 		// One shared Postgres StatefulSet (deviation 39, replacing deviation
 		// 34's Cluster CRD): the host is constant, and the database/role

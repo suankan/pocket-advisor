@@ -1,8 +1,3 @@
----
-model: gpt-5.6-sol
-reasoning_effort: xhigh
----
-
 # Workspace export and restore
 
 ## Outcome
@@ -99,7 +94,7 @@ Restoring derived state is a convenience for everything except identity; identit
 ## Non-goals
 
 - Do not implement whole-cluster disaster recovery or PostgreSQL point-in-time recovery.
-- Do not back up NATS messages as authoritative state.
+- Do not treat in-flight job state as authoritative; unfinished jobs are re-derived by ingestion.
 - Do not copy original files into the artifact; they are authoritative, they live outside this system, and backing them up is the operator's existing responsibility.
 - Do not copy private workspace configuration into the artifact without an approved encrypted configuration design.
 - Do not build a cloud-storage provider integration in the first task; produce a portable artifact that ordinary backup tooling can move.

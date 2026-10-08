@@ -9,11 +9,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/office"
 	"github.com/suankan/pocket-advisor/internal/source"
@@ -29,9 +27,9 @@ type OfficeWorker struct {
 	Log     *slog.Logger
 }
 
-func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
+func (w *OfficeWorker) Handle(ctx context.Context, job postgres.Job) error {
 	var cmd ingestionv1.ProcessOfficeCommand
-	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
+	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
 		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
@@ -67,7 +65,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 
 	tp := trace.Child(meta.Traceparent)
 	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, tp)
-	if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
+	if err := w.Bus.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 		Metadata: out, TextLength: int64(len(text)),
 	}, tp); err != nil {
 		return WithDoc(meta.DocId, err)

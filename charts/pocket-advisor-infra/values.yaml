@@ -1,19 +1,9 @@
-# Shared local stores. The host process reads configured original files.
+# Shared local store. The host process reads configured original files.
 # No workload requests or limits: the local VM provides the resource boundary.
 global:
   namespace: pocket-advisor
   environment: local
   logLevel: info
-
-nats:
-  # Workspace isolation is subject/stream naming; this local service has no accounts.
-  image: nats:2.14.3-alpine
-  replicaCount: 1
-  clientPort: 4222
-  monitorPort: 8222
-  persistence:
-    enabled: true
-    size: 5Gi
 
 postgres:
   # Built locally from docker-images/postgres/Dockerfile.

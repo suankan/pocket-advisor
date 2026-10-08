@@ -386,10 +386,10 @@ func (x *ProcessImageCommand) GetByteSize() int64 {
 
 // EmbedTextCommand -> ingest.text.embed
 //
-// Carries a doc_id REFERENCE, not the text. NATS caps message payload at 1MB
-// by default and a large OCR'd document exceeds it — failing at the end of the
-// most expensive work in the pipeline. The extractor writes
-// documents.normalized_text; the indexer reads it back (§4.1).
+// Carries a doc_id REFERENCE, not the text. A large OCR'd document would
+// otherwise bloat every job row and be copied on each claim, retry and
+// recovery. The extractor writes documents.normalized_text; the indexer reads
+// it back (§4.1).
 type EmbedTextCommand struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Metadata *DocumentMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`

@@ -1,10 +1,9 @@
 # Pocket Advisor Operator Guide
 
-Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion, direct local retrieval, and MCP (stdio and HTTP) all run as one Go binary on the host — none of it runs in Kubernetes. That binary uses two shared stores that do run in the local cluster:
+Pocket Advisor is a local retrieval-augmented generation system for personal document collections. Ingestion, direct local retrieval, and MCP (stdio and HTTP) all run as one Go binary on the host — none of it runs in Kubernetes. That binary uses one shared store that does run in the local cluster:
 
 - Original files in configured workspace directories are authoritative and read-only.
-- PostgreSQL is Tier 2 lineage and Tier 3 vector and lexical indexes.
-- NATS JetStream carries durable work between ingestion pools.
+- PostgreSQL is Tier 2 lineage, Tier 3 vector and lexical indexes, and the durable queue that carries work between ingestion pools.
 
 The binary discovers and ingests documents, retrieves cited evidence, and exposes retrieval as an MCP tool. It does not generate answers itself. An MCP client can read the returned evidence and compose a cited answer.
 
@@ -13,20 +12,20 @@ host                                         local Kubernetes cluster
 
 pocket-advisor
   source discovery        -----------------> configured original files (read-only)
-  ingestion worker pools  <----------------> NATS JetStream
   ingestion and retrieval -----------------> PostgreSQL / pgvector / BM25
+  ingestion worker pools  <----------------> (job queue, in PostgreSQL)
   embedding, reranking,
   query preparation       -----------------> local model endpoint
 ```
 
-The `pocket-advisor-infra` Helm chart deploys only the two shared stores. The MCP server is built into the `pocket-advisor` binary and runs locally via `mcp stdio` or `mcp start` (HTTP).
+The `pocket-advisor-infra` Helm chart deploys only PostgreSQL. The MCP server is built into the `pocket-advisor` binary and runs locally via `mcp stdio` or `mcp start` (HTTP).
 
 ## 1. Concepts
 
 - Every command is scoped to one workspace with `--workspace-id`.
-- The stores are shared processes, but each workspace has its own PostgreSQL database and role, confined source roots, and NATS subject/stream namespace — NATS isolation is naming, not a credential (see [§3](#3-configuration)).
+- PostgreSQL is a shared process, but each workspace has its own database and role — which also holds its job queue — and confined source roots (see [§3](#3-configuration)).
 - The registry's `paths` and `ignore` rules define authoritative originals. Historical bytes require source-side versioning or backups.
-- Ingestion hashes configured files, preserves content identities across moves and copies, and drains durable PostgreSQL jobs through NATS. Completed unchanged content is not re-extracted or re-embedded.
+- Ingestion hashes configured files, preserves content identities across moves and copies, and drains a durable PostgreSQL job queue. Completed unchanged content is not re-extracted or re-embedded.
 - PostgreSQL retains normalized text and derived metadata/indexes. Rebuilding requires hash-recoverable originals; restore a database backup when existing UUIDs and evaluation references must survive.
 - Ingestion is additive: it scans original files and processes queued work, and never deletes. `--reconcile-deletions` is the separate, confirmed sweep that removes documents no longer reachable from staged content.
 - Retrieval returns cited evidence packets, not generated prose.
@@ -46,12 +45,12 @@ The authoritative designs are:
 - `mise` for the pinned Go and CGo environment.
 - Tesseract and the required language packs for scanned PDFs and images.
 - A local OpenAI-compatible model endpoint serving the embedding, reranking, and query-preparation models named in `config.yaml`.
-- Helm, `kubectl`, Docker, `psql`, `natscli`, `yq`, and `envsubst`.
+- Helm, `kubectl`, Docker, `psql`, `yq`, and `envsubst`.
 
 On macOS:
 
 ```sh
-brew install mise tesseract tesseract-lang helm kubectl libpq natscli yq gettext
+brew install mise tesseract tesseract-lang helm kubectl libpq yq gettext
 mise trust
 mise install
 ```
@@ -78,8 +77,7 @@ nc -vz postgres.pocket-advisor.svc.cluster.local 5432
 `config.yaml` is committed and contains infrastructure endpoints, model settings, observability settings, and a path to the private workspace registry. Its `${NAME}` placeholders are expanded from the environment when configuration is loaded. Retrieval tuning defaults are compiled into `internal/config` and request-level query options can override the supported subset.
 `workspaces/workspaces.yaml` (gitignored) is the whole private workspace registry: it describes each workspace's id and the local directories it recursively walks for documents. There is no separate credentials file, no direnv, and nothing to keep in an `.envrc` — this is a fully local, single-operator system, so every credential is a fixed convention instead of a generated secret:
 
-- **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id.
-- **NATS**: no accounts, no users, no passwords at all. A workspace's subjects and stream names are namespaced by its id instead (`internal/bus/bus.go`).
+- **Postgres**: the `postgres` superuser and every per-workspace role connect with `trust` authentication — no password, ever. A workspace's role is simply named after its id, and its job queue lives in its own database.
 
 Example registry:
 
@@ -105,20 +103,20 @@ Ignore rules match slash-separated paths relative to each configured root. A bar
 
 `owner-identities` is optional and private, scoped to one workspace. Each entry is one mailbox. Entries are normalized, and a malformed or repeated entry fails loading without echoing the address. MCP callers cannot supply or replace the set.
 
-Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role/database and NATS streams from its id alone — nothing else to configure.
+Provisioning (`./pocket-advisor.sh deploy-workspaces`) walks every workspace listed in the registry and creates each one's Postgres role and database from its id alone — nothing else to configure.
 
 The full values shape is documented in [`charts/pocket-advisor-infra/values.yaml`](charts/pocket-advisor-infra/values.yaml).
 
 ## 4. Install and provision
 
-Bring up the shared stores and provision every registered workspace, then build the host binary:
+Bring up the shared store and provision every registered workspace, then build the host binary:
 
 ```sh
 ./pocket-advisor.sh deploy-infra
 ./pocket-advisor.sh build
 ```
 
-`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for PostgreSQL and NATS, and provisions every registered workspace. The chart contains no private workspace list.
+`deploy-infra` builds the local PostgreSQL image, installs or upgrades the chart, waits for PostgreSQL, and provisions every registered workspace. The chart contains no private workspace list.
 
 Re-run provisioning on its own after editing the registry, without touching the shared stores:
 
@@ -131,14 +129,13 @@ This command creates, idempotently, for every registered workspace:
 | Store | Workspace resources |
 | --- | --- |
 | PostgreSQL | database `<id>`, role `<id>`, `vector` and `pg_textsearch` extensions |
-| NATS | `INGESTION_<SUFFIX>` and `INGESTION_DLQ_<SUFFIX>` streams, namespaced by workspace id |
 
-The application applies the Tier 2/3 schema on the first ingest because the `halfvec` width comes from probing the host-local embedding endpoint.
+The application applies the Tier 2/3 schema, including the job queue's tables, on the first ingest because the `halfvec` width comes from probing the host-local embedding endpoint.
 
 ### Add another workspace
 
 1. Add it to `workspaces/workspaces.yaml`.
-2. Run `./pocket-advisor.sh deploy-workspaces` if shared stores are already running; otherwise run `./pocket-advisor.sh deploy-infra`.
+2. Run `./pocket-advisor.sh deploy-workspaces` if the shared store is already running; otherwise run `./pocket-advisor.sh deploy-infra`.
 3. Run an ingest to apply its schema and load content.
 
 ## 5. Ingest a workspace
@@ -155,7 +152,7 @@ Documents whose originals you deleted or newly ignored stay retrievable until `-
 # Hash originals and report counts without touching databases, queues or models.
 ./bin/pocket-advisor --ingest-all --workspace-id example --dry-run
 
-# Scan originals, redispatch unfinished jobs including broker-lost work, and process them.
+# Scan originals, retry jobs waiting for a restored source, and process unfinished jobs.
 ./bin/pocket-advisor --reconcile --workspace-id example
 
 # Scan at startup and every minute while processing jobs.
@@ -163,6 +160,8 @@ Documents whose originals you deleted or newly ignored stay retrievable until `-
 ```
 
 Admission has no queue-depth thresholds; the durable backlog can grow to fit the source collection, while worker concurrency remains bounded.
+
+A worker owns a job through a five-minute lease that it renews every thirty seconds. If the process is killed, its jobs stay `RUNNING` until their leases expire and are then claimed again, so the next run waits out the remainder — up to five minutes — before that work resumes. Each claim spends one of a job's three attempts; interruptions you cause with Ctrl+C return the job and refund it.
 
 File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if waiting or failed jobs remain. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
 
@@ -178,22 +177,23 @@ tail -f logs/document-extractor.log
 curl -s localhost:9090/metrics | rg '^rag_'
 ```
 
-Inspect the shared stores directly when needed:
+Inspect the shared store directly when needed:
 
 ```sh
-kubectl exec nats-0 -n pocket-advisor -- \
-  wget -qO- 'http://localhost:8222/jsz?accounts=true&streams=true'
-
 kubectl exec postgres-0 -n pocket-advisor -- \
   psql -U postgres -d example -c \
   'select processing_status, doc_type, count(*) from documents group by 1,2 order by 1,2;'
+
+kubectl exec postgres-0 -n pocket-advisor -- \
+  psql -U postgres -d example -c \
+  'select subject, state, count(*) from ingestion_jobs group by 1,2 order by 1,2;'
 ```
 
-`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A dead-lettered item is work that should have succeeded and did not. An ingest exits with failure when it dead-letters work.
+`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves failed or waiting jobs.
 
 ### Diagnose a workspace
 
-`--doctor` is read-only and writes nowhere. It checks the registry entry and resolved credentials, PostgreSQL, source-root and NATS reachability, the configured embedding model and dimension against what the schema recorded, the `vector` extension, the document and chunk tables and the HNSW and BM25 indexes, then counts jobs waiting on originals, documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes, `FAILED` and `SKIPPED` rows by reason, JetStream depth, and signs of an interrupted reset.
+`--doctor` is read-only and writes nowhere. It checks the registry entry and resolved credentials, PostgreSQL and source-root reachability, the configured embedding model and dimension against what the schema recorded, the `vector` extension, the document and chunk tables and the HNSW and BM25 indexes, then counts jobs per state, `RUNNING` jobs whose lease expired, jobs that spent every attempt, `FAILED` jobs by reason, jobs waiting on originals, documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes, `FAILED` and `SKIPPED` rows by reason, and signs of an interrupted reset. A job under a live lease is working, so its document is never reported stale, even while it still reads `PENDING` and it appears only in the queue summary. On a workspace created before the PostgreSQL queue, it reports `QUEUE_SCHEMA_UPGRADE_REQUIRED` and runs no job query; run an ingest to apply the schema.
 
 ```sh
 ./bin/pocket-advisor --doctor --workspace-id example
@@ -209,7 +209,7 @@ Each finding has a stable code, a severity, a count, a summary containing no con
 ./bin/pocket-advisor --recover --workspace-id example --yes
 ```
 
-Each item is classified retryable, terminal, converged, or not recoverable, with one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. The planner reads JetStream depth so it does not propose redriving work an active consumer still holds, and completed jobs always stay complete.
+Each item is classified retryable, terminal, converged, or not recoverable, with one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. Recovery runs under the workspace lock and refuses a document whose job holds a live lease. Applying a plan revalidates each document's jobs in its own transaction, refusing any item that changed since the plan was made, and resets the document and only its failed and expired jobs to a fresh retry cycle together; queued jobs, delayed retries and source waits keep their recorded failures, budgets and backoff. It refuses at once, rather than wait, if an expired handler of that job is still running. Each state contributes at most 500 documents to one plan; when a selection reaches that cap it says so, and applying the plan then running `--recover` again selects the next batch. A plan that fails validation is not applied, recovery refuses to run before the queue schema is current, and completed jobs always stay complete.
 
 ## 7. Retrieve evidence
 
@@ -475,7 +475,7 @@ Delete all content while leaving the workspace infrastructure ready for reuse:
 ./bin/pocket-advisor --delete-data --workspace-id example
 ```
 
-`--forget` and `--delete-data` prompt unless `--yes` is supplied. Forget retains independently present and shared descendants. A later ingestion can reintroduce forgotten bytes that remain configured; use `ignore` for persistent exclusion. `--delete-data` clears documents, passages, metadata/graphs, source inventory, jobs, and both workspace queues. Database deletion and broker purge are separate operations; rerun after a partial failure. Original files and configuration remain untouched.
+`--forget` and `--delete-data` prompt unless `--yes` is supplied. Forget retains independently present and shared descendants. A later ingestion can reintroduce forgotten bytes that remain configured; use `ignore` for persistent exclusion. `--delete-data` clears documents, passages, metadata/graphs, source inventory and jobs in one transaction. Original files and configuration remain untouched.
 
 Destroy the workspace infrastructure itself:
 
@@ -483,7 +483,7 @@ Destroy the workspace infrastructure itself:
 ./pocket-advisor.sh destroy-workspace example
 ```
 
-Then remove its entry from `workspaces/workspaces.yaml`. This removes its derived database and streams, not its original directories.
+Then remove its entry from `workspaces/workspaces.yaml`. This removes its derived database and role, not its original directories.
 
 ## 10. Verification
 
@@ -499,16 +499,16 @@ git diff --check
 git status --short
 ```
 
-`lint` runs formatting, Go vet, Helm lint, and a chart-render assertion. Install the repository’s commit-message hook once per clone with `install-hooks`.
+`lint` runs formatting, Go vet, Helm lint, and a chart-render assertion that the chart renders its one StatefulSet. Install the repository’s commit-message hook once per clone with `install-hooks`.
 
-For synthetic source integration tests, use disposable PostgreSQL with `vector` and `pg_textsearch`, plus disposable JetStream. Never point these variables at a workspace database or broker:
+For synthetic integration tests, use a disposable PostgreSQL with the `vector` and `pg_textsearch` extensions and superuser rights. Never point this variable at a workspace database:
 
 ```sh
 EMAIL_DSN=postgres://postgres@127.0.0.1:<test-port>/<disposable-db> \
-SOURCE_TEST_NATS=nats://127.0.0.1:<test-port> TAGS=ocr,manual ./pocket-advisor.sh test
+TAGS=ocr,manual ./pocket-advisor.sh test
 ```
 
-The tests include a synthetic embedding endpoint, source/attachment ingestion, unchanged reruns and rename identity, hybrid retrieval, source migration, transactional failure injection, broker loss, and derived-only reset. They do not establish private-corpus retrieval quality or production latency; use the private evaluation workflow in §8 for that deployment gate.
+The tests include a synthetic embedding endpoint, source/attachment ingestion, unchanged reruns and rename identity, hybrid retrieval, source and queue schema migration, concurrent claims, lease expiry and fences, notification and reconnect, transactional failure injection, crash exhaustion, and derived-only reset. They do not establish private-corpus retrieval quality or production latency; use the private evaluation workflow in §8 for that deployment gate.
 
 ## 11. Upgrade and teardown
 
@@ -520,7 +520,9 @@ Upgrade the shared-store release with the supported wrapper:
 
 Always use the wrapper rather than invoking Helm directly: it provisions every workspace via `deploy-workspaces` from `workspaces/workspaces.yaml` after the release rolls out.
 
-Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same stream, then check `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
+Upgrading the host binary is a rebuild. Before adopting one that changes extraction or schema, drain in-flight ingestion so no old and new consumer overlap on the same queue, then check `--doctor` and run the private retrieval evaluation in [§8](#8-evaluate-retrieval-quality) before accepting the deployment.
+
+A workspace whose job queue still has the layout from before the PostgreSQL queue upgrades like this: keep a database backup, stop the old host process, rebuild the binary, run `./pocket-advisor.sh deploy-infra` to update the chart, then start any ingestion mode. Ingestion takes the workspace lock, applies the queue schema in one transaction before any worker starts, and carries every unfinished job across; a job the old process had dispatched but not finished runs again, from zero attempts. `--doctor` reports `QUEUE_SCHEMA_UPGRADE_REQUIRED` until then. A binary from before the upgrade cannot use the upgraded database, so downgrading means restoring the backup. `deploy-infra` removes the retired message-broker workload but never its volume: it reports any storage it finds, and reclaiming it with `kubectl delete pvc` is your decision.
 
 Keep a recoverable database backup across any upgrade: re-ingesting current originals rebuilds an index but cannot recover overwritten historical bytes or recreate previous document UUIDs and evaluation references.
 
@@ -538,7 +540,7 @@ Permanently delete every retained PVC in the `pocket-advisor` namespace:
 ./pocket-advisor.sh destroy-state
 ```
 
-The latter removes retained PostgreSQL and JetStream state for every workspace. It cannot be undone. Original source directories are outside these PVCs.
+The latter removes retained PostgreSQL state for every workspace. It cannot be undone. Original source directories are outside these PVCs.
 
 Optional metrics-server has an independent lifecycle:
 

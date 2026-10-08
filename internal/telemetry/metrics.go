@@ -42,6 +42,11 @@ var (
 		Help: "Work that should have succeeded and did not, by worker and reason.",
 	}, []string{"worker", "reason"})
 
+	LeasesLost = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rag_job_leases_lost_total",
+		Help: "Claims abandoned because ownership was lost or could no longer be confirmed, by worker.",
+	}, []string{"worker"})
+
 	PDFClassification = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "rag_pdf_classification_total",
 		Help: "Digital vs scanned routing split.",

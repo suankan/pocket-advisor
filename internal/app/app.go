@@ -8,12 +8,9 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"log/slog"
 
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/limits"
 	"github.com/suankan/pocket-advisor/internal/source"
@@ -35,7 +32,6 @@ type App struct {
 	Docs   *postgres.DocumentRepo
 	Chunks *postgres.ChunkRepo
 	Emails *postgres.EmailRepo
-	Bus    *bus.Bus
 
 	// CPU is the single bound on genuinely CPU-bound work — rasterisation and
 	// OCR — shared across every lane in the process.
@@ -47,15 +43,14 @@ type App struct {
 type Needs struct {
 	Sources  bool
 	Postgres bool
-	NATS     bool
 	Metrics  bool
 }
 
 // New builds what the requested modes need and nothing more.
 //
-// workspaceID selects whose Postgres database, source roots, and NATS
-// account to connect to (workspace-isolation.md §2) — every store this
-// process touches is scoped to one workspace, never a shared identity.
+// workspaceID selects whose Postgres database and source roots to use
+// (workspace-isolation.md §2) — every store this process touches is scoped to
+// one workspace, never a shared identity.
 // Required whenever any Need is set; New returns an error otherwise.
 //
 // ctx governs connection setup and is retained by the stores; the caller owns
@@ -73,16 +68,13 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		a.stopFns = append(a.stopFns, func() { _ = shutdown(context.Background()) })
 	}
 
-	var w config.Workspace
 	if workspaceID != "" {
-		var err error
-		w, err = cfg.Workspace(workspaceID)
-		if err != nil {
+		if _, err := cfg.Workspace(workspaceID); err != nil {
 			return nil, err
 		}
 	}
 
-	if (needs.Sources || needs.Postgres || needs.NATS) && workspaceID == "" {
+	if (needs.Sources || needs.Postgres) && workspaceID == "" {
 		return nil, fmt.Errorf("a workspace id is required")
 	}
 
@@ -95,14 +87,9 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		if err != nil {
 			return nil, err
 		}
-		meta, scopeErr := db.LoadSchemaMetadata(ctx)
-		if scopeErr == nil && meta.WorkspaceID != workspaceID {
+		if err := db.AssertWorkspaceScope(ctx, workspaceID); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("database workspace scope mismatch")
-		}
-		if scopeErr != nil && !errors.Is(scopeErr, pgx.ErrNoRows) && !postgres.IsUndefinedTable(scopeErr) {
-			db.Close()
-			return nil, scopeErr
+			return nil, err
 		}
 		a.DB = db
 		a.Docs = postgres.NewDocumentRepo(db)
@@ -127,23 +114,8 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 		a.stopFns = append(a.stopFns, a.Sources.Close)
 	}
 
-	if needs.NATS {
-		b, err := bus.Connect(ctx, w.NATSURL, workspaceID)
-		if err != nil {
-			return nil, err
-		}
-		// Deliberately does not create streams. deploy-workspaces owns that
-		// lifecycle through natscli, and creating them here too would make Go
-		// a second writer. A missing stream means that command has not run for
-		// this workspace, which the pipeline reports when it attaches a
-		// consumer.
-		a.Bus = b
-		a.stopFns = append(a.stopFns, b.Close)
-	}
-
 	a.Log.Info("dependencies ready",
 		"cpus", limits.CPUs,
-		"nats", w.NATSURL,
 		"metrics_port", cfg.MetricsPort)
 	return a, nil
 }

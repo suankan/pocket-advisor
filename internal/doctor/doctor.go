@@ -14,7 +14,7 @@ import (
 const StalenessThreshold = 30 * time.Minute
 
 // Doctor performs read-only health checks on a workspace. It never writes
-// to PostgreSQL, sources, NATS, or any other store.
+// to PostgreSQL, sources, or any other store.
 type Doctor struct {
 	checks    Checks
 	workspace string
@@ -29,9 +29,9 @@ type Checks struct {
 	CredsOK    bool // credential values match workspace
 
 	// Store reachability
-	PGRaw      bool // PostgreSQL ping succeeded
-	SourcesRaw bool // configured roots available
-	NATSRaw    bool // NATS connection alive
+	ScopeMismatch bool // the database is recorded for a different workspace
+	PGRaw         bool // PostgreSQL ping succeeded
+	SourcesRaw    bool // configured roots available
 
 	// Embedding
 	EmbedModelOK bool   // model matches schema_metadata
@@ -59,11 +59,15 @@ type Checks struct {
 	FailedByReason  map[string]int // FAILED rows grouped by reason
 	SkippedByReason map[string]int // SKIPPED rows grouped by reason
 
-	// JetStream state
-	StreamsOK       bool
-	IngestionMsgs   uint64
-	DLQMsgs         uint64
-	ConsumerPending uint64
+	// Job queue. QueueSchemaChecked is false when PostgreSQL could not be
+	// probed; QueueSchemaReady is false on the pre-upgrade layout, whose job
+	// columns the remaining fields cannot be read from.
+	QueueSchemaChecked bool
+	QueueSchemaReady   bool
+	JobsByState        map[string]int // jobs per state
+	ExpiredLeases      int            // RUNNING jobs whose lease expired
+	ExhaustedBudgets   int            // unfinished jobs that spent every attempt
+	FailedJobsByReason map[string]int // FAILED jobs grouped by closed reason
 
 	// Partial reset
 	IncompleteReset bool // signs of an interrupted wipe or forget
@@ -97,6 +101,11 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	}
 
 	// 2. Store reachability
+	if d.checks.ScopeMismatch {
+		addFinding(&findings, "WORKSPACE_SCOPE_MISMATCH", SeverityCritical, 1,
+			"the database is recorded for a different workspace; no queue or document check was run against it",
+			"point the workspace credentials at its own database; never reuse another workspace's")
+	}
 	if !d.checks.PGRaw {
 		addFinding(&findings, "PG_UNREACHABLE", SeverityCritical, 1,
 			"PostgreSQL connection failed",
@@ -107,10 +116,13 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 			"source roots unavailable",
 			"check configured source directories and mounts")
 	}
-	if !d.checks.NATSRaw {
-		addFinding(&findings, "NATS_UNREACHABLE", SeverityCritical, 1,
-			"NATS connection failed",
-			"check nats StatefulSet health and workspace account/user")
+
+	// A database recorded for another workspace is not read further: every
+	// remaining check would describe someone else's data.
+	if d.checks.ScopeMismatch {
+		r.Findings = findings
+		r.Healthy = false
+		return r
 	}
 
 	// 3. Embedding endpoint
@@ -149,7 +161,26 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 			"run --ingest-all which rebuilds it after writes land")
 	}
 
-	// 5. Source inventory gaps
+	// 5. Job queue layout and state
+	if d.checks.PGSchemaOK && d.checks.QueueSchemaChecked && !d.checks.QueueSchemaReady {
+		addFinding(&findings, "QUEUE_SCHEMA_UPGRADE_REQUIRED", SeverityError, 1,
+			"the job queue uses the layout from before the PostgreSQL queue; queue findings are unavailable",
+			"stop any running ingestion process, then run --ingest-all (or --reconcile): "+
+				"it applies the schema under maintenance exclusion before any worker starts")
+	}
+	addFinding(&findings, "JOBS_EXPIRED_LEASES", SeverityWarning, d.checks.ExpiredLeases,
+		"RUNNING jobs whose lease expired: the worker that claimed them is gone",
+		"run --ingest-all or --reconcile: the next run reclaims them; if a run is active they are already being retried")
+	addFinding(&findings, "JOBS_EXHAUSTED_BUDGET", SeverityError, d.checks.ExhaustedBudgets,
+		"jobs that spent every attempt without finishing; their next claim fails them without running",
+		"run --ingest-all to record the failure, then --recover to plan a fresh retry cycle")
+	for reason, count := range d.checks.FailedJobsByReason {
+		addFinding(&findings, "JOBS_FAILED_REASON_"+strings.ToUpper(reason), SeverityError, count,
+			fmt.Sprintf("FAILED jobs with reason %s", reason),
+			classifyAction(reason))
+	}
+
+	// 6. Source inventory gaps
 	addFinding(&findings, "SOURCE_WAITING_JOBS", SeverityWarning, d.checks.SourceWaitingJobs,
 		"ingestion jobs waiting for original files",
 		"restore the expected originals, then run --reconcile")
@@ -157,7 +188,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 		"documents without an observed original-file route",
 		"restore expected originals and run --reconcile, or review the pruning plan")
 
-	// 6. Stale document rows
+	// 7. Stale document rows
 	addFinding(&findings, "STALE_PENDING", SeverityWarning, d.checks.StalePending,
 		"PENDING rows stuck beyond staleness threshold",
 		"run --reconcile to re-publish, or --recover to plan recovery")
@@ -165,33 +196,18 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 		"PROCESSING rows stuck beyond staleness threshold (handler likely crashed)",
 		"run --recover to reset and re-process")
 
-	// 7. Failed rows by reason
+	// 8. Failed rows by reason
 	for reason, count := range d.checks.FailedByReason {
 		addFinding(&findings, "FAILED_REASON_"+strings.ToUpper(reason), SeverityError, count,
 			fmt.Sprintf("FAILED documents with reason %s", reason),
 			classifyAction(reason))
 	}
 
-	// 8. Skipped rows by reason
+	// 9. Skipped rows by reason
 	for reason, count := range d.checks.SkippedByReason {
 		addFinding(&findings, "SKIPPED_REASON_"+strings.ToUpper(reason), SeverityInfo, count,
 			fmt.Sprintf("SKIPPED documents with reason %s", reason),
 			"expected decline — no action needed unless these should be processed")
-	}
-
-	// 9. JetStream state
-	if !d.checks.StreamsOK {
-		addFinding(&findings, "JS_STREAMS_MISSING", SeverityCritical, 1,
-			"one or more JetStream streams missing",
-			"run ./pocket-advisor.sh deploy-workspaces to create streams")
-	}
-	addFinding(&findings, "JS_DLQ_DEPTH", SeverityInfo, int(d.checks.DLQMsgs),
-		"messages in the dead letter queue",
-		"inspect DLQ for terminal failures needing investigation")
-	if d.checks.ConsumerPending > 0 {
-		addFinding(&findings, "JS_CONSUMER_PENDING", SeverityInfo, int(d.checks.ConsumerPending),
-			"messages pending in ingestion consumers",
-			"normal during ingestion; persistent pending indicates stuck consumers")
 	}
 
 	// 10. Incomplete reset
@@ -203,6 +219,9 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 
 	r.Findings = findings
 	r.Healthy = len(findings) == 0
+	if len(d.checks.JobsByState) > 0 {
+		r.Queue = d.checks.JobsByState
+	}
 	return r
 }
 
@@ -217,6 +236,6 @@ func classifyAction(reason string) string {
 	case domain.ClassExpectedDecline:
 		return "expected decline — no action needed"
 	default:
-		return "operator judgment required — inspect the DLQ entry"
+		return "operator judgment required — inspect the failed job and its document"
 	}
 }

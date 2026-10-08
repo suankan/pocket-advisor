@@ -14,7 +14,7 @@ message DocumentMetadata {
   // subdivision (ingestion-design.md §3.1); field 4 named the collection
   // that concept used to require and is retired rather than reused. field 3
   // named the workspace itself: every process in the pipeline already
-  // connects to that one workspace's own database and NATS stream
+  // connects to that one workspace's own database
   // (deviation 34), so nothing ever read this field for a decision — it was
   // set at discovery and carried, unread, to wherever a command happened to
   // travel. Retired rather than reused, like field 4.
@@ -87,10 +87,10 @@ message ProcessImageCommand {
 
 // EmbedTextCommand -> ingest.text.embed
 //
-// Carries a doc_id REFERENCE, not the text. NATS caps message payload at 1MB
-// by default and a large OCR'd document exceeds it — failing at the end of the
-// most expensive work in the pipeline. The extractor writes
-// documents.normalized_text; the indexer reads it back (§4.1).
+// Carries a doc_id REFERENCE, not the text. A large OCR'd document would
+// otherwise bloat every job row and be copied on each claim, retry and
+// recovery. The extractor writes documents.normalized_text; the indexer reads
+// it back (§4.1).
 message EmbedTextCommand {
   DocumentMetadata metadata = 1;
   // Character length of the text awaiting embedding, for batch budgeting.

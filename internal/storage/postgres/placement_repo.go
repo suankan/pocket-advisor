@@ -16,7 +16,7 @@ import (
 // whose content was already known: that second, third and fourth observation
 // is exactly the information documents.parent_doc_id throws away, and the
 // only thing that can later say a shared attachment is still being held.
-// Repeat calls are expected — the same email is re-extracted on redelivery —
+// Repeat calls are expected — the same email is re-extracted on a retry —
 // so a placement that already exists is success, not a conflict.
 func (r *DocumentRepo) RecordPlacement(ctx context.Context, containerID, containedID string) error {
 	if containerID == "" || containedID == "" {
@@ -264,7 +264,7 @@ func (r *DocumentRepo) ContainerDocuments(ctx context.Context, after string, lim
 // Asked only on a failure path, where the question is whether the work failed
 // or its subject was deliberately removed. A pruned document makes every
 // downstream write fail — a chunk placement has nothing to reference — and
-// those failures are not the work's fault and not worth a dead letter.
+// those failures are not the work's fault and not worth a failed job.
 func (r *DocumentRepo) Exists(ctx context.Context, docID string) (bool, error) {
 	var ok bool
 	err := r.db.executor(ctx).QueryRow(ctx,

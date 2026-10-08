@@ -78,8 +78,8 @@ const usage = `pocket-advisor — ingestion pipeline for a local RAG corpus.
 Modes (exactly one):
   --ingest-all        scan configured originals and process queued jobs; never
                       deletes (see --reconcile-deletions)
-  --reconcile         scan configured originals, redispatch unfinished durable
-                      jobs including broker-lost work, and process them
+  --reconcile         scan configured originals, retry jobs waiting for a source
+                      that has returned, and process unfinished durable jobs
   --listen            scan at startup and every minute while processing jobs
   --query <question>  ask the corpus a question and print the matching
                       sources, with citations. Returns evidence, not an
@@ -100,7 +100,8 @@ Modes (exactly one):
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
-  --delete-data       clear derived database state and queues; preserve original files
+  --delete-data       clear derived database state and the job queue; preserve
+                      original files
   --forget <sha256>   remove one document by content hash
   --reconcile-deletions
                       sweep away documents nothing stages any more; ingestion
@@ -222,9 +223,9 @@ func Parse(args []string) (*Options, error) {
 	fs.StringVar(&o.WorkspaceID, "workspace-id", "", "workspace id within the registry")
 
 	fs.BoolVar(&o.IngestAll, "ingest-all", false, "scan originals, enqueue and process to completion")
-	fs.BoolVar(&o.Reconcile, "reconcile", false, "re-publish stalled PENDING documents, then process")
+	fs.BoolVar(&o.Reconcile, "reconcile", false, "scan originals, retry source waits and process unfinished jobs")
 	fs.BoolVar(&o.Listen, "listen", false, "scan originals every minute while running the pipeline")
-	fs.BoolVar(&o.DeleteData, "delete-data", false, "clear derived database state and queues; preserve original files")
+	fs.BoolVar(&o.DeleteData, "delete-data", false, "clear derived database state and the job queue; preserve original files")
 	fs.StringVar(&o.Forget, "forget", "", "remove one document by sha256")
 	fs.BoolVar(&o.ReconcileDeletions, "reconcile-deletions", false,
 		"remove documents whose staged file is gone (plans unless --yes)")
@@ -428,10 +429,10 @@ func Run(o *Options) error {
 
 // interrupts wires the two-stage stop.
 //
-// The first signal stops fetching but lets in-flight handlers finish and ack.
-// Abandoning them unacked would burn one of their three delivery attempts, so
-// three interrupted runs would dead-letter documents that were never broken.
-// The second signal, or a drain that overruns, cancels the work itself.
+// The first signal stops claiming but lets in-flight handlers finish and
+// complete. The second signal, or a drain that overruns, cancels the work
+// itself; each cancelled job is returned to the queue with its attempt
+// refunded, so interrupted runs never spend a document's retry budget.
 func interrupts(parent context.Context, log interface{ Info(string, ...any) }) (fetchCtx, workCtx context.Context, stop func()) {
 	fetch, stopFetch := context.WithCancel(parent)
 	work, stopWork := context.WithCancel(parent)
@@ -474,8 +475,8 @@ func interrupts(parent context.Context, log interface{ Info(string, ...any) }) (
 }
 
 // drainGrace bounds how long a graceful stop waits. Comfortably under the
-// broker's 5-minute AckWait, so anything still running when it elapses would
-// have been redelivered anyway.
+// 5-minute job lease, so a handler still running when it elapses is cancelled
+// while it still owns its job and can hand it back cleanly.
 const drainGrace = 2 * time.Minute
 
 // confirm gates a destructive action on stdin. A variable so tests can answer.

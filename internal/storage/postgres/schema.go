@@ -324,7 +324,7 @@ const searchIndexName = "chunks_bm25_idx"
 // Deliberately not part of schemaSQL. pg_textsearch's own guidance is to
 // load data before indexing it — its write path is not yet optimised for
 // sustained concurrent inserts, and this application's ingestion is exactly
-// that: one row per chunk, streamed continuously by a NATS worker, not a
+// that: one row per chunk, streamed continuously by the worker pools, not a
 // single bulk load. Callers build this once, after every write for a run has
 // landed (retrieval-design.md §3.3).
 //
@@ -466,6 +466,28 @@ func (d *DB) LoadSchemaMetadata(ctx context.Context) (SchemaMetadata, error) {
          FROM schema_metadata WHERE id`).
 		Scan(&m.WorkspaceID, &m.EmbedModel, &m.EmbedDim, &m.TruncatedDim)
 	return m, err
+}
+
+// ErrScopeMismatch reports a populated database recorded for another workspace.
+var ErrScopeMismatch = errors.New("database workspace scope mismatch")
+
+// AssertWorkspaceScope refuses to treat a populated database as workspaceID's
+// when schema_metadata records a different workspace. A database that has no
+// schema yet is not populated and passes. Every client that touches the queue
+// — ingestion, doctor and recovery — asserts this first, so no request field or
+// shared fallback can point the queue at another workspace's data.
+func (d *DB) AssertWorkspaceScope(ctx context.Context, workspaceID string) error {
+	meta, err := d.LoadSchemaMetadata(ctx)
+	if err == nil {
+		if meta.WorkspaceID != workspaceID {
+			return ErrScopeMismatch
+		}
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) || IsUndefinedTable(err) {
+		return nil
+	}
+	return err
 }
 
 // VerifyDimension is the fatal startup check. A worker that embeds at one

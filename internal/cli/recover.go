@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/doctor"
@@ -12,6 +14,21 @@ import (
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
+
+// recoverySelectionCap bounds how many documents each state contributes to one
+// plan, so a plan stays reviewable. A selection that reaches it says so: more
+// exist, and applying this plan and running --recover again selects the next
+// batch.
+const recoverySelectionCap = 500
+
+// noteIfCapped tells the operator a selection stopped at the cap. It writes to
+// stderr so --json output stays machine-readable.
+func noteIfCapped(selected int, state string) {
+	if selected >= recoverySelectionCap {
+		fmt.Fprintf(os.Stderr, "note: %d %s documents selected, the per-run cap; more may exist — apply, then run --recover again\n",
+			selected, state)
+	}
+}
 
 // runRecover executes the --recover mode: plan and optionally apply recovery.
 func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
@@ -28,11 +45,26 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer db.Close()
+	// Scope is asserted before any queue access.
+	if err := db.AssertWorkspaceScope(ctx, o.WorkspaceID); err != nil {
+		return err
+	}
 	unlock, err := db.LockMaintenance(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+
+	// The queue columns recovery reads and resets exist only after the
+	// upgrade; refuse on the old layout rather than run a query it cannot answer.
+	ready, err := db.QueueSchemaReady(ctx)
+	if err != nil {
+		return fmt.Errorf("check queue schema: %w", err)
+	}
+	if !ready {
+		return fmt.Errorf("the job queue schema needs the upgrade first: stop any running " +
+			"ingestion, then run --reconcile, which applies it under maintenance exclusion")
+	}
 
 	q := postgres.NewDoctorQueries(db)
 	threshold := doctor.StalenessThreshold
@@ -41,10 +73,11 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	var docs []doctor.RecoveryItem
 
 	// Stale PENDING
-	sp, err := q.StalePENDING(ctx, threshold, 500)
+	sp, err := q.StalePENDING(ctx, threshold, recoverySelectionCap)
 	if err != nil {
 		log.Warn("query stale pending failed", "error", err)
 	}
+	noteIfCapped(len(sp), "stale PENDING")
 	for _, d := range sp {
 		docs = append(docs, doctor.RecoveryItem{
 			DocID:  d.DocID,
@@ -54,10 +87,11 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	// Stale PROCESSING
-	sproc, err := q.StalePROCESSING(ctx, threshold, 500)
+	sproc, err := q.StalePROCESSING(ctx, threshold, recoverySelectionCap)
 	if err != nil {
 		log.Warn("query stale processing failed", "error", err)
 	}
+	noteIfCapped(len(sproc), "stale PROCESSING")
 	for _, d := range sproc {
 		docs = append(docs, doctor.RecoveryItem{
 			DocID:  d.DocID,
@@ -67,10 +101,11 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	// Retryable FAILED
-	failed, err := q.RetryableFAILED(ctx, 500)
+	failed, err := q.RetryableFAILED(ctx, recoverySelectionCap)
 	if err != nil {
 		log.Warn("query retryable failed failed", "error", err)
 	}
+	noteIfCapped(len(failed), "retryable FAILED")
 	for _, d := range failed {
 		fr := domain.FailureReason(d.Reason)
 		if domain.Retryable(fr) {
@@ -82,18 +117,31 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		}
 	}
 
-	// Create and run the planner
+	// Attach each document's jobs, so the plan sees live leases and the
+	// application step can revalidate exactly what was planned.
+	ids := make([]string, 0, len(docs))
+	for _, d := range docs {
+		ids = append(ids, d.DocID)
+	}
+	jobs, err := q.JobsForDocuments(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("read jobs: %w", err)
+	}
+	for i := range docs {
+		for _, j := range jobs[docs[i].DocID] {
+			docs[i].Jobs = append(docs[i].Jobs, doctor.JobRef{
+				ID: j.ID, State: j.State, Generation: j.Generation, Attempts: j.Attempts, Live: j.Live,
+			})
+		}
+	}
+
 	planner := doctor.NewPlanner(doctor.RecoverConfig{
 		WorkspaceID: o.WorkspaceID,
 		Yes:         o.Yes,
-	}, docs, nil) // nil bus — no active stream check in basic mode
+	}, docs)
 
 	plan := planner.Plan(ctx)
-
-	// Validate the plan
-	if err := planner.Validate(ctx, plan); err != nil {
-		log.Warn("plan validation", "error", err)
-	}
+	validation := planner.Validate(ctx, plan)
 
 	// Output
 	if o.JSON {
@@ -104,6 +152,15 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		fmt.Println(string(b))
 	} else {
 		printPlan(plan)
+	}
+
+	// A validation failure stops application. A dry run still reports it.
+	if validation != nil {
+		if !plan.DryRun {
+			return validation
+		}
+		fmt.Printf("\n%v\n", validation)
+		return nil
 	}
 
 	// Execute if not dry-run
@@ -134,8 +191,8 @@ func printPlan(plan *doctor.RecoveryPlan) {
 		if item.Reason != "" {
 			fmt.Printf("    reason: %s\n", item.Reason)
 		}
-		if item.MessagePublish != "" {
-			fmt.Printf("    → %s\n", item.MessagePublish)
+		if item.Requeue != "" {
+			fmt.Printf("    → %s\n", item.Requeue)
 		}
 		if item.ObjectOperation != "" {
 			fmt.Printf("    → %s\n", item.ObjectOperation)
@@ -145,14 +202,24 @@ func printPlan(plan *doctor.RecoveryPlan) {
 
 // executeRecovery applies the plan by transitioning documents.
 func executeRecovery(ctx context.Context, q *postgres.DoctorQueries, plan *doctor.RecoveryPlan, log *slog.Logger) error {
-	var applied, failed int
+	var applied, failed, refused int
 
 	for _, item := range plan.Items {
 		if item.Action == doctor.ActionSkip || item.Action == doctor.ActionRefuse {
 			continue
 		}
 
-		ok, err := q.ResetToPENDING(ctx, item.DocID)
+		expected := make([]postgres.DoctorJob, 0, len(item.Jobs))
+		for _, j := range item.Jobs {
+			expected = append(expected, postgres.DoctorJob{ID: j.ID, State: j.State, Generation: j.Generation})
+		}
+		ok, err := q.ResetToPENDING(ctx, item.DocID, expected)
+		if errors.Is(err, postgres.ErrJobLive) || errors.Is(err, postgres.ErrPlanChanged) {
+			// Revalidation failed: nothing was changed for this document.
+			log.Warn("recovery refused for document", "doc_id", item.DocID, "error", err)
+			refused++
+			continue
+		}
 		if err != nil {
 			log.Error("reset to pending failed", "doc_id", item.DocID, "error", err)
 			failed++
@@ -166,6 +233,6 @@ func executeRecovery(ctx context.Context, q *postgres.DoctorQueries, plan *docto
 		}
 	}
 
-	fmt.Printf("\napplied: %d, failed: %d, total: %d\n", applied, failed, len(plan.Items))
+	fmt.Printf("\napplied: %d, refused: %d, failed: %d, total: %d\n", applied, refused, failed, len(plan.Items))
 	return nil
 }

@@ -30,7 +30,7 @@ func runQuery(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	log := logs.Logger(telemetry.RoleApp)
 
 	// The read path needs Postgres and the model endpoints, and nothing else:
-	// no source roots, no NATS, no worker pools.
+	// no source roots, no worker pools.
 	dsn, err := cfg.WorkspacePostgresDSN(o.WorkspaceID)
 	if err != nil {
 		return err

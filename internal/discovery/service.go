@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -98,7 +97,7 @@ func (s *Service) backfill(ctx context.Context, id string, data []byte, route Ro
 	return s.backfillBounded(ctx, id, data, route, name, depth, &budget)
 }
 func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, route Route, name string, depth int, budget *int64) error {
-	if route.Subject != bus.SubjectEmails || depth >= 8 {
+	if route.Subject != postgres.SubjectEmails || depth >= 8 {
 		return nil
 	}
 	children, err := source.Children(data, route.MimeType, name)
@@ -137,19 +136,19 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 }
 func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.DocumentMetadata, uri string, data []byte, tp string) error {
 	switch route.Subject {
-	case bus.SubjectEmails:
+	case postgres.SubjectEmails:
 		return s.Jobs.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessEmailCommand{Metadata: meta, SourceRef: uri}, tp)
 
-	case bus.SubjectPDFs:
+	case postgres.SubjectPDFs:
 		return s.Jobs.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessPdfCommand{Metadata: meta, SourceRef: uri}, tp)
 
-	case bus.SubjectDocx:
+	case postgres.SubjectDocx:
 		return s.Jobs.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessOfficeCommand{Metadata: meta, SourceRef: uri, Subtype: route.Subtype}, tp)
 
-	case bus.SubjectImages:
+	case postgres.SubjectImages:
 		// Dimensions are recorded here so the viability gate can decide
 		// without a second fetch (§4.1).
 		w, h := imageDimensions(data)
@@ -158,7 +157,7 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 			Width: int32(w), Height: int32(h), ByteSize: int64(len(data)),
 		}, tp)
 
-	case bus.SubjectEmbed:
+	case postgres.SubjectEmbed:
 		// Plain text needs no extraction pass, but normalized_text must still
 		// be written before the command goes out: the command carries a
 		// reference, not the text (§4.1).
@@ -244,7 +243,7 @@ func (s *Service) ResumeLegacy(ctx context.Context, scan string) error {
 	for _, d := range docs {
 		meta := &ingestionv1.DocumentMetadata{DocId: d.id, RawSha256: d.hash, SourceFilename: d.name, MimeType: d.mime, Traceparent: trace.NewTraceparent()}
 		if d.text != "" {
-			if err := s.Jobs.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: meta, TextLength: int64(len(d.text))}, meta.Traceparent); err != nil {
+			if err := s.Jobs.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: meta, TextLength: int64(len(d.text))}, meta.Traceparent); err != nil {
 				return err
 			}
 			continue

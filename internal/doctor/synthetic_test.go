@@ -100,7 +100,7 @@ func TestSyntheticStoresDownScenario(t *testing.T) {
 	for _, f := range r.Findings {
 		codes[f.Code] = true
 	}
-	for _, code := range []string{"PG_UNREACHABLE", "SOURCES_UNREACHABLE", "NATS_UNREACHABLE"} {
+	for _, code := range []string{"PG_UNREACHABLE", "SOURCES_UNREACHABLE"} {
 		if !codes[code] {
 			t.Errorf("missing finding: %s", code)
 		}
@@ -139,7 +139,7 @@ func TestSyntheticTierGapsScenario(t *testing.T) {
 
 func TestSyntheticRecoveryMixedScenario(t *testing.T) {
 	items := SyntheticRecoveryItems("mixed")
-	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items)
 	plan := p.Plan(nil)
 
 	counts := map[RecoveryClassification]int{}
@@ -167,7 +167,7 @@ func TestSyntheticRecoveryMixedScenario(t *testing.T) {
 
 func TestSyntheticRecoveryAllRetryableScenario(t *testing.T) {
 	items := SyntheticRecoveryItems("all_retryable")
-	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items)
 	plan := p.Plan(nil)
 
 	for _, item := range plan.Items {
@@ -179,7 +179,7 @@ func TestSyntheticRecoveryAllRetryableScenario(t *testing.T) {
 
 func TestSyntheticRecoveryAllTerminalScenario(t *testing.T) {
 	items := SyntheticRecoveryItems("all_terminal")
-	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items)
 	plan := p.Plan(nil)
 
 	for _, item := range plan.Items {
@@ -194,7 +194,7 @@ func TestSyntheticRecoveryAllTerminalScenario(t *testing.T) {
 
 func TestSyntheticRecoveryAllConvergedScenario(t *testing.T) {
 	items := SyntheticRecoveryItems("all_converged")
-	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items)
 	plan := p.Plan(nil)
 
 	for _, item := range plan.Items {
@@ -206,7 +206,7 @@ func TestSyntheticRecoveryAllConvergedScenario(t *testing.T) {
 
 func TestSyntheticRecoveryEmptyScenario(t *testing.T) {
 	items := SyntheticRecoveryItems("empty")
-	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "synthetic"}, items)
 	plan := p.Plan(nil)
 
 	if len(plan.Items) != 0 {

@@ -8,15 +8,13 @@ import (
 	"log/slog"
 )
 
-type QueuePurger interface{ PurgeQueues(context.Context) error }
 type Resetter struct {
-	docs   *postgres.DocumentRepo
-	queues QueuePurger
-	log    *slog.Logger
+	docs *postgres.DocumentRepo
+	log  *slog.Logger
 }
 
-func NewResetter(docs *postgres.DocumentRepo, queues QueuePurger, log *slog.Logger) *Resetter {
-	return &Resetter{docs, queues, log}
+func NewResetter(docs *postgres.DocumentRepo, log *slog.Logger) *Resetter {
+	return &Resetter{docs, log}
 }
 func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
@@ -26,10 +24,9 @@ func (r *Resetter) Wipe(ctx context.Context, workspaceID string) error {
 	if err != nil {
 		return err
 	}
+	// One transaction removes documents, derived data, source inventory and the
+	// job queue together, so a wipe never leaves jobs naming rows that are gone.
 	r.log.Info("derived documents removed", "count", n)
-	if r.queues != nil {
-		return r.queues.PurgeQueues(ctx)
-	}
 	return nil
 }
 func (r *Resetter) Forget(ctx context.Context, workspaceID, sha string) error {

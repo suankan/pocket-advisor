@@ -59,13 +59,13 @@ const (
 
 	// ReasonDocumentPruned marks work whose document no longer exists.
 	//
-	// Pruning removes documents nothing stages any more, and a queue is not
-	// transactional with it: messages enqueued before a sweep can still name a
-	// document the sweep has since deleted. That is an expected outcome of the
-	// two running at all, not a failure of the work — the document was
-	// deliberately removed — so the message is acked and nothing is
-	// dead-lettered. Dead-lettering instead would fill the DLQ with entries
-	// whose documents an operator cannot inspect, because they are gone.
+	// Pruning removes documents nothing stages any more, and a job in flight
+	// is not transactional with it: work claimed before a sweep can still name
+	// a document the sweep has since deleted. That is an expected outcome of
+	// the two running at all, not a failure of the work — the document was
+	// deliberately removed — so nothing is recorded as failed. Failing it
+	// instead would leave entries whose documents an operator cannot inspect,
+	// because they are gone.
 	ReasonDocumentPruned FailureReason = "DOCUMENT_PRUNED"
 
 	// ReasonUnclassified is what an error that nobody classified becomes.

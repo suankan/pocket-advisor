@@ -29,8 +29,9 @@ type Queue struct {
 func (q *Queue) LaneStarted()  { q.active.Add(1) }
 func (q *Queue) LaneFinished() { q.active.Add(-1) }
 
-// SetPending records queue depth, polled from the consumer rather than counted
-// here — the broker is the only authority on how much work is still waiting.
+// SetPending records queue depth, sampled from the job table rather than
+// counted here — the table is the only authority on how much work is still
+// waiting, delayed retries and expired claims included.
 func (q *Queue) SetPending(n int64) { q.pending.Store(n) }
 
 func (q *Queue) Active() int64 { return q.active.Load() }

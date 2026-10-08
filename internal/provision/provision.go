@@ -1,5 +1,5 @@
 // Package provision applies the workspace schema after probing the local
-// embedding dimension. The host wrapper provisions databases and NATS streams.
+// embedding dimension. The host wrapper provisions databases.
 package provision
 
 import (

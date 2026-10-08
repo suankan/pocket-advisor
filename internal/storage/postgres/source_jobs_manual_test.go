@@ -4,29 +4,13 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/source"
-	"google.golang.org/protobuf/proto"
-	"os"
 	"testing"
 	"time"
 )
 
-type recordingPublisher struct {
-	jobs []Job
-	fail bool
-}
-
-func (p *recordingPublisher) PublishJob(_ context.Context, subject string, payload []byte, tp, id string, generation int64) error {
-	p.jobs = append(p.jobs, Job{ID: id, Subject: subject, Payload: payload, Generation: generation})
-	if p.fail {
-		return errors.New("lost publication acknowledgement")
-	}
-	return nil
-}
 func setupSourceJob(t *testing.T) (*DB, *DocumentRepo, *Jobs, string, *ingestionv1.ProcessPdfCommand) {
 	t.Helper()
 	db, _ := scratch(t, "source_"+t.Name())
@@ -42,106 +26,6 @@ func setupSourceJob(t *testing.T) (*DB, *DocumentRepo, *Jobs, string, *ingestion
 	}
 	cmd := &ingestionv1.ProcessPdfCommand{Metadata: &ingestionv1.DocumentMetadata{DocId: id, RawSha256: hash, Traceparent: "synthetic"}, SourceRef: source.Ref(id)}
 	return db, docs, NewJobs(db), id, cmd
-}
-func TestSourceJobAtomicHandoffAndDuplicate(t *testing.T) {
-	db, docs, jobs, id, cmd := setupSourceJob(t)
-	ctx := context.Background()
-	crash := errors.New("injected interruption")
-	if err := db.Transaction(ctx, func(ctx context.Context) error {
-		if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
-			return err
-		}
-		return crash
-	}); !errors.Is(err, crash) {
-		t.Fatal(err)
-	}
-	ready, _, _, _, err := jobs.Counts(ctx)
-	if err != nil || ready != 0 {
-		t.Fatalf("uncommitted job escaped %d %v", ready, err)
-	}
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
-		t.Fatal(err)
-	}
-	publisher := &recordingPublisher{fail: true}
-	if _, err := jobs.Dispatch(ctx, publisher, 10); err == nil {
-		t.Fatal("publish failure hidden")
-	}
-	publisher.fail = false
-	if _, err := jobs.Dispatch(ctx, publisher, 10); err != nil {
-		t.Fatal(err)
-	}
-	j := publisher.jobs[0]
-	if publisher.jobs[1].ID != j.ID {
-		t.Fatal("retry changed identity")
-	}
-	handler := func(ctx context.Context) error {
-		if err := docs.SaveText(ctx, id, "canonical text", "pdf"); err != nil {
-			return err
-		}
-		return jobs.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: cmd.Metadata}, "")
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(ctx context.Context) error {
-		if err := handler(ctx); err != nil {
-			return err
-		}
-		return crash
-	}); !errors.Is(err, crash) {
-		t.Fatal(err)
-	}
-	var text *string
-	if err := db.Pool.QueryRow(ctx, "SELECT normalized_text FROM documents WHERE doc_id=$1", id).Scan(&text); err != nil || text != nil {
-		t.Fatalf("stage rollback leaked text %v %v", text, err)
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, handler); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { t.Fatal("completed handler repeated"); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	ready, _, _, _, err = jobs.Counts(ctx)
-	if err != nil || ready != 1 {
-		t.Fatalf("downstream job missing %d %v", ready, err)
-	}
-	if _, err := docs.DeleteDocuments(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { t.Fatal("deleted document resurrected"); return nil }); err != nil {
-		t.Fatal(err)
-	}
-}
-func TestSourceJobConcurrentDuplicateAndMaintenance(t *testing.T) {
-	db, _, jobs, _, cmd := setupSourceJob(t)
-	ctx := context.Background()
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
-		t.Fatal(err)
-	}
-	p := &recordingPublisher{}
-	_, _ = jobs.Dispatch(ctx, p, 1)
-	j := p.jobs[0]
-	// A distinct repository has its own pool gate; database locking is the boundary.
-	other := NewJobs(db)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	done := make(chan error, 1)
-	go func() {
-		done <- jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { close(entered); <-release; return nil })
-	}()
-	<-entered
-	if err := other.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { t.Error("concurrent duplicate ran"); return nil }); !errors.Is(err, ErrJobBusy) {
-		t.Fatalf("duplicate=%v", err)
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := db.LockMaintenance(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.LockMaintenance(ctx); !errors.Is(err, ErrWorkspaceBusy) {
-		t.Fatalf("maintenance=%v", err)
-	}
-	unlock()
 }
 func TestSourceInventoryLocationsAndScanCompleteness(t *testing.T) {
 	db, docs, _, id, _ := setupSourceJob(t)
@@ -189,90 +73,6 @@ func TestSourceInventoryLocationsAndScanCompleteness(t *testing.T) {
 		t.Fatal("complete scan missed absence")
 	}
 }
-func TestSourceJobBrokerLossRedispatch(t *testing.T) {
-	url := os.Getenv("SOURCE_TEST_NATS")
-	if url == "" {
-		t.Skip("set SOURCE_TEST_NATS to disposable NATS")
-	}
-	_, _, jobs, _, cmd := setupSourceJob(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	b, err := bus.Connect(ctx, url, "source-test-"+domain.NewDocID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	if err := b.EnsureStreams(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jobs.Dispatch(ctx, b, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.PurgeQueues(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Reconcile(ctx, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jobs.Dispatch(ctx, b, 1); err != nil {
-		t.Fatal(err)
-	}
-	c, err := b.PullConsumer(ctx, bus.StreamName, "source-test", bus.SubjectPDFs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	messages, err := c.Fetch(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for m := range messages.Messages() {
-		if m.Headers().Get(GenerationHeader) != "2" {
-			t.Fatal("redispatch generation missing")
-		}
-		var got ingestionv1.ProcessPdfCommand
-		if err := proto.Unmarshal(m.Data(), &got); err != nil || got.SourceRef != cmd.SourceRef {
-			t.Fatalf("bad source command %v", err)
-		}
-		_ = m.Ack()
-		return
-	}
-	t.Fatal("broker loss lost durable job")
-}
-
-func TestSourceWaitAndGenerationFence(t *testing.T) {
-	_, _, jobs, _, cmd := setupSourceJob(t)
-	ctx := context.Background()
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
-		t.Fatal(err)
-	}
-	p := &recordingPublisher{}
-	if _, err := jobs.Dispatch(ctx, p, 1); err != nil {
-		t.Fatal(err)
-	}
-	j := p.jobs[0]
-	if err := jobs.Waiting(ctx, j.ID, "SOURCE_CHANGED"); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.CheckResolved(ctx); err == nil {
-		t.Fatal("missing source counted as success")
-	}
-	if err := jobs.ResumeSources(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { t.Fatal("stale generation ran"); return nil }, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.Run(ctx, j.ID, j.Subject, j.Payload, func(context.Context) error { return nil }, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobs.CheckResolved(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestSourceWipeRemovesInventoryAndJobs(t *testing.T) {
 	db, docs, jobs, id, cmd := setupSourceJob(t)
 	ctx := context.Background()
@@ -287,7 +87,7 @@ func TestSourceWipeRemovesInventoryAndJobs(t *testing.T) {
 	if err := inv.FinishScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, cmd, ""); err != nil {
+	if err := jobs.Publish(ctx, SubjectPDFs, cmd, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := docs.DeleteWorkspace(ctx); err != nil {

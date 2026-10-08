@@ -1,19 +1,14 @@
----
-model: gpt-5.6-sol
-reasoning_effort: xhigh
----
-
 # Ingestion recovery and workspace doctor
 
 ## Outcome
 
-An operator can determine why a workspace is unhealthy and can safely converge interrupted or retryable ingestion work without editing PostgreSQL or JetStream state by hand.
+An operator can determine why a workspace is unhealthy and can safely converge interrupted or retryable ingestion work without editing PostgreSQL state by hand.
 
 ## Why this task is needed
 
 The current reconciler republishes stale `PENDING` rows only. A document left `PROCESSING`, a retryable document marked `FAILED`, a missing BM25 index, a document whose original can no longer be resolved, or a partially completed reset has no single supported diagnosis and recovery workflow. `--forget` deletes database descendants but does not traverse their different content hashes when removing contained children.
 
-JetStream provides durable delivery, acknowledgement timeouts, maximum-delivery behavior, and advisories, but Pocket Advisor still owns the application policy that distinguishes retryable work, terminal corruption, expected declines, and safe redrive.
+The PostgreSQL job queue provides durable claims, leases, a retry budget and fenced verdicts, but Pocket Advisor still owns the application policy that distinguishes retryable work, terminal corruption, expected declines, and safe redrive.
 
 The authoritative write-path design remains [`docs/ingestion-design.md`](../ingestion-design.md). Workspace resource boundaries remain owned by [`docs/workspace-isolation.md`](../workspace-isolation.md).
 
@@ -27,10 +22,10 @@ This is a follow-on reliability task after the P0 access and retrieval-quality w
 
 Add a `--doctor` mode for one fixed workspace. Put all checks in a transport-independent package and keep CLI rendering separate. Support human-readable and JSON output.
 
-Doctor mode must not write to PostgreSQL, NATS, model endpoints, workspace files, or corpora. It checks and classifies:
+Doctor mode must not write to PostgreSQL, model endpoints, workspace files, or corpora. It checks and classifies:
 
 - workspace registry and credential-value consistency;
-- reachability and scoped authentication for PostgreSQL and NATS, and availability of the configured source roots;
+- reachability and scoped authentication for PostgreSQL, and availability of the configured source roots;
 - embedding endpoint model and vector dimension against `schema_metadata`;
 - required PostgreSQL extensions, schema objects, HNSW index, and BM25 index;
 - configured original files with no corresponding document row;
@@ -38,7 +33,7 @@ Doctor mode must not write to PostgreSQL, NATS, model endpoints, workspace files
 - stale `PENDING` and `PROCESSING` rows;
 - `FAILED` rows grouped by closed failure reason and retry classification;
 - `SKIPPED` rows grouped by reason;
-- stream, consumer, pending, redelivery, and DLQ state; and
+- job queue state: per-state counts, expired leases, spent retry budgets and failed jobs by closed reason (the PostgreSQL queue already reports these); and
 - incomplete reset or deletion state detectable from the remaining derived rows.
 
 Each finding has a stable code, severity, affected count, safe summary, and supported next action. Output must not contain source paths, filenames, titles, content, questions, credentials, private endpoints, or raw workspace identifiers.
@@ -54,9 +49,9 @@ The planner must:
 - operate on one fixed workspace;
 - select work by state, age, failure reason, or explicit document identifier;
 - classify every selected item as retryable, terminal, already converged, or not safely reconstructible;
-- show intended database transitions and message publications;
+- show intended database transitions and job requeues;
 - refuse broad redrive of terminal failure reasons;
-- avoid republishing work that is already present and active in JetStream; and
+- refuse to reset a document whose job holds a live lease, and revalidate each item against durable job state when applying (the PostgreSQL queue already does both); and
 - preserve an auditable, content-free summary of what it attempted.
 
 Recovery behavior belongs in a reusable package. The CLI must not contain state-transition or command-reconstruction logic.
@@ -90,7 +85,7 @@ Keep the closed failure vocabulary authoritative. An unknown value is never auto
 
 Before deleting derived state, collect every descendant document that belongs to the selected document tree through the containment graph, including children whose content hashes differ from the root's. Delete their rows, placements, jobs and unreferenced passages through a repeatable plan, and never touch an original file.
 
-Database deletion is transactional, but the broker purge that accompanies it is not, so every step must be idempotent and a rerun must converge after failure at any boundary. Do not infer deletion from absence in a local source directory.
+Database deletion is transactional, and every step must stay idempotent so a rerun converges after failure at any boundary. Do not infer deletion from absence in a local source directory.
 
 ### Fault-injection coverage
 
@@ -131,7 +126,7 @@ Tests must stop and restart processing at each point, run doctor and recovery, a
 
 ## Verification
 
-Run the repository checks from [`README.md` §10](../../README.md#10-verification), unit tests for planning and classification, PostgreSQL and JetStream integration tests, race tests, and the complete fault-injection matrix against temporary synthetic fixtures.
+Run the repository checks from [`README.md` §10](../../README.md#10-verification), unit tests for planning and classification, PostgreSQL integration tests, race tests, and the complete fault-injection matrix against temporary synthetic fixtures.
 
 Prove workspace isolation with negative tests using two synthetic workspaces and separate credentials. Verify doctor and recovery cannot accept a caller-selected scope after clients are created.
 
@@ -143,5 +138,4 @@ Remove the settled redrive item from the ingestion open-decisions list. Do not r
 
 ## Primary references
 
-- [NATS JetStream consumer delivery and acknowledgement behavior](https://docs.nats.io/nats-concepts/jetstream/consumers)
-- [NATS consumer details and maximum-delivery advisories](https://docs.nats.io/using-nats/developer/develop_jetstream/consumers)
+- [PostgreSQL SELECT FOR UPDATE SKIP LOCKED](https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE)

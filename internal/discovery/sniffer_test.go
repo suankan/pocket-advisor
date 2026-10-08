@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/suankan/pocket-advisor/internal/bus"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 )
 
 func TestClassifyIgnoresLyingExtensions(t *testing.T) {
@@ -16,7 +16,7 @@ func TestClassifyIgnoresLyingExtensions(t *testing.T) {
 	pdf := []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n%%EOF\n")
 
 	got := Classify(pdf, "definitely-a-spreadsheet.xlsx")
-	if got.Subject != bus.SubjectPDFs {
+	if got.Subject != postgres.SubjectPDFs {
 		t.Errorf("expected pdf routing regardless of extension, got %q", got.Subject)
 	}
 	if got.Declined {
@@ -33,7 +33,7 @@ func TestClassifyEmail(t *testing.T) {
 		"MIME-Version: 1.0\r\n\r\nbody text\r\n")
 
 	got := Classify(eml, "ATT00001") // extensionless, as mail clients emit
-	if got.Subject != bus.SubjectEmails {
+	if got.Subject != postgres.SubjectEmails {
 		t.Errorf("expected email routing, got %q (mime %s)", got.Subject, got.MimeType)
 	}
 }
@@ -48,7 +48,7 @@ func TestClassifyArchiveRoutesToEmailWorker(t *testing.T) {
 	_ = zw.Close()
 
 	got := Classify(buf.Bytes(), "bundle.zip")
-	if got.Subject != bus.SubjectEmails {
+	if got.Subject != postgres.SubjectEmails {
 		t.Errorf("expected archive to route to the email worker, got %q", got.Subject)
 	}
 	if got.DocType != "archive" {
@@ -63,7 +63,7 @@ func TestClassifyImage(t *testing.T) {
 		0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
 	}
 	got := Classify(png, "logo.png")
-	if got.Subject != bus.SubjectImages {
+	if got.Subject != postgres.SubjectImages {
 		t.Errorf("expected image routing, got %q", got.Subject)
 	}
 }
@@ -81,7 +81,7 @@ func TestClassifyUnknownIsDeclinedNotFailed(t *testing.T) {
 
 func TestClassifyPlainTextGoesStraightToEmbed(t *testing.T) {
 	got := Classify([]byte("just some notes about the matter\n"), "notes.txt")
-	if got.Subject != bus.SubjectEmbed {
+	if got.Subject != postgres.SubjectEmbed {
 		t.Errorf("expected direct embed routing, got %q", got.Subject)
 	}
 }
@@ -96,7 +96,7 @@ func TestClassifyRoutesNonUTF8TextForIndexingWithAnAssumedCharset(t *testing.T) 
 	latin1 = append(latin1, []byte(" resumen adjunto.\n")...)
 
 	got := Classify(latin1, "notas.txt")
-	if got.Subject != bus.SubjectEmbed {
+	if got.Subject != postgres.SubjectEmbed {
 		t.Fatalf("routed to %q, want the text/embed route", got.Subject)
 	}
 	if got.Declined {

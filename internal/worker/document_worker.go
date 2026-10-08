@@ -9,11 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/ocr"
 	"github.com/suankan/pocket-advisor/internal/engine/pdf"
@@ -41,9 +39,9 @@ type DocumentWorker struct {
 	Log     *slog.Logger
 }
 
-func (w *DocumentWorker) HandlePDF(ctx context.Context, msg jetstream.Msg) error {
+func (w *DocumentWorker) HandlePDF(ctx context.Context, job postgres.Job) error {
 	var cmd ingestionv1.ProcessPdfCommand
-	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
+	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
 		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
@@ -230,9 +228,9 @@ func (w *DocumentWorker) pageDPI(doc *pdf.Document, page int) int {
 	return native
 }
 
-func (w *DocumentWorker) HandleImage(ctx context.Context, msg jetstream.Msg) error {
+func (w *DocumentWorker) HandleImage(ctx context.Context, job postgres.Job) error {
 	var cmd ingestionv1.ProcessImageCommand
-	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
+	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
 		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
@@ -290,7 +288,7 @@ func (w *DocumentWorker) emit(ctx context.Context, meta *ingestionv1.DocumentMet
 	}
 	tp := trace.Child(meta.Traceparent)
 	out := cloneMeta(meta, meta.DocId, meta.ParentDocId, tp)
-	if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
+	if err := w.Bus.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 		Metadata: out, TextLength: int64(len(text)),
 	}, tp); err != nil {
 		return WithDoc(meta.DocId, err)

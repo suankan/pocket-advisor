@@ -50,7 +50,7 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	if err := cfg.RequireEmbedding(); err != nil {
 		return err
 	}
-	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true, NATS: true, Metrics: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true, Metrics: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -80,13 +80,9 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 		return err
 	}
 	defer pipe.Close()
-	// Broker-lost work is reissued once, before any consumer exists. Running it
-	// beside live workers would supersede messages they are already handling.
-	// Source waits are not touched here: they are retried after the scan, when
-	// locations are current.
-	if err := a.Jobs.Reconcile(fetchCtx, 0); err != nil {
-		return err
-	}
+	// Work a dead process left RUNNING needs no startup step: its lease
+	// expires and a pool claims it like any other job. Source waits are not
+	// touched here: they are retried after the scan, when locations are current.
 	// Workers run while the scan admits: a job commits together with the source
 	// occurrence it reads, so new work is always resolvable. Only leftover work
 	// for a renamed original can race a scan that has not reached its new path;
@@ -121,8 +117,8 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 		// the scan error afterwards.
 		drainErr = drain(workCtx, pipe, a.Jobs, feedErr == nil)
 	}
-	// A quiet queue is not a stop. End dispatch and fetching, and join every
-	// handler before building the search index.
+	// A quiet queue is not a stop. End claiming, and join every handler before
+	// building the search index.
 	stopWorkers()
 	pipe.Wait()
 	runErr := errors.Join(feedErr, drainErr, fetchCtx.Err(), workCtx.Err())

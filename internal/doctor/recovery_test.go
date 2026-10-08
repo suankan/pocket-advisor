@@ -8,18 +8,10 @@ import (
 	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
-type fakeBus struct {
-	msgs uint64
-}
-
-func (f *fakeBus) StreamInfo(_ context.Context, _ string) (uint64, error) {
-	return f.msgs, nil
-}
-
 func TestClassifyStalePending(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-1", Status: domain.StatusPending},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	if len(plan.Items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(plan.Items))
@@ -31,15 +23,15 @@ func TestClassifyStalePending(t *testing.T) {
 	if item.Action != ActionRetryTransition {
 		t.Errorf("action %q, want transition_to_pending", item.Action)
 	}
-	if item.MessagePublish == "" {
-		t.Error("expected message publish description")
+	if item.Requeue == "" {
+		t.Error("expected a requeue description")
 	}
 }
 
 func TestClassifyStaleProcessing(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-2", Status: domain.StatusProcessing},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassRetryable {
@@ -53,7 +45,7 @@ func TestClassifyStaleProcessing(t *testing.T) {
 func TestClassifyRetryableFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-3", Status: domain.StatusFailed, Reason: domain.ReasonExtractionFailed},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassRetryable {
@@ -64,7 +56,7 @@ func TestClassifyRetryableFailed(t *testing.T) {
 func TestClassifyTerminalFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-4", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassTerminal {
@@ -78,7 +70,7 @@ func TestClassifyTerminalFailed(t *testing.T) {
 func TestClassifyUnclassifiedFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-5", Status: domain.StatusFailed, Reason: domain.ReasonUnclassified},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassNotRecoverable {
@@ -89,7 +81,7 @@ func TestClassifyUnclassifiedFailed(t *testing.T) {
 func TestClassifyCompletedIsConverged(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-6", Status: domain.StatusCompleted},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassConverged {
@@ -103,7 +95,7 @@ func TestClassifyCompletedIsConverged(t *testing.T) {
 func TestClassifySkippedIsConverged(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-7", Status: domain.StatusSkipped, Reason: domain.ReasonUnsupportedFormat},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	item := plan.Items[0]
 	if item.Classification != ClassConverged {
@@ -116,7 +108,7 @@ func TestPlanSummary(t *testing.T) {
 		{DocID: "a", Status: domain.StatusPending},
 		{DocID: "b", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},
 		{DocID: "c", Status: domain.StatusCompleted},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	if plan.Summary == "" {
 		t.Error("expected non-empty summary")
@@ -130,7 +122,7 @@ func TestPlanSummary(t *testing.T) {
 }
 
 func TestValidateRefusesBroadTerminalRedrive(t *testing.T) {
-	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil)
 	plan := &RecoveryPlan{
 		Items: []RecoveryItem{
 			{DocID: "x", Classification: ClassTerminal, Action: ActionRetryTransition},
@@ -143,7 +135,7 @@ func TestValidateRefusesBroadTerminalRedrive(t *testing.T) {
 }
 
 func TestValidatePassesWithAllRefused(t *testing.T) {
-	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil, nil)
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil)
 	plan := &RecoveryPlan{
 		Items: []RecoveryItem{
 			{DocID: "x", Classification: ClassTerminal, Action: ActionRefuse},
@@ -154,21 +146,43 @@ func TestValidatePassesWithAllRefused(t *testing.T) {
 	}
 }
 
-func TestValidateWarnsOnBusyStream(t *testing.T) {
-	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil, &fakeBus{msgs: 5000})
+func TestValidateRefusesALiveLease(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil)
 	plan := &RecoveryPlan{
-		Items: []RecoveryItem{
-			{DocID: "x", Classification: ClassRetryable, Action: ActionRetryTransition},
-		},
+		Items: []RecoveryItem{{
+			DocID: "x", Classification: ClassRetryable, Action: ActionRetryTransition,
+			Jobs: []JobRef{{ID: "job-1", State: "RUNNING", Generation: 3, Live: true}},
+		}},
 	}
-	err := p.Validate(context.Background(), plan)
-	if err == nil {
-		t.Error("expected validation warning for busy stream")
+	if err := p.Validate(context.Background(), plan); err == nil {
+		t.Error("expected validation error for a document whose job holds a live lease")
 	}
 }
 
-func TestValidatePassesOnQuietStream(t *testing.T) {
-	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil, &fakeBus{msgs: 10})
+func TestClassifyRefusesALiveLease(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{{
+		DocID: "doc-live", Status: domain.StatusProcessing,
+		Jobs: []JobRef{{ID: "job-1", State: "RUNNING", Generation: 2, Live: true}},
+	}})
+	item := p.Plan(context.Background()).Items[0]
+	if item.Action != ActionRefuse || item.Classification != ClassNotRecoverable {
+		t.Errorf("live job classified %q/%q, want refused/not_recoverable", item.Classification, item.Action)
+	}
+}
+
+func TestExpiredLeaseDoesNotBlockRecovery(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{{
+		DocID: "doc-dead", Status: domain.StatusProcessing,
+		Jobs: []JobRef{{ID: "job-1", State: "RUNNING", Generation: 2, Live: false}},
+	}})
+	item := p.Plan(context.Background()).Items[0]
+	if item.Classification != ClassRetryable {
+		t.Errorf("expired lease classified %q, want retryable", item.Classification)
+	}
+}
+
+func TestValidatePassesOnAnIdleQueue(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, nil)
 	plan := &RecoveryPlan{
 		Items: []RecoveryItem{
 			{DocID: "x", Classification: ClassRetryable, Action: ActionRetryTransition},
@@ -188,7 +202,7 @@ func TestMixedPlanClassifications(t *testing.T) {
 		{DocID: "d", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},
 		{DocID: "e", Status: domain.StatusCompleted},
 		{DocID: "f", Status: domain.StatusSkipped, Reason: domain.ReasonUnsupportedFormat},
-	}, nil)
+	})
 	plan := p.Plan(context.Background())
 	if len(plan.Items) != 6 {
 		t.Fatalf("expected 6 items, got %d", len(plan.Items))

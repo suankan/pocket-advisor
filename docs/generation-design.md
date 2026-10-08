@@ -30,7 +30,7 @@ The generation workload receives:
 - network access to the configured answer-model endpoint; and
 - only the credential needed for that model endpoint, if one is required.
 
-It receives no PostgreSQL, source-filesystem, NATS, provisioning, ingestion, or Kubernetes administrative credential. Giving generation direct storage access would create a second retrieval path and weaken the workspace boundary.
+It receives no PostgreSQL, source-filesystem, provisioning, ingestion, or Kubernetes administrative credential. Giving generation direct storage access would create a second retrieval path and weaken the workspace boundary.
 
 The gateway authenticates the caller, authorizes the workspace, and routes to the matching generation workload. A workspace value in the request cannot override that workload's configured scope.
 

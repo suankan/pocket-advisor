@@ -4,7 +4,7 @@ This document is the design authority for Pocket Advisor’s write path: source 
 
 ## 1. Current state
 
-One host Go process discovers original files, dispatches durable ingestion jobs, and runs five JetStream stage pools. Kubernetes supplies PostgreSQL and NATS. Directories configured in the private workspace registry are authoritative for original bytes; the application never writes them. PostgreSQL retains normalized text, structured metadata, shared passages, placements, and search indexes. Container members are replayed from their verified original on demand; no extracted bytes are retained outside PostgreSQL.
+One host Go process discovers original files, admits durable ingestion jobs to a PostgreSQL queue, and runs five stage pools that claim them. Kubernetes supplies PostgreSQL. Directories configured in the private workspace registry are authoritative for original bytes; the application never writes them. PostgreSQL retains normalized text, structured metadata, shared passages, placements, and search indexes. Container members are replayed from their verified original on demand; no extracted bytes are retained outside PostgreSQL.
 
 Document identity is an opaque UUID, independent of its unique per-workspace raw SHA-256. Moves and identical copies preserve that identity; changed bytes create a new content identity. Every indexed passage is an exact UTF-8 byte slice of canonical normalized text. Generated answers never enter the index. Jobs use at-least-once delivery with transactional stage completion.
 
@@ -12,9 +12,8 @@ Document identity is an opaque UUID, independent of its unique per-workspace raw
 flowchart LR
     Files["Configured original files"] --> Scan["Host source scan"]
     Scan --> Tx["PostgreSQL: occurrence + stub + job"]
-    Tx --> Dispatcher["Outbox dispatcher"]
-    Dispatcher --> NATS["JetStream stage queues"]
-    NATS --> Workers["Extraction and embedding workers"]
+    Tx --> Queue["ingestion_jobs queue"]
+    Queue --> Workers["Extraction and embedding workers"]
     Files --> Resolver["Verified source resolver"]
     Resolver --> Workers
     Workers --> Tx
@@ -75,7 +74,7 @@ Startup verifies that the endpoint’s model and vector width match `schema_meta
 
 **Target state:** a model change is handled as an explicit re-embed into a distinct model namespace, with the existing namespace remaining queryable until backfill and cutover complete. The migration and backfill workflow is not implemented.
 
-The source inventory, containment, and durable-job tables are applied by the same bootstrap, as a second transactional and repeatable step. It preserves document UUIDs and existing evidence. Extraction records an exact canonical SHA-256 and an `extraction_version` of `canonical-v1`; that version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately.
+The source inventory, containment, and durable-job tables are applied by the same bootstrap, as a second transactional and repeatable step under its own advisory lock. The queue layout of `ingestion_jobs` is a step inside it that converts an older layout and leaves a current one untouched; reapplication never resets attempts, generations or live leases. The step decides from the table itself — the lease column, the absence of the dispatch columns, the lease constraint and both claim indexes — never from a migration number, because earlier releases wrote rows into `application_migrations` with numbers a later step cannot assume are its own. Ingestion applies the bootstrap under the maintenance lock before any queue query or worker starts, so an older binary and a newer one never consume the same jobs. The step preserves document UUIDs and existing evidence. Extraction records an exact canonical SHA-256 and an `extraction_version` of `canonical-v1`; that version identifies the current canonicalization contract, not a promise of bit-identical OCR across tool upgrades. Containment backfill reads verified originals separately.
 
 ### 2.5 Email message metadata
 
@@ -101,13 +100,13 @@ Exact browse reads these tables, using configured workspace owner identities for
 
 The workspace's `paths` and ordered ignore rules define eligible regular files. Relative roots resolve against the registry directory, and multiple roots require distinct basenames. Each scan fully reads and hashes originals, including unchanged mtime/size observations. Platform metadata files are excluded. There is no watcher dependency; `--listen` scans at startup and every minute. Changes to registry configuration require restarting the process.
 
-Each accepted original commits its document stub, source occurrence, and next-stage outbox job together. Content the workspace already holds is found by a plain read and only new content reaches the conflict-safe upsert, so admission never queues behind a worker's open transaction on a document it is midway through. Completed, skipped, and failed documents are not automatically re-extracted. Existing containers are replayed to refresh known member routes. New supported plain text commits canonical text and its embed job together.
+Each accepted original commits its document stub, source occurrence, and next-stage job together. Content the workspace already holds is found by a plain read and only new content reaches the conflict-safe upsert, so admission never queues behind a worker's open transaction on a document it is midway through. Completed, skipped, and failed documents are not automatically re-extracted. Existing containers are replayed to refresh known member routes. New supported plain text commits canonical text and its embed job together.
 
-Discovery reads one original at a time and writes reference-only jobs to the durable outbox. It never waits for a queue-depth threshold. The dispatcher and workers run while the scan admits, so extraction and embedding overlap the scan's reads. A job commits together with the source occurrence it reads, so work admitted by the scan always resolves. Leftover work for a renamed original can reach a worker before the scan has reached its new path; it parks as `WAITING_SOURCE` and is retried once the scan completes and locations are current. The backlog grows in proportion to the admitted collection; worker concurrency, job transaction slots, and container expansion limits bound active processing independently of its size.
+Discovery reads one original at a time and writes reference-only jobs to the durable queue. It never waits for a queue-depth threshold. The workers run while the scan admits, so extraction and embedding overlap the scan's reads. A job commits together with the source occurrence it reads, so work admitted by the scan always resolves. Leftover work for a renamed original can reach a worker before the scan has reached its new path; it parks as `WAITING_SOURCE` and is retried once the scan completes and locations are current. The backlog grows in proportion to the admitted collection; worker concurrency, job transaction slots, and container expansion limits bound active processing independently of its size.
 
-Ingestion is additive: it admits and processes, and never deletes. `--ingest-all` and `--reconcile` run the same path: one source scan, which also refreshes known locations, preceded by a reissue of broker-lost commands with a new dispatch generation before any consumer starts, and followed by a retry of source waits and a drain. Only `--ingest-all` accepts `--dry-run`. `BindExisting` is the non-admitting source refresh used by the explicit maintenance commands. A `PENDING` or `PROCESSING` document row that has no durable job at all and is reachable from the completed scan is re-admitted: straight to embedding when it already holds normalized text, and through classification of its verified original otherwise. A jobless row whose original is gone is left for the sweep in §6.4 rather than resumed into a missing source. Terminal failures require explicit recovery.
+Ingestion is additive: it admits and processes, and never deletes. `--ingest-all` and `--reconcile` run the same path: one source scan, which also refreshes known locations, followed by a retry of source waits and a drain. Work a dead process left RUNNING needs no startup step: its lease expires and a pool claims it like any other job. Only `--ingest-all` accepts `--dry-run`. `BindExisting` is the non-admitting source refresh used by the explicit maintenance commands. A `PENDING` or `PROCESSING` document row that has no durable job at all and is reachable from the completed scan is re-admitted: straight to embedding when it already holds normalized text, and through classification of its verified original otherwise. A jobless row whose original is gone is left for the sweep in §6.4 rather than resumed into a missing source. Terminal failures require explicit recovery.
 
-`--ingest-all --dry-run` only hashes configured files and reports file/byte counts. It opens no database, broker, or model connection and writes no derived state.
+`--ingest-all --dry-run` only hashes configured files and reports file/byte counts. It opens no database or model connection and writes no derived state.
 
 ## 4. Routing and extraction
 
@@ -173,35 +172,57 @@ Every ingestion command is Protobuf and begins with `DocumentMetadata` containin
 | `ProcessImageCommand` | `ingest.images.raw` | source reference, dimensions, size, metadata |
 | `EmbedTextCommand` | `ingest.text.embed` | document reference and text length |
 
-Extracted text is written to Tier 2 before an embed command is published. This keeps large OCR output below NATS payload limits and gives `normalized_text` one durable owner.
+Extracted text is written to Tier 2 before an embed job is enqueued. This keeps large OCR output out of job rows, which are copied on every claim, retry and recovery, and gives `normalized_text` one durable owner.
 
-The workspace has two namespaced streams: `INGESTION` with work-queue retention over the five stage subjects, and `INGESTION_DLQ` with limits retention for terminal failures. `deploy-workspaces` provisions both. Every command carries its source reference in field 10; field 2 is permanently reserved and must not be reused.
+The five subjects name the stage queues; they are values of `ingestion_jobs.subject` and need no provisioning. Every command carries its source reference in field 10; field 2 is permanently reserved and must not be reused.
 
 ## 6. Durable handoff, failure and retention
 
-### 6.1 Transactional jobs
+### 6.1 The PostgreSQL job queue
 
-`ingestion_jobs` is both the durable work record and transactional outbox. Its unique identity is document, stage subject, and content revision; embedding also binds the canonical-text hash. Payloads contain references and metadata, never document bodies. A dispatcher leases READY entries for 30 seconds, publishes with acknowledgement, and records DISPATCHED. `Nats-Msg-Id` combines immutable job ID and dispatch generation. Failed or ambiguous publication retries the same identity.
+`ingestion_jobs` is the durable work record and the queue. Its unique identity is document, stage subject, and content revision; embedding also binds the canonical-text hash. Payloads contain references and metadata, never document bodies. A job is READY, RUNNING, COMPLETED, FAILED or WAITING_SOURCE, and carries a generation, a count of charged attempts (0 through 3), the time it becomes available, a lease expiry while RUNNING, and the closed reason of its latest processing failure, kept apart from the diagnostic of a source wait. Enqueueing commits with the rows that make the work resolvable and notifies at that commit.
 
-The runtime verifies job identity, subject, exact stored payload, and dispatch generation. A transaction advisory lock and row lock serialize duplicate deliveries; stale generations and jobs removed by pruning acknowledge as no-ops. The handler's writes, child/embedding intents, and COMPLETED state commit together. Nested repositories use savepoints on the stage transaction. Completed jobs are not rerun even after the broker deduplication window expires.
+**Claiming.** Each pool has one claimer. It reserves only as much of the process-wide gate as it has idle lanes and the gate has free slots, never waits while holding part of a batch, and releases whatever a claim does not use at once. READY jobs whose delay has elapsed and RUNNING jobs whose lease has expired are claimed by separate short `FOR UPDATE SKIP LOCKED` statements, committed before any handler runs. Each follows its own partial index — `(subject, available_at, created_at, job_id)` for READY work and `(subject, lease_until, created_at, job_id)` for expired work — with the wall time materialized once so it is a usable index bound, so neither statement sorts its eligible backlog. With several reservations one expired claim is tried before READY work fills the rest; with one reservation the two states alternate as the first choice, so neither a continuous READY backlog nor a large expired backlog starves the other. A claim sets RUNNING, increments the generation, charges an attempt and grants a five-minute lease. Fresh work is first-in first-out by availability; a retried job queues behind work that became available earlier.
 
-The current implementation holds one database transaction through extraction/model work, bounded by the one-hour handler deadline. This favors atomicity and requires monitoring long transactions and vacuum pressure. A process-wide job gate reserves three pool connections for scanning, dispatch, and maintenance; ingestion requires at least four connections. A future short-transaction claim/fence design must preserve the same commit guarantees.
+**Waking.** A pool waits for a free lane, released gate capacity, a notification, the next due time, or a five-second fallback poll. One fixed channel per database carries empty notifications from enqueue, retry, return and recovery commits, and a notification wakes every pool. Notifications are hints. A once-a-second grouped depth sample also reports each subject's earliest READY availability and RUNNING expiry; a pool schedules its next look at that instant when it is sooner than the fallback, and an unchanged past-due hint is consumed once rather than obeyed repeatedly, so an idle pool issues about one claim per five seconds. A dedicated LISTEN connection, outside the application pool and on the workspace's own DSN, is established before the first claim; if it is lost, polling continues while a bounded-backoff reconnect loop runs, and each reconnect wakes the pools once.
+
+**Ownership.** A handler's lease renews every thirty seconds on its own connection, capped at one hour from claim time, which is also the handler's deadline. Renewal that matches no row is confirmed loss and cancels the handler at once. A database error leaves ownership uncertain, so renewal retries with jitter while a conservative local estimate — the request's start time plus the remaining lease the database reported — leaves more than a thirty-second margin; only when no confirmation arrives inside that window is the handler cancelled and its claim left to expire with the attempt still charged. Database time stays authoritative: an expired lease rejects renewal and completion even when no successor has claimed the job. Cooperative cancellation cannot release a lane occupied by an uninterruptible native call; the handler is never detached and its lane and gate slot are never reused while it runs. If it stays stuck its ownership expires and it cannot commit, and process termination is the supported way to free the lane.
+
+**One transaction per handler.** The handler runs in one READ COMMITTED transaction that holds the job's advisory lock — mutual exclusion with an expired handler still physically running — and takes no job-row lock, so renewals proceed. Its writes, child and embedding jobs, and the completion statement commit together. The completion statement is the ownership fence: it requires the job's ID, expected generation, RUNNING state, an unexpired lease and the handler budget, and matching no row rolls back everything. Every other verdict — decline, retry, failure, source wait, return — is a short transaction under a fresh deadline with the same predicate. A verdict that cannot be recorded is logged and left for expiry; it is never repeated blindly or followed by a different transition. Document status commits only with a successful job fence, and the document row is updated before the job row so a verdict never waits on a document lock while holding a job-row lock an older handler's completion needs. An uncertain commit is resolved from durable state before anything is counted.
+
+**Attempts and outcomes.** An attempt is charged at claim, so a crash spends one like an error does; an interruption does not establish a parser or input failure, and the budget is not a lifetime claim count.
+
+| Outcome | Transition |
+| --- | --- |
+| Success | COMPLETED with the stage's writes |
+| Declined input | document SKIPPED and job COMPLETED together |
+| Transient failure below three attempts | READY after a jittered exponential delay (a nominal sixty seconds doubling to five minutes, in the upper half of that interval); the attempt stays charged and the closed reason is recorded |
+| Terminal failure, or a third transient failure | job and document FAILED together; payload and reason retained |
+| Spent budget at claim | FAILED without running a handler, with the last closed reason or UNCLASSIFIED |
+| Busy advisory lock | READY after thirty seconds; the attempt is refunded if this claim charged one |
+| Shutdown or cancellation | READY at once; the charged attempt is refunded |
+| Missing or changed original | WAITING_SOURCE with a closed reason; the charged attempt is refunded and earlier failures kept |
+| Handler panic | FAILED with `HANDLER_PANIC` |
+| Lost or unconfirmable ownership | no verdict; expiry or the successor resolves the job |
+| Process crash | no transition; the lease expires and the next claim charges the attempt |
+
+A refund happens only in the fenced transition that leaves RUNNING, so it cannot happen twice. Complete scans resume WAITING_SOURCE to READY with the charged attempts retained; partial scans do not. Explicit recovery resets only selected jobs to a fresh cycle of zero attempts. Completed jobs stay complete.
+
+The handler transaction is held through extraction and model work, bounded by the one-hour handler deadline. That favours atomicity and requires watching long transactions and vacuum pressure. A process-wide gate of `max_conns − 3` slots bounds open stage transactions independently of lane count: one reserved connection holds the maintenance lock, two serve scanning, claims, renewals, verdicts and depth samples, and the listener sits outside the pool. Ingestion therefore requires at least four connections. Moving expensive work outside the stage transaction remains a future design concern and must preserve the same commit guarantees.
 
 ### 6.2 Failures and recovery
 
-Consumers acknowledge explicitly, permit unlimited broker redelivery, and heartbeat under the bounded handler deadline. Expected declines commit SKIPPED without dead-lettering. Transient failures use jittered delayed NAK. Terminal failures, or errors reaching the application retry threshold, publish the original command to the DLQ before atomically recording failed job/document state; failed DLQ publication requests another delivery.
+Expected declines commit SKIPPED. Transient failures return the job to the queue after the jittered delay above, long enough to outlast the embedding endpoint's circuit-breaker cooldown, so a failing dependency cannot spend a document's three attempts in milliseconds. Terminal failures, and errors on the third charged attempt, record FAILED job and document state atomically, behind the job's advisory lock: an expired handler of the same job that still holds it makes the verdict a busy return, with an exhausted claim keeping its spent budget. The failed-job counter counts only newly committed outcomes. A missing or changed source records WAITING_SOURCE with a closed reason. Complete listener scans retry source waits; an explicit reconciliation also retries them. No changed bytes replace the expected revision. A finite run reports waiting and failed jobs as unresolved.
 
-A missing or changed source records WAITING_SOURCE with a closed reason and acknowledges the broker message. Complete listener scans retry source waits; an explicit reconciliation also retries them. No changed bytes replace the expected revision. A finite run reports waiting and failed jobs as unresolved, even when broker queues are empty.
-
-A process crash before stage commit leaves no partial stage effects. A crash after commit but before acknowledgement produces a completed-job no-op. A crash after outbox commit but before publication leaves READY work. Broker message loss is repaired from DISPATCHED jobs by explicit reconciliation with a new generation. `--recover --yes` resets only planner-approved retryable states and redrives their unfinished durable jobs; completed jobs stay complete.
+A process crash before stage commit leaves no partial stage effects. Its jobs stay RUNNING until their leases expire, then are claimed again with the attempt charged, so a restart after a kill waits out the remaining lease — up to five minutes — before that work resumes; three crashed attempts fail the job without a fourth handler. The workspace maintenance lock belongs to its own database session, and losing that session cannot prove that old handler transactions have ended, so startup never bulk-resets RUNNING jobs. A crash after commit leaves a COMPLETED job. `--recover --yes` resets only planner-approved documents and their unfinished or failed jobs; completed jobs stay complete.
 
 ### 6.3 Diagnosis and recovery planning
 
-`--doctor` is a read-only diagnosis of one workspace that writes to nothing. It resolves the registry entry and the workspace's credentials, pings PostgreSQL, the configured source roots and NATS, compares the configured embedding model and dimension against `schema_metadata`, and checks the `vector` extension, the document and chunk tables, and the HNSW and BM25 indexes. It then counts jobs waiting on originals, documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes, `FAILED` and `SKIPPED` rows grouped by reason, JetStream stream and consumer depth, and signs of an interrupted reset.
+`--doctor` is a read-only diagnosis of one workspace that writes to nothing. It resolves the registry entry and the workspace's credentials, pings PostgreSQL and the configured source roots, compares the configured embedding model and dimension against `schema_metadata`, and checks the `vector` extension, the document and chunk tables, and the HNSW and BM25 indexes. It then proves the queue layout and, only if it is current, reports jobs per state, RUNNING jobs whose lease expired, unfinished jobs whose budget is spent, FAILED jobs grouped by reason and jobs waiting on originals; it counts documents with no observed source, `PENDING` and `PROCESSING` rows older than thirty minutes — a document whose job holds an unexpired lease is working, not stale — a handler's own status writes stay in its open transaction, so a document being processed often still reads `PENDING` — `FAILED` and `SKIPPED` rows grouped by reason, and signs of an interrupted reset. On the older layout it reports `QUEUE_SCHEMA_UPGRADE_REQUIRED`, naming ingestion as the step that applies the schema, and runs no job query. Live RUNNING work appears in the queue summary, not as a finding.
 
 Each finding carries a stable code, a severity of info, warning, error or critical, an affected count, a summary that contains no content, filename or credential, and one next action. `--json` emits the whole report. The exit status is 0 for healthy, 1 for unhealthy but diagnosed, and 2 for a doctor run that could not complete.
 
-`--recover` classifies documents rather than describing the workspace. Its planner is read-only: every selected document becomes one item with a classification — retryable, terminal, converged or not recoverable — and one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. The planner reads JetStream depth so it does not propose redriving work an active consumer still holds. Without `--yes` the plan is reported and nothing changes.
+`--recover` classifies documents rather than describing the workspace. Its planner is read-only: every selected document becomes one item with a classification — retryable, terminal, converged or not recoverable — and one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. Each item carries the document's unfinished and failed jobs with their generation and state. A document whose job holds an unexpired lease is refused, and the apply step revalidates every job's generation, state and lease inside its own transaction: a changed item is refused without mutation. Each job's advisory lock is tried first and never waited for, under the control deadline, so recovery refuses at once rather than block behind an expired handler that is still running. Applying resets the document and only its failed and expired jobs to a fresh retry cycle and notifies at commit; queued jobs — delayed retries included — source waits and completed jobs are untouched, keeping their recorded failures, budgets and backoff. A validation failure stops application, and recovery refuses to run before the queue schema is current. Recovery runs under the maintenance lock. Failed documents are selected by retryable reason in the query itself, and each state contributes at most 500 documents to a plan; a selection that reaches that cap says so on stderr, and applying the plan then running `--recover` again selects the next batch. Without `--yes` the plan is reported and nothing changes.
 
 ### 6.4 Pruning and maintenance
 
@@ -213,7 +234,7 @@ The sweep requires a complete root traversal, a nonempty source set, and complet
 
 Until the sweep runs, documents whose originals were deleted or newly ignored remain retrievable. Their outstanding jobs wait for a source, so ingestion reports them as unresolved and names the sweep.
 
-Canonical text must be valid UTF-8. The sniffer routes anything text-shaped for indexing and labels undecodable bytes `iso-8859-1` by assumption, not by declaration, so admission checks the bytes and records SKIPPED with `UNKNOWN_ENCODING` rather than decoding on that assumption or ending the scan. Extraction workers reaching the same refusal dead-letter that one document. Encodings are never guessed: a wrong guess yields valid UTF-8 from wrong bytes, which is silent corruption of indexed evidence rather than a loud, actionable failure.
+Canonical text must be valid UTF-8. The sniffer routes anything text-shaped for indexing and labels undecodable bytes `iso-8859-1` by assumption, not by declaration, so admission checks the bytes and records SKIPPED with `UNKNOWN_ENCODING` rather than decoding on that assumption or ending the scan. Extraction workers reaching the same refusal fail that one document. Encodings are never guessed: a wrong guess yields valid UTF-8 from wrong bytes, which is silent corruption of indexed evidence rather than a loud, actionable failure.
 
 A staged container whose members cannot be re-derived — malformed multipart, unknown charset, corrupt archive, or a replay budget exhausted by one file — is counted and reported, not fatal. Containment authority is `document_placements`, whose completeness is already a precondition above; re-expansion during a sweep is a redundant second reading of the same fact. A container unparsable now was equally unparsable at admission and contributed no member documents, and one that parsed then retains its members through the placement graph. Real corpora carry a steady fraction of these, so a fatal traversal would refuse the sweep rather than protect anything. The count appears in the plan and in `--reconcile-deletions --json`; each container is named at debug level in the retention log.
 
@@ -251,15 +272,15 @@ PDFium uses the wazero WebAssembly backend. Its instance pool is lazy and sized 
 
 ## 9. Run lifecycle
 
-A finite run reissues broker-lost jobs, then starts the dispatcher and all stage pools and runs discovery beside them. When the scan completes it resumes reachable jobless work and retries source waits. It then waits for both unfinished durable jobs and broker/in-flight work to remain empty for three seconds; if source waits remain it retries them once more, since a worker can record a wait just after the first retry, and drains again. It then stops fetching and dispatching, joins every worker, and creates the search index. If the scan fails, work already admitted is still drained and the scan error is reported. WAITING_SOURCE and FAILED jobs are reported as unresolved. A listener performs the same initial source scan, then scans periodically alongside workers and runs until interrupted.
+A finite run starts all stage pools, the queue listener and the depth sampler, and runs discovery beside them. When the scan completes it resumes reachable jobless work and retries source waits. It then waits for the queue to hold no READY or RUNNING job — delayed retries and expired claims included — and every lane to be idle for three seconds; a failed depth sample is not an empty observation. If source waits remain it retries them once more, since a worker can record a wait just after the first retry, and drains again. It then stops claiming, joins every worker, the sampler and the listener, and creates the search index. If the scan fails, work already admitted is still drained and the scan error is reported. WAITING_SOURCE and FAILED jobs are reported as unresolved. A listener performs the same initial source scan, then scans periodically alongside workers and runs until interrupted.
 
-The first interrupt stops intake and fetching while handlers drain. A second interrupt or grace-period expiry cancels handlers. Downstream intents committed during shutdown remain durable for the next run even if no dispatcher remains active.
+The first interrupt stops intake and claiming while handlers drain. A second interrupt or grace-period expiry cancels handlers; each cancelled job returns to the queue with its attempt refunded. Downstream jobs committed during shutdown remain durable for the next run.
 
 ## 10. Reset semantics
 
 `--forget <sha256>` removes the selected document and exclusively held descendants from derived state, retains independently present or shared descendants, and collects orphan passages. It never edits an original. A later scan can reintroduce still-configured bytes; persistent exclusion belongs in `ignore`.
 
-`--delete-data` clears documents, email metadata, passages, source inventory, jobs, and both workspace queues. Original files and configuration remain unchanged. PostgreSQL deletion is transactional, while broker purge is a separate idempotent step; rerun after a partial failure. Purged or delayed commands naming removed jobs cannot resurrect deleted documents.
+`--delete-data` clears documents, email metadata, passages, source inventory and jobs in one PostgreSQL transaction under the maintenance lock. Original files and configuration remain unchanged. A job removed by a reset or sweep cannot resurrect its document: every verdict requires the job row it claimed.
 
 ## 11. Observability
 
@@ -275,7 +296,8 @@ Implemented metrics include:
 | `rag_pdf_classification_total{type}` | digital and scanned routing |
 | `rag_office_extracted_total{format}` | office extraction throughput |
 | `rag_skipped_total{reason}` | expected declines |
-| `rag_dlq_total{worker,reason}` | terminal failures |
+| `rag_dlq_total{worker,reason}` | newly committed FAILED outcomes |
+| `rag_job_leases_lost_total{worker}` | claims abandoned because ownership was lost or could not be confirmed |
 | `rag_embedding_tokens_processed_total` | approximate embedding volume |
 
 The process creates and propagates W3C `traceparent` values and records their trace ids in logs. It does not currently export spans to an external tracing backend.
@@ -284,7 +306,7 @@ Ingestion prints nothing live; progress is read from the role logs and the Prome
 
 ## 12. Deployment boundary
 
-The chart deploys only PostgreSQL and NATS. Workspace provisioning creates database/role/extensions and the two namespaced streams. The host process reads configured original directories and uses only its fixed workspace's clients. Source access, authentication, and the local trust model belong to [workspace isolation](workspace-isolation.md).
+The chart deploys only PostgreSQL. Workspace provisioning creates the database, role and extensions. The host process reads configured original directories and uses only its fixed workspace's clients. Source access, authentication, and the local trust model belong to [workspace isolation](workspace-isolation.md).
 
 An authenticated future control plane may dispatch operations to a host agent using this same bounded process. Moving extraction elsewhere requires deliberate, confined access to originals and local models; it is not implied by the target API.
 
@@ -301,7 +323,7 @@ git diff --check
 git status --short
 ```
 
-Synthetic integration checks cover stage rollback, duplicate delivery, broker purge and redispatch, source schema migration, partial scans, shared locations, unchanged second ingestion, rename identity, hybrid retrieval, and derived-only reset. Source tests cover content changes preserving size/mtime, alternative container routes, repeated member names, replay bounds, missing roots, traversal, symlinks, and cross-root scope. Run manual tests only against disposable PostgreSQL/NATS as described in the README.
+Synthetic integration checks cover stage rollback, concurrent claims, expiry and reclaim, stale-verdict fences, refunds, crash exhaustion, notification and reconnect, queue schema upgrade, recovery revalidation, source schema migration, partial scans, shared locations, unchanged second ingestion, rename identity, hybrid retrieval, and derived-only reset. Source tests cover content changes preserving size/mtime, alternative container routes, repeated member names, replay bounds, missing roots, traversal, symlinks, and cross-root scope. Run manual tests only against a disposable PostgreSQL as described in the README.
 
 ## 14. Open decisions
 
@@ -309,4 +331,4 @@ Synthetic integration checks cover stage rollback, duplicate delivery, broker pu
 - Measure long-transaction contention, query latency during ingestion, and container replay costs before increasing concurrency.
 - Define a source-version retention and coordinated database/source backup policy. One local replica is not a backup.
 - Watcher acceleration and configurable scan intervals can follow measured freshness and I/O needs.
-- Log rotation and a shorter transactional claim/fence implementation remain operational improvements.
+- Define log rotation and measure whether expensive handler work should move outside stage transactions while preserving the queue's commit guarantees.

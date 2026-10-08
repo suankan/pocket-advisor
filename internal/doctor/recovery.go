@@ -31,15 +31,29 @@ const (
 	ClassNotRecoverable RecoveryClassification = "not_recoverable"
 )
 
+// JobRef is the planner's view of one unfinished or failed job of a document.
+// Application revalidates it against durable state, so a plan made before the
+// state moved cannot reset work it never saw.
+type JobRef struct {
+	ID         string `json:"job_id"`
+	State      string `json:"state"`
+	Generation int64  `json:"generation"`
+	Attempts   int    `json:"attempts"`
+	// Live is a RUNNING job under an unexpired lease: a handler may still be
+	// working on it.
+	Live bool `json:"live,omitempty"`
+}
+
 // RecoveryItem is one document the planner has classified.
 type RecoveryItem struct {
 	DocID           string                 `json:"doc_id"`
 	Status          domain.Status          `json:"status"`
 	Reason          domain.FailureReason   `json:"reason,omitempty"`
+	Jobs            []JobRef               `json:"jobs,omitempty"`
 	Classification  RecoveryClassification `json:"classification"`
 	Action          RecoveryAction         `json:"action"`
 	ObjectOperation string                 `json:"object_operation,omitempty"`
-	MessagePublish  string                 `json:"message_publish,omitempty"`
+	Requeue         string                 `json:"requeue,omitempty"`
 }
 
 // RecoveryPlan is the complete output of the planner.
@@ -68,21 +82,13 @@ type RecoverConfig struct {
 type RecoveryPlanner struct {
 	cfg       RecoverConfig
 	documents []RecoveryItem
-	bus       RecoveryBus
-}
-
-// RecoveryBus is the JetStream subset the planner needs to check for
-// active work, so it avoids republishing into an active consumer.
-type RecoveryBus interface {
-	// StreamInfo returns message counts for a stream, or an error if the
-	// stream does not exist.
-	StreamInfo(ctx context.Context, stream string) (msgs uint64, err error)
 }
 
 // NewPlanner creates a RecoveryPlanner. The documents slice is the set
-// of items the caller has already queried from the database.
-func NewPlanner(cfg RecoverConfig, docs []RecoveryItem, bus RecoveryBus) *RecoveryPlanner {
-	return &RecoveryPlanner{cfg: cfg, documents: docs, bus: bus}
+// of items the caller has already queried from the database, each with the
+// jobs the document currently has.
+func NewPlanner(cfg RecoverConfig, docs []RecoveryItem) *RecoveryPlanner {
+	return &RecoveryPlanner{cfg: cfg, documents: docs}
 }
 
 // Plan classifies every item and returns the recovery plan. It is
@@ -121,6 +127,17 @@ func (p *RecoveryPlanner) Plan(ctx context.Context) *RecoveryPlan {
 func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 	item := doc
 
+	// A job under an unexpired lease means a handler may still be working on
+	// this document. Resetting it now would race that handler, so it is refused
+	// until the lease ends or the work finishes.
+	for _, j := range doc.Jobs {
+		if j.Live {
+			item.Classification = ClassNotRecoverable
+			item.Action = ActionRefuse
+			return item
+		}
+	}
+
 	// Already converged: nothing to do.
 	if doc.Status == domain.StatusCompleted {
 		item.Classification = ClassConverged
@@ -139,7 +156,7 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 	if doc.Status == domain.StatusPending {
 		item.Classification = ClassRetryable
 		item.Action = ActionRetryTransition
-		item.MessagePublish = "re-publish to ingestion stream"
+		item.Requeue = "return the document's failed and expired jobs to the queue with a fresh retry cycle; queued and source-waiting jobs are left as they are"
 		return item
 	}
 
@@ -147,7 +164,7 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 	if doc.Status == domain.StatusProcessing {
 		item.Classification = ClassRetryable
 		item.Action = ActionResetProcessing
-		item.MessagePublish = "re-publish to ingestion stream"
+		item.Requeue = "return the document's failed and expired jobs to the queue with a fresh retry cycle; queued and source-waiting jobs are left as they are"
 		return item
 	}
 
@@ -157,7 +174,7 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 		case domain.ClassRetryable:
 			item.Classification = ClassRetryable
 			item.Action = ActionRetryTransition
-			item.MessagePublish = "re-publish to ingestion stream"
+			item.Requeue = "return the document's failed and expired jobs to the queue with a fresh retry cycle; queued and source-waiting jobs are left as they are"
 		case domain.ClassTerminal:
 			item.Classification = ClassTerminal
 			item.Action = ActionRefuse
@@ -176,8 +193,9 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 	return item
 }
 
-// Validate checks the plan for safety before execution. It refuses
-// broad redrive of terminal failures and flags active JetStream work.
+// Validate checks the plan for safety before execution. It refuses broad
+// redrive of terminal failures and any redrive of a document whose job holds
+// a live lease. A validation error stops application.
 func (p *RecoveryPlanner) Validate(ctx context.Context, plan *RecoveryPlan) error {
 	var issues []string
 
@@ -187,16 +205,13 @@ func (p *RecoveryPlanner) Validate(ctx context.Context, plan *RecoveryPlan) erro
 				fmt.Sprintf("refusing broad redrive of terminal failure: %s (%s)",
 					item.DocID, item.Reason))
 		}
-	}
-
-	// Check that we are not republishing into an active stream with
-	// significant pending work.
-	if p.bus != nil {
-		msgs, err := p.bus.StreamInfo(ctx, "INGESTION")
-		if err == nil && msgs > 1000 {
-			issues = append(issues,
-				fmt.Sprintf("INGESTION stream has %d pending messages — "+
-					"recovery may conflict with active ingestion work", msgs))
+		if item.Action != ActionRefuse && item.Action != ActionSkip {
+			for _, j := range item.Jobs {
+				if j.Live {
+					issues = append(issues,
+						fmt.Sprintf("refusing to reset %s: job %s holds a live lease", item.DocID, j.ID))
+				}
+			}
 		}
 	}
 

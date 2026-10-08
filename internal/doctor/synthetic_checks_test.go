@@ -15,14 +15,12 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:       true,
 			PGRaw:         true,
 			SourcesRaw:    true,
-			NATSRaw:       true,
 			EmbedModelOK:  true,
 			EmbedDimOK:    true,
 			PGVectorExtOK: true,
 			PGSchemaOK:    true,
 			PGHNSWOK:      true,
 			PGBM25OK:      true,
-			StreamsOK:     true,
 		}
 	case "stale_pending":
 		return Checks{
@@ -30,12 +28,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:       true,
 			PGRaw:         true,
 			SourcesRaw:    true,
-			NATSRaw:       true,
 			PGVectorExtOK: true,
 			PGSchemaOK:    true,
 			PGHNSWOK:      true,
 			PGBM25OK:      true,
-			StreamsOK:     true,
 			StalePending:  12,
 		}
 	case "stale_processing":
@@ -44,12 +40,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:         true,
 			PGRaw:           true,
 			SourcesRaw:      true,
-			NATSRaw:         true,
 			PGVectorExtOK:   true,
 			PGSchemaOK:      true,
 			PGHNSWOK:        true,
 			PGBM25OK:        true,
-			StreamsOK:       true,
 			StaleProcessing: 3,
 		}
 	case "failed_mixed":
@@ -58,12 +52,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:       true,
 			PGRaw:         true,
 			SourcesRaw:    true,
-			NATSRaw:       true,
 			PGVectorExtOK: true,
 			PGSchemaOK:    true,
 			PGHNSWOK:      true,
 			PGBM25OK:      true,
-			StreamsOK:     true,
 			FailedByReason: map[string]int{
 				"EXTRACTION_FAILED": 5,
 				"OCR_FAILED":        2,
@@ -81,12 +73,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:       true,
 			PGRaw:         true,
 			SourcesRaw:    true,
-			NATSRaw:       true,
 			PGVectorExtOK: false,
 			PGSchemaOK:    false,
 			PGHNSWOK:      false,
 			PGBM25OK:      false,
-			StreamsOK:     true,
 		}
 	case "stores_down":
 		return Checks{
@@ -94,8 +84,6 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:    true,
 			PGRaw:      false,
 			SourcesRaw: false,
-			NATSRaw:    false,
-			StreamsOK:  false,
 		}
 	case "partial_reset":
 		return Checks{
@@ -103,12 +91,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:         true,
 			PGRaw:           true,
 			SourcesRaw:      true,
-			NATSRaw:         true,
 			PGVectorExtOK:   true,
 			PGSchemaOK:      true,
 			PGHNSWOK:        true,
 			PGBM25OK:        true,
-			StreamsOK:       true,
 			IncompleteReset: true,
 			StalePending:    200,
 		}
@@ -118,12 +104,10 @@ func SyntheticChecks(scenario string) Checks {
 			CredsOK:                 true,
 			PGRaw:                   true,
 			SourcesRaw:              true,
-			NATSRaw:                 true,
 			PGVectorExtOK:           true,
 			PGSchemaOK:              true,
 			PGHNSWOK:                true,
 			PGBM25OK:                true,
-			StreamsOK:               true,
 			SourceWaitingJobs:       7,
 			DocumentsWithoutSources: 3,
 		}

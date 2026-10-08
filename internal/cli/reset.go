@@ -17,10 +17,7 @@ import (
 func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	ctx := context.Background()
 
-	// NATS as well as the two stores: a wipe now empties the queues too, and
-	// requiring the connection up front means an unreachable broker refuses the
-	// whole operation rather than leaving purged stores behind populated ones.
-	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true, NATS: true}, o.WorkspaceID)
+	a, err := app.New(ctx, cfg, logs, app.Needs{Sources: true, Postgres: true}, o.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -41,7 +38,7 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		return err
 	}
 
-	reset := retention.NewResetter(a.Docs, a.Bus, a.Logger(telemetry.RoleRetention))
+	reset := retention.NewResetter(a.Docs, a.Logger(telemetry.RoleRetention))
 
 	if o.Forget != "" {
 		if err := discoveryService(a).BindExisting(ctx); err != nil {
@@ -78,8 +75,8 @@ func runReset(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 			"  - %s\n"+
 			"  - preserves every original file\n"+
 			"  - deletes every documents row and every chunk for the workspace\n"+
-			"  - purges its queues, the dead letter queue included: every message\n"+
-			"    names a row that will no longer exist\n"+
+			"  - deletes its ingestion job queue: every job names a row that will\n"+
+			"    no longer exist\n"+
 			"This cannot be undone. Rebuilding derived state\n"+
 			"requires the original files still being on disk.",
 		ws.ID, counts)) {

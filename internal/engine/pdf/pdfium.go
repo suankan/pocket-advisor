@@ -71,8 +71,8 @@ type Engine struct {
 //
 // The pool is built on first use, not here. pdfium is compiled to WebAssembly
 // and webassembly.Init compiles the module — about a second, which used to be
-// the single largest item in startup, larger than every store connection and
-// JetStream round trip combined. A run that touches no PDF now never pays it,
+// the single largest item in startup, larger than every store connection
+// combined. A run that touches no PDF now never pays it,
 // and a run that does pays it against the first document rather than in front
 // of every command (ingestion-design.md deviation 24).
 func NewEngine(maxInstances int, cpu *limits.CPU) (*Engine, error) {

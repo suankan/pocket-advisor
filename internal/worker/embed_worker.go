@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
@@ -25,9 +24,9 @@ type EmbedWorker struct {
 	Log      *slog.Logger
 }
 
-func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
+func (w *EmbedWorker) Handle(ctx context.Context, job postgres.Job) error {
 	var cmd ingestionv1.EmbedTextCommand
-	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
+	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
 		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
@@ -80,7 +79,7 @@ func (w *EmbedWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		vectors, err := w.Embedder.Embed(ctx, inputs)
 		if err != nil {
 			// Transient by default: a model restart should cost latency, not
-			// documents. The breaker keeps redeliveries from hammering it.
+			// documents. The breaker keeps retries from hammering it.
 			return WithDoc(meta.DocId, err)
 		}
 

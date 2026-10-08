@@ -90,7 +90,7 @@ func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.
 // ErrInvalidText marks text the canonical column cannot hold. PostgreSQL
 // rejects a non-UTF-8 value at the driver level, as SQLSTATE 22021 naming a
 // byte offset — unclassifiable by the runtime, so it retried three times and
-// dead-lettered under UNCLASSIFIED, and on the admission path it ended the
+// failed under UNCLASSIFIED, and on the admission path it ended the
 // whole scan. Refused here instead, once, with a reason a caller can act on.
 //
 // Refused rather than transcoded: guessing an encoding produces valid UTF-8
@@ -276,7 +276,7 @@ func (r *DocumentRepo) DeleteWorkspace(ctx context.Context) (int64, error) {
 			return err
 		}
 		n = tag.RowsAffected()
-		for _, table := range []string{"chunks", "source_scans", "source_roots"} {
+		for _, table := range []string{"chunks", "ingestion_jobs", "source_scans", "source_roots"} {
 			if _, err := r.db.executor(ctx).Exec(ctx, "DELETE FROM "+table); err != nil {
 				return err
 			}

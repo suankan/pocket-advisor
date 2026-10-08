@@ -46,13 +46,13 @@ usage: ./pocket-advisor.sh <command> [args]
   lint                      fmt, vet, helm lint, chart-render assertion
   install-hooks             enable this clone's versioned Git hooks
   docker-build-postgres     build the local Postgres image
-  deploy-infra              helm install/upgrade the two shared stores, then deploy-workspaces
+  deploy-infra              helm install/upgrade the shared store, then deploy-workspaces
   destroy-infra             helm uninstall (PVCs retained)
   destroy-state             delete every PVC in $POCKET_ADVISOR_NAMESPACE (irreversible)
   deploy-metrics-server     helm install metrics-server into $METRICS_SERVER_NAMESPACE
   destroy-metrics-server    helm uninstall metrics-server
   deploy-workspaces         provision every workspace in workspaces/workspaces.yaml
-  destroy-workspace <id>    tear down one workspace's database/streams
+  destroy-workspace <id>    tear down one workspace's database and role
   clean                     rm -rf bin
 EOF
 }
@@ -81,11 +81,11 @@ cmd_lint() {
   cmd_fmt || exit 1
   cmd_vet || exit 1
   helm lint "$CHART" || exit 1
-  # Only the two shared stores are chart workloads.
+  # PostgreSQL is the only chart workload; the job queue lives inside it.
   helm template "$RELEASE" "$CHART" \
      > "$TMPFS/infra-lint.yaml" \
-    && [ "$(grep -c 'kind: StatefulSet' "$TMPFS/infra-lint.yaml")" = "2" ] \
-    && echo "ok: chart renders two StatefulSets" \
+    && [ "$(grep -c 'kind: StatefulSet' "$TMPFS/infra-lint.yaml")" = "1" ] \
+    && echo "ok: chart renders one StatefulSet" \
     || { echo "FAIL: rendered chart is incomplete"; exit 1; }
 }
 
@@ -100,13 +100,6 @@ resolve_infra() {
 
   POSTGRES_HOST=$(yq '.infra.postgres.host' "$CONFIG_ENVSUBSTED")
   POSTGRES_PORT=$(yq '.infra.postgres.port' "$CONFIG_ENVSUBSTED")
-  # infra.nats.url carries the nats:// scheme (internal/config uses it
-  # whole); this script only ever needs host:port to build its own
-  # nats://host:port URLs below, so the scheme is stripped once here rather
-  # than repeated at every call site.
-  NUTS_URL=$(yq '.infra.nats.url' "$CONFIG_ENVSUBSTED")
-  NATS_HOST=${NATS_HOST:-${NUTS_URL#nats://}}
-
   POSTGRES_ADMIN_USER=postgres
 
   if [ -z "$POSTGRES_HOST" ] || [ "$POSTGRES_HOST" = null ]; then
@@ -114,9 +107,6 @@ resolve_infra() {
   fi
   if [ -z "$POSTGRES_PORT" ] || [ "$POSTGRES_PORT" = null ]; then
     echo "missing infra.postgres.port in $CONFIG_ENVSUBSTED" >&2; exit 1
-  fi
-  if [ -z "$NUTS_URL" ] || [ "$NUTS_URL" = null ]; then
-    echo "missing infra.nats.url in $CONFIG_ENVSUBSTED" >&2; exit 1
   fi
 }
 
@@ -137,15 +127,28 @@ cmd_deploy_infra() {
   fi
   helm upgrade --install "$RELEASE" "$CHART" --namespace "$POCKET_ADVISOR_NAMESPACE" --create-namespace \
     || exit 1
-  for sts in postgres nats; do
-    kubectl rollout status statefulset/"$sts" -n "$POCKET_ADVISOR_NAMESPACE" --timeout=5m || exit 1
-  done
+  kubectl rollout status statefulset/postgres -n "$POCKET_ADVISOR_NAMESPACE" --timeout=5m || exit 1
+  report_retired_storage
   echo
   echo "shared stores ready. provisioning every workspace in workspaces/workspaces.yaml..."
   cmd_deploy_workspaces
   echo
-  echo "deploy-infra brought up Postgres, NATS, and every registered workspace. next:"
+  echo "deploy-infra brought up Postgres and every registered workspace. next:"
   echo "  ./pocket-advisor.sh build && ./$BIN --ingest-all --workspace-id <id>"
+}
+
+# The job queue used to live in a separate NATS StatefulSet. Helm removes that
+# workload when the chart no longer declares it, but never the PersistentVolumeClaim
+# a StatefulSet created for itself. Report what is left rather than delete it:
+# whether to reclaim that storage is the operator's decision.
+report_retired_storage() {
+  retired=$(kubectl get pvc -n "$POCKET_ADVISOR_NAMESPACE" -o name 2>/dev/null | grep 'nats-data' || true)
+  if [ -n "$retired" ]; then
+    echo
+    echo "retired NATS storage is still present (nothing deletes it automatically):"
+    echo "$retired" | sed 's/^/  /'
+    echo "once you no longer need it: kubectl delete pvc -n $POCKET_ADVISOR_NAMESPACE <name>"
+  fi
 }
 
 cmd_destroy_infra() {
@@ -204,22 +207,6 @@ provision_workspace() {
     -c "CREATE EXTENSION IF NOT EXISTS pg_textsearch;" \
     || exit 1
 
-  echo "--- nats: streams (anonymous — no NATS credential exists any more; subjects and stream names are namespaced by workspace id, matching internal/bus/bus.go's identical transform exactly) ---"
-  suffix=$(echo "$id" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-  nats stream add "INGESTION_$suffix" -s "nats://$NATS_HOST" \
-    --subjects="$id.ingest.emails.raw,$id.ingest.pdfs.raw,$id.ingest.docx.raw,$id.ingest.images.raw,$id.ingest.text.embed" \
-    --retention=work --storage=file --discard=new --max-msgs=1000000 \
-    --max-msgs-per-subject=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 \
-    --dupe-window=2m --no-allow-rollup --deny-delete --no-deny-purge --replicas=1 \
-    >/dev/null 2>&1 || echo "  INGESTION_$suffix already exists, skipping"
-  nats stream add "INGESTION_DLQ_$suffix" -s "nats://$NATS_HOST" \
-    --subjects="$id.ingest.dlq" \
-    --retention=limits --storage=file --discard=new --max-age=720h \
-    --max-msgs=-1 --max-msgs-per-subject=-1 --max-bytes=-1 --max-msg-size=-1 \
-    --dupe-window=2m --no-allow-rollup --deny-delete --no-deny-purge --replicas=1 \
-    >/dev/null 2>&1 || echo "  INGESTION_DLQ_$suffix already exists, skipping"
-
-
   echo
   echo "workspace \"$id\" provisioned."
 }
@@ -256,12 +243,6 @@ cmd_destroy_workspace() {
     -c "DROP ROLE IF EXISTS \"$id\";" \
     -c "DROP ROLE IF EXISTS \"${id}_user\";" \
     || exit 1
-
-  echo "--- nats: removing streams (anonymous, namespaced names matching provision_workspace) ---"
-  suffix=$(echo "$id" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-  for s in INGESTION INGESTION_DLQ; do
-    nats stream rm "${s}_$suffix" -s "nats://$NATS_HOST" --force >/dev/null 2>&1 || true
-  done
 
   echo
   echo "workspace \"$id\" torn down. Remove its entry from workspaces/workspaces.yaml by hand."

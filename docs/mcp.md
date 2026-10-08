@@ -183,7 +183,7 @@ Each `mcp start`/`mcp stdio` process is fixed to one workspace at startup, via `
 
 Both MCP transports follow the same rule: `--workspace-id <id>` fixes the workspace before the retrieval service, tool, or listener is created. Neither search nor continuation accepts a workspace argument. The tool name and route are routing inputs, not the storage boundary; the selected PostgreSQL credential and asserted database scope remain that boundary.
 
-Serving more than one workspace over HTTP means running one `mcp start --workspace-id <id>` process per workspace, each on its own address (`--addr`); nothing multiplexes several workspaces' credentials inside one process. Each process receives no source-file, NATS, provisioning, or shared PostgreSQL administrative credential — only what `WorkspacePostgresDSN` resolves for its own workspace.
+Serving more than one workspace over HTTP means running one `mcp start --workspace-id <id>` process per workspace, each on its own address (`--addr`); nothing multiplexes several workspaces' credentials inside one process. Each process receives no source-file, provisioning, or shared PostgreSQL administrative credential — only what `WorkspacePostgresDSN` resolves for its own workspace.
 
 ## Deployment
 

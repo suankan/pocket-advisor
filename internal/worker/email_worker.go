@@ -8,11 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/email"
@@ -34,9 +32,9 @@ type EmailWorker struct {
 	Log    *slog.Logger
 }
 
-func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
+func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 	var cmd ingestionv1.ProcessEmailCommand
-	if err := proto.Unmarshal(msg.Data(), &cmd); err != nil {
+	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
 		return Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
@@ -100,7 +98,7 @@ func (w *EmailWorker) Handle(ctx context.Context, msg jetstream.Msg) error {
 		}
 		child := trace.Child(meta.Traceparent)
 		embedMeta := cloneMeta(meta, meta.DocId, meta.ParentDocId, child)
-		if err := w.Bus.Publish(ctx, bus.SubjectEmbed, &ingestionv1.EmbedTextCommand{
+		if err := w.Bus.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{
 			Metadata: embedMeta, TextLength: int64(len(bodyText)),
 		}, child); err != nil {
 			return WithDoc(meta.DocId, err)
@@ -200,20 +198,20 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 
 	uri := source.Ref(childID)
 	switch route.Subject {
-	case bus.SubjectEmails:
+	case postgres.SubjectEmails:
 		return w.Bus.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessEmailCommand{Metadata: meta, SourceRef: uri}, tp)
-	case bus.SubjectPDFs:
+	case postgres.SubjectPDFs:
 		return w.Bus.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessPdfCommand{Metadata: meta, SourceRef: uri}, tp)
-	case bus.SubjectDocx:
+	case postgres.SubjectDocx:
 		return w.Bus.Publish(ctx, route.Subject,
 			&ingestionv1.ProcessOfficeCommand{Metadata: meta, SourceRef: uri, Subtype: route.Subtype}, tp)
-	case bus.SubjectImages:
+	case postgres.SubjectImages:
 		return w.Bus.Publish(ctx, route.Subject, &ingestionv1.ProcessImageCommand{
 			Metadata: meta, SourceRef: uri, ByteSize: int64(len(c.Data)),
 		}, tp)
-	case bus.SubjectEmbed:
+	case postgres.SubjectEmbed:
 		// Same line as discovery draws on a staged text file: an attachment
 		// whose bytes are not valid UTF-8 is declined, not dead-lettered under
 		// a driver-level error nobody can classify.

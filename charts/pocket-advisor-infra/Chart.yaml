@@ -1,6 +1,6 @@
 apiVersion: v2
 name: pocket-advisor-infra
-description: Shared PostgreSQL and NATS stores; workspace databases and streams are provisioned by pocket-advisor.sh.
+description: Shared PostgreSQL store; workspace databases are provisioned by pocket-advisor.sh.
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "1.0.0"

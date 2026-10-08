@@ -14,8 +14,6 @@ import (
 // means to test. Each test below adds its own workspaces: block on top.
 const validInfra = `
 infra:
-  nats:
-    url: nats://nats.example:4222
   postgres:
     host: postgres.example
   reranking:

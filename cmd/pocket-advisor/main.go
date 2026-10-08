@@ -1,10 +1,10 @@
 // Command pocket-advisor is the ingestion pipeline.
 //
-// It runs on the host against two stores in the local cluster (
-// PostgreSQL+pgvector, NATS JetStream), which communicate as before over
-// JetStream subjects carrying protobuf commands. What changed is that every
-// worker role now runs as a pool of goroutines in this process rather than as
-// its own Deployment (ingestion-design.md §5, §6.2).
+// It runs on the host against one store in the local cluster
+// (PostgreSQL+pgvector), which also holds the durable job queue that carries
+// protobuf commands between stages. Every worker role runs as a pool of
+// goroutines in this process rather than as its own Deployment
+// (ingestion-design.md §5, §6.2).
 //
 //	pocket-advisor --ingest-all --workspace-id test
 //	pocket-advisor --delete-data --workspace-id test

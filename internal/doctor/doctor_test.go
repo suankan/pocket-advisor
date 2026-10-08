@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -11,14 +12,12 @@ func TestHealthyReport(t *testing.T) {
 		CredsOK:       true,
 		PGRaw:         true,
 		SourcesRaw:    true,
-		NATSRaw:       true,
 		EmbedModelOK:  true,
 		EmbedDimOK:    true,
 		PGVectorExtOK: true,
 		PGSchemaOK:    true,
 		PGHNSWOK:      true,
 		PGBM25OK:      true,
-		StreamsOK:     true,
 	})
 	r := d.Run(nil)
 	if !r.Healthy {
@@ -35,11 +34,9 @@ func TestUnhealthyReport(t *testing.T) {
 		CredsOK:    true,
 		PGRaw:      false, // broken
 		SourcesRaw: true,
-		NATSRaw:    true,
 		PGSchemaOK: true,
 		PGHNSWOK:   true,
 		PGBM25OK:   true,
-		StreamsOK:  true,
 	})
 	r := d.Run(nil)
 	if r.Healthy {
@@ -68,11 +65,9 @@ func TestStalePendingFinding(t *testing.T) {
 		CredsOK:      true,
 		PGRaw:        true,
 		SourcesRaw:   true,
-		NATSRaw:      true,
 		PGSchemaOK:   true,
 		PGHNSWOK:     true,
 		PGBM25OK:     true,
-		StreamsOK:    true,
 		StalePending: 5,
 	})
 	r := d.Run(nil)
@@ -102,11 +97,9 @@ func TestFailedByReasonFinding(t *testing.T) {
 		CredsOK:    true,
 		PGRaw:      true,
 		SourcesRaw: true,
-		NATSRaw:    true,
 		PGSchemaOK: true,
 		PGHNSWOK:   true,
 		PGBM25OK:   true,
-		StreamsOK:  true,
 		FailedByReason: map[string]int{
 			"EXTRACTION_FAILED": 3,
 			"OCR_FAILED":        1,
@@ -157,14 +150,12 @@ func TestZeroCountFindingsAreOmitted(t *testing.T) {
 		CredsOK:       true,
 		PGRaw:         true,
 		SourcesRaw:    true,
-		NATSRaw:       true,
 		EmbedModelOK:  true,
 		EmbedDimOK:    true,
 		PGVectorExtOK: true,
 		PGSchemaOK:    true,
 		PGHNSWOK:      true,
 		PGBM25OK:      true,
-		StreamsOK:     true,
 		StalePending:  0, // zero count should not produce a finding
 	})
 	r := d.Run(nil)
@@ -188,11 +179,9 @@ func TestIncompleteResetFinding(t *testing.T) {
 		CredsOK:         true,
 		PGRaw:           true,
 		SourcesRaw:      true,
-		NATSRaw:         true,
 		PGSchemaOK:      true,
 		PGHNSWOK:        true,
 		PGBM25OK:        true,
-		StreamsOK:       true,
 		IncompleteReset: true,
 	})
 	r := d.Run(nil)
@@ -216,11 +205,9 @@ func TestSkippedByReasonFinding(t *testing.T) {
 		CredsOK:    true,
 		PGRaw:      true,
 		SourcesRaw: true,
-		NATSRaw:    true,
 		PGSchemaOK: true,
 		PGHNSWOK:   true,
 		PGBM25OK:   true,
-		StreamsOK:  true,
 		SkippedByReason: map[string]int{
 			"UNSUPPORTED_FORMAT": 10,
 		},
@@ -238,5 +225,119 @@ func TestSkippedByReasonFinding(t *testing.T) {
 	}
 	if !found {
 		t.Error("missing SKIPPED_REASON_UNSUPPORTED_FORMAT finding")
+	}
+}
+
+func healthyChecks() Checks {
+	return Checks{
+		RegistryOK: true, CredsOK: true, PGRaw: true, SourcesRaw: true,
+		EmbedModelOK: true, EmbedDimOK: true,
+		PGVectorExtOK: true, PGSchemaOK: true, PGHNSWOK: true, PGBM25OK: true,
+		QueueSchemaChecked: true, QueueSchemaReady: true,
+	}
+}
+
+func findingCodes(r *Report) map[string]Finding {
+	out := map[string]Finding{}
+	for _, f := range r.Findings {
+		out[f.Code] = f
+	}
+	return out
+}
+
+func TestOldQueueLayoutIsReportedAndNothingElseAboutJobs(t *testing.T) {
+	c := healthyChecks()
+	c.QueueSchemaReady = false
+	// Stale values from a layout that cannot be read must not leak into findings.
+	r := New("ws", c).Run(nil)
+	f, ok := findingCodes(r)["QUEUE_SCHEMA_UPGRADE_REQUIRED"]
+	if !ok {
+		t.Fatal("missing QUEUE_SCHEMA_UPGRADE_REQUIRED")
+	}
+	if f.Severity != SeverityError || f.NextAction == "" {
+		t.Errorf("finding = %+v, want an error with a next action", f)
+	}
+	if r.Healthy {
+		t.Error("an old queue layout reported healthy")
+	}
+}
+
+func TestMissingSchemaDoesNotAlsoReportAnUpgrade(t *testing.T) {
+	c := healthyChecks()
+	c.PGSchemaOK, c.QueueSchemaReady = false, false
+	if _, ok := findingCodes(New("ws", c).Run(nil))["QUEUE_SCHEMA_UPGRADE_REQUIRED"]; ok {
+		t.Error("a database with no schema was told to upgrade a queue it does not have")
+	}
+}
+
+func TestQueueFindingsCarrySeverityCountAndAction(t *testing.T) {
+	c := healthyChecks()
+	c.ExpiredLeases = 3
+	c.ExhaustedBudgets = 2
+	c.FailedJobsByReason = map[string]int{"OCR_FAILED": 4, "MALFORMED_COMMAND": 1}
+	c.JobsByState = map[string]int{"READY": 5, "RUNNING": 2, "FAILED": 5}
+	r := New("ws", c).Run(nil)
+	codes := findingCodes(r)
+	for code, want := range map[string]struct {
+		sev   Severity
+		count int
+	}{
+		"JOBS_EXPIRED_LEASES":                  {SeverityWarning, 3},
+		"JOBS_EXHAUSTED_BUDGET":                {SeverityError, 2},
+		"JOBS_FAILED_REASON_OCR_FAILED":        {SeverityError, 4},
+		"JOBS_FAILED_REASON_MALFORMED_COMMAND": {SeverityError, 1},
+	} {
+		f, ok := codes[code]
+		if !ok {
+			t.Errorf("missing %s", code)
+			continue
+		}
+		if f.Severity != want.sev || f.Count != want.count || f.Summary == "" || f.NextAction == "" {
+			t.Errorf("%s = %+v", code, f)
+		}
+	}
+	if !strings.Contains(codes["JOBS_FAILED_REASON_OCR_FAILED"].NextAction, "--recover") {
+		t.Errorf("a retryable failure should point at --recover: %q", codes["JOBS_FAILED_REASON_OCR_FAILED"].NextAction)
+	}
+	if r.Queue["RUNNING"] != 2 || r.Queue["READY"] != 5 {
+		t.Errorf("queue summary = %v, want the per-state counts", r.Queue)
+	}
+}
+
+// Live RUNNING work is a count in the summary, never a finding, so an active
+// ingestion does not make a workspace look unhealthy.
+func TestLiveRunningWorkIsNotAFinding(t *testing.T) {
+	c := healthyChecks()
+	c.JobsByState = map[string]int{"RUNNING": 12, "READY": 40}
+	r := New("ws", c).Run(nil)
+	if !r.Healthy {
+		t.Fatalf("live work produced findings: %+v", r.Findings)
+	}
+	if r.Queue["RUNNING"] != 12 {
+		t.Errorf("queue summary = %v", r.Queue)
+	}
+}
+
+func TestReportContainsNoBrokerFindings(t *testing.T) {
+	c := healthyChecks()
+	c.PGRaw = false
+	for code := range findingCodes(New("ws", c).Run(nil)) {
+		if strings.HasPrefix(code, "NATS_") || strings.HasPrefix(code, "JS_") {
+			t.Errorf("broker finding %s survived the migration", code)
+		}
+	}
+}
+
+func TestScopeMismatchReportsOnlyTheMismatch(t *testing.T) {
+	c := healthyChecks()
+	c.ScopeMismatch = true
+	c.PGSchemaOK, c.PGVectorExtOK, c.PGHNSWOK, c.PGBM25OK = false, false, false, false
+	r := New("ws", c).Run(nil)
+	codes := findingCodes(r)
+	if f, ok := codes["WORKSPACE_SCOPE_MISMATCH"]; !ok || f.Severity != SeverityCritical {
+		t.Fatalf("missing a critical WORKSPACE_SCOPE_MISMATCH: %+v", r.Findings)
+	}
+	if len(r.Findings) != 1 || r.Healthy {
+		t.Errorf("findings = %+v, want only the mismatch: nothing else may describe another workspace's database", r.Findings)
 	}
 }

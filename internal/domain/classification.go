@@ -65,3 +65,34 @@ func ClassifyReason(r FailureReason) FailureClass {
 func Retryable(r FailureReason) bool {
 	return ClassifyReason(r) == ClassRetryable
 }
+
+// RetryableReasons lists the failure reasons classified retryable. It is
+// derived from ClassifyReason, so a reason's class has one definition and a
+// query that selects by it cannot drift from the classification.
+func RetryableReasons() []FailureReason {
+	var out []FailureReason
+	for _, r := range ProcessingFailureReasons() {
+		if Retryable(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ProcessingFailureReasons lists the closed reasons a handler can record when
+// processing fails. Declines are SKIPPED outcomes and source waits are
+// diagnostics of a missing original, so neither is a processing failure.
+func ProcessingFailureReasons() []FailureReason {
+	return []FailureReason{
+		ReasonExtractionFailed,
+		ReasonEmptyExtraction,
+		ReasonUnknownEncoding,
+		ReasonMissingTraceContext,
+		ReasonMalformedCommand,
+		ReasonOCRFailed,
+		ReasonPDFOpenFailed,
+		ReasonEmailParseFailed,
+		ReasonHandlerPanic,
+		ReasonUnclassified,
+	}
+}

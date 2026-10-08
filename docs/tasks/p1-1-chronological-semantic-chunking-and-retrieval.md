@@ -1,8 +1,3 @@
----
-model: gpt-5.6-sol
-reasoning_effort: xhigh
----
-
 # Chronological semantic chunking and cross-type topic retrieval
 
 ## Outcome

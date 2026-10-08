@@ -42,7 +42,7 @@ WordPress `name: mysql, version: 5.7.21`, naming each application; Helm says
 name "should be the app name, reflecting the entire app" and version "can be
 set to {{ .Chart.AppVersion }}". Helm's reading assumes one app per chart and
 leaves component to distinguish the pieces, which is what we do: every object
-is name: pocket-advisor, and component says database / message-bus.
+is name: pocket-advisor, and component says what role the object plays.
 
 An earlier revision used the Kubernetes reading, with name per workload and
 version from the image tag. Reverted deliberately — the image tag is still on
@@ -62,8 +62,8 @@ Deliberately NOT wired into any workload's .spec.selector.matchLabels, which
 still match the legacy `app: <name>` key. .spec.selector is immutable on a live
 StatefulSet, so changing it fails `helm upgrade` outright with "updates to
 statefulset spec ... are forbidden", and the only way out is recreating the
-StatefulSet — which here means detaching the PVCs holding the workspace
-databases and the JetStream state. Not a trade worth making for a cosmetic key change.
+StatefulSet — which here means detaching the PVC holding the workspace
+databases. Not a trade worth making for a cosmetic key change.
 */}}
 {{- define "pa.labels" -}}
 {{- $ctx := .ctx -}}
@@ -90,10 +90,6 @@ check, refusing to adopt a resource another release already owns. They are
 Helm's to manage; a chart that also declares them is duplicating machine-owned
 metadata for no gain. Confirmed by rendering: `helm template` emits no
 annotations at all, while the same objects in a live release carry both.
-
-Note this is distinct from the field-manager conflicts a `helm upgrade` can hit
-on .data.nats-server.conf. Those come from Kubernetes server-side apply
-tracking which manager owns which field, not from these annotations (README §9).
 
 Renders empty when no annotation applies, so call sites must guard with `with`
 rather than emitting a bare `annotations:` key.

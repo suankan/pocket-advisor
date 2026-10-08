@@ -32,6 +32,10 @@ type Report struct {
 	WorkspaceID string    `json:"workspace_id"`
 	Healthy     bool      `json:"healthy"`
 	Findings    []Finding `json:"findings"`
+	// Queue counts jobs per state. Live RUNNING work appears here and is not
+	// a finding: a job under an unexpired lease is working, however old its
+	// document row is.
+	Queue map[string]int `json:"queue,omitempty"`
 }
 
 // JSON serialises the report.

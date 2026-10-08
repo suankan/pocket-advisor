@@ -8,12 +8,10 @@ require (
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/klippa-app/go-pdfium v1.19.4
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/nats-io/nats.go v1.37.0
 	github.com/otiai10/gosseract/v2 v2.4.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/net v0.57.0
-	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -28,11 +26,9 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jolestar/go-commons-pool/v2 v2.1.2 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/nats-io/nkeys v0.4.7 // indirect
-	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
@@ -44,6 +40,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )

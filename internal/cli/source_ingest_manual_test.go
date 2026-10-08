@@ -20,7 +20,6 @@ import (
 	"time"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
-	"github.com/suankan/pocket-advisor/internal/bus"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -31,9 +30,9 @@ import (
 )
 
 func TestSourceIngestEndToEnd(t *testing.T) {
-	dsn, natsURL := os.Getenv("EMAIL_DSN"), os.Getenv("SOURCE_TEST_NATS")
-	if dsn == "" || natsURL == "" {
-		t.Skip("requires disposable EMAIL_DSN and SOURCE_TEST_NATS")
+	dsn := os.Getenv("EMAIL_DSN")
+	if dsn == "" {
+		t.Skip("requires a disposable EMAIL_DSN with superuser rights")
 	}
 	ctx := context.Background()
 	admin, err := postgres.Connect(ctx, dsn, 4)
@@ -113,21 +112,9 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 	port, _ := strconv.Atoi(u.Port())
 	cfg.Postgres.Port = port
 	cfg.Postgres.MaxConns = 12
-	cfg.NATS.URL = natsURL
 	cfg.WorkspacesConfigPath = registry
 	cfg.Embedding = config.Embedding{Endpoint: model.URL + "/embeddings", Model: "synthetic", Timeout: 5 * time.Second}
 	cfg.MetricsPort = 0
-	b, err := bus.Connect(ctx, natsURL, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	if err := b.EnsureStreams(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.PurgeQueues(ctx); err != nil {
-		t.Fatal(err)
-	}
 	logs, err := telemetry.OpenLogs(t.TempDir(), "error")
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +193,7 @@ func TestSourceIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs := postgres.NewJobs(db)
-	if err := jobs.Publish(ctx, bus.SubjectPDFs, &ingestionv1.ProcessPdfCommand{
+	if err := jobs.Publish(ctx, postgres.SubjectPDFs, &ingestionv1.ProcessPdfCommand{
 		Metadata: &ingestionv1.DocumentMetadata{DocId: missing, RawSha256: missingHash, Traceparent: "00-11111111111111111111111111111111-1111111111111111-01"}, SourceRef: source.Ref(missing)}, ""); err != nil {
 		t.Fatal(err)
 	}

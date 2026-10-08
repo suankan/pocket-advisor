@@ -1,20 +1,26 @@
 # Workspace Isolation
 
-This document owns the boundary around configured originals, database state, queues, models, and transport requests. [Ingestion](ingestion-design.md) owns source discovery and replay; [MCP](mcp.md) owns authenticated request binding.
+This document owns the boundary around configured originals, database state, the job queue, models, and transport requests. [Ingestion](ingestion-design.md) owns source discovery and replay; [MCP](mcp.md) owns authenticated request binding.
 
 ## Current deployment and trust model
 
-One local host process serves one fixed workspace. PostgreSQL and NATS are shared local services. Each workspace has its own database and PostgreSQL role; NATS uses workspace-prefixed subjects and streams. This is a single-operator deployment: PostgreSQL uses `trust` authentication and NATS has no accounts or passwords. PostgreSQL still enforces role/database privileges; NATS isolation is an application naming convention, not a broker-enforced security boundary.
+One local host process serves one fixed workspace. PostgreSQL is a shared local service. Each workspace has its own database and PostgreSQL role. This is a single-operator deployment: PostgreSQL uses `trust` authentication, which skips the password check but not PostgreSQL's own role and database privileges.
 
 | Resource | Workspace boundary |
 | --- | --- |
 | Original files | configured roots and ignore rules; a read-only, confined resolver |
 | Source inventory, normalized text, metadata, vectors and lexical index | dedicated PostgreSQL database owned by the workspace role |
-| Ingestion work | `<id>.ingest.*` subjects and `INGESTION_<SUFFIX>` / `INGESTION_DLQ_<SUFFIX>` streams |
+| Ingestion work | the `ingestion_jobs` queue in the same dedicated database, under the same role |
 | Retrieval and evidence snapshots | server-fixed workspace and scoped opaque references |
 | Models | local configured endpoints; only the selected workspace's requested content is supplied |
 
-The suffix is the workspace ID uppercased with hyphens converted to underscores. Workspace IDs and the registry remain private. Provisioning never copies their values into the chart or other version-controlled material.
+Workspace IDs and the registry remain private. Provisioning never copies their values into the chart or other version-controlled material.
+
+### Queue boundary
+
+The ingestion queue resides in each workspace's PostgreSQL database, under the same fixed role as its evidence and source inventory, so a workspace's queued work is confined by the same database privileges as its data. Claims, renewals, verdicts, diagnosis, recovery and the dedicated LISTEN connection all use that selected database and role; populated-database scope is asserted before queue access, and no request field or shared administrative fallback can change the binding. The one notification channel per database carries an empty payload, so it names no workspace, document or job. The workspace maintenance lock excludes concurrent ingestion and maintenance processes. [Ingestion design](ingestion-design.md#61-the-postgresql-job-queue) owns lease, fence and retry semantics.
+
+PostgreSQL `trust` is the local authentication convention. Role privileges confine operations under the selected identity, but a client able to connect can assert another username, so the queue strengthens application confinement under the selected role without authenticating anyone. This deployment is not suitable for hostile or multiple operators without authenticated database access.
 
 ## Original-file boundary
 
@@ -32,30 +38,26 @@ Two workspaces may deliberately configure overlapping physical directories. Thei
 
 The application never receives the shared PostgreSQL administrator connection. Per-workspace tables do not need caller-selectable workspace filters because the database itself is the boundary. No shared fallback role, database, or query is allowed.
 
-A workspace advisory lock excludes concurrent ingestion and destructive maintenance. Stage jobs additionally use transaction/row locks and dispatch generations. Removed jobs acknowledge as no-ops, preventing stale broker commands from recreating forgotten documents.
+A workspace advisory lock excludes concurrent ingestion and destructive maintenance. Its session is separate from the handlers' transactions, so it does not by itself prove that an earlier process's handlers have ended; every job therefore also carries a lease and a generation fence, and a verdict for a job that was removed, reclaimed or expired changes nothing. A removed job cannot recreate a forgotten document.
 
-## NATS boundary
-
-The host connection namespaces every stream and subject from its fixed workspace ID. Outbox commands carry references and metadata, never original bytes or normalized document bodies. The runtime verifies the delivered subject, job payload and generation against the selected database's durable job record. A job from another workspace cannot authorize a write merely by presenting a document UUID.
-
-The broker itself has no per-workspace account isolation. A remote or multi-user deployment must introduce broker accounts and authentication before exposing this local topology. Naming conventions alone are insufficient for hostile clients.
+Queue payloads carry references and metadata, never original bytes or normalized document bodies. A job is claimed from the selected database's own `ingestion_jobs` table, so a job from another workspace cannot exist there and cannot authorize a write merely by presenting a document UUID.
 
 ## Retrieval, MCP and generation
 
 A process is bound to one workspace before clients and tools are created. MCP tool names, opaque references, mailbox cursors and evidence continuation remain scoped to that binding; clients cannot select another workspace in tool arguments. Serving several workspaces requires separately bound server processes.
 
-Ordinary retrieval reads normalized text and indexes from PostgreSQL. It needs neither a source-file handle nor NATS. Source locations describe recorded observations, not a live availability guarantee. Generation consumes supplied evidence only and has no source, queue, or administrative storage access. Authentication and HTTP exposure remain owned by [MCP](mcp.md) and [API design](api-server-design.md).
+Ordinary retrieval reads normalized text and indexes from PostgreSQL. It needs neither a source-file handle nor the job queue. Source locations describe recorded observations, not a live availability guarantee. Generation consumes supplied evidence only and has no source, queue, or administrative storage access. Authentication and HTTP exposure remain owned by [MCP](mcp.md) and [API design](api-server-design.md).
 
 ## Provisioning, removal and backup
 
-Add the workspace to the private registry and run `./pocket-advisor.sh deploy-workspaces`; use `deploy-infra` first if the shared stores do not exist. Ingestion applies dimension-dependent application schema after probing the local embedding endpoint.
+Add the workspace to the private registry and run `./pocket-advisor.sh deploy-workspaces`; use `deploy-infra` first if the shared store does not exist. Ingestion applies dimension-dependent application schema after probing the local embedding endpoint.
 
-`--delete-data` removes derived data and queued work while preserving originals and configuration. `destroy-workspace <id>` drops the database/role and both streams; then remove its registry entry. No provisioning or teardown command traverses or deletes configured original directories.
+`--delete-data` removes derived data and queued work while preserving originals and configuration. `destroy-workspace <id>` drops the database and role, which takes its queue with it; then remove its registry entry. No provisioning or teardown command traverses or deletes configured original directories.
 
 Back up originals with their required version history and retain a coordinated database backup when document identities, annotations, and evaluation references must survive. Re-ingesting current originals can rebuild an index, but it cannot recover overwritten historical bytes or recreate previous random UUIDs. Upgrade and teardown procedures are documented in [README §11](../README.md#11-upgrade-and-teardown).
 
 ## Verification and open decisions
 
-Use [README §10](../README.md#10-verification). Test with synthetic roots and disposable databases/brokers. Include foreign root bindings, traversal, symlink escapes, missing mounts, same-content copies, shared members, duplicate jobs, and role/database scope mismatch.
+Use [README §10](../README.md#10-verification). Test with synthetic roots and disposable databases. Include foreign root bindings, traversal, symlink escapes, missing mounts, same-content copies, shared members, duplicate jobs, role/database scope mismatch, and distinct synthetic roles that cannot connect to, read, claim, renew or mutate each other's jobs.
 
-Before supporting remote or multiple operators, introduce PostgreSQL authentication, NATS accounts, confined host-agent access, and credential distribution/rotation. Source-version retention, portable explicit root IDs, and coordinated restore procedures remain operational design decisions.
+Before supporting remote or multiple operators, introduce PostgreSQL authentication, confined host-agent access, and credential distribution/rotation. Source-version retention, portable explicit root IDs, and coordinated restore procedures remain operational design decisions.

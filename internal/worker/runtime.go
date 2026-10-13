@@ -501,6 +501,22 @@ func (r *Runtime) settle(workCtx context.Context, job postgres.Job, err, cause e
 		return
 	}
 
+	// PostgreSQL aborted the stage transaction to break a lock cycle. That is
+	// a race lost to another transaction, not evidence about the input, so it
+	// spends no attempt. Admission order makes the known cycles impossible;
+	// this keeps an unforeseen one from failing documents.
+	if postgres.IsTransactionConflict(err) {
+		delay := postgres.ConflictDelay/2 + time.Duration(rand.Int64N(int64(postgres.ConflictDelay/2)))
+		if r.verdict(workCtx, job, "conflict return", func(ctx context.Context) error {
+			return r.Queue.Release(ctx, job, delay)
+		}) {
+			telemetry.IngestionTasks.WithLabelValues(r.Name, "retry").Inc()
+			r.Log.Warn("transaction conflict, will retry",
+				"worker_type", r.Name, "job_id", job.ID, "error", err, "retry_in", delay)
+		}
+		return
+	}
+
 	if errors.Is(err, source.ErrUnavailable) || errors.Is(err, source.ErrChanged) {
 		reason := "SOURCE_UNAVAILABLE"
 		if errors.Is(err, source.ErrChanged) {

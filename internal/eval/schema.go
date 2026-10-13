@@ -46,7 +46,7 @@ type Case struct {
 // curated suite: every case reports "no expected document in results" while
 // retrieval is working perfectly, which reads as a quality collapse rather
 // than as the setup error it is. raw_sha256 survives that, because it hashes
-// the original bytes and is the same key CreateStub already upserts on, so
+// the original bytes and is the same key CreateStub admits content by, so
 // "the same bytes are the same document" is enforced by the schema rather
 // than assumed here.
 //

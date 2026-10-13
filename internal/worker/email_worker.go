@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -120,8 +121,8 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 		}
 	}
 
-	for _, c := range children {
-		if err := w.dispatchChild(ctx, meta, c); err != nil {
+	for _, a := range admissionOrder(children) {
+		if err := w.dispatchChild(ctx, meta, a); err != nil {
 			// All child intents must commit before the parent can acknowledge.
 			return WithDoc(meta.DocId, err)
 		}
@@ -133,12 +134,34 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 	return nil
 }
 
-// dispatchChild records a replayable member and its durable processing intent.
-func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.DocumentMetadata, c email.Child) error {
-	if len(c.Data) == 0 {
-		return nil
+// admission is a member about to be admitted, with its content hash.
+type admission struct {
+	child email.Child
+	sum   string
+}
+
+// admissionOrder returns a container's non-empty members in ascending content
+// hash order. A new member's stub stays uncommitted until this handler
+// commits, and another handler admitting the same bytes waits for it. Every
+// handler inserting in one global order means those waits cannot form a
+// cycle, so two messages sharing attachments in opposite order never
+// deadlock. The sort is stable: identical members keep their selector order.
+func admissionOrder(children []email.Child) []admission {
+	out := make([]admission, 0, len(children))
+	for _, c := range children {
+		if len(c.Data) == 0 {
+			continue
+		}
+		out = append(out, admission{child: c, sum: domain.SHA256Hex(c.Data)})
 	}
-	sum := domain.SHA256Hex(c.Data)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].sum < out[j].sum })
+	return out
+}
+
+// dispatchChild records a replayable member and, for content this handler
+// admits, its durable processing intent.
+func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.DocumentMetadata, a admission) error {
+	c, sum := a.child, a.sum
 
 	route := discovery.Classify(c.Data, c.Filename)
 
@@ -175,14 +198,12 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		return err
 	}
 
+	// Known content is linked, never written. Its stub committed with its
+	// job, and that job's handler may hold the row for the whole extraction;
+	// the member and placement rows above take only the key-share lock their
+	// foreign keys need, which never waits on it.
 	if !created {
-		status, err := w.Docs.Status(ctx, childID)
-		if err != nil {
-			return err
-		}
-		if status == domain.StatusCompleted || status == domain.StatusSkipped || status == domain.StatusFailed {
-			return nil
-		}
+		return nil
 	}
 
 	if route.Declined {

@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"errors"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -13,6 +15,16 @@ type executor interface {
 	Begin(context.Context) (pgx.Tx, error)
 }
 type transactionKey struct{ db *DB }
+
+// IsTransactionConflict reports whether PostgreSQL aborted a transaction to
+// break a lock cycle (deadlock_detected) or a serialization conflict
+// (serialization_failure). Neither says anything about the work itself: the
+// transaction it lost to has finished or is about to, and the same work rerun
+// is expected to succeed.
+func IsTransactionConflict(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && (pg.Code == "40P01" || pg.Code == "40001")
+}
 
 func (d *DB) executor(ctx context.Context) executor {
 	if tx, ok := ctx.Value(transactionKey{d}).(pgx.Tx); ok {

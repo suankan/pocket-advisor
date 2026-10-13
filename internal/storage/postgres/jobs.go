@@ -58,6 +58,10 @@ const (
 	// BusyDelay spaces out a claim that found the job's advisory lock held by
 	// an expired handler that is still physically running.
 	BusyDelay = 30 * time.Second
+	// ConflictDelay spaces out a job whose transaction PostgreSQL aborted to
+	// break a deadlock: long enough for the transaction it lost to to commit,
+	// short enough that a lost race does not read as a backlog.
+	ConflictDelay = 5 * time.Second
 
 	// NotifyChannel is the one fixed LISTEN/NOTIFY channel per database. The
 	// payload is always empty: a notification is only a hint to look.

@@ -54,24 +54,17 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 		route := Classify(data, f.Filename)
 		d := &domain.Document{DocID: domain.NewDocID(), RawSHA256: f.SHA256, SourceName: f.Filename, DocType: route.DocType, MimeType: route.MimeType, Metadata: map[string]string{"source_path": f.DisplayPath}}
 		d.SourceRef = source.Ref(d.DocID)
-		// Known content is found by a plain read. CreateStub's upsert takes the
-		// document's row lock even when the row exists, so a duplicate of
-		// content a worker is midway through would stall this serial scan
-		// behind that worker's transaction. Only new content reaches the
-		// upsert, which still resolves a racing insert by raw_sha256.
-		id, err := s.Docs.DocIDBySHA(ctx, f.SHA256)
+		id, created, err := s.Docs.CreateStub(ctx, d)
 		if err != nil {
 			return err
-		}
-		created := false
-		if id == "" {
-			if id, created, err = s.Docs.CreateStub(ctx, d); err != nil {
-				return err
-			}
 		}
 		if err := s.Inventory.Observe(ctx, scan, id, f); err != nil {
 			return err
 		}
+		// Known content is only observed, never written: a worker may be
+		// midway through a long stage transaction on its row, and this serial
+		// scan must not queue behind it. Its stub committed with its job, and
+		// ResumeLegacy re-admits a reachable row that has lost one.
 		if !created {
 			st, err := s.Docs.Status(ctx, id)
 			if err != nil {
@@ -80,6 +73,7 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 			if st == domain.StatusCompleted || st == domain.StatusSkipped || st == domain.StatusFailed {
 				return s.backfill(ctx, id, data, route, f.Filename, 0)
 			}
+			return nil
 		}
 		if route.Declined {
 			return s.Docs.UpdateStatus(ctx, id, domain.StatusSkipped, domain.ReasonUnsupportedFormat)

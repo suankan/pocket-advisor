@@ -41,7 +41,7 @@ Missing originals or changed bytes are separate waiting outcomes. PostgreSQL evi
 doc_id and raw_sha256 are two independent identities on the same row, not one value serving both purposes:
 
 - `doc_id` is a random UUIDv4 (`domain.NewDocID`), assigned once and never derived from anything — a short, indexable key that lets every other table (chunks, email metadata, placements) cross-reference one document cheaply. It carries no information about content, workspace, or placement.
-- `raw_sha256` is the actual content identity: a `UNIQUE` constraint (`documents_raw_sha256_key`) makes it, not doc_id, the idempotency key. `CreateStub` inserts a candidate doc_id but upserts on `raw_sha256` (`ON CONFLICT (raw_sha256) DO UPDATE ... RETURNING doc_id`), so re-scanning a workspace, retrying a failed publish, and two racing intake requests for the same bytes all resolve to whichever doc_id first claimed that content — the candidate id a caller generated is only used if the content is genuinely new.
+- `raw_sha256` is the actual content identity: a `UNIQUE` constraint (`documents_raw_sha256_key`) makes it, not doc_id, the idempotency key. `CreateStub` resolves content by a plain read of `raw_sha256` and inserts a candidate doc_id only when the read finds nothing, with `ON CONFLICT (raw_sha256) DO NOTHING` followed by a re-read when a concurrent admission of the same bytes committed first. Re-scanning a workspace, retrying a failed publish, and two racing intake requests for the same bytes therefore all resolve to whichever doc_id first claimed that content — the candidate id a caller generated is only used if the content is genuinely new.
 
 This is what makes moving a file within a workspace, reorganizing a workspace's directory layout, or renaming a workspace itself an ordinary metadata change rather than a re-identification: nothing about a document's identity is derived from where it currently lives.
 
@@ -100,7 +100,9 @@ Exact browse reads these tables, using configured workspace owner identities for
 
 The workspace's `paths` and ordered ignore rules define eligible regular files. Relative roots resolve against the registry directory, and multiple roots require distinct basenames. Each scan fully reads and hashes originals, including unchanged mtime/size observations. Platform metadata files are excluded. There is no watcher dependency; `--listen` scans at startup and every minute. Changes to registry configuration require restarting the process.
 
-Each accepted original commits its document stub, source occurrence, and next-stage job together. Content the workspace already holds is found by a plain read and only new content reaches the conflict-safe upsert, so admission never queues behind a worker's open transaction on a document it is midway through. Completed, skipped, and failed documents are not automatically re-extracted. Existing containers are replayed to refresh known member routes. New supported plain text commits canonical text and its embed job together.
+Each accepted original commits its document stub, source occurrence, and next-stage job together. Completed, skipped, and failed documents are not automatically re-extracted. Existing containers are replayed to refresh known member routes. New supported plain text commits canonical text and its embed job together.
+
+Every admitter — the source scan for originals, the email worker for container members — follows one rule: resolve, then link. Content the workspace already holds is found by a plain read and is only linked, through a source occurrence, member route or placement, never written: its stub committed with its job, and its stage handler may hold the document row for the whole extraction. Linking takes only the key-share lock its foreign keys need, which never waits on that handler, whereas any conflict-handling insert or update of the row would wait for it. A reachable known row that has lost its job is re-admitted by the post-scan resume below, not by the admitter that met it. Only content the read does not find is inserted, and that insert can wait only for another uncommitted admission of the same new bytes. The first to commit keeps the row and later admitters link to it. A handler admits a container's members in ascending `raw_sha256` order, so these waits follow one global order and cannot form a cycle. An abort that PostgreSQL makes to break an unforeseen deadlock is still a returned job, not a failure (§6.1).
 
 Discovery reads one original at a time and writes reference-only jobs to the durable queue. It never waits for a queue-depth threshold. The workers run while the scan admits, so extraction and embedding overlap the scan's reads. A job commits together with the source occurrence it reads, so work admitted by the scan always resolves. Leftover work for a renamed original can reach a worker before the scan has reached its new path; it parks as `WAITING_SOURCE` and is retried once the scan completes and locations are current. The backlog grows in proportion to the admitted collection; worker concurrency, job transaction slots, and container expansion limits bound active processing independently of its size.
 
@@ -132,8 +134,8 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - strips markup, quoted reply chains, signature boilerplate, and machine-generated tracking URLs over the configured structural threshold;
 - records headers in structured columns;
 - persists the durable message metadata described in §2.5;
-- records child replay selectors and containment without persisting child bytes;
-- commits child stubs and all downstream job intents with the parent stage; and
+- records child replay selectors and containment without persisting child bytes, for every member including those whose content is already known;
+- admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage; and
 - enforces nesting and expansion bounds for hostile containers.
 
 Child commands carry `parent_doc_id`, depth, and the parent trace id. Root creation remains exclusive to discovery.
@@ -200,6 +202,7 @@ The five subjects name the stage queues; they are values of `ingestion_jobs.subj
 | Terminal failure, or a third transient failure | job and document FAILED together; payload and reason retained |
 | Spent budget at claim | FAILED without running a handler, with the last closed reason or UNCLASSIFIED |
 | Busy advisory lock | READY after thirty seconds; the attempt is refunded if this claim charged one |
+| Deadlock or serialization abort | READY after a jittered two-and-a-half to five seconds; the attempt is refunded |
 | Shutdown or cancellation | READY at once; the charged attempt is refunded |
 | Missing or changed original | WAITING_SOURCE with a closed reason; the charged attempt is refunded and earlier failures kept |
 | Handler panic | FAILED with `HANDLER_PANIC` |
@@ -323,7 +326,7 @@ git diff --check
 git status --short
 ```
 
-Synthetic integration checks cover stage rollback, concurrent claims, expiry and reclaim, stale-verdict fences, refunds, crash exhaustion, notification and reconnect, queue schema upgrade, recovery revalidation, source schema migration, partial scans, shared locations, unchanged second ingestion, rename identity, hybrid retrieval, and derived-only reset. Source tests cover content changes preserving size/mtime, alternative container routes, repeated member names, replay bounds, missing roots, traversal, symlinks, and cross-root scope. Run manual tests only against a disposable PostgreSQL as described in the README.
+Synthetic integration checks cover concurrent admission of shared content, stage rollback, concurrent claims, expiry and reclaim, stale-verdict fences, refunds, crash exhaustion, notification and reconnect, queue schema upgrade, recovery revalidation, source schema migration, partial scans, shared locations, unchanged second ingestion, rename identity, hybrid retrieval, and derived-only reset. Source tests cover content changes preserving size/mtime, alternative container routes, repeated member names, replay bounds, missing roots, traversal, symlinks, and cross-root scope. Run manual tests only against a disposable PostgreSQL as described in the README.
 
 ## 14. Open decisions
 

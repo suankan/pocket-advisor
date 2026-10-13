@@ -92,11 +92,12 @@ CREATE INDEX IF NOT EXISTS documents_parent_idx     ON documents(parent_doc_id);
 -- doc_id and raw_sha256 are deliberately independent: doc_id is an opaque,
 -- randomly generated row identifier (domain.NewDocID) with no relationship
 -- to the bytes it names, and raw_sha256 is the content identity idempotency
--- actually depends on. This constraint is what CreateStub upserts against
--- (ON CONFLICT (raw_sha256)) to converge two racing intake attempts, a
--- retried publish, and a re-scan of the same bytes on one row — the
--- guarantee doc_id used to provide by being derived from the hash itself,
--- now provided by this constraint instead of by doc_id's own value.
+-- actually depends on. This constraint is what CreateStub's insert of new
+-- content conflicts on (ON CONFLICT (raw_sha256) DO NOTHING) to converge two
+-- racing intake attempts, a retried publish, and a re-scan of the same bytes
+-- on one row — the guarantee doc_id used to provide by being derived from
+-- the hash itself, now provided by this constraint instead of by doc_id's
+-- own value.
 DO $$ BEGIN
     ALTER TABLE documents
         ADD CONSTRAINT documents_raw_sha256_key UNIQUE (raw_sha256);

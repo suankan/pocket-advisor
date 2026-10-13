@@ -17,17 +17,28 @@ type DocumentRepo struct{ db *DB }
 
 func NewDocumentRepo(db *DB) *DocumentRepo { return &DocumentRepo{db: db} }
 
-// CreateStub inserts a PENDING row, or finds the existing row for the same
-// content, and reports the resolved doc_id plus whether it was newly
-// created. d.DocID is only a candidate: doc_id and raw_sha256 are
-// deliberately independent (schema.go's documents_raw_sha256_key), so this
-// upserts on the content hash, not on the candidate id, and the id actually
-// stored — d.DocID's value on a fresh insert, or whichever id an earlier
-// insert of the same bytes already claimed — is what every caller must use
-// from here on, not d.DocID itself. A duplicate is an expected outcome of
-// the idempotent entry path, not a failure — hence a bool rather than an
-// error (§8.2).
+// CreateStub admits content: it resolves d.RawSHA256 to the document that
+// already holds it, or inserts a PENDING row for it, and reports the resolved
+// doc_id plus whether this call created it. d.DocID is only a candidate:
+// doc_id and raw_sha256 are deliberately independent (schema.go's
+// documents_raw_sha256_key), so the id actually stored — d.DocID's value on a
+// fresh insert, or whichever id an earlier admission of the same bytes
+// claimed — is what every caller must use from here on. A duplicate is an
+// expected outcome, not a failure — hence a bool rather than an error.
+//
+// Known content is resolved by a plain read and never locked. The row may
+// belong to a handler that is midway through a long stage transaction on it,
+// and any conflict-handling insert waits for that transaction: DO UPDATE
+// because it locks the row, DO NOTHING because the unique check waits on the
+// row's uncommitted update. Only content the read did not find is inserted,
+// and the only transaction that insert can wait for is another admission of
+// the same new bytes. ON CONFLICT DO NOTHING lets that race's winner keep the
+// row; a READ COMMITTED re-read then sees the winner's committed id.
 func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (string, bool, error) {
+	if id, err := r.DocIDBySHA(ctx, d.RawSHA256); err != nil || id != "" {
+		return id, false, err
+	}
+
 	meta, err := json.Marshal(orEmpty(d.Metadata))
 	if err != nil {
 		return "", false, fmt.Errorf("marshal metadata: %w", err)
@@ -39,22 +50,33 @@ func (r *DocumentRepo) CreateStub(ctx context.Context, d *domain.Document) (stri
 	}
 
 	var id string
-	var inserted bool
 	err = r.db.executor(ctx).QueryRow(ctx, `
         INSERT INTO documents (
             doc_id, parent_doc_id,
             processing_status, doc_type, mime_type, source_ref, raw_sha256,
             source_filename, metadata_headers)
         SELECT $1::uuid,$2::uuid,'PENDING',$3,$4,$5,$6::varchar,$7,$8::jsonb
-        ON CONFLICT (raw_sha256) DO UPDATE SET raw_sha256 = EXCLUDED.raw_sha256
-        RETURNING doc_id::text, (xmax = 0)`,
+        ON CONFLICT (raw_sha256) DO NOTHING
+        RETURNING doc_id::text`,
 		d.DocID, parent,
-		d.DocType, d.MimeType, "source:"+d.DocID, d.RawSHA256, d.SourceName, meta).Scan(&id, &inserted)
-
-	if err != nil {
+		d.DocType, d.MimeType, "source:"+d.DocID, d.RawSHA256, d.SourceName, meta).Scan(&id)
+	if err == nil {
+		return id, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", false, fmt.Errorf("create stub %s: %w", d.DocID, err)
 	}
-	return id, inserted, nil
+
+	// A concurrent admission committed the same bytes after the read above.
+	// Only the deletion sweep removes documents, and it excludes ingestion, so
+	// the winner is still there.
+	if id, err = r.DocIDBySHA(ctx, d.RawSHA256); err != nil {
+		return "", false, err
+	}
+	if id == "" {
+		return "", false, fmt.Errorf("create stub %s: conflicting content %s is not visible", d.DocID, d.RawSHA256)
+	}
+	return id, false, nil
 }
 
 // Status reads the current state of a document.

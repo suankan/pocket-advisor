@@ -202,7 +202,7 @@ The five subjects name the stage queues; they are values of `ingestion_jobs.subj
 | Terminal failure, or a third transient failure | job and document FAILED together; payload and reason retained |
 | Spent budget at claim | FAILED without running a handler, with the last closed reason or UNCLASSIFIED |
 | Busy advisory lock | READY after thirty seconds; the attempt is refunded if this claim charged one |
-| Deadlock or serialization abort | READY after a jittered two-and-a-half to five seconds; the attempt is refunded |
+| Deadlock abort | READY after a jittered two-and-a-half to five seconds; the attempt is refunded |
 | Shutdown or cancellation | READY at once; the charged attempt is refunded |
 | Missing or changed original | WAITING_SOURCE with a closed reason; the charged attempt is refunded and earlier failures kept |
 | Handler panic | FAILED with `HANDLER_PANIC` |

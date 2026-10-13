@@ -23,7 +23,7 @@ import (
 //	Run: EMAIL_DSN=postgres://<role>@localhost:5432/<disposable-db> \
 //		go test -tags manual ./internal/worker/ -run Attachment -v
 
-func admissionFixture(t *testing.T) (*postgres.DB, *EmailWorker) {
+func admissionFixture(t *testing.T) (*postgres.DB, *EmailWorker, string) {
 	t.Helper()
 	dsn := os.Getenv("EMAIL_DSN")
 	if dsn == "" {
@@ -45,7 +45,8 @@ func admissionFixture(t *testing.T) (*postgres.DB, *EmailWorker) {
 	q := u.Query()
 	q.Set("search_path", schema+",public")
 	u.RawQuery = q.Encode()
-	db, err := postgres.Connect(ctx, u.String(), 6)
+	scoped := u.String()
+	db, err := postgres.Connect(ctx, scoped, 6)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,31 @@ func admissionFixture(t *testing.T) (*postgres.DB, *EmailWorker) {
 	if err := db.ApplySchema(ctx, postgres.SchemaMetadata{WorkspaceID: "synthetic", EmbedModel: "synthetic", EmbedDim: 8}); err != nil {
 		t.Fatal(err)
 	}
-	return db, &EmailWorker{Inventory: postgres.NewSourceRepo(db), Docs: postgres.NewDocumentRepo(db), Bus: postgres.NewJobs(db)}
+	return db, workerOn(db), scoped
+}
+
+func workerOn(db *postgres.DB) *EmailWorker {
+	return &EmailWorker{Inventory: postgres.NewSourceRepo(db), Docs: postgres.NewDocumentRepo(db), Bus: postgres.NewJobs(db)}
+}
+
+// connectAs opens a pool on the fixture's schema whose sessions carry name as
+// their application_name, so a test can see from pg_stat_activity what that
+// pool's transaction is waiting for.
+func connectAs(t *testing.T, scoped, name string) *postgres.DB {
+	t.Helper()
+	u, err := url.Parse(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("application_name", name)
+	u.RawQuery = q.Encode()
+	db, err := postgres.Connect(context.Background(), u.String(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	return db
 }
 
 func stageEmail(t *testing.T, w *EmailWorker, body string) *ingestionv1.DocumentMetadata {
@@ -80,7 +105,7 @@ func count(t *testing.T, db *postgres.DB, sql string, args ...any) int {
 // and before admission resolved known content by a plain read this email
 // waited for all of it.
 func TestKnownAttachmentIsLinkedWithoutWaitingOnItsExtraction(t *testing.T) {
-	db, w := admissionFixture(t)
+	db, w, _ := admissionFixture(t)
 	ctx := context.Background()
 	pdf := []byte("%PDF-1.4 synthetic attachment under extraction")
 	held, _, err := w.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex(pdf), DocType: "pdf"})
@@ -122,40 +147,81 @@ func TestKnownAttachmentIsLinkedWithoutWaitingOnItsExtraction(t *testing.T) {
 	}
 }
 
-// Two emails carry the same two new attachments in opposite order and are
-// handled concurrently, each pausing between members so their admissions
-// interleave. Admitting in message order deadlocks: each holds one uncommitted
-// stub the other needs. Admission order serializes them instead, and both
-// commit with one document per attachment and every containment recorded.
+// Two emails carry the same two new attachments in opposite order. The first
+// admits one member and holds its transaction open until the second has either
+// admitted a member of its own or is blocked behind the first; only then does
+// the first admit its other member. Admitting in message order deadlocks on
+// that schedule every time: each holds one uncommitted stub the other needs.
+// Admission order makes the second wait on the first's first member instead,
+// and both commit with one document per attachment and every containment
+// recorded.
 func TestSharedAttachmentsInOppositeOrderDoNotDeadlock(t *testing.T) {
-	db, w := admissionFixture(t)
-	ctx := context.Background()
-	p := email.Child{Filename: "p.pdf", Data: []byte("%PDF-1.4 synthetic shared attachment P")}
-	q := email.Child{Filename: "q.pdf", Data: []byte("%PDF-1.4 synthetic shared attachment Q")}
+	db, w, scoped := admissionFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p := email.Child{Filename: "p.pdf", Selector: "mime:1", Data: []byte("%PDF-1.4 synthetic shared attachment P")}
+	q := email.Child{Filename: "q.pdf", Selector: "mime:2", Data: []byte("%PDF-1.4 synthetic shared attachment Q")}
 	first, second := stageEmail(t, w, "first email"), stageEmail(t, w, "second email")
+	dbA, dbB := connectAs(t, scoped, "admit_first"), connectAs(t, scoped, "admit_second")
+	wA, wB := workerOn(dbA), workerOn(dbB)
 
-	handle := func(parent *ingestionv1.DocumentMetadata, children ...email.Child) error {
-		for i := range children {
-			children[i].Selector = "mime:" + string(rune('1'+i))
+	// The first email resumes once the second has admitted a member or is
+	// blocked by the first, whichever happens.
+	aAdmitted, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	proceed := func() { once.Do(func() { close(resume) }) }
+	go func() {
+		for {
+			var blocked bool
+			err := db.Pool.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity b, pg_stat_activity a
+				WHERE b.application_name = 'admit_second' AND a.application_name = 'admit_first'
+				  AND a.pid = ANY(pg_blocking_pids(b.pid)))`).Scan(&blocked)
+			if err != nil || blocked {
+				proceed()
+				return
+			}
+			select {
+			case <-resume:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
-		return db.Transaction(ctx, func(ctx context.Context) error {
-			for i, a := range admissionOrder(children) {
-				if i > 0 {
-					time.Sleep(500 * time.Millisecond)
+	}()
+
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = dbA.Transaction(ctx, func(ctx context.Context) error {
+			for i, a := range admissionOrder([]email.Child{p, q}) {
+				if i == 1 {
+					close(aAdmitted)
+					<-resume
 				}
-				if err := w.dispatchChild(ctx, parent, a); err != nil {
+				if err := wA.dispatchChild(ctx, first, a); err != nil {
 					return err
 				}
 			}
 			return nil
 		})
-	}
-	var wg sync.WaitGroup
-	errs := make([]error, 2)
-	wg.Add(2)
-	go func() { defer wg.Done(); errs[0] = handle(first, p, q) }()
-	time.Sleep(100 * time.Millisecond)
-	go func() { defer wg.Done(); errs[1] = handle(second, q, p) }()
+	}()
+	go func() {
+		defer wg.Done()
+		<-aAdmitted
+		errs[1] = dbB.Transaction(ctx, func(ctx context.Context) error {
+			for i, a := range admissionOrder([]email.Child{q, p}) {
+				if err := wB.dispatchChild(ctx, second, a); err != nil {
+					return err
+				}
+				if i == 0 {
+					proceed()
+				}
+			}
+			return nil
+		})
+	}()
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {

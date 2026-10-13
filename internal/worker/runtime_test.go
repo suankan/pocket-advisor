@@ -695,23 +695,21 @@ func TestBusyReturnWaitsOutTheStaleHandler(t *testing.T) {
 	}
 }
 
-// A deadlock or serialization abort is a race lost to another transaction.
-// It returns the job after a short wait with its attempt refunded, even on the
-// claim that would otherwise have failed it.
-func TestTransactionConflictReturnsTheJobWithoutSpendingAnAttempt(t *testing.T) {
-	for _, code := range []string{"40P01", "40001"} {
-		q := &fakeQueue{}
-		rt := newRuntime(q, 1)
-		rt.handle(context.Background(), newJob(postgres.MaxAttempts), func(context.Context, postgres.Job) error {
-			return WithDoc("doc", fmt.Errorf("create stub: %w", &pgconn.PgError{Code: code}))
-		})
-		v := q.only(t, "release")
-		if v.Delay < postgres.ConflictDelay/2 || v.Delay >= postgres.ConflictDelay {
-			t.Errorf("%s: conflict return delay = %v, want within [%v, %v)", code, v.Delay, postgres.ConflictDelay/2, postgres.ConflictDelay)
-		}
-		if !v.Job.Charged {
-			t.Errorf("%s: the returned claim owes no refund", code)
-		}
+// A deadlock abort is a race lost to another transaction. It returns the job
+// after a short wait with its attempt refunded, even on the claim that would
+// otherwise have failed it.
+func TestDeadlockReturnsTheJobWithoutSpendingAnAttempt(t *testing.T) {
+	q := &fakeQueue{}
+	rt := newRuntime(q, 1)
+	rt.handle(context.Background(), newJob(postgres.MaxAttempts), func(context.Context, postgres.Job) error {
+		return WithDoc("doc", fmt.Errorf("create stub: %w", &pgconn.PgError{Code: "40P01"}))
+	})
+	v := q.only(t, "release")
+	if v.Delay < postgres.DeadlockDelay/2 || v.Delay >= postgres.DeadlockDelay {
+		t.Errorf("deadlock return delay = %v, want within [%v, %v)", v.Delay, postgres.DeadlockDelay/2, postgres.DeadlockDelay)
+	}
+	if !v.Job.Charged {
+		t.Error("the returned claim owes no refund")
 	}
 }
 

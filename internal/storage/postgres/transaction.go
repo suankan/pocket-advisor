@@ -16,14 +16,14 @@ type executor interface {
 }
 type transactionKey struct{ db *DB }
 
-// IsTransactionConflict reports whether PostgreSQL aborted a transaction to
-// break a lock cycle (deadlock_detected) or a serialization conflict
-// (serialization_failure). Neither says anything about the work itself: the
+// IsDeadlock reports whether PostgreSQL aborted a transaction to break a lock
+// cycle (deadlock_detected). That says nothing about the work itself: the
 // transaction it lost to has finished or is about to, and the same work rerun
-// is expected to succeed.
-func IsTransactionConflict(err error) bool {
+// is expected to succeed. Every transaction runs at READ COMMITTED, so a
+// serialization failure cannot occur and is not treated as one.
+func IsDeadlock(err error) bool {
 	var pg *pgconn.PgError
-	return errors.As(err, &pg) && (pg.Code == "40P01" || pg.Code == "40001")
+	return errors.As(err, &pg) && pg.Code == "40P01"
 }
 
 func (d *DB) executor(ctx context.Context) executor {

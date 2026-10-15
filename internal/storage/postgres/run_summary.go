@@ -20,7 +20,7 @@ type Tally struct {
 
 // AttentionDoc is a document only the owner can resolve: a failure, or content
 // locked behind a password. Location is the original's path, or the member's
-// name and the path of the container it came from.
+// name and the path of a container that holds it.
 type AttentionDoc struct {
 	Status   domain.Status
 	Reason   string
@@ -148,10 +148,18 @@ func (r *Jobs) RunSummary(ctx context.Context, since time.Time) (RunSummary, err
  SELECT d.processing_status::text, COALESCE(d.metadata_headers->>'reason', ''), l.this_run,
         d.source_filename,
         COALESCE((SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = d.doc_id AND o.available), ''),
-        COALESCE((SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = d.parent_doc_id AND o.available), ''),
-        COALESCE(p.source_filename, ''),
+        COALESCE(c.path, ''), COALESCE(c.name, ''),
         count(*) OVER ()
- FROM listed l JOIN documents d USING (doc_id) LEFT JOIN documents p ON p.doc_id = d.parent_doc_id
+ FROM listed l JOIN documents d USING (doc_id)
+ LEFT JOIN LATERAL (
+   SELECT name, path FROM (
+     SELECT k.doc_id, k.source_filename AS name,
+            (SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = k.doc_id AND o.available) AS path
+     FROM documents k
+     WHERE k.doc_id = d.parent_doc_id
+        OR k.doc_id IN (SELECT container_doc_id FROM document_placements WHERE contained_doc_id = d.doc_id)) k
+   ORDER BY path IS NULL, k.doc_id = d.parent_doc_id DESC, path, k.doc_id
+   LIMIT 1) c ON true
  ORDER BY l.this_run DESC, 1, 2, 5, 6, 4
  LIMIT $3`, since, locked, MaxAttention)
 	if err != nil {
@@ -160,27 +168,30 @@ func (r *Jobs) RunSummary(ctx context.Context, since time.Time) (RunSummary, err
 	defer rows.Close()
 	for rows.Next() {
 		var a AttentionDoc
-		var status, name, own, parentPath, parentName string
-		if err := rows.Scan(&status, &a.Reason, &a.ThisRun, &name, &own, &parentPath, &parentName, &s.AttentionTotal); err != nil {
+		var status, name, own, containerPath, containerName string
+		if err := rows.Scan(&status, &a.Reason, &a.ThisRun, &name, &own, &containerPath, &containerName, &s.AttentionTotal); err != nil {
 			return s, err
 		}
 		a.Status = domain.Status(status)
-		a.Location = location(name, own, parentPath, parentName)
+		a.Location = location(name, own, containerPath, containerName)
 		s.Attention = append(s.Attention, a)
 	}
 	return s, rows.Err()
 }
 
-// location names a document by its original's path, or as a member of the
-// container it came from.
-func location(name, own, parentPath, parentName string) string {
+// location names a document by its original's path, or as a member of a
+// container that holds it: the one it came from when that is still staged,
+// otherwise any other that is. A document first seen as a file keeps no
+// parent, so once that file is deleted only its containment can say where it
+// still is.
+func location(name, own, containerPath, containerName string) string {
 	switch {
 	case own != "":
 		return own
-	case parentPath != "":
-		return name + " in " + parentPath
-	case parentName != "":
-		return name + " in " + parentName
+	case containerPath != "":
+		return name + " in " + containerPath
+	case containerName != "":
+		return name + " in " + containerName
 	}
 	return name
 }

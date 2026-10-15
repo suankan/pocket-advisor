@@ -17,14 +17,15 @@ import (
 // and documents from before it are earlier, everything the run created or
 // finished a job for is this run's, including documents discovery settled
 // without any job. Failures and this run's password skips are named, members
-// by the container they came from.
+// by the container they came from, and a document whose own file is gone by a
+// container that still holds it.
 func TestRunSummaryScopesTheRunByItsStart(t *testing.T) {
 	db, docs, jobs := queueSetup(t)
 	ctx := context.Background()
 	inventory := NewSourceRepo(db)
 
 	earlier, _ := addJob(t, db, docs, jobs, SubjectPDFs)
-	if _, err := db.Pool.Exec(ctx, `UPDATE documents SET source_filename = 'old.eml' WHERE doc_id = $1`, earlier); err != nil {
+	if _, err := db.Pool.Exec(ctx, `UPDATE documents SET source_filename = 'saved.zip' WHERE doc_id = $1`, earlier); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobs.Fail(ctx, claimOne(t, jobs, SubjectPDFs), domain.ReasonUnknownEncoding); err != nil {
@@ -74,6 +75,16 @@ func TestRunSummaryScopesTheRunByItsStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The earlier failure was first seen as a file of its own, since deleted;
+	// the same content is still attached to the message.
+	observe(earlier, "saved.zip")
+	if _, err := db.Pool.Exec(ctx, `UPDATE source_occurrences SET available = false WHERE doc_id = $1`, earlier); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(ctx, `INSERT INTO document_placements (container_doc_id, contained_doc_id) VALUES ($1, $2)`, mail, earlier); err != nil {
+		t.Fatal(err)
+	}
+
 	declined, _, err := docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex([]byte("declined")), DocType: "legacy-office"})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +98,7 @@ func TestRunSummaryScopesTheRunByItsStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Files != 2 || s.NewOriginals != 4 || s.Unfinished != 1 || s.Waiting != 0 {
+	if s.Files != 3 || s.NewOriginals != 4 || s.Unfinished != 1 || s.Waiting != 0 {
 		t.Fatalf("files %d, new %d, unfinished %d, waiting %d", s.Files, s.NewOriginals, s.Unfinished, s.Waiting)
 	}
 	for _, want := range []struct {
@@ -113,7 +124,7 @@ func TestRunSummaryScopesTheRunByItsStart(t *testing.T) {
 	want := []AttentionDoc{
 		{domain.StatusFailed, "OCR_FAILED", true, "root/a.pdf"},
 		{domain.StatusSkipped, "PDF_ENCRYPTED", true, "letter.pdf in root/mail.eml"},
-		{domain.StatusFailed, "UNKNOWN_ENCODING", false, "old.eml"},
+		{domain.StatusFailed, "UNKNOWN_ENCODING", false, "saved.zip in root/mail.eml"},
 	}
 	if !slices.Equal(s.Attention, want) || s.AttentionTotal != 3 {
 		t.Fatalf("attention = %+v (total %d), want %+v", s.Attention, s.AttentionTotal, want)

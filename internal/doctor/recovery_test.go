@@ -69,6 +69,24 @@ func TestClassifyFailedDeclineIsRedriven(t *testing.T) {
 	}
 }
 
+// A failure with no job was recorded before the job queue, so its reason, even
+// a terminal or unclassified one, is no verdict on the current handlers.
+func TestClassifyJoblessFailedIsRedriven(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
+		{DocID: "doc-9", Status: domain.StatusFailed, Reason: domain.ReasonUnclassified, Jobless: true},
+		{DocID: "doc-10", Status: domain.StatusFailed, Reason: domain.ReasonUnknownEncoding, Jobless: true},
+	})
+	plan := p.Plan(context.Background())
+	for _, item := range plan.Items {
+		if item.Classification != ClassRetryable || item.Action != ActionRetryTransition {
+			t.Errorf("%s: classification %q action %q, want retryable transition_to_pending", item.DocID, item.Classification, item.Action)
+		}
+	}
+	if err := p.Validate(context.Background(), plan); err != nil {
+		t.Errorf("a jobless failure failed validation: %v", err)
+	}
+}
+
 func TestClassifyTerminalFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-4", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},

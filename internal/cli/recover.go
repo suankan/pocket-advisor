@@ -100,7 +100,7 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 		})
 	}
 
-	// Retryable FAILED, and FAILED carrying a decline
+	// Retryable FAILED, FAILED carrying a decline, and FAILED with no job
 	failed, err := q.RedrivableFAILED(ctx, recoverySelectionCap)
 	if err != nil {
 		log.Warn("query redrivable failed failed", "error", err)
@@ -108,9 +108,10 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	noteIfCapped(len(failed), "redrivable FAILED")
 	for _, d := range failed {
 		docs = append(docs, doctor.RecoveryItem{
-			DocID:  d.DocID,
-			Status: domain.StatusFailed,
-			Reason: domain.FailureReason(d.Reason),
+			DocID:   d.DocID,
+			Status:  domain.StatusFailed,
+			Reason:  domain.FailureReason(d.Reason),
+			Jobless: d.Jobless,
 		})
 	}
 

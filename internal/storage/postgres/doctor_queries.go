@@ -184,11 +184,7 @@ func (q *DoctorQueries) DocumentsWithoutSources(ctx context.Context) (int, error
 // StalePENDING returns PENDING rows older than the threshold for recovery.
 func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, mime_type,
-		       source_ref, raw_sha256, source_filename,
-		       COALESCE(parent_doc_id::text, ''),
-		       COALESCE(metadata_headers->>'reason', ''),
-		       updated_at
+		SELECT `+doctorDocColumns+`
 		FROM documents
 		WHERE processing_status = 'PENDING'
 		  AND updated_at < now() - $1::interval
@@ -204,11 +200,7 @@ func (q *DoctorQueries) StalePENDING(ctx context.Context, threshold time.Duratio
 // StalePROCESSING returns PROCESSING rows older than the threshold.
 func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Duration, limit int) ([]DoctorDoc, error) {
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, mime_type,
-		       source_ref, raw_sha256, source_filename,
-		       COALESCE(parent_doc_id::text, ''),
-		       COALESCE(metadata_headers->>'reason', ''),
-		       updated_at
+		SELECT `+doctorDocColumns+`
 		FROM documents
 		WHERE processing_status = 'PROCESSING'
 		  AND updated_at < now() - $1::interval
@@ -222,26 +214,25 @@ func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Dura
 }
 
 // RedrivableFAILED returns FAILED rows whose reason is classified retryable or
-// is an expected decline, oldest first, at most limit of them. A decline is
-// recorded SKIPPED, so a failure carrying one was recorded by a handler that
-// predates the decline, and running it again settles it. The reason filter is
-// in the query: the cap must apply to redrivable rows, not to all failures, or
-// a workspace with many terminal failures hides its redrivable ones beyond the
-// cap.
+// is an expected decline, or that have no job at all, oldest first, at most
+// limit of them. A decline is recorded SKIPPED, so a failure carrying one was
+// recorded by a handler that predates the decline, and running it again
+// settles it. A failure is recorded together with its failed job, so one with
+// no job predates the job queue, and its reason says nothing about the
+// current handlers. The filter is in the query: the cap must apply to
+// redrivable rows, not to all failures, or a workspace with many terminal
+// failures hides its redrivable ones beyond the cap.
 func (q *DoctorQueries) RedrivableFAILED(ctx context.Context, limit int) ([]DoctorDoc, error) {
 	var reasons []string
 	for _, r := range append(domain.RetryableReasons(), domain.DeclineReasons()...) {
 		reasons = append(reasons, string(r))
 	}
 	rows, err := q.db.Pool.Query(ctx, `
-		SELECT doc_id::text, mime_type,
-		       source_ref, raw_sha256, source_filename,
-		       COALESCE(parent_doc_id::text, ''),
-		       COALESCE(metadata_headers->>'reason', ''),
-		       updated_at
+		SELECT `+doctorDocColumns+`
 		FROM documents
 		WHERE processing_status = 'FAILED'
-		  AND metadata_headers->>'reason' = ANY($2::text[])
+		  AND (metadata_headers->>'reason' = ANY($2::text[])
+		       OR NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id))
 		ORDER BY updated_at
 		LIMIT $1`, limit, reasons)
 	if err != nil {
@@ -250,6 +241,14 @@ func (q *DoctorQueries) RedrivableFAILED(ctx context.Context, limit int) ([]Doct
 	defer rows.Close()
 	return scanDoctorDocs(rows)
 }
+
+// doctorDocColumns are the columns scanDoctorDocs reads, in its order.
+const doctorDocColumns = `doc_id::text, mime_type,
+		       source_ref, raw_sha256, source_filename,
+		       COALESCE(parent_doc_id::text, ''),
+		       COALESCE(metadata_headers->>'reason', ''),
+		       updated_at,
+		       NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id)`
 
 // DoctorDoc is a lightweight document representation for doctor/recovery.
 type DoctorDoc struct {
@@ -261,6 +260,9 @@ type DoctorDoc struct {
 	ParentDocID string
 	Reason      string
 	UpdatedAt   time.Time
+	// Jobless is a document with no job at all: one recorded before the
+	// job queue existed.
+	Jobless bool
 }
 
 func scanDoctorDocs(rows pgxRows) ([]DoctorDoc, error) {
@@ -269,7 +271,7 @@ func scanDoctorDocs(rows pgxRows) ([]DoctorDoc, error) {
 		var d DoctorDoc
 		if err := rows.Scan(&d.DocID, &d.MimeType,
 			&d.SourceRef, &d.RawSHA256, &d.SourceName, &d.ParentDocID,
-			&d.Reason, &d.UpdatedAt); err != nil {
+			&d.Reason, &d.UpdatedAt, &d.Jobless); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

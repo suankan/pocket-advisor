@@ -46,10 +46,13 @@ type JobRef struct {
 
 // RecoveryItem is one document the planner has classified.
 type RecoveryItem struct {
-	DocID           string                 `json:"doc_id"`
-	Status          domain.Status          `json:"status"`
-	Reason          domain.FailureReason   `json:"reason,omitempty"`
-	Jobs            []JobRef               `json:"jobs,omitempty"`
+	DocID  string               `json:"doc_id"`
+	Status domain.Status        `json:"status"`
+	Reason domain.FailureReason `json:"reason,omitempty"`
+	Jobs   []JobRef             `json:"jobs,omitempty"`
+	// Jobless is a document with no job at all, recorded before the job
+	// queue existed.
+	Jobless         bool                   `json:"jobless,omitempty"`
 	Classification  RecoveryClassification `json:"classification"`
 	Action          RecoveryAction         `json:"action"`
 	ObjectOperation string                 `json:"object_operation,omitempty"`
@@ -165,6 +168,17 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 		item.Classification = ClassRetryable
 		item.Action = ActionResetProcessing
 		item.Requeue = "return the document's failed and expired jobs to the queue with a fresh retry cycle; queued and source-waiting jobs are left as they are"
+		return item
+	}
+
+	// FAILED with no job: recorded before the job queue, by handlers that
+	// have since changed, so its reason is no verdict on the current ones.
+	// Reset to PENDING, the next ingestion resumes it like other work from
+	// before the queue, and a failure then is recorded with its job.
+	if doc.Status == domain.StatusFailed && doc.Jobless {
+		item.Classification = ClassRetryable
+		item.Action = ActionRetryTransition
+		item.Requeue = "recorded before the job queue: reset to pending, and the next ingestion runs it under the current handlers when its source is reachable"
 		return item
 	}
 

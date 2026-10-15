@@ -1641,24 +1641,33 @@ func TestQueueLiveWorkIsNotStalePending(t *testing.T) {
 // The cap on a recovery selection must apply to redrivable failures, not to all
 // failures: a workspace with many terminal failures older than its retryable
 // ones used to hide every retryable document beyond the cap. A failure carrying
-// a decline is selected too.
+// a decline is selected too, and so is one with no job, whatever its reason:
+// it was recorded before the job queue.
 func TestQueueRedrivableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
-	db, docs, _ := queueSetup(t)
+	db, docs, jobs := queueSetup(t)
 	ctx := context.Background()
 	q := NewDoctorQueries(db)
-	fail := func(reason domain.FailureReason, age string) string {
-		id := domain.NewDocID()
-		if _, _, err := docs.CreateStub(ctx, &domain.Document{DocID: id, RawSHA256: domain.SHA256Hex([]byte(id)), DocType: "pdf"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := docs.UpdateStatus(ctx, id, domain.StatusFailed, reason); err != nil {
-			t.Fatal(err)
-		}
+	age := func(id, age string) {
 		if _, err := db.Pool.Exec(ctx, "UPDATE documents SET updated_at = now() - $2::interval WHERE doc_id = $1", id, age); err != nil {
 			t.Fatal(err)
 		}
+	}
+	fail := func(reason domain.FailureReason, ago string) string {
+		id, _ := addJob(t, db, docs, jobs, SubjectPDFs)
+		if err := jobs.Fail(ctx, claimOne(t, jobs, SubjectPDFs), reason); err != nil {
+			t.Fatal(err)
+		}
+		age(id, ago)
 		return id
 	}
+	legacy := domain.NewDocID()
+	if _, _, err := docs.CreateStub(ctx, &domain.Document{DocID: legacy, RawSHA256: domain.SHA256Hex([]byte(legacy)), DocType: "pdf"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.UpdateStatus(ctx, legacy, domain.StatusFailed, domain.ReasonUnclassified); err != nil {
+		t.Fatal(err)
+	}
+	age(legacy, "1 second")
 	// Many older terminal and unclassified failures, then newer redrivable ones.
 	for i := 0; i < 30; i++ {
 		fail(domain.ReasonUnknownEncoding, "10 days")
@@ -1669,6 +1678,7 @@ func TestQueueRedrivableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 		fail(domain.ReasonPDFOpenFailed, "1 day"):     domain.ReasonPDFOpenFailed,
 		fail(domain.ReasonEmailParseFailed, "1 hour"): domain.ReasonEmailParseFailed,
 		fail(domain.ReasonRecursionLimit, "1 minute"): domain.ReasonRecursionLimit,
+		legacy: domain.ReasonUnclassified,
 	}
 	got, err := q.RedrivableFAILED(ctx, 10) // far fewer than the 60 older failures
 	if err != nil {
@@ -1678,8 +1688,8 @@ func TestQueueRedrivableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 		t.Fatalf("selected %d documents, want the %d redrivable ones: terminal failures filled the cap", len(got), len(want))
 	}
 	for _, d := range got {
-		if want[d.DocID] != domain.FailureReason(d.Reason) {
-			t.Errorf("selected %s with reason %q", d.DocID, d.Reason)
+		if want[d.DocID] != domain.FailureReason(d.Reason) || d.Jobless != (d.DocID == legacy) {
+			t.Errorf("selected %s with reason %q, jobless %v", d.DocID, d.Reason, d.Jobless)
 		}
 	}
 	// The cap still bounds a selection, oldest first.

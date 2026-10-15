@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Bounds on container unrolling. Nested containers are adversarially
@@ -45,13 +46,24 @@ type Parsed struct {
 	// existing columns are written from — while Headers carries what browse
 	// and conversation reconstruction need (ingestion-design.md §4.1).
 	Headers Headers
+
+	// nameHint is the first charset a text part declares, the best evidence
+	// for undeclared 8-bit attachment names in the same message.
+	nameHint string
 }
 
 // Child is a decoded member with a deterministic, versioned replay selector.
+//
+// Filename is always valid UTF-8 without NUL. RawName is set only when the
+// container gave the name as undeclared non-UTF-8 bytes: it keeps those
+// bytes, and NameEncoding names the encoding Filename was detected in, or is
+// empty when none was certain and the invalid bytes were replaced (names.go).
 type Child struct {
-	Filename string
-	Selector string
-	Data     []byte
+	Filename     string
+	Selector     string
+	Data         []byte
+	RawName      []byte
+	NameEncoding string
 }
 
 // ParseEmail unrolls an RFC822 message.
@@ -89,6 +101,7 @@ func ParseEmail(data []byte) (*Parsed, error) {
 	for i := range p.Children {
 		p.Children[i].Selector = fmt.Sprintf("mime-v1:%d", i)
 	}
+	resolveNames(p.Children, p.nameHint)
 	p.BodyText = Compact(p.BodyText)
 	return p, nil
 }
@@ -153,6 +166,9 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 	if len(raw) > maxSingleChildSize {
 		return fmt.Errorf("MIME member limit exceeded")
 	}
+	if strings.HasPrefix(mediaType, "text/") && p.nameHint == "" {
+		p.nameHint = params["charset"]
+	}
 
 	switch {
 	case mediaType == "text/plain":
@@ -170,7 +186,10 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 			p.BodyText += "\n" + StripHTML(text)
 		}
 	default:
-		name := params["name"]
+		name := decodeHeader(params["name"])
+		if name == "" {
+			name = extendedParam(contentType, "name")
+		}
 		if name == "" {
 			name = "attachment"
 		}
@@ -192,11 +211,12 @@ func attachmentName(disposition, contentType string) string {
 			if fn := dp["filename"]; fn != "" {
 				return decodeHeader(fn)
 			}
+			if fn := extendedParam(disposition, "filename"); fn != "" {
+				return fn
+			}
 			if strings.EqualFold(disp, "attachment") {
-				if _, cp, err := mime.ParseMediaType(contentType); err == nil {
-					if n := cp["name"]; n != "" {
-						return decodeHeader(n)
-					}
+				if n := typeName(contentType); n != "" {
+					return n
 				}
 				return "attachment"
 			}
@@ -204,10 +224,16 @@ func attachmentName(disposition, contentType string) string {
 	}
 	// Inline parts still count as children when they name a file — this is how
 	// most mail clients emit embedded images.
+	return typeName(contentType)
+}
+
+// typeName returns the name parameter of a Content-Type, decoded.
+func typeName(contentType string) string {
 	if _, cp, err := mime.ParseMediaType(contentType); err == nil {
 		if n := cp["name"]; n != "" {
 			return decodeHeader(n)
 		}
+		return extendedParam(contentType, "name")
 	}
 	return ""
 }
@@ -243,7 +269,7 @@ func UnrollArchive(data []byte, filename string) ([]Child, error) {
 
 	switch {
 	case bytes.HasPrefix(data, []byte("PK\x03\x04")):
-		return unrollZip(data, budget)
+		return memberNames(unrollZip(data, budget))
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"),
 		bytes.HasPrefix(data, []byte{0x1f, 0x8b}):
 		zr, err := gzip.NewReader(bytes.NewReader(data))
@@ -251,11 +277,23 @@ func UnrollArchive(data []byte, filename string) ([]Child, error) {
 			return nil, fmt.Errorf("gzip: %w", err)
 		}
 		defer zr.Close()
-		return unrollTar(zr, budget)
+		return memberNames(unrollTar(zr, budget))
 	case strings.HasSuffix(lower, ".tar"):
-		return unrollTar(bytes.NewReader(data), budget)
+		return memberNames(unrollTar(bytes.NewReader(data), budget))
 	}
 	return nil, fmt.Errorf("unsupported archive format for %q", filename)
+}
+
+// memberNames turns the archive's full member paths into base names. The
+// paths are decoded first, all together: a Shift-JIS, GBK or Big5 character
+// can end in the byte of a backslash, so splitting raw bytes on separators
+// would cut characters in half.
+func memberNames(children []Child, err error) ([]Child, error) {
+	resolveNames(children, "")
+	for i := range children {
+		children[i].Filename = sanitize(children[i].Filename)
+	}
+	return children, err
 }
 
 func unrollZip(data []byte, budget int64) ([]Child, error) {
@@ -286,7 +324,15 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 		if total > budget {
 			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
 		}
-		out = append(out, Child{Filename: sanitize(f.Name), Selector: fmt.Sprintf("zip-v1:%d", ordinal), Data: b})
+		// The UTF-8 flag needs no handling: archive/zip reads names as bytes,
+		// and a name that is valid UTF-8 is taken as UTF-8.
+		name := f.Name
+		if !utf8.ValidString(name) {
+			if u, ok := zipUnicodeName(name, f.Extra); ok {
+				name = u
+			}
+		}
+		out = append(out, Child{Filename: name, Selector: fmt.Sprintf("zip-v1:%d", ordinal), Data: b})
 	}
 	return out, nil
 }
@@ -319,7 +365,8 @@ func unrollTar(r io.Reader, budget int64) ([]Child, error) {
 		if total > budget {
 			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
 		}
-		out = append(out, Child{Filename: sanitize(h.Name), Selector: fmt.Sprintf("tar-v1:%d", ordinal), Data: b})
+		// archive/tar has already applied any PAX path record.
+		out = append(out, Child{Filename: h.Name, Selector: fmt.Sprintf("tar-v1:%d", ordinal), Data: b})
 	}
 }
 

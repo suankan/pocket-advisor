@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,6 +145,58 @@ func TestKnownAttachmentIsLinkedWithoutWaitingOnItsExtraction(t *testing.T) {
 	}
 	if n := count(t, db, `SELECT count(*) FROM ingestion_jobs WHERE doc_id=$1`, held); n != 0 {
 		t.Errorf("known content was queued again: %d jobs", n)
+	}
+}
+
+// A member whose name was recovered from undeclared legacy bytes keeps those
+// bytes and how they were read beside its stored name, and a text attachment
+// containing NUL is declined rather than failing the email on save.
+func TestRecoveredNameKeepsItsBytesAndNULTextIsSkipped(t *testing.T) {
+	db, w, _ := admissionFixture(t)
+	ctx := context.Background()
+	parent := stageEmail(t, w, "email carrying legacy-named members")
+	detected := []byte("%PDF-1.4 synthetic member with a detected name")
+	replaced := []byte("%PDF-1.4 synthetic member with a replaced name")
+	// Past the sniffer's header window, so the member still routes as text.
+	nul := []byte(strings.Repeat("key=value\n", 500) + "\x00")
+	children := []email.Child{
+		{Filename: "Отчёт.pdf", Selector: "mime-v1:0", Data: detected, RawName: []byte("\x8e\xe2\xe7\xf1\xe2.pdf"), NameEncoding: "ibm866"},
+		{Filename: "�.pdf", Selector: "mime-v1:1", Data: replaced, RawName: []byte("\xb0\xa1.pdf")},
+		{Filename: "settings.conf", Selector: "mime-v1:2", Data: nul},
+	}
+	err := db.Transaction(ctx, func(ctx context.Context) error {
+		for _, a := range admissionOrder(children) {
+			if err := w.dispatchChild(ctx, parent, a); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("admission failed: %v", err)
+	}
+	meta := func(data []byte, key string) string {
+		var v string
+		if err := db.Pool.QueryRow(ctx, `SELECT COALESCE(metadata_headers->>$2, '') FROM documents WHERE raw_sha256=$1`,
+			domain.SHA256Hex(data), key).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	if got := meta(detected, "source_name_raw"); got != "8ee2e7f1e22e706466" {
+		t.Errorf("detected member raw name = %q", got)
+	}
+	if got := meta(detected, "source_name_encoding"); got != "ibm866" {
+		t.Errorf("detected member encoding = %q", got)
+	}
+	if got := meta(replaced, "source_name_encoding"); got != "unknown" {
+		t.Errorf("replaced member encoding = %q, want unknown", got)
+	}
+	if got := meta(nul, "source_name_raw"); got != "" {
+		t.Errorf("a UTF-8 name was marked as recovered: %q", got)
+	}
+	if got := meta(nul, "reason"); got != string(domain.ReasonNULBytes) {
+		t.Errorf("NUL text member reason = %q, want %s", got, domain.ReasonNULBytes)
 	}
 }
 

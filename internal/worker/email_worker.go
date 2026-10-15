@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -176,6 +178,18 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		RawSHA256:   sum,
 		SourceName:  c.Filename,
 	}
+	// A name recovered from undeclared legacy bytes keeps those bytes and
+	// how they were read, so a wrong reading can be found and redone.
+	if c.RawName != nil {
+		enc := c.NameEncoding
+		if enc == "" {
+			enc = "unknown"
+		}
+		doc.Metadata = map[string]string{
+			"source_name_raw":      hex.EncodeToString(c.RawName),
+			"source_name_encoding": enc,
+		}
+	}
 	// Stub before publish, always: when the child is processed its
 	// parent_doc_id already exists, so relational integrity holds regardless
 	// of consumption order (§2.1).
@@ -238,6 +252,9 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 		// a driver-level error nobody can classify.
 		if !utf8.Valid(c.Data) {
 			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonUnknownEncoding)
+		}
+		if bytes.IndexByte(c.Data, 0) >= 0 {
+			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonNULBytes)
 		}
 		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType); err != nil {
 			return err

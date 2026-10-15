@@ -784,7 +784,7 @@ func TestQueueRefundsOccurExactlyOnceAndSourceWaitsConsumeNoAttempt(t *testing.T
 	if r := readJob(t, db, id); r.State != "WAITING_SOURCE" || r.Attempts != 1 || r.Reason != "SOURCE_UNAVAILABLE" || r.LastFailure != "EXTRACTION_FAILED" || r.LeaseSet {
 		t.Fatalf("after source wait: %+v", r)
 	}
-	if _, err := jobs.CheckResolved(ctx, time.Time{}); err == nil {
+	if err := jobs.CheckResolved(ctx, time.Time{}); err == nil {
 		t.Fatal("a missing source counted as success")
 	}
 	if got, err := jobs.Claim(ctx, SubjectPDFs, 1); err != nil || len(got) != 0 {
@@ -821,7 +821,7 @@ func TestQueueFailIsAtomicWithTheDocument(t *testing.T) {
 	if got := docStatus(t, db, docID); got != "FAILED" {
 		t.Fatalf("document status = %s", got)
 	}
-	if _, err := jobs.CheckResolved(ctx, before); err == nil {
+	if err := jobs.CheckResolved(ctx, before); err == nil {
 		t.Fatal("a job failed during the run counted as resolved")
 	}
 	// A later run reports the failure without being judged by it: nothing it
@@ -830,8 +830,8 @@ func TestQueueFailIsAtomicWithTheDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := jobs.CheckResolved(ctx, after); err != nil || n != 1 {
-		t.Fatalf("an earlier failure: failedBefore = %d, err = %v", n, err)
+	if err := jobs.CheckResolved(ctx, after); err != nil {
+		t.Fatalf("an earlier failure decided a later run: %v", err)
 	}
 }
 

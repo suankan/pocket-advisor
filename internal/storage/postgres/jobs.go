@@ -481,21 +481,20 @@ func (r *Jobs) Clock(ctx context.Context) (time.Time, error) {
 
 // CheckResolved reports what a finite run that started at since leaves
 // unresolved: unfinished work, source waits, and jobs that failed during the
-// run. Jobs that had already failed before since are returned as a count
-// rather than an error. Nothing this run did could have resolved them, since
-// ingestion never retries a failure on its own, so counting them would end
-// every later run unresolved until each was fixed or removed; --recover is
-// what retries them.
-func (r *Jobs) CheckResolved(ctx context.Context, since time.Time) (failedBefore int, err error) {
+// run. Jobs that had already failed before since do not count. Nothing this
+// run did could have resolved them, since ingestion never retries a failure on
+// its own, so counting them would end every later run unresolved until each
+// was fixed or removed; the run summary reports them, and --recover is what
+// retries them.
+func (r *Jobs) CheckResolved(ctx context.Context, since time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, ControlTimeout)
 	defer cancel()
 	var u, w, f int
 	if err := r.db.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state IN ('READY','RUNNING')),
  count(*) FILTER (WHERE state = 'WAITING_SOURCE'),
- count(*) FILTER (WHERE state = 'FAILED' AND finished_at >= $1),
- count(*) FILTER (WHERE state = 'FAILED' AND (finished_at IS NULL OR finished_at < $1))
- FROM ingestion_jobs`, since).Scan(&u, &w, &f, &failedBefore); err != nil {
-		return 0, err
+ count(*) FILTER (WHERE state = 'FAILED' AND finished_at >= $1)
+ FROM ingestion_jobs`, since).Scan(&u, &w, &f); err != nil {
+		return err
 	}
 	if u+w+f > 0 {
 		err := fmt.Errorf("ingestion unresolved: %d unfinished, %d waiting for sources, %d jobs failed in this run", u, w, f)
@@ -505,9 +504,9 @@ func (r *Jobs) CheckResolved(ctx context.Context, since time.Time) (failedBefore
 			err = fmt.Errorf("%w; --reconcile-deletions removes documents whose originals are gone, "+
 				"--reconcile retries restored originals", err)
 		}
-		return failedBefore, err
+		return err
 	}
-	return failedBefore, nil
+	return nil
 }
 
 // Depth is one subject's outstanding work and when it next becomes due, in

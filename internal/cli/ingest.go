@@ -68,11 +68,13 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	}
 	defer unlock()
 	// Failures recorded from here on are this run's; older ones are reported
-	// but do not decide its outcome (Jobs.CheckResolved).
+	// but do not decide its outcome (Jobs.CheckResolved). The run summary is
+	// scoped by the same instant.
 	since, err := a.Jobs.Clock(ctx)
 	if err != nil {
 		return err
 	}
+	started := time.Now()
 	embedder := embedding.New(cfg.Embedding)
 	info, err := embedder.Probe(ctx)
 	if err != nil {
@@ -139,10 +141,14 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	if fetchCtx.Err() == nil && workCtx.Err() == nil {
 		runErr = errors.Join(runErr, a.DB.BuildSearchIndex(fetchCtx))
 	}
-	failedBefore, resolveErr := a.Jobs.CheckResolved(ctx, since)
-	if failedBefore > 0 {
-		fmt.Fprintf(os.Stderr, "pocket-advisor: %d jobs that failed in earlier runs remain failed; "+
-			"--doctor lists them by reason and --recover retries those that can be\n", failedBefore)
+	resolveErr := a.Jobs.CheckResolved(ctx, since)
+	// Read from the store rather than counted in memory, so an interrupted or
+	// failed run still says what it did. A summary that cannot be read does
+	// not change the run's outcome.
+	if summary, err := a.Jobs.RunSummary(ctx, since); err != nil {
+		fmt.Fprintf(os.Stderr, "pocket-advisor: run summary unavailable: %v\n", err)
+	} else {
+		printRunSummary(os.Stdout, o.WorkspaceID, time.Since(started), summary)
 	}
 	return errors.Join(runErr, resolveErr)
 }

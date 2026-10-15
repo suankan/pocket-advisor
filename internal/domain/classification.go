@@ -66,6 +66,13 @@ func ClassifyReason(r FailureReason) FailureClass {
 	}
 }
 
+// PasswordReasons are the declines only the owner can resolve: the content is
+// locked behind a password the system never holds, so a run reports them by
+// name rather than leaving them among ordinary skips.
+func PasswordReasons() []FailureReason {
+	return []FailureReason{ReasonPDFEncrypted, ReasonArchiveEncrypted}
+}
+
 // Retryable reports whether a failure reason may be safely retried.
 func Retryable(r FailureReason) bool {
 	return ClassifyReason(r) == ClassRetryable

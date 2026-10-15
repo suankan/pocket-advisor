@@ -444,8 +444,8 @@ WHERE `+owned, j.ID, j.Generation, string(reason))
 	})
 }
 
-// ResumeSources retries source waits after a new complete filesystem scan.
-// Charged attempts are retained.
+// ResumeSources retries source waits after a filesystem scan has refreshed
+// locations. Charged attempts are retained.
 func (r *Jobs) ResumeSources(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, ControlTimeout)
 	defer cancel()

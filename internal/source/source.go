@@ -28,6 +28,33 @@ var ErrUnavailable = errors.New("source unavailable")
 var ErrChanged = errors.New("source content changed")
 var ErrUnsafe = errors.New("source path is not confined to a configured root")
 
+// ErrUnstable is a file that kept changing while being read. Its bytes may mix
+// two versions, so they are never hashed into an identity.
+var ErrUnstable = fmt.Errorf("%w while being read", ErrChanged)
+
+// ErrIncomplete marks a walk that deferred originals it could not read
+// stably. Everything it did visit is valid, but it cannot prove absence.
+var ErrIncomplete = errors.New("source scan incomplete")
+
+// IncompleteError lists the originals a walk deferred, by display path.
+type IncompleteError struct{ Deferred []string }
+
+func (e *IncompleteError) Error() string {
+	return fmt.Sprintf("%v: %d original(s) changed while being read; deferred to the next scan", ErrIncomplete, len(e.Deferred))
+}
+func (e *IncompleteError) Unwrap() error { return ErrIncomplete }
+
+// A read is trusted only when size and mtime match before and after it and
+// the bytes read match that size. Mtimes compare within mtimeTolerance: some
+// file providers (Google Drive for desktop) report sub-microsecond jitter
+// between stats of an unchanged file. An unstable read is retried after a
+// growing pause, unstableAttempts times in all.
+const (
+	mtimeTolerance   = time.Millisecond
+	unstableAttempts = 3
+	unstablePause    = 100 * time.Millisecond
+)
+
 type File struct {
 	RootKey      string
 	RelativePath string
@@ -64,6 +91,8 @@ type Resolver struct {
 	roots  []root
 	ignore func(string) bool
 	Store  Store
+	// stat replaces (*os.File).Stat in tests that simulate unstable files.
+	stat func(*os.File) (fs.FileInfo, error)
 }
 
 func New(paths []string, ignore func(string) bool, store Store) (*Resolver, error) {
@@ -143,12 +172,39 @@ func (r *Resolver) readFile(ctx context.Context, f File) ([]byte, error) {
 			return nil, ErrUnsafe
 		}
 	}
-	file, err := dir.OpenFile(f.RelativePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	var data []byte
+	for attempt := 1; ; attempt++ {
+		data, err = r.readStable(ctx, dir, f.RelativePath)
+		if !errors.Is(err, ErrUnstable) || attempt == unstableAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt) * unstablePause):
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if f.SHA256 != "" && domain.SHA256Hex(data) != f.SHA256 {
+		return nil, ErrChanged
+	}
+	return data, nil
+}
+
+// readStable reads one consistent version of a file, or reports ErrUnstable.
+func (r *Resolver) readStable(ctx context.Context, dir *os.Root, rel string) ([]byte, error) {
+	stat := r.stat
+	if stat == nil {
+		stat = (*os.File).Stat
+	}
+	file, err := dir.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 	defer file.Close()
-	before, err := file.Stat()
+	before, err := stat(file)
 	if err != nil || !before.Mode().IsRegular() {
 		return nil, ErrUnsafe
 	}
@@ -159,15 +215,15 @@ func (r *Resolver) readFile(ctx context.Context, f File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	after, err := file.Stat()
+	after, err := stat(file)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	if int64(len(data)) > MaxBytes || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || int64(len(data)) != after.Size() {
-		return nil, ErrChanged
+	if before.Size() != after.Size() || int64(len(data)) != after.Size() || before.ModTime().Sub(after.ModTime()).Abs() >= mtimeTolerance {
+		return nil, ErrUnstable
 	}
-	if f.SHA256 != "" && domain.SHA256Hex(data) != f.SHA256 {
-		return nil, ErrChanged
+	if int64(len(data)) > MaxBytes {
+		return nil, fmt.Errorf("source exceeds %d byte limit", MaxBytes)
 	}
 	return data, nil
 }
@@ -187,7 +243,10 @@ func (r *Resolver) ReadFile(ctx context.Context, f File) ([]byte, error) { retur
 
 // Walk reads and hashes every eligible regular file. It calls visit serially,
 // bounding live raw buffers to one source and propagating incomplete scans.
+// A file that stays unstable across retries is deferred rather than visited,
+// and the walk continues; deferrals end it with an *IncompleteError.
 func (r *Resolver) Walk(ctx context.Context, visit func(File, []byte) error) error {
+	var deferred []string
 	for _, root := range r.roots {
 		dir, err := os.OpenRoot(root.name)
 		if err != nil {
@@ -218,6 +277,10 @@ func (r *Resolver) Walk(ctx context.Context, visit func(File, []byte) error) err
 				f.DisplayPath = filepath.Base(root.name) + "/" + rel
 			}
 			data, err := r.readFile(ctx, f)
+			if errors.Is(err, ErrUnstable) {
+				deferred = append(deferred, f.DisplayPath)
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -229,6 +292,9 @@ func (r *Resolver) Walk(ctx context.Context, visit func(File, []byte) error) err
 		if err != nil {
 			return err
 		}
+	}
+	if len(deferred) > 0 {
+		return &IncompleteError{Deferred: deferred}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ package discovery
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -31,6 +32,10 @@ type Service struct {
 // Scan admits every current original and returns the completed scan's id.
 // It never deletes: documents whose originals are gone are left for the
 // explicit --reconcile-deletions sweep.
+//
+// Originals that kept changing while being read are deferred: the rest are
+// admitted, the scan stays incomplete, and Scan returns its id with an error
+// wrapping source.ErrIncomplete. The next scan reads those files again.
 func (s *Service) Scan(ctx context.Context) (string, error) {
 	scan, err := s.Inventory.BeginScan(ctx, s.Sources.RootKeys())
 	if err != nil {
@@ -44,8 +49,19 @@ func (s *Service) Scan(ctx context.Context) (string, error) {
 		telemetry.DiscoveryFiles.WithLabelValues("scan", "observed").Inc()
 		return nil
 	})
-	if err != nil {
+	var incomplete *source.IncompleteError
+	if errors.As(err, &incomplete) {
+		telemetry.DiscoveryFiles.WithLabelValues("scan", "deferred").Add(float64(len(incomplete.Deferred)))
+		if s.Log != nil {
+			for _, p := range incomplete.Deferred {
+				s.Log.Warn("original changed while being read; deferred to the next scan", "file", p)
+			}
+		}
+	} else if err != nil {
 		return "", err
+	}
+	if err != nil {
+		return scan, err
 	}
 	return scan, s.Inventory.FinishScan(ctx, scan)
 }
@@ -209,7 +225,7 @@ func (s *Service) BindExisting(ctx context.Context) error {
 // ResumeLegacy admits nonterminal rows predating the durable job table. Existing
 // normalized evidence goes straight to embedding; other stages reopen sources.
 //
-// Only rows reachable from the completed scan are resumed. Ingestion never
+// Only rows reachable from the scan's observations are resumed. Ingestion never
 // deletes, so a row whose original is gone stays until --reconcile-deletions;
 // resuming it would fail on a missing source and end every run.
 func (s *Service) ResumeLegacy(ctx context.Context, scan string) error {

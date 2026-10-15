@@ -37,6 +37,12 @@ func previewSources(ctx context.Context, o *Options) error {
 	var size int64
 	err = sources.Walk(ctx, func(f source.File, _ []byte) error { count++; size += f.Size; return nil })
 	fmt.Printf("source preview: files=%d bytes=%d (read-only; no database or queue changes)\n", count, size)
+	var incomplete *source.IncompleteError
+	if errors.As(err, &incomplete) {
+		for _, p := range incomplete.Deferred {
+			fmt.Printf("deferred: %s\n", p)
+		}
+	}
 	return err
 }
 func runIngest(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
@@ -129,17 +135,20 @@ func runIngestContext(ctx context.Context, o *Options, cfg *config.Config, logs 
 	return errors.Join(runErr, a.Jobs.CheckResolved(ctx))
 }
 
-// feed runs one complete admission pass: scan, resume jobless rows reachable
-// from it, then retry source waits now that locations are current.
+// feed runs one admission pass: scan, resume jobless rows reachable from it,
+// then retry source waits now that locations are current. A scan that
+// deferred unstable originals still resumes from what it observed; a retried
+// wait whose original is still missing parks again with its attempt refunded.
+// The deferral is reported after the pass.
 func feed(ctx context.Context, svc *discovery.Service, jobs *postgres.Jobs) error {
-	scan, err := svc.Scan(ctx)
-	if err != nil {
-		return err
+	scan, scanErr := svc.Scan(ctx)
+	if scan == "" {
+		return scanErr
 	}
 	if err := svc.ResumeLegacy(ctx, scan); err != nil {
-		return err
+		return errors.Join(scanErr, err)
 	}
-	return jobs.ResumeSources(ctx)
+	return errors.Join(scanErr, jobs.ResumeSources(ctx))
 }
 
 // drain waits for the pipeline to go quiet. A worker can decide a source is

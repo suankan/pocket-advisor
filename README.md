@@ -165,7 +165,7 @@ A worker owns a job through a five-minute lease that it renews every thirty seco
 
 File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if waiting or failed jobs remain. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
 
-Roots are limited to regular files of at most 256 MiB each. Container replay is limited to eight levels and 512 MiB cumulative decoded bytes, with bounded member counts and archive expansion ratios. Incomplete source traversal prevents pruning. Registry edits require restarting listener mode. Original volumes can be offline for ordinary database-backed retrieval; reprocessing and index rebuilding require accessible originals.
+Roots are limited to regular files of at most 256 MiB each. Container replay is limited to eight levels and 512 MiB cumulative decoded bytes, with bounded member counts and archive expansion ratios. Incomplete source traversal prevents pruning. A file that keeps changing while it is read, for example one being saved or synced, is deferred: the scan logs it, ingests everything else, and ends with a `source scan incomplete` error; the next run picks the file up. `--dry-run` lists deferred files. Registry edits require restarting listener mode. Original volumes can be offline for ordinary database-backed retrieval; reprocessing and index rebuilding require accessible originals.
 
 ## 6. Observe ingestion
 

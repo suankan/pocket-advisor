@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type records map[string]Record
@@ -136,5 +138,81 @@ func TestSourceWalkRenameAndIgnore(t *testing.T) {
 	cancel()
 	if err := r.Walk(ctx, func(File, []byte) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
+	}
+}
+
+// shifted reports a file's real attributes with its mtime moved by offset.
+type shifted struct {
+	fs.FileInfo
+	offset time.Duration
+}
+
+func (s shifted) ModTime() time.Time { return s.FileInfo.ModTime().Add(s.offset) }
+
+// statShifting gives each stat of the named file the next offset from step.
+func statShifting(name string, step func(call int) time.Duration) func(*os.File) (fs.FileInfo, error) {
+	calls := 0
+	return func(f *os.File) (fs.FileInfo, error) {
+		st, err := f.Stat()
+		if err != nil || filepath.Base(f.Name()) != name {
+			return st, err
+		}
+		calls++
+		return shifted{st, step(calls)}, nil
+	}
+}
+func walkNames(t *testing.T, r *Resolver) ([]string, error) {
+	t.Helper()
+	var names []string
+	err := r.Walk(context.Background(), func(f File, _ []byte) error {
+		names = append(names, f.RelativePath)
+		return nil
+	})
+	return names, err
+}
+func TestSourceToleratesSubMillisecondMtimeJitter(t *testing.T) {
+	r, s, dir := fixture(t)
+	put(t, r, s, dir, "drive.txt", []byte("synced"))
+	r.stat = statShifting("drive.txt", func(call int) time.Duration { return time.Duration(call%2) * 85 * time.Nanosecond })
+	names, err := walkNames(t, r)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("jitter rejected an unchanged file: %v %v", names, err)
+	}
+}
+func TestSourceRetriesAnUnstableRead(t *testing.T) {
+	r, s, dir := fixture(t)
+	put(t, r, s, dir, "saving.txt", []byte("settled"))
+	// The first read sees the file move on; the retry sees it settled.
+	r.stat = statShifting("saving.txt", func(call int) time.Duration {
+		if call == 2 {
+			return time.Second
+		}
+		return 0
+	})
+	names, err := walkNames(t, r)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("settled file not admitted on retry: %v %v", names, err)
+	}
+}
+func TestSourceWalkDefersFilesThatKeepChanging(t *testing.T) {
+	r, s, dir := fixture(t)
+	put(t, r, s, dir, "a.txt", []byte("stable"))
+	busy := put(t, r, s, dir, "b.txt", []byte("busy"))
+	put(t, r, s, dir, "c.txt", []byte("stable too"))
+	r.stat = statShifting("b.txt", func(call int) time.Duration { return time.Duration(call) * time.Second })
+	names, err := walkNames(t, r)
+	var incomplete *IncompleteError
+	if !errors.As(err, &incomplete) || !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("deferral not reported: %v", err)
+	}
+	if len(incomplete.Deferred) != 1 || incomplete.Deferred[0] != "b.txt" {
+		t.Fatalf("deferred=%v", incomplete.Deferred)
+	}
+	if len(names) != 2 || names[0] != "a.txt" || names[1] != "c.txt" {
+		t.Fatalf("walk stopped at the unstable file: %v", names)
+	}
+	// A worker read of a still-changing original waits like any changed source.
+	if _, err := r.Read(context.Background(), Ref(busy), s[busy].SHA256); !errors.Is(err, ErrChanged) {
+		t.Fatalf("unstable worker read: %v", err)
 	}
 }

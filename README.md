@@ -163,7 +163,7 @@ Admission has no queue-depth thresholds; the durable backlog can grow to fit the
 
 A worker owns a job through a five-minute lease that it renews every thirty seconds. If the process is killed, its jobs stay `RUNNING` until their leases expire and are then claimed again, so the next run waits out the remainder — up to five minutes — before that work resumes. Each claim spends one of a job's three attempts; interruptions you cause with Ctrl+C return the job and refund it.
 
-File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if waiting or failed jobs remain. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
+File moves preserve document UUIDs; changed content creates a new identity. Worker reads verify the expected hash and put missing/changed sources into `WAITING_SOURCE`. Restoring the expected original and running `--reconcile` retries those jobs. Finite ingestion exits with an unresolved-work error if work is left unfinished, jobs wait for a source, or jobs failed during the run; jobs that had failed in earlier runs are reported as a count but do not change the exit status. `--recover` previews classified recovery; `--recover --yes` explicitly resets eligible retryable failures before another ingestion run.
 
 Roots are limited to regular files of at most 256 MiB each. Container replay is limited to eight levels and 512 MiB cumulative decoded bytes, with bounded member counts and archive expansion ratios. Incomplete source traversal prevents pruning. A file that keeps changing while it is read, for example one being saved or synced, is deferred: the scan logs it, ingests everything else, and ends with a `source scan incomplete` error; the next run picks the file up. `--dry-run` lists deferred files. A file whose values PostgreSQL refuses is handled the same way and named in `logs/discovery.log`. Registry edits require restarting listener mode. Original volumes can be offline for ordinary database-backed retrieval; reprocessing and index rebuilding require accessible originals.
 
@@ -189,7 +189,7 @@ kubectl exec postgres-0 -n pocket-advisor -- \
   'select subject, state, count(*) from ingestion_jobs group by 1,2 order by 1,2;'
 ```
 
-`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves failed or waiting jobs. Encrypted or damaged PDFs and images the OCR engine cannot decode (`PDF_ENCRYPTED`, `PDF_DAMAGED`, `IMAGE_UNREADABLE`) are `SKIPPED`, because retrying the same bytes cannot change the answer.
+`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves waiting jobs or jobs that failed during that run. Encrypted or damaged PDFs and images the OCR engine cannot decode (`PDF_ENCRYPTED`, `PDF_DAMAGED`, `IMAGE_UNREADABLE`) are `SKIPPED`, because retrying the same bytes cannot change the answer.
 
 ### Diagnose a workspace
 

@@ -228,7 +228,7 @@ workspaces:
 		if err == nil {
 			t.Fatalf("a run that failed a job exited cleanly\n%s", out.String())
 		}
-		if !strings.Contains(out.String(), "failed job") {
+		if !strings.Contains(out.String(), "1 jobs failed in this run") {
 			t.Fatalf("the failure was not reported as unresolved work:\n%s", out.String())
 		}
 	case <-time.After(120 * time.Second):

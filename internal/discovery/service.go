@@ -33,18 +33,29 @@ type Service struct {
 // It never deletes: documents whose originals are gone are left for the
 // explicit --reconcile-deletions sweep.
 //
-// Originals that kept changing while being read are deferred: the rest are
-// admitted, the scan stays incomplete, and Scan returns its id with an error
-// wrapping source.ErrIncomplete. The next scan reads those files again.
+// Originals that kept changing while being read are deferred, and an original
+// whose admission PostgreSQL refused for its values is rejected: either way
+// the rest are admitted, the scan stays incomplete, and Scan returns its id
+// with an error wrapping source.ErrIncomplete. The next scan reads those
+// files again. Any other admission error ends the scan, since it says nothing
+// about one file and would recur for every file after it.
 func (s *Service) Scan(ctx context.Context) (string, error) {
 	scan, err := s.Inventory.BeginScan(ctx, s.Sources.RootKeys())
 	if err != nil {
 		return "", err
 	}
+	rejected := 0
 	err = s.Sources.Walk(ctx, func(f source.File, data []byte) error {
 		if err := s.admit(ctx, scan, f, data); err != nil {
 			telemetry.DiscoveryFiles.WithLabelValues("scan", "failed").Inc()
-			return err
+			if !postgres.IsDataException(err) {
+				return err
+			}
+			rejected++
+			if s.Log != nil {
+				s.Log.Error("original rejected by the store; scan left incomplete", "file", f.DisplayPath, "error", err)
+			}
+			return nil
 		}
 		telemetry.DiscoveryFiles.WithLabelValues("scan", "observed").Inc()
 		return nil
@@ -59,6 +70,9 @@ func (s *Service) Scan(ctx context.Context) (string, error) {
 		}
 	} else if err != nil {
 		return "", err
+	}
+	if rejected > 0 {
+		err = errors.Join(err, fmt.Errorf("%w: %d original(s) rejected by the store; see the discovery log", source.ErrIncomplete, rejected))
 	}
 	if err != nil {
 		return scan, err
@@ -175,9 +189,13 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 		// Bytes the canonical column cannot hold are one skipped document, not
 		// a failed scan. The sniffer routes anything text-shaped here, and it
 		// labels a non-UTF-8 file iso-8859-1 by assumption rather than by
-		// declaration, so decoding it would be a guess (§6.3).
+		// declaration, so decoding it would be a guess (§6.3). NUL is valid
+		// UTF-8 that PostgreSQL text still refuses.
 		if !utf8.Valid(data) {
 			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonUnknownEncoding)
+		}
+		if bytes.IndexByte(data, 0) >= 0 {
+			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonNULBytes)
 		}
 		if err := s.Docs.SaveText(ctx, meta.DocId, string(data), route.DocType); err != nil {
 			return err

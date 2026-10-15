@@ -34,6 +34,7 @@ func ClassifyReason(r FailureReason) FailureClass {
 		ReasonRecursionLimit,
 		ReasonImageNotViable,
 		ReasonOCRUnavailable,
+		ReasonNULBytes,
 		ReasonDocumentPruned:
 		return ClassExpectedDecline
 

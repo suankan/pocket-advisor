@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,5 +157,38 @@ func TestAdmitDoesNotWaitOnDocumentRowLockedByWorker(t *testing.T) {
 				t.Fatalf("duplicate was not observed: %d %v", seen, err)
 			}
 		})
+	}
+}
+
+// Text PostgreSQL cannot hold is one declined document, not a failed scan. The NUL
+// sits past the sniffer's header window, as in real files that reach admission.
+func TestScanDeclinesTextWithNULBytesAndCompletes(t *testing.T) {
+	s, root := scanFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for name, body := range map[string]string{"a.txt": "Before the NUL file.", "b.conf": strings.Repeat("key=value\n", 500) + "\x00", "c.txt": "After the NUL file."} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done bool
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT completed_at IS NOT NULL FROM source_scans WHERE scan_id=$1`, scan).Scan(&done); err != nil || !done {
+		t.Fatalf("scan not completed: %v %v", done, err)
+	}
+	var status, reason string
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT d.processing_status::text, d.metadata_headers->>'reason'
+	 FROM documents d JOIN source_occurrences o USING(doc_id) WHERE o.relative_path='b.conf'`).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(domain.StatusSkipped) || reason != string(domain.ReasonNULBytes) {
+		t.Fatalf("NUL text recorded %s/%s", status, reason)
+	}
+	ready, _, _, _, err := s.Jobs.Counts(ctx)
+	if err != nil || ready != 2 {
+		t.Fatalf("neighbouring text not admitted: ready=%d %v", ready, err)
 	}
 }

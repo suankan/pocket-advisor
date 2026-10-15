@@ -47,6 +47,10 @@ const (
 	// (ingestion-design.md's DLQ philosophy: a wrong guess would be silent
 	// content corruption, not a loud, actionable failure).
 	ReasonUnknownEncoding FailureReason = "UNKNOWN_ENCODING"
+	// ReasonNULBytes marks plain text containing NUL bytes, which PostgreSQL
+	// text cannot hold. Stripping them would make canonical text differ from
+	// its source, so the file is declined rather than rewritten.
+	ReasonNULBytes FailureReason = "NUL_BYTES"
 
 	// Codes that used to be string literals at their call sites.
 	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"

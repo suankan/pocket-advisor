@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -24,6 +25,14 @@ type transactionKey struct{ db *DB }
 func IsDeadlock(err error) bool {
 	var pg *pgconn.PgError
 	return errors.As(err, &pg) && pg.Code == "40P01"
+}
+
+// IsDataException reports whether PostgreSQL refused a statement because of
+// the values it carried (SQLSTATE class 22), such as an invalid byte sequence
+// in text. The store is healthy; that input cannot be stored as given.
+func IsDataException(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && strings.HasPrefix(pg.Code, "22")
 }
 
 func (d *DB) executor(ctx context.Context) executor {

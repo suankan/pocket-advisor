@@ -13,6 +13,7 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonMissingTraceContext,
 		ReasonMalformedCommand,
 		ReasonOCRUnavailable,
+		ReasonNULBytes,
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
@@ -71,7 +72,7 @@ func TestProcessingFailureReasonsCoverTheNonDeclineVocabulary(t *testing.T) {
 	all := []FailureReason{
 		ReasonUnsupportedFormat, ReasonRecursionLimit, ReasonImageNotViable,
 		ReasonExtractionFailed, ReasonEmptyExtraction, ReasonUnknownEncoding,
-		ReasonMissingTraceContext, ReasonMalformedCommand, ReasonOCRUnavailable,
+		ReasonMissingTraceContext, ReasonMalformedCommand, ReasonOCRUnavailable, ReasonNULBytes,
 		ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed,
 		ReasonHandlerPanic, ReasonDocumentPruned, ReasonUnclassified,
 	}

@@ -146,6 +146,25 @@ func TestDecodeTextRejectsUndeclaredNonUTF8(t *testing.T) {
 	}
 }
 
+// A charset is declared under any of its names, sometimes with quotes left in
+// the parameter. Every name of US-ASCII reads as ASCII — 8-bit bytes are never
+// taken as Windows-1252, which the WHATWG index maps some of them to.
+func TestDecodeTextReadsCharsetAliases(t *testing.T) {
+	for _, charset := range []string{"ISO646-US", "ANSI_X3.4-1968", "csASCII", "'UTF-8'", `"utf-8"`, " us-ascii "} {
+		if got, err := decodeText([]byte("plain letter"), charset); err != nil || got != "plain letter" {
+			t.Errorf("charset %s: %q, %v", charset, got, err)
+		}
+	}
+	for _, charset := range []string{"ISO646-US", "ANSI_X3.4-1968"} {
+		if _, err := decodeText([]byte("\x93quoted\x94"), charset); !errors.Is(err, ErrUnknownCharset) {
+			t.Errorf("charset %s read 8-bit bytes: %v", charset, err)
+		}
+	}
+	if got, err := decodeText([]byte("caf\xe9"), "'ISO-8859-1'"); err != nil || got != "café" {
+		t.Errorf("quoted latin-1: %q, %v", got, err)
+	}
+}
+
 // A zip with a password-protected member is reported as encrypted rather than
 // as an unreadable or oversized archive: the password is never held here, so
 // the owner is the only one who can unlock it. The member is written raw with

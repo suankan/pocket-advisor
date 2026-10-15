@@ -163,10 +163,11 @@ func declaredNames(raw []string, hint string) ([]string, string, bool) {
 func hintCandidate(hint string) (nameCandidate, bool) {
 	// The WHATWG index reads US-ASCII as Windows-1252, which a message
 	// declaring ASCII never meant for its 8-bit bytes.
-	if h := strings.ToLower(strings.TrimSpace(hint)); h == "" || h == "us-ascii" || h == "ascii" {
+	h := charsetLabel(hint)
+	if h == "" || h == "us-ascii" {
 		return nameCandidate{}, false
 	}
-	enc, err := htmlindex.Get(hint)
+	enc, err := htmlindex.Get(h)
 	if err != nil {
 		return nameCandidate{}, false
 	}
@@ -438,7 +439,7 @@ func extendedParam(header, key string) string {
 		}
 		raw.WriteString(s)
 	}
-	enc, err := htmlindex.Get(charset)
+	enc, err := htmlindex.Get(charsetLabel(charset))
 	if err != nil {
 		return raw.String()
 	}

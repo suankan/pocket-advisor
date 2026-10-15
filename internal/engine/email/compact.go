@@ -48,8 +48,28 @@ func newQuotedPrintableReader(r io.Reader) io.Reader {
 	return quotedprintable.NewReader(r)
 }
 
+// asciiLabels are IANA's names for US-ASCII. The WHATWG index reads some of
+// them as Windows-1252 and knows none of the others, but a message declaring
+// ASCII never meant its 8-bit bytes as anything.
+var asciiLabels = map[string]bool{
+	"us-ascii": true, "ascii": true, "iso646-us": true, "ansi_x3.4-1968": true,
+	"ansi_x3.4-1986": true, "iso-ir-6": true, "iso_646.irv:1991": true, "us": true,
+	"ibm367": true, "cp367": true, "csascii": true, "646": true,
+}
+
+// charsetLabel normalizes a declared charset for lookup: whitespace and the
+// quotes some mailers leave inside the parameter are removed, case is
+// folded, and every name of US-ASCII reads as "us-ascii".
+func charsetLabel(s string) string {
+	s = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(s), `"'`)))
+	if asciiLabels[s] {
+		return "us-ascii"
+	}
+	return s
+}
+
 func charsetReader(label string, input io.Reader) (io.Reader, error) {
-	if enc, err := htmlindex.Get(label); err == nil {
+	if enc, err := htmlindex.Get(charsetLabel(label)); err == nil {
 		return enc.NewDecoder().Reader(input), nil
 	}
 	// A legacy default is better than failing the whole header.
@@ -64,14 +84,15 @@ func charsetReader(label string, input io.Reader) (io.Reader, error) {
 // than a loud failure. The body is the indexed evidentiary text, so an
 // error here — routed to the DLQ by the caller — is the safer default.
 func decodeText(raw []byte, charset string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(charset)) {
-	case "", "utf-8", "utf8", "us-ascii", "ascii":
+	label := charsetLabel(charset)
+	switch label {
+	case "", "utf-8", "utf8", "us-ascii":
 		if utf8.Valid(raw) {
 			return string(raw), nil
 		}
 		return "", fmt.Errorf("%w: charset %q but body is not valid UTF-8", ErrUnknownCharset, charset)
 	}
-	enc, err := htmlindex.Get(charset)
+	enc, err := htmlindex.Get(label)
 	if err != nil {
 		return "", fmt.Errorf("%w: unrecognized charset %q", ErrUnknownCharset, charset)
 	}

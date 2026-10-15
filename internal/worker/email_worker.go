@@ -68,7 +68,11 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 			if errors.Is(err, email.ErrEncrypted) {
 				return Decline(meta.DocId, domain.ReasonArchiveEncrypted)
 			}
-			return WithDoc(meta.DocId, Fatal(domain.ReasonRecursionLimit, err))
+			// The bytes are verified, so an archive that cannot be unrolled —
+			// past the nesting or expansion bounds, damaged, or in a format
+			// the unroller does not read — fails the same way every time.
+			w.Log.Warn("archive declined", "doc_id", meta.DocId, "error", err)
+			return Decline(meta.DocId, domain.ReasonRecursionLimit)
 		}
 	} else {
 		p, perr := email.ParseEmail(data)

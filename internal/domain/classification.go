@@ -1,5 +1,7 @@
 package domain
 
+import "slices"
+
 // FailureClass groups FailureReason values into actionable categories.
 //
 // The mapping is authoritative: an unknown FailureReason is never
@@ -23,25 +25,29 @@ const (
 	ClassOperatorDecision FailureClass = "operator_decision"
 )
 
+// declineReasons are the expected declines — set SKIPPED, never DLQ'd.
+var declineReasons = []FailureReason{
+	ReasonUnsupportedFormat,
+	ReasonRecursionLimit,
+	ReasonImageNotViable,
+	ReasonOCRUnavailable,
+	ReasonNULBytes,
+	ReasonPDFEncrypted,
+	ReasonPDFDamaged,
+	ReasonImageUnreadable,
+	ReasonArchiveEncrypted,
+	ReasonDocumentPruned,
+}
+
 // ClassifyReason maps a FailureReason to its FailureClass.
 // Every code in the closed vocabulary must have an explicit mapping.
 // Unknown values are always classified as operator_decision — an
 // unknown code is never automatically retryable.
 func ClassifyReason(r FailureReason) FailureClass {
-	switch r {
-	// Expected declines — set SKIPPED, never DLQ'd.
-	case ReasonUnsupportedFormat,
-		ReasonRecursionLimit,
-		ReasonImageNotViable,
-		ReasonOCRUnavailable,
-		ReasonNULBytes,
-		ReasonPDFEncrypted,
-		ReasonPDFDamaged,
-		ReasonImageUnreadable,
-		ReasonArchiveEncrypted,
-		ReasonDocumentPruned:
+	if slices.Contains(declineReasons, r) {
 		return ClassExpectedDecline
-
+	}
+	switch r {
 	// Retryable infrastructure or transient failures.
 	case ReasonExtractionFailed,
 		ReasonEmptyExtraction,
@@ -71,6 +77,14 @@ func ClassifyReason(r FailureReason) FailureClass {
 // name rather than leaving them among ordinary skips.
 func PasswordReasons() []FailureReason {
 	return []FailureReason{ReasonPDFEncrypted, ReasonArchiveEncrypted}
+}
+
+// DeclineReasons lists the reasons classified as expected declines. A handler
+// records them SKIPPED, so a FAILED document carrying one was failed by a
+// handler that predates the decline, and recovery reruns it so the current
+// handler settles it.
+func DeclineReasons() []FailureReason {
+	return slices.Clone(declineReasons)
 }
 
 // Retryable reports whether a failure reason may be safely retried.

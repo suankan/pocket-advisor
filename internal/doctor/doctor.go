@@ -234,7 +234,7 @@ func classifyAction(reason string) string {
 	case domain.ClassTerminal:
 		return "terminal — investigate source data, do not auto-redrive"
 	case domain.ClassExpectedDecline:
-		return "expected decline — no action needed"
+		return "a decline recorded as a failure — run --recover to settle it under the current handler"
 	default:
 		return "operator judgment required — inspect the failed job and its document"
 	}

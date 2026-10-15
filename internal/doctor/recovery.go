@@ -179,8 +179,11 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 			item.Classification = ClassTerminal
 			item.Action = ActionRefuse
 		case domain.ClassExpectedDecline:
-			item.Classification = ClassConverged
-			item.Action = ActionSkip
+			// A decline is recorded SKIPPED. Recorded as a failure, it came from
+			// a handler that predates the decline; running it again settles it.
+			item.Classification = ClassRetryable
+			item.Action = ActionRetryTransition
+			item.Requeue = "run the document again so the current handler records the decline it failed under; its failed jobs return to the queue with a fresh retry cycle"
 		default:
 			item.Classification = ClassNotRecoverable
 			item.Action = ActionRefuse

@@ -4,12 +4,16 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -56,6 +60,36 @@ func admissionFixture(t *testing.T) (*postgres.DB, *EmailWorker, string) {
 		t.Fatal(err)
 	}
 	return db, workerOn(db), scoped
+}
+
+// bytesSource serves fixed bytes for any reference.
+type bytesSource []byte
+
+func (b bytesSource) Read(context.Context, string, string) ([]byte, error) { return b, nil }
+
+// An archive the unroller cannot read reads the same way on every attempt, so
+// it is declined rather than failed, and its document is SKIPPED.
+func TestUnreadableArchiveIsDeclined(t *testing.T) {
+	_, ew, _ := admissionFixture(t)
+	ctx := context.Background()
+	data := []byte("7z\xbc\xaf\x27\x1c synthetic, not unrolled")
+	sum := domain.SHA256Hex(data)
+	id, _, err := ew.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: sum, DocType: "archive", MimeType: "application/x-7z-compressed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ew.Sources = bytesSource(data)
+	ew.Log = slog.New(slog.DiscardHandler)
+	payload, err := proto.Marshal(&ingestionv1.ProcessEmailCommand{Metadata: &ingestionv1.DocumentMetadata{
+		DocId: id, RawSha256: sum, MimeType: "application/x-7z-compressed", SourceFilename: "letters.7z", Traceparent: trace.NewTraceparent()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ew.Handle(ctx, postgres.Job{DocID: id, Payload: payload})
+	var declined *Declined
+	if !errors.As(err, &declined) || declined.Reason != domain.ReasonRecursionLimit {
+		t.Fatalf("err = %v, want a %s decline", err, domain.ReasonRecursionLimit)
+	}
 }
 
 func workerOn(db *postgres.DB) *EmailWorker {

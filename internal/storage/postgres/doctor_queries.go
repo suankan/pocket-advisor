@@ -221,13 +221,16 @@ func (q *DoctorQueries) StalePROCESSING(ctx context.Context, threshold time.Dura
 	return scanDoctorDocs(rows)
 }
 
-// RetryableFAILED returns FAILED rows whose reason is classified retryable,
-// oldest first, at most limit of them. The reason filter is in the query: the
-// cap must apply to retryable rows, not to all failures, or a workspace with
-// many terminal failures hides its retryable ones beyond the cap.
-func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]DoctorDoc, error) {
-	reasons := make([]string, 0, 5)
-	for _, r := range domain.RetryableReasons() {
+// RedrivableFAILED returns FAILED rows whose reason is classified retryable or
+// is an expected decline, oldest first, at most limit of them. A decline is
+// recorded SKIPPED, so a failure carrying one was recorded by a handler that
+// predates the decline, and running it again settles it. The reason filter is
+// in the query: the cap must apply to redrivable rows, not to all failures, or
+// a workspace with many terminal failures hides its redrivable ones beyond the
+// cap.
+func (q *DoctorQueries) RedrivableFAILED(ctx context.Context, limit int) ([]DoctorDoc, error) {
+	var reasons []string
+	for _, r := range append(domain.RetryableReasons(), domain.DeclineReasons()...) {
 		reasons = append(reasons, string(r))
 	}
 	rows, err := q.db.Pool.Query(ctx, `
@@ -242,7 +245,7 @@ func (q *DoctorQueries) RetryableFAILED(ctx context.Context, limit int) ([]Docto
 		ORDER BY updated_at
 		LIMIT $1`, limit, reasons)
 	if err != nil {
-		return nil, fmt.Errorf("retryable failed: %w", err)
+		return nil, fmt.Errorf("redrivable failed: %w", err)
 	}
 	defer rows.Close()
 	return scanDoctorDocs(rows)

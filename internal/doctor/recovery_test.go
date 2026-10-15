@@ -53,6 +53,22 @@ func TestClassifyRetryableFailed(t *testing.T) {
 	}
 }
 
+// A decline is recorded SKIPPED, so a failure carrying one came from a handler
+// that predates the decline: it is run again, not taken as settled.
+func TestClassifyFailedDeclineIsRedriven(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
+		{DocID: "doc-8", Status: domain.StatusFailed, Reason: domain.ReasonRecursionLimit},
+	})
+	plan := p.Plan(context.Background())
+	item := plan.Items[0]
+	if item.Classification != ClassRetryable || item.Action != ActionRetryTransition {
+		t.Errorf("classification %q action %q, want retryable transition_to_pending", item.Classification, item.Action)
+	}
+	if err := p.Validate(context.Background(), plan); err != nil {
+		t.Errorf("a redriven decline failed validation: %v", err)
+	}
+}
+
 func TestClassifyTerminalFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-4", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},

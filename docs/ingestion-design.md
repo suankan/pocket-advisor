@@ -118,7 +118,7 @@ Discovery classifies bytes rather than trusting extensions.
 | --- | --- | --- |
 | RFC 822 email | `ingest.emails.raw` | email worker |
 | ZIP, tar, and tar.gz archives | `ingest.emails.raw` | container unrolling |
-| detected 7z and bzip2 archives | `ingest.emails.raw` | currently fail as unsupported during unrolling |
+| detected 7z and bzip2 archives | `ingest.emails.raw` | `SKIPPED / RECURSION_LIMIT` during unrolling |
 | PDF | `ingest.pdfs.raw` | document worker |
 | DOCX, XLSX, PPTX, ODT, RTF | `ingest.docx.raw` | office worker |
 | image | `ingest.images.raw` | image viability and OCR |
@@ -137,8 +137,9 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - records child replay selectors and containment without persisting child bytes, for every member including those whose content is already known;
 - gives every member a valid UTF-8 name without NUL (below);
 - admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage;
-- enforces nesting and expansion bounds for hostile containers; and
-- declines a ZIP with a password-protected member as `SKIPPED / ARCHIVE_ENCRYPTED`, since the system never holds passwords.
+- enforces nesting and expansion bounds for hostile containers;
+- declines a ZIP with a password-protected member as `SKIPPED / ARCHIVE_ENCRYPTED`, since the system never holds passwords; and
+- declines any other archive it cannot unroll — beyond those bounds, damaged, or in a format it does not read — as `SKIPPED / RECURSION_LIMIT`, logging the unrolling error, since the verified bytes fail the same way on every attempt.
 
 Child commands carry `parent_doc_id`, depth, and the parent trace id. Root creation remains exclusive to discovery.
 
@@ -231,7 +232,7 @@ A process crash before stage commit leaves no partial stage effects. Its jobs st
 
 Each finding carries a stable code, a severity of info, warning, error or critical, an affected count, a summary that contains no content, filename or credential, and one next action. `--json` emits the whole report. The exit status is 0 for healthy, 1 for unhealthy but diagnosed, and 2 for a doctor run that could not complete.
 
-`--recover` classifies documents rather than describing the workspace. Its planner is read-only: every selected document becomes one item with a classification — retryable, terminal, converged or not recoverable — and one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. Each item carries the document's unfinished and failed jobs with their generation and state. A document whose job holds an unexpired lease is refused, and the apply step revalidates every job's generation, state and lease inside its own transaction: a changed item is refused without mutation. Each job's advisory lock is tried first and never waited for, under the control deadline, so recovery refuses at once rather than block behind an expired handler that is still running. Applying resets the document and only its failed and expired jobs to a fresh retry cycle and notifies at commit; queued jobs — delayed retries included — source waits and completed jobs are untouched, keeping their recorded failures, budgets and backoff. A validation failure stops application, and recovery refuses to run before the queue schema is current. Recovery runs under the maintenance lock. Failed documents are selected by retryable reason in the query itself, and each state contributes at most 500 documents to a plan; a selection that reaches that cap says so on stderr, and applying the plan then running `--recover` again selects the next batch. Without `--yes` the plan is reported and nothing changes.
+`--recover` classifies documents rather than describing the workspace. Its planner is read-only: every selected document becomes one item with a classification — retryable, terminal, converged or not recoverable — and one action: transition to pending, reset to pending, rebuild the BM25 index, converge an incomplete reset, no action needed, or refused. Each item carries the document's unfinished and failed jobs with their generation and state. A document whose job holds an unexpired lease is refused, and the apply step revalidates every job's generation, state and lease inside its own transaction: a changed item is refused without mutation. Each job's advisory lock is tried first and never waited for, under the control deadline, so recovery refuses at once rather than block behind an expired handler that is still running. Applying resets the document and only its failed and expired jobs to a fresh retry cycle and notifies at commit; queued jobs — delayed retries included — source waits and completed jobs are untouched, keeping their recorded failures, budgets and backoff. A validation failure stops application, and recovery refuses to run before the queue schema is current. Recovery runs under the maintenance lock. Failed documents are selected in the query itself by a retryable reason or an expected-decline reason. Declines are recorded SKIPPED, so a failure carrying one was recorded by a handler that predates the decline; it is planned retryable and run again so the current handler settles it. Each state contributes at most 500 documents to a plan; a selection that reaches that cap says so on stderr, and applying the plan then running `--recover` again selects the next batch. Without `--yes` the plan is reported and nothing changes.
 
 ### 6.4 Pruning and maintenance
 

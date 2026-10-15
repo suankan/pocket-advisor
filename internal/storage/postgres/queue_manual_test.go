@@ -1638,10 +1638,11 @@ func TestQueueLiveWorkIsNotStalePending(t *testing.T) {
 	}
 }
 
-// The cap on a recovery selection must apply to retryable failures, not to all
+// The cap on a recovery selection must apply to redrivable failures, not to all
 // failures: a workspace with many terminal failures older than its retryable
-// ones used to hide every retryable document beyond the cap.
-func TestQueueRetryableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
+// ones used to hide every retryable document beyond the cap. A failure carrying
+// a decline is selected too.
+func TestQueueRedrivableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 	db, docs, _ := queueSetup(t)
 	ctx := context.Background()
 	q := NewDoctorQueries(db)
@@ -1658,7 +1659,7 @@ func TestQueueRetryableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 		}
 		return id
 	}
-	// Many older terminal and unclassified failures, then newer retryable ones.
+	// Many older terminal and unclassified failures, then newer redrivable ones.
 	for i := 0; i < 30; i++ {
 		fail(domain.ReasonUnknownEncoding, "10 days")
 		fail(domain.ReasonUnclassified, "9 days")
@@ -1667,13 +1668,14 @@ func TestQueueRetryableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 		fail(domain.ReasonOCRFailed, "2 days"):        domain.ReasonOCRFailed,
 		fail(domain.ReasonPDFOpenFailed, "1 day"):     domain.ReasonPDFOpenFailed,
 		fail(domain.ReasonEmailParseFailed, "1 hour"): domain.ReasonEmailParseFailed,
+		fail(domain.ReasonRecursionLimit, "1 minute"): domain.ReasonRecursionLimit,
 	}
-	got, err := q.RetryableFAILED(ctx, 10) // far fewer than the 60 older failures
+	got, err := q.RedrivableFAILED(ctx, 10) // far fewer than the 60 older failures
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != len(want) {
-		t.Fatalf("selected %d documents, want the %d retryable ones: terminal failures filled the cap", len(got), len(want))
+		t.Fatalf("selected %d documents, want the %d redrivable ones: terminal failures filled the cap", len(got), len(want))
 	}
 	for _, d := range got {
 		if want[d.DocID] != domain.FailureReason(d.Reason) {
@@ -1681,8 +1683,8 @@ func TestQueueRetryableSelectionIsFilteredBeforeItIsCapped(t *testing.T) {
 		}
 	}
 	// The cap still bounds a selection, oldest first.
-	capped, err := q.RetryableFAILED(ctx, 2)
+	capped, err := q.RedrivableFAILED(ctx, 2)
 	if err != nil || len(capped) != 2 || capped[0].Reason != string(domain.ReasonOCRFailed) {
-		t.Fatalf("capped selection = %+v %v, want the two oldest retryable documents", capped, err)
+		t.Fatalf("capped selection = %+v %v, want the two oldest redrivable documents", capped, err)
 	}
 }

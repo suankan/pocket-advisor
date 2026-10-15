@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestClassifyReasonCoversAllReasons(t *testing.T) {
 	allReasons := []FailureReason{
@@ -125,6 +128,26 @@ func TestRetryableReasonsAreExactlyTheRetryableClass(t *testing.T) {
 	for _, r := range []FailureReason{ReasonUnclassified, ReasonUnknownEncoding, ReasonHandlerPanic, ReasonMalformedCommand, ReasonRecursionLimit, ReasonDocumentPruned} {
 		if got[r] {
 			t.Errorf("%s must never be selected for redrive", r)
+		}
+	}
+}
+
+// Recovery selects failed documents carrying a decline by this list, so it must
+// be exactly the reasons classified as expected declines and none that can fail
+// a job.
+func TestDeclineReasonsAreExactlyTheDeclineClass(t *testing.T) {
+	failures := map[FailureReason]bool{}
+	for _, r := range ProcessingFailureReasons() {
+		failures[r] = true
+	}
+	for _, r := range DeclineReasons() {
+		if ClassifyReason(r) != ClassExpectedDecline || failures[r] {
+			t.Errorf("%s is listed as a decline but classified %s", r, ClassifyReason(r))
+		}
+	}
+	for _, r := range []FailureReason{ReasonRecursionLimit, ReasonArchiveEncrypted, ReasonPDFEncrypted, ReasonUnsupportedFormat} {
+		if !slices.Contains(DeclineReasons(), r) {
+			t.Errorf("%s is a decline but missing from DeclineReasons", r)
 		}
 	}
 }

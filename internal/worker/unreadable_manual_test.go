@@ -21,11 +21,6 @@ import (
 	"github.com/suankan/pocket-advisor/internal/trace"
 )
 
-// bytesSource serves fixed bytes for any reference.
-type bytesSource []byte
-
-func (b bytesSource) Read(context.Context, string, string) ([]byte, error) { return b, nil }
-
 // Inputs whose bytes decide the answer are declined with a reason naming why,
 // not failed: a retry reads the same bytes and gets the same answer, and a
 // failure would make every finite run end unresolved.

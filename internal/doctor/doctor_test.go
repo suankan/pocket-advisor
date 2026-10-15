@@ -125,6 +125,41 @@ func TestFailedByReasonFinding(t *testing.T) {
 	}
 }
 
+// A failure or a password skip names its documents, and its advice says what
+// to do with them: failures recorded before the job queue are for --recover,
+// password-protected documents for the owner. Other skips are only counted.
+func TestReasonFindingsNameTheirDocuments(t *testing.T) {
+	d := New("test-ws", Checks{
+		RegistryOK: true, CredsOK: true, PGRaw: true, SourcesRaw: true,
+		PGSchemaOK: true, PGHNSWOK: true, PGBM25OK: true,
+		FailedByReason:  map[string]int{"UNCLASSIFIED": 3, "UNKNOWN_ENCODING": 4},
+		SkippedByReason: map[string]int{"PDF_ENCRYPTED": 1, "IMAGE_NOT_VIABLE": 9},
+		FailedDocs: map[string]NamedDocs{
+			"UNCLASSIFIED":     {Jobless: 3, Locations: []string{"mail/a.eml", "mail/b.eml"}},
+			"UNKNOWN_ENCODING": {Jobless: 1, Locations: []string{"mail/c.eml"}},
+		},
+		LockedDocs: map[string]NamedDocs{"PDF_ENCRYPTED": {Locations: []string{"letter.pdf in mail/d.eml"}}},
+	})
+	findings := map[string]Finding{}
+	for _, f := range d.Run(nil).Findings {
+		findings[f.Code] = f
+	}
+	for code, want := range map[string]struct {
+		docs   int
+		action string
+	}{
+		"FAILED_REASON_UNCLASSIFIED":      {2, "recorded before the job queue — run --recover"},
+		"FAILED_REASON_UNKNOWN_ENCODING":  {1, "1 recorded before the job queue, which --recover reruns; the rest: terminal"},
+		"SKIPPED_REASON_PDF_ENCRYPTED":    {1, "password-protected"},
+		"SKIPPED_REASON_IMAGE_NOT_VIABLE": {0, "expected decline"},
+	} {
+		f := findings[code]
+		if len(f.Documents) != want.docs || !strings.HasPrefix(f.NextAction, want.action) {
+			t.Errorf("%s: %d documents, action %q; want %d and %q", code, len(f.Documents), f.NextAction, want.docs, want.action)
+		}
+	}
+}
+
 func TestReportJSON(t *testing.T) {
 	r := &Report{
 		WorkspaceID: "test-ws",

@@ -25,6 +25,9 @@ type Finding struct {
 	Count      int      `json:"count"`
 	Summary    string   `json:"summary"`
 	NextAction string   `json:"next_action"`
+	// Documents names the documents behind the finding by location, the most
+	// recently updated first. It may name fewer than Count.
+	Documents []string `json:"documents,omitempty"`
 }
 
 // Report is the complete output of a doctor run.

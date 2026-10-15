@@ -58,6 +58,10 @@ type Checks struct {
 	// Failure analysis
 	FailedByReason  map[string]int // FAILED rows grouped by reason
 	SkippedByReason map[string]int // SKIPPED rows grouped by reason
+	// FailedDocs names FAILED rows by reason, and LockedDocs the SKIPPED rows
+	// only the owner can resolve, those behind a password.
+	FailedDocs map[string]NamedDocs
+	LockedDocs map[string]NamedDocs
 
 	// Job queue. QueueSchemaChecked is false when PostgreSQL could not be
 	// probed; QueueSchemaReady is false on the pre-upgrade layout, whose job
@@ -71,6 +75,15 @@ type Checks struct {
 
 	// Partial reset
 	IncompleteReset bool // signs of an interrupted wipe or forget
+}
+
+// NamedDocs names the documents behind one reason.
+type NamedDocs struct {
+	// Jobless counts those with no job at all: recorded before the job queue,
+	// by handlers that have since changed.
+	Jobless int
+	// Locations names some or all of them.
+	Locations []string
 }
 
 // New creates a Doctor for one workspace.
@@ -198,16 +211,33 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 
 	// 8. Failed rows by reason
 	for reason, count := range d.checks.FailedByReason {
-		addFinding(&findings, "FAILED_REASON_"+strings.ToUpper(reason), SeverityError, count,
-			fmt.Sprintf("FAILED documents with reason %s", reason),
-			classifyAction(reason))
+		named := d.checks.FailedDocs[reason]
+		action := classifyAction(reason)
+		switch {
+		case named.Jobless == count:
+			action = "recorded before the job queue — run --recover to rerun them under the current handlers"
+		case named.Jobless > 0:
+			action = fmt.Sprintf("%d recorded before the job queue, which --recover reruns; the rest: %s", named.Jobless, action)
+		}
+		code := "FAILED_REASON_" + strings.ToUpper(reason)
+		addFinding(&findings, code, SeverityError, count,
+			fmt.Sprintf("FAILED documents with reason %s", reason), action)
+		nameDocuments(findings, code, named)
 	}
 
 	// 9. Skipped rows by reason
 	for reason, count := range d.checks.SkippedByReason {
-		addFinding(&findings, "SKIPPED_REASON_"+strings.ToUpper(reason), SeverityInfo, count,
-			fmt.Sprintf("SKIPPED documents with reason %s", reason),
-			"expected decline — no action needed unless these should be processed")
+		action := "expected decline — no action needed unless these should be processed"
+		named, locked := d.checks.LockedDocs[reason]
+		if locked {
+			action = "password-protected — only you can unlock them: save an unlocked copy under a configured root"
+		}
+		code := "SKIPPED_REASON_" + strings.ToUpper(reason)
+		addFinding(&findings, code, SeverityInfo, count,
+			fmt.Sprintf("SKIPPED documents with reason %s", reason), action)
+		if locked {
+			nameDocuments(findings, code, named)
+		}
 	}
 
 	// 10. Incomplete reset
@@ -223,6 +253,13 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 		r.Queue = d.checks.JobsByState
 	}
 	return r
+}
+
+// nameDocuments attaches documents to the finding just added under code.
+func nameDocuments(findings []Finding, code string, named NamedDocs) {
+	if n := len(findings); n > 0 && findings[n-1].Code == code {
+		findings[n-1].Documents = named.Locations
+	}
 }
 
 // classifyAction maps a failure reason string to a suggested next action.

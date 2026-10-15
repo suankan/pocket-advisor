@@ -171,6 +171,72 @@ func (q *DoctorQueries) SkippedByReason(ctx context.Context) (map[string]int, er
 	return out, rows.Err()
 }
 
+// NamedDocs names the documents behind one status and reason.
+type NamedDocs struct {
+	// Jobless counts those with no job at all: recorded before the job queue.
+	Jobless int
+	// Locations name them as the run summary does, most recently updated
+	// first, at most as many as were asked for.
+	Locations []string
+}
+
+// DocumentsByReason names the documents with status, by reason as
+// FailedByReason and SkippedByReason key it, at most limit per reason, or all
+// of them when limit is 0. When reasons is not empty, only those are named.
+// It reads the job table, so it needs the current queue layout.
+func (q *DoctorQueries) DocumentsByReason(ctx context.Context, status domain.Status, reasons []string, limit int) (map[string]NamedDocs, error) {
+	const picked = `WITH picked AS (
+   SELECT doc_id, COALESCE(metadata_headers->>'reason', 'UNKNOWN') AS reason,
+          row_number() OVER (PARTITION BY metadata_headers->>'reason' ORDER BY updated_at DESC, doc_id) AS n,
+          NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id) AS jobless
+   FROM documents
+   WHERE processing_status = $1
+     AND (cardinality($2::text[]) = 0 OR metadata_headers->>'reason' = ANY($2::text[])))`
+	if reasons == nil {
+		reasons = []string{}
+	}
+	out := map[string]NamedDocs{}
+	rows, err := q.db.Pool.Query(ctx, picked+`
+ SELECT reason, count(*) FILTER (WHERE jobless) FROM picked GROUP BY reason`, string(status), reasons)
+	if err != nil {
+		return nil, fmt.Errorf("documents by reason: %w", err)
+	}
+	for rows.Next() {
+		var reason string
+		var named NamedDocs
+		if err := rows.Scan(&reason, &named.Jobless); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[reason] = named
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = q.db.Pool.Query(ctx, picked+`
+ SELECT p.reason, `+locationColumns+`
+ FROM picked p JOIN documents d USING (doc_id)
+ `+locationJoin+`
+ WHERE $3 = 0 OR p.n <= $3
+ ORDER BY p.reason, p.n`, string(status), reasons, limit)
+	if err != nil {
+		return nil, fmt.Errorf("documents by reason: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reason, name, own, containerPath, containerName string
+		if err := rows.Scan(&reason, &name, &own, &containerPath, &containerName); err != nil {
+			return nil, err
+		}
+		named := out[reason]
+		named.Locations = append(named.Locations, location(name, own, containerPath, containerName))
+		out[reason] = named
+	}
+	return out, rows.Err()
+}
+
 // DocumentsWithoutSources counts inventory gaps, not live filesystem probes.
 func (q *DoctorQueries) DocumentsWithoutSources(ctx context.Context) (int, error) {
 	var n int

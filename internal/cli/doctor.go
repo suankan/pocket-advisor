@@ -12,6 +12,7 @@ import (
 
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/doctor"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 	"github.com/suankan/pocket-advisor/internal/workspace"
@@ -46,7 +47,11 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	if pgDB != nil {
 		fillSchemaChecks(ctx, pgDB, cfg, &checks, log)
 		fillQueueChecks(ctx, pgDB, &checks, log)
-		fillDocumentChecks(ctx, pgDB, &checks, log)
+		named := doctorNamed
+		if o.JSON {
+			named = 0 // all of them
+		}
+		fillDocumentChecks(ctx, pgDB, &checks, named, log)
 	}
 
 	// 3. Configured source-root availability
@@ -91,6 +96,12 @@ func printReport(r *doctor.Report) {
 	for _, f := range r.Findings {
 		fmt.Printf("  [%s] %s (×%d)\n", f.Severity, f.Code, f.Count)
 		fmt.Printf("    %s\n", f.Summary)
+		for _, doc := range f.Documents {
+			fmt.Printf("      %s\n", doc)
+		}
+		if more := f.Count - len(f.Documents); len(f.Documents) > 0 && more > 0 {
+			fmt.Printf("      ... and %d more (--json lists all)\n", more)
+		}
 		fmt.Printf("    → %s\n\n", f.NextAction)
 	}
 }
@@ -182,8 +193,14 @@ func fillSchemaChecks(ctx context.Context, db *postgres.DB, cfg *config.Config, 
 	}
 }
 
-// fillDocumentChecks queries document state counts.
-func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, log *slog.Logger) {
+// doctorNamed is how many documents a finding names in the text report;
+// --json names all of them.
+const doctorNamed = 10
+
+// fillDocumentChecks queries document state counts, and names up to named
+// documents per failure reason and password-protected reason, or all of them
+// when named is 0.
+func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Checks, named int, log *slog.Logger) {
 	q := postgres.NewDoctorQueries(db)
 	threshold := doctor.StalenessThreshold
 
@@ -214,6 +231,35 @@ func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Che
 	} else {
 		checks.SkippedByReason = sr
 	}
+
+	// Naming reads the job table, which only the current layout can answer.
+	if !checks.QueueSchemaReady {
+		return
+	}
+	failed, err := q.DocumentsByReason(ctx, domain.StatusFailed, nil, named)
+	if err != nil {
+		log.Warn("naming failed documents failed", "error", err)
+	} else {
+		checks.FailedDocs = namedDocs(failed)
+	}
+	var password []string
+	for _, r := range domain.PasswordReasons() {
+		password = append(password, string(r))
+	}
+	locked, err := q.DocumentsByReason(ctx, domain.StatusSkipped, password, named)
+	if err != nil {
+		log.Warn("naming password-protected documents failed", "error", err)
+	} else {
+		checks.LockedDocs = namedDocs(locked)
+	}
+}
+
+func namedDocs(in map[string]postgres.NamedDocs) map[string]doctor.NamedDocs {
+	out := make(map[string]doctor.NamedDocs, len(in))
+	for reason, n := range in {
+		out[reason] = doctor.NamedDocs{Jobless: n.Jobless, Locations: n.Locations}
+	}
+	return out
 }
 
 // fillQueueChecks reads the job queue, but only after proving the layout

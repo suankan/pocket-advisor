@@ -146,20 +146,10 @@ func (r *Jobs) RunSummary(ctx context.Context, since time.Time) (RunSummary, err
      AND (d.created_at >= $1 OR EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = d.doc_id AND j.finished_at >= $1)))
  , listed AS (SELECT * FROM picked UNION ALL SELECT * FROM locked)
  SELECT d.processing_status::text, COALESCE(d.metadata_headers->>'reason', ''), l.this_run,
-        d.source_filename,
-        COALESCE((SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = d.doc_id AND o.available), ''),
-        COALESCE(c.path, ''), COALESCE(c.name, ''),
+        `+locationColumns+`,
         count(*) OVER ()
  FROM listed l JOIN documents d USING (doc_id)
- LEFT JOIN LATERAL (
-   SELECT name, path FROM (
-     SELECT k.doc_id, k.source_filename AS name,
-            (SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = k.doc_id AND o.available) AS path
-     FROM documents k
-     WHERE k.doc_id = d.parent_doc_id
-        OR k.doc_id IN (SELECT container_doc_id FROM document_placements WHERE contained_doc_id = d.doc_id)) k
-   ORDER BY path IS NULL, k.doc_id = d.parent_doc_id DESC, path, k.doc_id
-   LIMIT 1) c ON true
+ `+locationJoin+`
  ORDER BY l.this_run DESC, 1, 2, 5, 6, 4
  LIMIT $3`, since, locked, MaxAttention)
 	if err != nil {
@@ -177,21 +167,4 @@ func (r *Jobs) RunSummary(ctx context.Context, since time.Time) (RunSummary, err
 		s.Attention = append(s.Attention, a)
 	}
 	return s, rows.Err()
-}
-
-// location names a document by its original's path, or as a member of a
-// container that holds it: the one it came from when that is still staged,
-// otherwise any other that is. A document first seen as a file keeps no
-// parent, so once that file is deleted only its containment can say where it
-// still is.
-func location(name, own, containerPath, containerName string) string {
-	switch {
-	case own != "":
-		return own
-	case containerPath != "":
-		return name + " in " + containerPath
-	case containerName != "":
-		return name + " in " + containerName
-	}
-	return name
 }

@@ -1,9 +1,14 @@
 package email
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -169,4 +174,124 @@ func TestUnrollZipReportsEncryptedMembers(t *testing.T) {
 	if _, err := UnrollArchive(buf.Bytes(), "letters.zip"); !errors.Is(err, ErrEncrypted) {
 		t.Fatalf("err = %v, want ErrEncrypted", err)
 	}
+}
+
+// Every archive that cannot be unrolled says why, so it is declined under a
+// reason that names the cause: a format not read, damage, or the bounds that
+// stop archive bombs.
+func TestUnrollArchiveClassifiesWhatItCannotRead(t *testing.T) {
+	letter := []byte(strings.Repeat("Dear owner, this is a synthetic letter.\n", 40))
+	tarball := tarOf(t, map[string][]byte{"a.txt": letter, "b.txt": letter})
+
+	var lzma bytes.Buffer
+	zw := zip.NewWriter(&lzma)
+	w, err := zw.CreateRaw(&zip.FileHeader{Name: "letter.txt", Method: 14, CompressedSize64: 16, UncompressedSize64: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte{0x5a}, 16)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var many bytes.Buffer
+	zw = zip.NewWriter(&many)
+	for i := range MaxExtractedFiles + 1 {
+		if _, err := zw.Create(fmt.Sprintf("%d.txt", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	zipped := zipOf(t, "letter.txt", letter)
+	corrupt := bytes.Clone(zipped)
+	at := bytes.Index(corrupt, []byte("PK\x03\x04")) + 30 + len("letter.txt")
+	for i := at; i < at+8; i++ {
+		corrupt[i] ^= 0xff
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"unknown bytes", []byte("7z\xbc\xaf\x27\x1c not an archive this unroller reads"), ErrUnsupported},
+		{"gzip holding no tar", gzipOf(t, letter), ErrUnsupported},
+		{"short gzip holding no tar", gzipOf(t, []byte("tiny")), ErrUnsupported},
+		{"zip member under lzma", lzma.Bytes(), ErrUnsupported},
+		{"truncated gzip", halve(gzipOf(t, tarball)), ErrDamaged},
+		{"tar cut inside its second entry", tarball[:512*6+100], ErrDamaged},
+		{"zip without its directory", halve(zipped), ErrDamaged},
+		{"zip member with corrupt data", corrupt, ErrDamaged},
+		{"zip expanding past the ratio", zipOf(t, "zeros.bin", make([]byte, 4<<20)), ErrTooLarge},
+		{"zip with too many members", many.Bytes(), ErrTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := UnrollArchive(tc.data, "synthetic"); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+
+	// The format is read from the bytes: a tar is a tar whatever its name.
+	for _, data := range [][]byte{tarball, gzipOf(t, tarball)} {
+		children, err := UnrollArchive(data, "attachment")
+		if err != nil || len(children) != 2 {
+			t.Fatalf("children %d, err %v; want both members", len(children), err)
+		}
+	}
+}
+
+func tarOf(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(files[name])), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(files[name]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func halve(b []byte) []byte { return b[:len(b)/2] }
+
+func gzipOf(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zipOf(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

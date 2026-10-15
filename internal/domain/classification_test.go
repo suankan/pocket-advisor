@@ -21,6 +21,8 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonPDFDamaged,
 		ReasonImageUnreadable,
 		ReasonArchiveEncrypted,
+		ReasonArchiveTooLarge,
+		ReasonArchiveDamaged,
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
@@ -63,6 +65,8 @@ func TestRetryable(t *testing.T) {
 		ReasonPDFDamaged,
 		ReasonImageUnreadable,
 		ReasonArchiveEncrypted,
+		ReasonArchiveTooLarge,
+		ReasonArchiveDamaged,
 		ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonHandlerPanic,
@@ -85,7 +89,7 @@ func TestProcessingFailureReasonsCoverTheNonDeclineVocabulary(t *testing.T) {
 		ReasonExtractionFailed, ReasonEmptyExtraction, ReasonUnknownEncoding,
 		ReasonMissingTraceContext, ReasonMalformedCommand, ReasonOCRUnavailable, ReasonNULBytes,
 		ReasonPDFEncrypted, ReasonPDFDamaged, ReasonImageUnreadable, ReasonArchiveEncrypted,
-		ReasonArchiveEncrypted,
+		ReasonArchiveTooLarge, ReasonArchiveDamaged,
 		ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed,
 		ReasonHandlerPanic, ReasonDocumentPruned, ReasonUnclassified,
 	}
@@ -145,7 +149,7 @@ func TestDeclineReasonsAreExactlyTheDeclineClass(t *testing.T) {
 			t.Errorf("%s is listed as a decline but classified %s", r, ClassifyReason(r))
 		}
 	}
-	for _, r := range []FailureReason{ReasonRecursionLimit, ReasonArchiveEncrypted, ReasonPDFEncrypted, ReasonUnsupportedFormat} {
+	for _, r := range []FailureReason{ReasonRecursionLimit, ReasonArchiveEncrypted, ReasonArchiveTooLarge, ReasonArchiveDamaged, ReasonPDFEncrypted, ReasonUnsupportedFormat} {
 		if !slices.Contains(DeclineReasons(), r) {
 			t.Errorf("%s is a decline but missing from DeclineReasons", r)
 		}

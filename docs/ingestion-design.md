@@ -118,7 +118,7 @@ Discovery classifies bytes rather than trusting extensions.
 | --- | --- | --- |
 | RFC 822 email | `ingest.emails.raw` | email worker |
 | ZIP, tar, and tar.gz archives | `ingest.emails.raw` | container unrolling |
-| detected 7z and bzip2 archives | `ingest.emails.raw` | `SKIPPED / RECURSION_LIMIT` during unrolling |
+| detected 7z and bzip2 archives, and gzip holding no tar | `ingest.emails.raw` | `SKIPPED / UNSUPPORTED_FORMAT` during unrolling |
 | PDF | `ingest.pdfs.raw` | document worker |
 | DOCX, XLSX, PPTX, ODT, RTF | `ingest.docx.raw` | office worker |
 | image | `ingest.images.raw` | image viability and OCR |
@@ -137,9 +137,11 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - records child replay selectors and containment without persisting child bytes, for every member including those whose content is already known;
 - gives every member a valid UTF-8 name without NUL (below);
 - admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage;
-- enforces nesting and expansion bounds for hostile containers;
-- declines a ZIP with a password-protected member as `SKIPPED / ARCHIVE_ENCRYPTED`, since the system never holds passwords; and
-- declines any other archive it cannot unroll — beyond those bounds, damaged, or in a format it does not read — as `SKIPPED / RECURSION_LIMIT`, logging the unrolling error, since the verified bytes fail the same way on every attempt.
+- reads an archive's format from its bytes, never its name: ZIP and gzip by their signatures, anything else as a tar;
+- enforces nesting and expansion bounds for hostile containers; and
+- declines an archive it cannot unroll, logging the unrolling error, since the verified bytes fail the same way on every attempt.
+
+Each cause of an archive decline has its own reason. Nesting past eight levels is `RECURSION_LIMIT`. Expansion past one hundred times the archive's size, at most 512 MiB, or more than 2000 members is `ARCHIVE_TOO_LARGE`. A ZIP with a password-protected member is `ARCHIVE_ENCRYPTED`, since the system never holds passwords. Damaged structure or compressed data is `ARCHIVE_DAMAGED`. A format the unroller does not read — 7z, bzip2, a gzip stream holding no tar, or a ZIP member under a compression method Go does not provide — is `UNSUPPORTED_FORMAT`. A gzip stream is told from its content by watching the decompressor: a tar header that fails over intact data is no tar when it is the first, and damage after that. An unrolling error none of these name fails the document as `UNCLASSIFIED`.
 
 Child commands carry `parent_doc_id`, depth, and the parent trace id. Root creation remains exclusive to discovery.
 

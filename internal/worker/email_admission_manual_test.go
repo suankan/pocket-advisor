@@ -68,7 +68,7 @@ type bytesSource []byte
 func (b bytesSource) Read(context.Context, string, string) ([]byte, error) { return b, nil }
 
 // An archive the unroller cannot read reads the same way on every attempt, so
-// it is declined rather than failed, and its document is SKIPPED.
+// it is declined rather than failed, under the reason that names why.
 func TestUnreadableArchiveIsDeclined(t *testing.T) {
 	_, ew, _ := admissionFixture(t)
 	ctx := context.Background()
@@ -87,8 +87,8 @@ func TestUnreadableArchiveIsDeclined(t *testing.T) {
 	}
 	err = ew.Handle(ctx, postgres.Job{DocID: id, Payload: payload})
 	var declined *Declined
-	if !errors.As(err, &declined) || declined.Reason != domain.ReasonRecursionLimit {
-		t.Fatalf("err = %v, want a %s decline", err, domain.ReasonRecursionLimit)
+	if !errors.As(err, &declined) || declined.Reason != domain.ReasonUnsupportedFormat {
+		t.Fatalf("err = %v, want a %s decline", err, domain.ReasonUnsupportedFormat)
 	}
 }
 

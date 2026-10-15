@@ -191,7 +191,7 @@ kubectl exec postgres-0 -n pocket-advisor -- \
   'select subject, state, count(*) from ingestion_jobs group by 1,2 order by 1,2;'
 ```
 
-`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves waiting jobs or jobs that failed during that run. Encrypted or damaged PDFs, archives with a password-protected member, archives that cannot be unrolled, and images the OCR engine cannot decode (`PDF_ENCRYPTED`, `PDF_DAMAGED`, `ARCHIVE_ENCRYPTED`, `RECURSION_LIMIT`, `IMAGE_UNREADABLE`) are `SKIPPED`, because retrying the same bytes cannot change the answer.
+`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves waiting jobs or jobs that failed during that run. Encrypted or damaged PDFs, archives that are password-protected, damaged, past the unrolling bounds or nested too deep, and images the OCR engine cannot decode (`PDF_ENCRYPTED`, `PDF_DAMAGED`, `ARCHIVE_ENCRYPTED`, `ARCHIVE_DAMAGED`, `ARCHIVE_TOO_LARGE`, `RECURSION_LIMIT`, `IMAGE_UNREADABLE`) are `SKIPPED`, because retrying the same bytes cannot change the answer. Archives in a format the unroller does not read, such as 7z, bzip2 or a gzip stream holding no tar, are `SKIPPED / UNSUPPORTED_FORMAT`.
 
 ### Diagnose a workspace
 

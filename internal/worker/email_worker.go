@@ -65,14 +65,12 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 	if isArchive(meta.MimeType) {
 		children, err = email.UnrollArchive(data, meta.SourceFilename)
 		if err != nil {
-			if errors.Is(err, email.ErrEncrypted) {
-				return Decline(meta.DocId, domain.ReasonArchiveEncrypted)
+			reason, ok := archiveDecline(err)
+			if !ok {
+				return WithDoc(meta.DocId, Fatal(domain.ReasonUnclassified, err))
 			}
-			// The bytes are verified, so an archive that cannot be unrolled —
-			// past the nesting or expansion bounds, damaged, or in a format
-			// the unroller does not read — fails the same way every time.
-			w.Log.Warn("archive declined", "doc_id", meta.DocId, "error", err)
-			return Decline(meta.DocId, domain.ReasonRecursionLimit)
+			w.Log.Warn("archive declined", "doc_id", meta.DocId, "reason", reason, "error", err)
+			return Decline(meta.DocId, reason)
 		}
 	} else {
 		p, perr := email.ParseEmail(data)
@@ -297,6 +295,23 @@ func cloneMeta(src *ingestionv1.DocumentMetadata, docID, parentID, tp string) *i
 		Traceparent:    tp,
 		Depth:          src.Depth,
 	}
+}
+
+// archiveDecline names why an archive cannot be unrolled. The bytes are
+// verified before unrolling, so each cause recurs on every attempt and is
+// declined rather than failed.
+func archiveDecline(err error) (domain.FailureReason, bool) {
+	switch {
+	case errors.Is(err, email.ErrEncrypted):
+		return domain.ReasonArchiveEncrypted, true
+	case errors.Is(err, email.ErrTooLarge):
+		return domain.ReasonArchiveTooLarge, true
+	case errors.Is(err, email.ErrDamaged):
+		return domain.ReasonArchiveDamaged, true
+	case errors.Is(err, email.ErrUnsupported):
+		return domain.ReasonUnsupportedFormat, true
+	}
+	return "", false
 }
 
 func isArchive(mime string) bool {

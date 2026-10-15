@@ -11,8 +11,8 @@ type FailureClass string
 
 const (
 	// ClassExpectedDecline is a known-unsupported input: unsupported
-	// format, image not viable, recursion limit. These set SKIPPED and
-	// never create DLQ entries.
+	// format, image not viable, damaged or oversized archive. These set
+	// SKIPPED and never create DLQ entries.
 	ClassExpectedDecline FailureClass = "expected_decline"
 	// ClassRetryable is an infrastructure or transient failure that
 	// may succeed on a later attempt.
@@ -36,6 +36,8 @@ var declineReasons = []FailureReason{
 	ReasonPDFDamaged,
 	ReasonImageUnreadable,
 	ReasonArchiveEncrypted,
+	ReasonArchiveTooLarge,
+	ReasonArchiveDamaged,
 	ReasonDocumentPruned,
 }
 

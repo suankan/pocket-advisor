@@ -17,9 +17,21 @@ import (
 	"unicode/utf8"
 )
 
-// ErrEncrypted is returned for an archive with a password-protected member.
-// Nothing retries it into success: the password is never held here.
-var ErrEncrypted = errors.New("archive member is encrypted")
+// Archive unrolling errors. Each names why an archive is declined; the bytes
+// are verified before unrolling, so none of them can change on a retry.
+var (
+	// ErrEncrypted is an archive with a password-protected member. The
+	// password is never held here.
+	ErrEncrypted = errors.New("archive member is encrypted")
+	// ErrTooLarge is an archive past the expansion ratio or member count.
+	ErrTooLarge = errors.New("archive exceeds its unrolling bounds")
+	// ErrDamaged is an archive whose structure or compressed data cannot be
+	// read.
+	ErrDamaged = errors.New("archive is damaged")
+	// ErrUnsupported is an archive format, or a member compression method,
+	// the unroller does not read, and a gzip stream holding no tar.
+	ErrUnsupported = errors.New("archive format is not supported")
+)
 
 // Bounds on container unrolling. Nested containers are adversarially
 // unbounded — a zip bomb or a mail loop can recurse until the pod OOMs (§5.3).
@@ -267,29 +279,47 @@ func decodeHeader(s string) string {
 	return out
 }
 
-// UnrollArchive expands zip / tar / tar.gz members in memory.
+// UnrollArchive expands zip / tar / tar.gz members in memory. Its errors wrap
+// ErrEncrypted, ErrTooLarge, ErrDamaged or ErrUnsupported.
 //
 // The expansion ratio guard is what stops a zip bomb: a 1 MB archive that
 // decompresses to 10 GB is refused before it reaches the heap (§5.3).
+//
+// The format is read from the bytes, never the name. Anything neither ZIP nor
+// gzip is tried as a tar, so a tar whose name says otherwise is still read,
+// and 7z, bzip2 or any other format fails at the first header as unsupported.
 func UnrollArchive(data []byte, filename string) ([]Child, error) {
-	lower := strings.ToLower(filename)
 	budget := min(int64(len(data))*MaxExpansionRatio, int64(512<<20))
 
 	switch {
 	case bytes.HasPrefix(data, []byte("PK\x03\x04")):
 		return memberNames(unrollZip(data, budget))
-	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"),
-		bytes.HasPrefix(data, []byte{0x1f, 0x8b}):
+	case bytes.HasPrefix(data, []byte{0x1f, 0x8b}):
 		zr, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
-			return nil, fmt.Errorf("gzip: %w", err)
+			return nil, fmt.Errorf("gzip %q: %w: %w", filename, ErrDamaged, err)
 		}
 		defer zr.Close()
-		return memberNames(unrollTar(zr, budget))
-	case strings.HasSuffix(lower, ".tar"):
-		return memberNames(unrollTar(bytes.NewReader(data), budget))
+		stream := &watchedReader{r: zr}
+		return memberNames(unrollTar(stream, stream, budget))
 	}
-	return nil, fmt.Errorf("unsupported archive format for %q", filename)
+	return memberNames(unrollTar(bytes.NewReader(data), nil, budget))
+}
+
+// watchedReader records the first error of the stream beneath a tar reader
+// other than its end, so a failed tar header can be told apart: damaged
+// compressed data, or intact data that holds no tar.
+type watchedReader struct {
+	r   io.Reader
+	err error
+}
+
+func (w *watchedReader) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	if err != nil && err != io.EOF && w.err == nil {
+		w.err = err
+	}
+	return n, err
 }
 
 // memberNames turns the archive's full member paths into base names. The
@@ -307,7 +337,7 @@ func memberNames(children []Child, err error) ([]Child, error) {
 func unrollZip(data []byte, budget int64) ([]Child, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, fmt.Errorf("zip: %w", err)
+		return nil, fmt.Errorf("zip: %w: %w", ErrDamaged, err)
 	}
 
 	var out []Child
@@ -320,20 +350,23 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 			return nil, fmt.Errorf("zip member %d: %w", ordinal, ErrEncrypted)
 		}
 		if len(out) >= MaxExtractedFiles {
-			return out, fmt.Errorf("archive exceeds %d members", MaxExtractedFiles)
+			return nil, fmt.Errorf("%w: more than %d members", ErrTooLarge, MaxExtractedFiles)
 		}
 		rc, err := f.Open()
+		if errors.Is(err, zip.ErrAlgorithm) {
+			return nil, fmt.Errorf("zip member %d: %w: compression method %d", ordinal, ErrUnsupported, f.Method)
+		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("zip member %d: %w: %w", ordinal, ErrDamaged, err)
 		}
 		b, err := io.ReadAll(io.LimitReader(rc, budget-total+1))
 		_ = rc.Close()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("zip member %d: %w: %w", ordinal, ErrDamaged, err)
 		}
 		total += int64(len(b))
 		if total > budget {
-			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
+			return nil, fmt.Errorf("%w: expansion past %dx", ErrTooLarge, MaxExpansionRatio)
 		}
 		// The UTF-8 flag needs no handling: archive/zip reads names as bytes,
 		// and a name that is valid UTF-8 is taken as UTF-8.
@@ -348,7 +381,10 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 	return out, nil
 }
 
-func unrollTar(r io.Reader, budget int64) ([]Child, error) {
+// unrollTar reads a tar from r. stream, when not nil, watches the
+// decompressor beneath it: a header that fails over intact data is no tar at
+// all when it is the first, and a damaged tar after that.
+func unrollTar(r io.Reader, stream *watchedReader, budget int64) ([]Child, error) {
 	tr := tar.NewReader(r)
 	ordinal := -1
 	var out []Child
@@ -360,21 +396,30 @@ func unrollTar(r io.Reader, budget int64) ([]Child, error) {
 			return out, nil
 		}
 		if err != nil {
-			return out, fmt.Errorf("tar: %w", err)
+			switch {
+			case stream != nil && stream.err != nil:
+				return nil, fmt.Errorf("gzip: %w: %w", ErrDamaged, stream.err)
+			case ordinal == 0:
+				return nil, fmt.Errorf("%w: no tar header: %w", ErrUnsupported, err)
+			}
+			return nil, fmt.Errorf("tar entry %d: %w: %w", ordinal, ErrDamaged, err)
 		}
 		if h.Typeflag != tar.TypeReg {
 			continue
 		}
 		if len(out) >= MaxExtractedFiles {
-			return out, fmt.Errorf("archive exceeds %d members", MaxExtractedFiles)
+			return nil, fmt.Errorf("%w: more than %d members", ErrTooLarge, MaxExtractedFiles)
 		}
 		b, err := io.ReadAll(io.LimitReader(tr, budget-total+1))
 		if err != nil {
-			return nil, err
+			if stream != nil && stream.err != nil {
+				err = stream.err
+			}
+			return nil, fmt.Errorf("tar entry %d: %w: %w", ordinal, ErrDamaged, err)
 		}
 		total += int64(len(b))
 		if total > budget {
-			return out, fmt.Errorf("archive expansion exceeds %dx ratio", MaxExpansionRatio)
+			return nil, fmt.Errorf("%w: expansion past %dx", ErrTooLarge, MaxExpansionRatio)
 		}
 		// archive/tar has already applied any PAX path record.
 		out = append(out, Child{Filename: h.Name, Selector: fmt.Sprintf("tar-v1:%d", ordinal), Data: b})

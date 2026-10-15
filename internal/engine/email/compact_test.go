@@ -99,9 +99,3 @@ func TestParseEmailExtractsAttachment(t *testing.T) {
 		t.Errorf("attachment not decoded: %q", p.Children[0].Data)
 	}
 }
-
-func TestUnrollArchiveRejectsUnknownFormat(t *testing.T) {
-	if _, err := UnrollArchive([]byte("not an archive"), "x.rar"); err == nil {
-		t.Error("expected unsupported archive format to error")
-	}
-}

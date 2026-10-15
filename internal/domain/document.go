@@ -36,11 +36,16 @@ type FailureReason string
 
 // Reason codes recorded in metadata_headers alongside SKIPPED / FAILED.
 const (
+	// ReasonUnsupportedFormat marks content no worker reads, including an
+	// archive in a format the unroller does not read, a gzip stream holding
+	// no tar, and a ZIP member under a compression method it lacks.
 	ReasonUnsupportedFormat FailureReason = "UNSUPPORTED_FORMAT"
-	ReasonRecursionLimit    FailureReason = "RECURSION_LIMIT"
-	ReasonImageNotViable    FailureReason = "IMAGE_NOT_VIABLE"
-	ReasonExtractionFailed  FailureReason = "EXTRACTION_FAILED"
-	ReasonEmptyExtraction   FailureReason = "EMPTY_EXTRACTION"
+	// ReasonRecursionLimit marks a container nested deeper than the unrolling
+	// depth bound.
+	ReasonRecursionLimit   FailureReason = "RECURSION_LIMIT"
+	ReasonImageNotViable   FailureReason = "IMAGE_NOT_VIABLE"
+	ReasonExtractionFailed FailureReason = "EXTRACTION_FAILED"
+	ReasonEmptyExtraction  FailureReason = "EMPTY_EXTRACTION"
 	// ReasonUnknownEncoding marks a body whose charset could not be
 	// determined with confidence — not declared, or declared but
 	// unrecognized. Never guessed; routed for manual review instead
@@ -65,6 +70,12 @@ const (
 	// ReasonArchiveEncrypted marks an archive with a password-protected member.
 	// The system never holds passwords, so only the owner can unlock it.
 	ReasonArchiveEncrypted FailureReason = "ARCHIVE_ENCRYPTED"
+	// ReasonArchiveTooLarge marks an archive past the expansion ratio or
+	// member count bound, the guard against archive bombs.
+	ReasonArchiveTooLarge FailureReason = "ARCHIVE_TOO_LARGE"
+	// ReasonArchiveDamaged marks an archive whose structure or compressed data
+	// cannot be read. The same bytes give the same answer on every attempt.
+	ReasonArchiveDamaged FailureReason = "ARCHIVE_DAMAGED"
 
 	// Codes that used to be string literals at their call sites.
 	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"

@@ -65,6 +65,9 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 	if isArchive(meta.MimeType) {
 		children, err = email.UnrollArchive(data, meta.SourceFilename)
 		if err != nil {
+			if errors.Is(err, email.ErrEncrypted) {
+				return Decline(meta.DocId, domain.ReasonArchiveEncrypted)
+			}
 			return WithDoc(meta.DocId, Fatal(domain.ReasonRecursionLimit, err))
 		}
 	} else {

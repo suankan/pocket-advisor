@@ -1,6 +1,8 @@
 package email
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -136,5 +138,35 @@ func TestDecodeTextRejectsUndeclaredNonUTF8(t *testing.T) {
 	_, err := decodeText(raw, "")
 	if !errors.Is(err, ErrUnknownCharset) {
 		t.Fatalf("expected ErrUnknownCharset, got: %v", err)
+	}
+}
+
+// A zip with a password-protected member is reported as encrypted rather than
+// as an unreadable or oversized archive: the password is never held here, so
+// the owner is the only one who can unlock it. The member is written raw with
+// the encryption flag and WinZip's AES method, as such archives carry.
+func TestUnrollZipReportsEncryptedMembers(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	plain, err := zw.Create("cover.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Write([]byte("readable")); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := zw.CreateRaw(&zip.FileHeader{Name: "letter.pdf", Method: 99, Flags: 0x1,
+		CompressedSize64: 16, UncompressedSize64: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := locked.Write(bytes.Repeat([]byte{0xa5}, 16)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnrollArchive(buf.Bytes(), "letters.zip"); !errors.Is(err, ErrEncrypted) {
+		t.Fatalf("err = %v, want ErrEncrypted", err)
 	}
 }

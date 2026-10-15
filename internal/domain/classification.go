@@ -38,6 +38,7 @@ func ClassifyReason(r FailureReason) FailureClass {
 		ReasonPDFEncrypted,
 		ReasonPDFDamaged,
 		ReasonImageUnreadable,
+		ReasonArchiveEncrypted,
 		ReasonDocumentPruned:
 		return ClassExpectedDecline
 

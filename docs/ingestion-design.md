@@ -136,8 +136,9 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - persists the durable message metadata described in §2.5;
 - records child replay selectors and containment without persisting child bytes, for every member including those whose content is already known;
 - gives every member a valid UTF-8 name without NUL (below);
-- admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage; and
-- enforces nesting and expansion bounds for hostile containers.
+- admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage;
+- enforces nesting and expansion bounds for hostile containers; and
+- declines a ZIP with a password-protected member as `SKIPPED / ARCHIVE_ENCRYPTED`, since the system never holds passwords.
 
 Child commands carry `parent_doc_id`, depth, and the parent trace id. Root creation remains exclusive to discovery.
 

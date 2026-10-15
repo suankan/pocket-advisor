@@ -7,6 +7,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -15,6 +16,10 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+// ErrEncrypted is returned for an archive with a password-protected member.
+// Nothing retries it into success: the password is never held here.
+var ErrEncrypted = errors.New("archive member is encrypted")
 
 // Bounds on container unrolling. Nested containers are adversarially
 // unbounded — a zip bomb or a mail loop can recurse until the pod OOMs (§5.3).
@@ -310,6 +315,9 @@ func unrollZip(data []byte, budget int64) ([]Child, error) {
 	for ordinal, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
+		}
+		if f.Flags&0x1 != 0 {
+			return nil, fmt.Errorf("zip member %d: %w", ordinal, ErrEncrypted)
 		}
 		if len(out) >= MaxExtractedFiles {
 			return out, fmt.Errorf("archive exceeds %d members", MaxExtractedFiles)

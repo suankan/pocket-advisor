@@ -62,6 +62,9 @@ const (
 	// format Leptonica does not read, such as HEIC, camera RAW, CAD drawings,
 	// Photoshop, DjVu or icon files, or a damaged file.
 	ReasonImageUnreadable FailureReason = "IMAGE_UNREADABLE"
+	// ReasonArchiveEncrypted marks an archive with a password-protected member.
+	// The system never holds passwords, so only the owner can unlock it.
+	ReasonArchiveEncrypted FailureReason = "ARCHIVE_ENCRYPTED"
 
 	// Codes that used to be string literals at their call sites.
 	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"

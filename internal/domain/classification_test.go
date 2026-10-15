@@ -14,6 +14,9 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonMalformedCommand,
 		ReasonOCRUnavailable,
 		ReasonNULBytes,
+		ReasonPDFEncrypted,
+		ReasonPDFDamaged,
+		ReasonImageUnreadable,
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
@@ -52,6 +55,9 @@ func TestRetryable(t *testing.T) {
 	notRetryable := []FailureReason{
 		ReasonUnsupportedFormat,
 		ReasonRecursionLimit,
+		ReasonPDFEncrypted,
+		ReasonPDFDamaged,
+		ReasonImageUnreadable,
 		ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonHandlerPanic,
@@ -73,6 +79,7 @@ func TestProcessingFailureReasonsCoverTheNonDeclineVocabulary(t *testing.T) {
 		ReasonUnsupportedFormat, ReasonRecursionLimit, ReasonImageNotViable,
 		ReasonExtractionFailed, ReasonEmptyExtraction, ReasonUnknownEncoding,
 		ReasonMissingTraceContext, ReasonMalformedCommand, ReasonOCRUnavailable, ReasonNULBytes,
+		ReasonPDFEncrypted, ReasonPDFDamaged, ReasonImageUnreadable,
 		ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed,
 		ReasonHandlerPanic, ReasonDocumentPruned, ReasonUnclassified,
 	}

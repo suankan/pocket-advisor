@@ -167,6 +167,8 @@ After OCR, the text must contain at least five word-like tokens. A token counts 
 
 A declined image remains untouched at its original source and retains its database row and lineage. It is recorded as `SKIPPED / IMAGE_NOT_VIABLE` and produces no chunks or DLQ entry.
 
+An image Leptonica cannot decode is recorded as `SKIPPED / IMAGE_UNREADABLE`. That covers formats it does not read, such as HEIC, camera RAW, CAD drawings, Photoshop, DjVu and icon files, and damaged files. A Tesseract error on an image Leptonica does decode remains `OCR_FAILED`.
+
 ## 9. Resource bounds
 
 Rasterisation is the main memory pressure. An A4 page at 300 DPI occupies roughly 35 MiB as uncompressed RGBA before PDFium and Tesseract overhead.
@@ -184,7 +186,10 @@ The OCR language set defaults to `eng+rus`. Required Tesseract language data mus
 ## 10. Failure semantics
 
 - An unavailable OCR build declines scanned PDFs and images with `OCR_UNAVAILABLE`.
-- A PDF that cannot be opened fails with `PDF_OPEN_FAILED`.
+- A PDF that needs a password, or an encryption handler PDFium lacks, is declined with `PDF_ENCRYPTED`.
+- A PDF whose bytes PDFium cannot read as a PDF is declined with `PDF_DAMAGED`.
+- Any other PDF that cannot be opened fails with `PDF_OPEN_FAILED`.
+- An image Leptonica cannot decode is declined with `IMAGE_UNREADABLE` (§8).
 - Full-page OCR failure uses `OCR_FAILED`.
 - An empty final extraction is declined with `EMPTY_EXTRACTION`.
 - A digital-page layout or residue failure is non-fatal when the native text layer is still usable; the worker logs the failure and retains the text-layer extraction.
@@ -202,8 +207,9 @@ Automated verification covers:
 - reading axes;
 - vertical-run handling and list markers;
 - leader compression;
-- trimming; and
-- image viability thresholds.
+- trimming;
+- image viability thresholds; and
+- encrypted and damaged PDFs and undecodable images being declined, not failed.
 
 The strongest text invariant is that digital extraction does not lose text-layer words. Tests compare extracted output with source-layer words while allowing deliberate layout reordering and leader compression.
 

@@ -51,6 +51,17 @@ const (
 	// text cannot hold. Stripping them would make canonical text differ from
 	// its source, so the file is declined rather than rewritten.
 	ReasonNULBytes FailureReason = "NUL_BYTES"
+	// ReasonPDFEncrypted marks a PDF that needs a password, or an encryption
+	// handler PDFium lacks, before it can be opened. Retrying cannot supply
+	// either, so it is declined rather than failed.
+	ReasonPDFEncrypted FailureReason = "PDF_ENCRYPTED"
+	// ReasonPDFDamaged marks bytes PDFium cannot read as a PDF at all. The same
+	// bytes give the same answer on every attempt.
+	ReasonPDFDamaged FailureReason = "PDF_DAMAGED"
+	// ReasonImageUnreadable marks an image the OCR engine cannot decode: a
+	// format Leptonica does not read, such as HEIC, camera RAW, CAD drawings,
+	// Photoshop, DjVu or icon files, or a damaged file.
+	ReasonImageUnreadable FailureReason = "IMAGE_UNREADABLE"
 
 	// Codes that used to be string literals at their call sites.
 	ReasonMissingTraceContext FailureReason = "MISSING_TRACE_CONTEXT"

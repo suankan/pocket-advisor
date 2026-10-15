@@ -57,6 +57,12 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, job postgres.Job) error 
 
 	doc, err := w.PDF.Open(ctx, data)
 	if err != nil {
+		switch {
+		case errors.Is(err, pdf.ErrEncrypted):
+			return Decline(meta.DocId, domain.ReasonPDFEncrypted)
+		case errors.Is(err, pdf.ErrDamaged):
+			return Decline(meta.DocId, domain.ReasonPDFDamaged)
+		}
 		return WithDoc(meta.DocId, Fatal(domain.ReasonPDFOpenFailed, err))
 	}
 	defer doc.Close()
@@ -258,6 +264,9 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, job postgres.Job) erro
 	if err != nil {
 		if errors.Is(err, ocr.ErrUnavailable) {
 			return Decline(meta.DocId, domain.ReasonOCRUnavailable)
+		}
+		if errors.Is(err, ocr.ErrUnreadable) {
+			return Decline(meta.DocId, domain.ReasonImageUnreadable)
 		}
 		return WithDoc(meta.DocId, Fatal(domain.ReasonOCRFailed, err))
 	}

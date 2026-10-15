@@ -18,6 +18,7 @@ import (
 	"image/png"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/otiai10/gosseract/v2"
 
@@ -171,9 +172,28 @@ func (e *Engine) Bytes(ctx context.Context, data []byte) (string, error) {
 	}
 	text, err := client.Text()
 	if err != nil {
+		// gosseract hands Leptonica the bytes only now, and a decode failure
+		// surfaces as an unset image. Asking Leptonica directly tells that
+		// apart from a Tesseract fault without matching on the message.
+		if !decodable(data) {
+			return "", fmt.Errorf("%w: %w", ErrUnreadable, err)
+		}
 		return "", fmt.Errorf("ocr: %w", err)
 	}
 	return text, nil
+}
+
+// decodable reports whether Leptonica can decode data as an image.
+func decodable(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	pix := C.pixReadMem((*C.l_uint8)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	if pix == nil {
+		return false
+	}
+	C.pixDestroy(&pix)
+	return true
 }
 
 func splitLangs(s string) []string {

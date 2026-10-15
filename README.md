@@ -189,7 +189,7 @@ kubectl exec postgres-0 -n pocket-advisor -- \
   'select subject, state, count(*) from ingestion_jobs group by 1,2 order by 1,2;'
 ```
 
-`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves failed or waiting jobs.
+`SKIPPED` means the system deliberately declined a known input, such as a non-document image or unsupported format. A `FAILED` job is work that should have succeeded and did not. An ingest exits with failure when it leaves failed or waiting jobs. Encrypted or damaged PDFs and images the OCR engine cannot decode (`PDF_ENCRYPTED`, `PDF_DAMAGED`, `IMAGE_UNREADABLE`) are `SKIPPED`, because retrying the same bytes cannot change the answer.
 
 ### Diagnose a workspace
 

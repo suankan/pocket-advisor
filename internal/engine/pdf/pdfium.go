@@ -10,6 +10,7 @@ package pdf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"math"
@@ -20,12 +21,21 @@ import (
 
 	"github.com/klippa-app/go-pdfium"
 	"github.com/klippa-app/go-pdfium/enums"
+	pdfiumerrors "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/references"
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/responses"
 	"github.com/klippa-app/go-pdfium/webassembly"
 
 	"github.com/suankan/pocket-advisor/internal/limits"
+)
+
+// ErrEncrypted and ErrDamaged are the open failures that say something about
+// the bytes rather than the engine: the same file gives the same answer on
+// every attempt, so callers decline it instead of retrying.
+var (
+	ErrEncrypted = errors.New("pdf is encrypted")
+	ErrDamaged   = errors.New("pdf is damaged")
 )
 
 type Engine struct {
@@ -156,6 +166,12 @@ func (e *Engine) Open(ctx context.Context, data []byte) (*Document, error) {
 	doc, err := inst.OpenDocument(&requests.OpenDocument{File: &data})
 	if err != nil {
 		_ = inst.Close()
+		switch {
+		case errors.Is(err, pdfiumerrors.ErrPassword), errors.Is(err, pdfiumerrors.ErrSecurity):
+			return nil, fmt.Errorf("open pdf: %w: %w", ErrEncrypted, err)
+		case errors.Is(err, pdfiumerrors.ErrFormat):
+			return nil, fmt.Errorf("open pdf: %w: %w", ErrDamaged, err)
+		}
 		return nil, fmt.Errorf("open pdf: %w", err)
 	}
 	count, err := inst.FPDF_GetPageCount(&requests.FPDF_GetPageCount{Document: doc.Document})

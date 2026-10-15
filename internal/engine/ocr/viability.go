@@ -20,6 +20,11 @@ import (
 // for it in both builds: with -tags ocr it is simply never returned.
 var ErrUnavailable = errors.New("ocr not available in this build")
 
+// ErrUnreadable is returned when the OCR engine cannot decode an image at all:
+// a format Leptonica does not read, such as HEIC or camera RAW, or damaged
+// bytes. The same bytes give the same answer on every attempt.
+var ErrUnreadable = errors.New("image format not readable by the ocr engine")
+
 // Viability thresholds. Email corpora are full of images that are not
 // documents: tracking pixels, logos, signature graphics, social icons.
 // Sending them to OCR wastes the scarcest resource in the cluster and floods

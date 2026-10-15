@@ -29,6 +29,12 @@ const (
 	WarnMalformedAddress    WarningCode = "malformed_address"
 	WarnMissingDate         WarningCode = "missing_date"
 	WarnUnparsableDate      WarningCode = "unparsable_date"
+	// WarnMalformedHeaderLine marks a header line that named no field and was
+	// joined to the field before it, or began the body when no field followed.
+	WarnMalformedHeaderLine WarningCode = "malformed_header_line"
+	// WarnUndeclaredCharset marks a header value written as raw 8-bit text
+	// rather than encoded words, read under the body's charset or replaced.
+	WarnUndeclaredCharset WarningCode = "undeclared_charset"
 )
 
 // ParseWarning is one defect found in one header. Value carries the offending

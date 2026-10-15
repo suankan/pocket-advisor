@@ -103,10 +103,8 @@ func resolveNames(children []Child, hint string) {
 // the decoded names and the encoding's label, or the names with invalid bytes
 // replaced and an empty label when no encoding is clearly right.
 func decodeNames(raw []string, hint string) ([]string, string) {
-	if c, ok := hintCandidate(hint); ok {
-		if names, ok := decodeAll(raw, c.enc); ok && nameScore(strings.Join(names, "\n"), c.han) >= nameAcceptScore {
-			return names, c.label
-		}
+	if names, label, ok := declaredNames(raw, hint); ok {
+		return names, label
 	}
 
 	type reading struct {
@@ -147,6 +145,17 @@ func decodeNames(raw []string, hint string) ([]string, string) {
 		out[i] = strings.ToValidUTF8(s, "�")
 	}
 	return out, ""
+}
+
+// declaredNames decodes raw under the charset the container declares for its
+// text, when that reading is plausible.
+func declaredNames(raw []string, hint string) ([]string, string, bool) {
+	if c, ok := hintCandidate(hint); ok {
+		if names, ok := decodeAll(raw, c.enc); ok && nameScore(strings.Join(names, "\n"), c.han) >= nameAcceptScore {
+			return names, c.label, true
+		}
+	}
+	return nil, "", false
 }
 
 // hintCandidate resolves a declared charset to a candidate, keeping the Han

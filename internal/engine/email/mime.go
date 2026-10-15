@@ -11,7 +11,6 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
-	"net/mail"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -47,9 +46,10 @@ type Parsed struct {
 	// and conversation reconstruction need (ingestion-design.md §4.1).
 	Headers Headers
 
-	// nameHint is the first charset a text part declares, the best evidence
-	// for undeclared 8-bit attachment names in the same message.
-	nameHint string
+	// charsetHint is the first charset a text part declares, the best evidence
+	// for undeclared 8-bit header values and attachment names in the same
+	// message.
+	charsetHint string
 }
 
 // Child is a decoded member with a deterministic, versioned replay selector.
@@ -68,19 +68,30 @@ type Child struct {
 
 // ParseEmail unrolls an RFC822 message.
 func ParseEmail(data []byte) (*Parsed, error) {
-	msg, err := mail.ReadMessage(bytes.NewReader(data))
+	msg, repairs, err := readMessage(data)
 	if err != nil {
 		return nil, fmt.Errorf("read message: %w", err)
 	}
 
-	p := &Parsed{
-		Subject:   decodeHeader(msg.Header.Get("Subject")),
-		From:      decodeHeader(msg.Header.Get("From")),
-		To:        decodeHeader(msg.Header.Get("To")),
-		MessageID: strings.Trim(msg.Header.Get("Message-ID"), "<> "),
-		InReplyTo: strings.Trim(msg.Header.Get("In-Reply-To"), "<> "),
-		Headers:   ParseHeaders(msg.Header),
+	// The body first: the charset it declares is the evidence for raw 8-bit
+	// header values, as it is for member names.
+	p := &Parsed{}
+	ct := msg.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "text/plain"
 	}
+	if err := walkPart(msg.Header.Get("Content-Transfer-Encoding"), ct, msg.Body, p, 0); err != nil {
+		return nil, err
+	}
+	warns := append(repairs, legacyHeaders(msg.Header, p.charsetHint)...)
+
+	p.Subject = decodeHeader(msg.Header.Get("Subject"))
+	p.From = decodeHeader(msg.Header.Get("From"))
+	p.To = decodeHeader(msg.Header.Get("To"))
+	p.MessageID = strings.Trim(msg.Header.Get("Message-ID"), "<> ")
+	p.InReplyTo = strings.Trim(msg.Header.Get("In-Reply-To"), "<> ")
+	p.Headers = ParseHeaders(msg.Header)
+	p.Headers.Warnings = append(p.Headers.Warnings, warns...)
 	if d, err := msg.Header.Date(); err == nil {
 		p.Date = d
 	}
@@ -90,18 +101,10 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		}
 	}
 
-	ct := msg.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "text/plain"
-	}
-	if err := walkPart(msg.Header.Get("Content-Transfer-Encoding"), ct, msg.Body, p, 0); err != nil {
-		return nil, err
-	}
-
 	for i := range p.Children {
 		p.Children[i].Selector = fmt.Sprintf("mime-v1:%d", i)
 	}
-	resolveNames(p.Children, p.nameHint)
+	resolveNames(p.Children, p.charsetHint)
 	p.BodyText = Compact(p.BodyText)
 	return p, nil
 }
@@ -166,8 +169,8 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 	if len(raw) > maxSingleChildSize {
 		return fmt.Errorf("MIME member limit exceeded")
 	}
-	if strings.HasPrefix(mediaType, "text/") && p.nameHint == "" {
-		p.nameHint = params["charset"]
+	if strings.HasPrefix(mediaType, "text/") && p.charsetHint == "" {
+		p.charsetHint = params["charset"]
 	}
 
 	switch {

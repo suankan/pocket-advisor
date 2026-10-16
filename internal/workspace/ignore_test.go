@@ -22,6 +22,14 @@ func TestIgnoreMatchesTheDocumentedVocabulary(t *testing.T) {
 			},
 			kept: []string{"INBOX/cur/1781.eml", "notes.txt", "msf", "x.msf.eml"},
 		},
+		"the suffix from the first dot ignores case": {
+			patterns: []string{"*.fb2", "*.fb2.zip", "build/*.log", "msgFilterRules.dat"},
+			ignored: []string{
+				"Book.FB2", "a/b/Book.Fb2", "Book.FB2.ZIP", "Book.fb2.Zip",
+				"build/APP.LOG", "msgFilterRules.DAT",
+			},
+			kept: []string{"Book.FB2.txt", "msgfilterrules.dat", "Build/app.log", "fb2"},
+		},
 		"a pattern with a slash is anchored to the directory": {
 			patterns: []string{"build/*.log"},
 			ignored:  []string{"build/app.log"},

@@ -29,6 +29,12 @@ import (
 // those sitting at the top. A pattern containing a slash is matched against
 // the whole path relative to the configured directory it was found under.
 //
+// A pattern's suffix — everything from its first dot on, such as ".fb2" in
+// "*.fb2" or ".fb2.zip" in "*.fb2.zip" — matches without regard to case, so
+// "*.epub" also covers Book.EPUB: file systems and mail clients write the
+// same extension in either case, and nobody means to ignore one spelling.
+// What comes before the dot stays case-sensitive.
+//
 // Order decides: the last rule that matches a path wins, so a negation only
 // undoes the rules written above it.
 type Ignore struct {
@@ -122,7 +128,7 @@ func (r ignoreRule) matches(segs []string, base string) bool {
 		// bare directory name matches at any depth, while a path is anchored.
 		for i := 1; i < len(segs); i++ {
 			if r.name {
-				if ok, _ := path.Match(r.segs[0], segs[i-1]); ok {
+				if matchSegment(r.segs[0], segs[i-1]) {
 					return true
 				}
 			} else if matchSegments(r.segs, segs[:i]) {
@@ -132,10 +138,36 @@ func (r ignoreRule) matches(segs []string, base string) bool {
 		return false
 	}
 	if r.name {
-		ok, err := path.Match(r.segs[0], base)
-		return err == nil && ok
+		return matchSegment(r.segs[0], base)
 	}
 	return matchSegments(r.segs, segs)
+}
+
+// matchSegment matches one pattern segment against one name, with the
+// pattern's suffix from its first dot on compared case-insensitively. The name
+// is tried at each of its dots, so "*.fb2.zip" finds Book.FB2.ZIP and a stem
+// pattern can still span dots of its own.
+func matchSegment(pat, name string) bool {
+	if ok, err := path.Match(pat, name); err == nil && ok {
+		return true
+	}
+	dot := strings.IndexByte(pat, '.')
+	if dot < 0 {
+		return false
+	}
+	stem, suffix := pat[:dot], strings.ToLower(pat[dot:])
+	for i := 0; i < len(name); i++ {
+		if name[i] != '.' {
+			continue
+		}
+		if ok, _ := path.Match(stem, name[:i]); !ok {
+			continue
+		}
+		if ok, _ := path.Match(suffix, strings.ToLower(name[i:])); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // matchSegments matches a slash-split pattern against a slash-split path,
@@ -161,8 +193,7 @@ func matchSegments(pat, name []string) bool {
 		if len(name) == 0 {
 			return false
 		}
-		ok, err := path.Match(pat[0], name[0])
-		if err != nil || !ok {
+		if !matchSegment(pat[0], name[0]) {
 			return false
 		}
 		pat, name = pat[1:], name[1:]

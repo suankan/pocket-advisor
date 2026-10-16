@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/suankan/pocket-advisor/internal/domain"
 )
 
 func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
@@ -129,5 +132,37 @@ func TestRecoverDoesNotNeedPipeline(t *testing.T) {
 	}
 	if o.NeedsPipeline() {
 		t.Error("--recover should not need pipeline")
+	}
+}
+
+// --reason takes reasons a document can fail with, comma-separated and in any
+// case, or "all" on its own, and means nothing outside recovery.
+func TestParseRecoverReasons(t *testing.T) {
+	o, err := Parse([]string{"--recover", "--reason", "unclassified, UNKNOWN_ENCODING,unclassified", "--workspace-id", "test"})
+	if err != nil || !slices.Equal(o.RecoverReasons, []domain.FailureReason{domain.ReasonUnclassified, domain.ReasonUnknownEncoding}) || o.RecoverAll {
+		t.Fatalf("reasons %v, all %v, err %v", o.RecoverReasons, o.RecoverAll, err)
+	}
+	o, err = Parse([]string{"--recover", "--reason", "all", "--workspace-id", "test"})
+	if err != nil || !o.RecoverAll || len(o.RecoverReasons) != 0 {
+		t.Fatalf("reasons %v, all %v, err %v", o.RecoverReasons, o.RecoverAll, err)
+	}
+	for _, args := range [][]string{
+		{"--doctor", "--reason", "UNCLASSIFIED", "--workspace-id", "test"},
+		{"--recover", "--reason", "NOT_A_REASON", "--workspace-id", "test"},
+		{"--recover", "--reason", "UNCLASSIFIED,SOURCE_UNAVAILABLE", "--workspace-id", "test"},
+		{"--recover", "--reason", "all,UNCLASSIFIED", "--workspace-id", "test"},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Errorf("%v parsed", args)
+		}
+	}
+}
+
+// A bare word ends flag parsing, so the flags after it would go unread: a
+// mistyped "--recover all --yes" must fail instead of running as a dry run.
+func TestParseRejectsBareWords(t *testing.T) {
+	_, err := Parse([]string{"--recover", "all", "--yes", "--workspace-id", "test"})
+	if err == nil || !strings.Contains(err.Error(), `"all"`) {
+		t.Fatalf("err = %v", err)
 	}
 }

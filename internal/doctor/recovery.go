@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +71,9 @@ type RecoveryPlan struct {
 // RecoverConfig controls what the planner selects and how it classifies.
 type RecoverConfig struct {
 	// Filters
+	// AllFailed reruns every FAILED document whatever its reason: the
+	// operator's judgment for all of them at once.
+	AllFailed   bool
 	States      []domain.Status
 	MinAge      time.Duration
 	FailureReas []domain.FailureReason
@@ -179,6 +183,15 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 		item.Classification = ClassRetryable
 		item.Action = ActionRetryTransition
 		item.Requeue = "recorded before the job queue: reset to pending, and the next ingestion runs it under the current handlers when its source is reachable"
+		return item
+	}
+
+	// FAILED with a reason the operator named: that choice is the judgment an
+	// unclassified or terminal reason waits for.
+	if doc.Status == domain.StatusFailed && (p.cfg.AllFailed || slices.Contains(p.cfg.FailureReas, doc.Reason)) {
+		item.Classification = ClassRetryable
+		item.Action = ActionRetryTransition
+		item.Requeue = "selected by --reason: its failed jobs return to the queue with a fresh retry cycle"
 		return item
 	}
 

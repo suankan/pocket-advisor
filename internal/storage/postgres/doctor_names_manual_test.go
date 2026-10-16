@@ -95,3 +95,42 @@ func TestDocumentsByReasonNamesAndCountsJobless(t *testing.T) {
 		t.Fatalf("password-protected = %+v, want only the encrypted PDF", locked)
 	}
 }
+
+// Naming reasons selects every FAILED document carrying one, whatever its
+// class, oldest first, and nothing else; naming none selects every failure.
+func TestFAILEDWithReasonsSelectsOnlyThoseReasons(t *testing.T) {
+	db, docs, jobs := queueSetup(t)
+	ctx := context.Background()
+	var want []string
+	for _, reason := range []domain.FailureReason{domain.ReasonUnclassified, domain.ReasonUnknownEncoding, domain.ReasonUnclassified} {
+		id, _ := addJob(t, db, docs, jobs, SubjectPDFs)
+		if err := jobs.Fail(ctx, claimOne(t, jobs, SubjectPDFs), reason); err != nil {
+			t.Fatal(err)
+		}
+		if reason == domain.ReasonUnclassified {
+			want = append(want, id)
+		}
+	}
+	got, err := NewDoctorQueries(db).FAILEDWithReasons(ctx, []string{string(domain.ReasonUnclassified)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, d := range got {
+		ids = append(ids, d.DocID)
+		if d.Jobless {
+			t.Errorf("%s reported jobless", d.DocID)
+		}
+	}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("selected %v, want %v", ids, want)
+	}
+	both, err := NewDoctorQueries(db).FAILEDWithReasons(ctx, []string{string(domain.ReasonUnclassified), string(domain.ReasonUnknownEncoding)}, 10)
+	if err != nil || len(both) != 3 {
+		t.Fatalf("two reasons: %d selected, %v", len(both), err)
+	}
+	all, err := NewDoctorQueries(db).FAILEDWithReasons(ctx, nil, 10)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("every failure: %d selected, %v", len(all), err)
+	}
+}

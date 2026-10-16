@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/doctor"
@@ -67,52 +69,26 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	q := postgres.NewDoctorQueries(db)
-	threshold := doctor.StalenessThreshold
 
-	// Collect documents based on state filters
+	// Collect documents: those the operator named by reason, or by default
+	// those whose state or reason makes them recoverable.
 	var docs []doctor.RecoveryItem
-
-	// Stale PENDING
-	sp, err := q.StalePENDING(ctx, threshold, recoverySelectionCap)
-	if err != nil {
-		log.Warn("query stale pending failed", "error", err)
-	}
-	noteIfCapped(len(sp), "stale PENDING")
-	for _, d := range sp {
-		docs = append(docs, doctor.RecoveryItem{
-			DocID:  d.DocID,
-			Status: domain.StatusPending,
-			Reason: domain.FailureReason(d.Reason),
-		})
-	}
-
-	// Stale PROCESSING
-	sproc, err := q.StalePROCESSING(ctx, threshold, recoverySelectionCap)
-	if err != nil {
-		log.Warn("query stale processing failed", "error", err)
-	}
-	noteIfCapped(len(sproc), "stale PROCESSING")
-	for _, d := range sproc {
-		docs = append(docs, doctor.RecoveryItem{
-			DocID:  d.DocID,
-			Status: domain.StatusProcessing,
-			Reason: domain.FailureReason(d.Reason),
-		})
-	}
-
-	// Retryable FAILED, FAILED carrying a decline, and FAILED with no job
-	failed, err := q.RedrivableFAILED(ctx, recoverySelectionCap)
-	if err != nil {
-		log.Warn("query redrivable failed failed", "error", err)
-	}
-	noteIfCapped(len(failed), "redrivable FAILED")
-	for _, d := range failed {
-		docs = append(docs, doctor.RecoveryItem{
-			DocID:   d.DocID,
-			Status:  domain.StatusFailed,
-			Reason:  domain.FailureReason(d.Reason),
-			Jobless: d.Jobless,
-		})
+	switch {
+	case o.RecoverAll:
+		docs = selectStale(ctx, q, doctor.StalenessThreshold, log)
+		failed, err := selectByReasons(ctx, q, nil)
+		if err != nil {
+			return err
+		}
+		docs = append(docs, failed...)
+	case len(o.RecoverReasons) > 0:
+		docs, err = selectByReasons(ctx, q, o.RecoverReasons)
+		if err != nil {
+			return err
+		}
+	default:
+		docs = selectStale(ctx, q, doctor.StalenessThreshold, log)
+		docs = append(docs, selectRedrivable(ctx, q, log)...)
 	}
 
 	// Attach each document's jobs, so the plan sees live leases and the
@@ -136,6 +112,8 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	planner := doctor.NewPlanner(doctor.RecoverConfig{
 		WorkspaceID: o.WorkspaceID,
 		Yes:         o.Yes,
+		AllFailed:   o.RecoverAll,
+		FailureReas: o.RecoverReasons,
 	}, docs)
 
 	plan := planner.Plan(ctx)
@@ -167,6 +145,85 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	}
 
 	return nil
+}
+
+// selectStale selects PENDING and PROCESSING documents older than the
+// threshold. A query that fails is logged and its state left out.
+func selectStale(ctx context.Context, q *postgres.DoctorQueries, threshold time.Duration, log *slog.Logger) []doctor.RecoveryItem {
+	var docs []doctor.RecoveryItem
+
+	// Stale PENDING
+	sp, err := q.StalePENDING(ctx, threshold, recoverySelectionCap)
+	if err != nil {
+		log.Warn("query stale pending failed", "error", err)
+	}
+	noteIfCapped(len(sp), "stale PENDING")
+	for _, d := range sp {
+		docs = append(docs, doctor.RecoveryItem{
+			DocID:  d.DocID,
+			Status: domain.StatusPending,
+			Reason: domain.FailureReason(d.Reason),
+		})
+	}
+
+	// Stale PROCESSING
+	sproc, err := q.StalePROCESSING(ctx, threshold, recoverySelectionCap)
+	if err != nil {
+		log.Warn("query stale processing failed", "error", err)
+	}
+	noteIfCapped(len(sproc), "stale PROCESSING")
+	for _, d := range sproc {
+		docs = append(docs, doctor.RecoveryItem{
+			DocID:  d.DocID,
+			Status: domain.StatusProcessing,
+			Reason: domain.FailureReason(d.Reason),
+		})
+	}
+	return docs
+}
+
+// selectRedrivable selects FAILED documents whose reason is retryable or a
+// decline, or that have no job. A query that fails is logged.
+func selectRedrivable(ctx context.Context, q *postgres.DoctorQueries, log *slog.Logger) []doctor.RecoveryItem {
+	var docs []doctor.RecoveryItem
+	failed, err := q.RedrivableFAILED(ctx, recoverySelectionCap)
+	if err != nil {
+		log.Warn("query redrivable failed failed", "error", err)
+	}
+	noteIfCapped(len(failed), "redrivable FAILED")
+	for _, d := range failed {
+		docs = append(docs, doctor.RecoveryItem{
+			DocID:   d.DocID,
+			Status:  domain.StatusFailed,
+			Reason:  domain.FailureReason(d.Reason),
+			Jobless: d.Jobless,
+		})
+	}
+	return docs
+}
+
+// selectByReasons selects FAILED documents with the reasons the operator
+// named, whatever their class, or every FAILED document when none is named.
+func selectByReasons(ctx context.Context, q *postgres.DoctorQueries, reasons []domain.FailureReason) ([]doctor.RecoveryItem, error) {
+	names := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		names = append(names, string(r))
+	}
+	failed, err := q.FAILEDWithReasons(ctx, names, recoverySelectionCap)
+	if err != nil {
+		return nil, err
+	}
+	noteIfCapped(len(failed), strings.TrimSpace("FAILED "+strings.Join(names, ",")))
+	docs := make([]doctor.RecoveryItem, 0, len(failed))
+	for _, d := range failed {
+		docs = append(docs, doctor.RecoveryItem{
+			DocID:   d.DocID,
+			Status:  domain.StatusFailed,
+			Reason:  domain.FailureReason(d.Reason),
+			Jobless: d.Jobless,
+		})
+	}
+	return docs, nil
 }
 
 // printPlan renders the plan in human-readable form.

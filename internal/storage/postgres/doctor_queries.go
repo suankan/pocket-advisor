@@ -316,6 +316,28 @@ const doctorDocColumns = `doc_id::text, mime_type,
 		       updated_at,
 		       NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id)`
 
+// FAILEDWithReasons returns FAILED rows carrying any of reasons, whatever
+// their class, or every FAILED row when reasons is empty, oldest first, at
+// most limit of them: the selection an operator makes by naming reasons, or
+// all of them.
+func (q *DoctorQueries) FAILEDWithReasons(ctx context.Context, reasons []string, limit int) ([]DoctorDoc, error) {
+	if reasons == nil {
+		reasons = []string{}
+	}
+	rows, err := q.db.Pool.Query(ctx, `
+		SELECT `+doctorDocColumns+`
+		FROM documents
+		WHERE processing_status = 'FAILED'
+		  AND (cardinality($2::text[]) = 0 OR metadata_headers->>'reason' = ANY($2::text[]))
+		ORDER BY updated_at
+		LIMIT $1`, limit, reasons)
+	if err != nil {
+		return nil, fmt.Errorf("failed with reason: %w", err)
+	}
+	defer rows.Close()
+	return scanDoctorDocs(rows)
+}
+
 // DoctorDoc is a lightweight document representation for doctor/recovery.
 type DoctorDoc struct {
 	DocID       string

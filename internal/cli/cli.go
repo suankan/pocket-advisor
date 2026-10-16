@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/suankan/pocket-advisor/internal/config"
+	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
 )
 
@@ -54,6 +56,14 @@ type Options struct {
 
 	Doctor  bool
 	Recover bool
+	// RecoverReasons narrows --recover to FAILED documents with these
+	// reasons and reruns them whatever their class: naming a reason is the
+	// operator's judgment that an unclassified or terminal one waits for.
+	// RecoverAll, from --reason all, reruns every FAILED document alongside
+	// the stale work the default selection takes.
+	RecoverReasons []domain.FailureReason
+	RecoverAll     bool
+	reasonArg      string
 
 	// Golden-case authoring (retrieval-design.md's evaluation section).
 	// CorpusSearch deliberately bypasses retrieval: a case whose expected
@@ -97,6 +107,10 @@ Modes (exactly one):
   --doctor            read-only workspace health checks
   --recover           plan and optionally apply ingestion recovery
                       (default: dry-run; use --yes to apply)
+                      --reason <R1,R2,...> plans only FAILED documents with
+                      those reasons, and reruns them whatever their class;
+                      --reason all plans every FAILED document and the
+                      stale work plain --recover takes
   --evaluate          run retrieval quality evaluation against evaluation cases.
                       Uses workspaces/evaluation/<workspace>/cases.json by default.
                       --json emits machine-readable output.
@@ -234,6 +248,7 @@ func Parse(args []string) (*Options, error) {
 		"find documents containing this exact text, bypassing retrieval")
 	fs.BoolVar(&o.Doctor, "doctor", false, "read-only workspace health checks")
 	fs.BoolVar(&o.Recover, "recover", false, "plan and optionally apply ingestion recovery")
+	fs.StringVar(&o.reasonArg, "reason", "", "with --recover: rerun only FAILED documents with these comma-separated reasons, whatever their class; \"all\" reruns every FAILED and stale document")
 	fs.BoolVar(&o.Evaluate, "evaluate", false, "run retrieval quality evaluation against evaluation cases")
 	fs.StringVar(&o.EvalCases, "eval-cases", "", "evaluation case set JSON (default: test/fixtures/eval/<workspace>/cases.json)")
 	fs.StringVar(&o.EvalReport, "eval-report", "", "write the report somewhere other than the per-workspace runs directory")
@@ -258,6 +273,12 @@ func Parse(args []string) (*Options, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	// The flag package stops at the first bare word and leaves every flag
+	// after it unread, so "--recover all --yes" would silently drop --yes.
+	// No mode takes a bare word, so one is an error rather than a cut-off.
+	if fs.NArg() > 0 {
+		return nil, fmt.Errorf("unexpected argument %q: options are --flags, and none after it was read (--help for details)", fs.Arg(0))
 	}
 	return o, o.validate()
 }
@@ -312,8 +333,38 @@ func (o *Options) validate() error {
 	if o.DryRun && !o.IngestAll {
 		return fmt.Errorf("--dry-run requires --ingest-all")
 	}
+	if o.reasonArg != "" {
+		if !o.Recover {
+			return fmt.Errorf("--reason requires --recover")
+		}
+		if err := o.parseReasons(); err != nil {
+			return err
+		}
+	}
 	if o.Forget != "" && len(o.Forget) != 64 {
 		return fmt.Errorf("--forget expects a 64-character sha256, got %d characters", len(o.Forget))
+	}
+	return nil
+}
+
+// parseReasons reads --reason: "all" on its own, or comma-separated reasons a
+// document can fail with, case-insensitive and each named once.
+func (o *Options) parseReasons() error {
+	for _, part := range strings.Split(o.reasonArg, ",") {
+		r := domain.FailureReason(strings.ToUpper(strings.TrimSpace(part)))
+		switch {
+		case r == "ALL":
+			o.RecoverAll = true
+		case slices.Contains(domain.ProcessingFailureReasons(), r) || slices.Contains(domain.DeclineReasons(), r):
+			if !slices.Contains(o.RecoverReasons, r) {
+				o.RecoverReasons = append(o.RecoverReasons, r)
+			}
+		default:
+			return fmt.Errorf("--reason %q is not a reason a document can fail with", strings.TrimSpace(part))
+		}
+	}
+	if o.RecoverAll && len(o.RecoverReasons) > 0 {
+		return fmt.Errorf("--reason all already includes every reason; name it alone")
 	}
 	return nil
 }

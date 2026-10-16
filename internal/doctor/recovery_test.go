@@ -87,6 +87,49 @@ func TestClassifyJoblessFailedIsRedriven(t *testing.T) {
 	}
 }
 
+// A reason the operator names is their judgment: its failures are rerun
+// whatever the reason's class, and only those named.
+func TestClassifyNamedReasonIsRedriven(t *testing.T) {
+	docs := []RecoveryItem{
+		{DocID: "named", Status: domain.StatusFailed, Reason: domain.ReasonUnclassified},
+		{DocID: "other", Status: domain.StatusFailed, Reason: domain.ReasonHandlerPanic},
+	}
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws", FailureReas: []domain.FailureReason{domain.ReasonUnclassified}}, docs)
+	plan := p.Plan(context.Background())
+	if c := plan.Items[0].Classification; c != ClassRetryable || plan.Items[0].Action != ActionRetryTransition {
+		t.Errorf("named reason planned %q %q", c, plan.Items[0].Action)
+	}
+	if c := plan.Items[1].Classification; c != ClassTerminal {
+		t.Errorf("unnamed terminal reason planned %q", c)
+	}
+	if c := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, docs[:1]).Plan(context.Background()).Items[0].Classification; c != ClassNotRecoverable {
+		t.Errorf("unnamed UNCLASSIFIED planned %q", c)
+	}
+}
+
+// Choosing all reasons reruns every failure, however it is classified, and
+// leaves other states to their own rules.
+func TestClassifyAllFailedIsRedriven(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws", AllFailed: true}, []RecoveryItem{
+		{DocID: "a", Status: domain.StatusFailed, Reason: domain.ReasonHandlerPanic},
+		{DocID: "b", Status: domain.StatusFailed, Reason: domain.ReasonUnclassified},
+		{DocID: "c", Status: domain.StatusFailed, Reason: "SOMETHING_UNKNOWN"},
+		{DocID: "d", Status: domain.StatusSkipped, Reason: domain.ReasonUnsupportedFormat},
+	})
+	plan := p.Plan(context.Background())
+	for _, item := range plan.Items[:3] {
+		if item.Classification != ClassRetryable || item.Action != ActionRetryTransition {
+			t.Errorf("%s planned %q %q", item.DocID, item.Classification, item.Action)
+		}
+	}
+	if plan.Items[3].Classification != ClassConverged {
+		t.Errorf("a skipped document planned %q", plan.Items[3].Classification)
+	}
+	if err := p.Validate(context.Background(), plan); err != nil {
+		t.Errorf("validation: %v", err)
+	}
+}
+
 func TestClassifyTerminalFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-4", Status: domain.StatusFailed, Reason: domain.ReasonMalformedCommand},

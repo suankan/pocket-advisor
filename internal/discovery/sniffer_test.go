@@ -3,6 +3,7 @@ package discovery
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -128,4 +129,85 @@ func TestClassifyRoutesNonUTF8TextForIndexingWithAnAssumedCharset(t *testing.T) 
 	if utf8.Valid(latin1) {
 		t.Error("fixture is valid UTF-8, so it cannot stand for the case it names")
 	}
+}
+
+// Text is indexed when it is written for people to read: prose and tables by
+// any name, including none, while code and data formats the detector names,
+// and logs, code and data files it cannot tell from prose, are declined.
+func TestClassifyIndexesOnlyTextWrittenToBeRead(t *testing.T) {
+	prose := "Notes from the meeting, with the figures attached.\n"
+	for _, tc := range []struct {
+		name, data string
+		indexed    bool
+	}{
+		{"notes.txt", prose, true},
+		{"ATT00001", prose, true},
+		{"report v1.2", prose, true},
+		{"figures.csv", "a,b,c\n1,2,3\n4,5,6\n", true},
+		{"figures.tsv", "a\tb\tc\n1\t2\t3\n4\t5\t6\n", true},
+		{"invite.ics", "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n", true},
+		{"card.vcf", "BEGIN:VCARD\nVERSION:3.0\nEND:VCARD\n", true},
+		{"page.html", "<!DOCTYPE html><html><body>hi</body></html>", true},
+		{"chapter.xhtml", `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>hi</body></html>`, true},
+		{"page.html", `<?xml version="1.0"?><html><body>hi</body></html>`, true},
+		{"server.log", prose, false},
+		{"server.LOG.3", prose, false},
+		{"main.cc", "int main() { return 0; }\n", false},
+		{"settings.yaml", "a: 1\n", false},
+		{"data", `{"a": 1, "b": [1, 2]}`, false},
+		{"feed", `<?xml version="1.0"?><root><a>1</a></root>`, false},
+		{"tool", "#!/usr/bin/env python\nprint(1)\n", false},
+	} {
+		got := Classify([]byte(tc.data), tc.name)
+		if indexed := got.Subject == postgres.SubjectEmbed && !got.Declined; indexed != tc.indexed {
+			t.Errorf("%s: indexed %v (%+v), want %v", tc.name, indexed, got, tc.indexed)
+		}
+		if !tc.indexed && (!got.Declined || got.Subject != "") {
+			t.Errorf("%s: refused text must be declined with no subject, got %+v", tc.name, got)
+		}
+	}
+}
+
+// Only a plain zip is an archive of documents. A zip-based format is declined,
+// whether the detector names it or only its name does, and a compressed
+// metafile is not unrolled either.
+func TestClassifyUnrollsOnlyPlainArchives(t *testing.T) {
+	zipOf := func(first string) []byte {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		w, _ := zw.CreateHeader(&zip.FileHeader{Name: first, Method: zip.Store})
+		_, _ = w.Write([]byte("application/epub+zip"))
+		_ = zw.Close()
+		return buf.Bytes()
+	}
+	if got := Classify(zipOf("inner.txt"), "letters.zip"); got.DocType != "archive" || got.Declined {
+		t.Errorf("a plain zip: %+v", got)
+	}
+	for name, data := range map[string][]byte{
+		"book.epub (detected)":     zipOf("mimetype"),
+		"Letter.pages":             zipOf("Index/Document.iwa"),
+		"Pass.PKPASS":              zipOf("pass.json"),
+		"drawing.emz (compressed)": gzipOf(t, "metafile"),
+	} {
+		file := strings.Fields(name)[0]
+		if got := Classify(data, file); !got.Declined || got.Subject != "" {
+			t.Errorf("%s: %+v, want declined", name, got)
+		}
+	}
+	if got := Classify(gzipOf(t, "x"), "notes.txt.gz"); got.DocType != "archive" {
+		t.Errorf("a gzip file: %+v", got)
+	}
+}
+
+func gzipOf(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

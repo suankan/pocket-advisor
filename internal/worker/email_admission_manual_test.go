@@ -196,7 +196,7 @@ func TestRecoveredNameKeepsItsBytesAndNULTextIsSkipped(t *testing.T) {
 	children := []email.Child{
 		{Filename: "Отчёт.pdf", Selector: "mime-v1:0", Data: detected, RawName: []byte("\x8e\xe2\xe7\xf1\xe2.pdf"), NameEncoding: "ibm866"},
 		{Filename: "�.pdf", Selector: "mime-v1:1", Data: replaced, RawName: []byte("\xb0\xa1.pdf")},
-		{Filename: "settings.conf", Selector: "mime-v1:2", Data: nul},
+		{Filename: "settings.txt", Selector: "mime-v1:2", Data: nul},
 	}
 	err := db.Transaction(ctx, func(ctx context.Context) error {
 		for _, a := range admissionOrder(children) {

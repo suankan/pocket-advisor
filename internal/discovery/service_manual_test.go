@@ -166,7 +166,7 @@ func TestScanDeclinesTextWithNULBytesAndCompletes(t *testing.T) {
 	s, root := scanFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for name, body := range map[string]string{"a.txt": "Before the NUL file.", "b.conf": strings.Repeat("key=value\n", 500) + "\x00", "c.txt": "After the NUL file."} {
+	for name, body := range map[string]string{"a.txt": "Before the NUL file.", "b.txt": strings.Repeat("key=value\n", 500) + "\x00", "c.txt": "After the NUL file."} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +181,7 @@ func TestScanDeclinesTextWithNULBytesAndCompletes(t *testing.T) {
 	}
 	var status, reason string
 	if err := s.DB.Pool.QueryRow(ctx, `SELECT d.processing_status::text, d.metadata_headers->>'reason'
-	 FROM documents d JOIN source_occurrences o USING(doc_id) WHERE o.relative_path='b.conf'`).Scan(&status, &reason); err != nil {
+	 FROM documents d JOIN source_occurrences o USING(doc_id) WHERE o.relative_path='b.txt'`).Scan(&status, &reason); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(domain.StatusSkipped) || reason != string(domain.ReasonNULBytes) {

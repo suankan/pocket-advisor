@@ -24,12 +24,19 @@ type Route struct {
 // actually .docx, extensionless ATT00001 parts. Discovery deliberately does
 // not sniff, so this is the single place format knowledge lives (§5.1, §5.2):
 // the first entry of formats that claims the detected type decides, and
-// content no entry claims is declined.
+// content no entry claims is declined. A name is consulted only to narrow a
+// claim, never to make one: a log is text by its bytes, and an epub a zip.
 func Classify(data []byte, filename string) Route {
 	mt := mimetype.Detect(data)
 	for _, f := range formats {
 		if !f.claims(mt, data) {
 			continue
+		}
+		if len(f.names) > 0 && !hasSuffix(filename, f.names) {
+			continue
+		}
+		if hasSuffix(filename, f.refuse) {
+			break
 		}
 		route := f.route
 		if route.MimeType == "" {
@@ -44,10 +51,18 @@ func Classify(data []byte, filename string) Route {
 // the route they take to it.
 type format struct {
 	// types are detected MIME types, each matching its descendants too, as
-	// text/csv descends from text/plain.
+	// text/csv descends from text/plain, unless exact is set.
 	types []string
+	exact bool
 	// match, when set, claims content types cannot describe.
 	match func(mt *mimetype.MIME, data []byte) bool
+	// names, when set, narrows the claim to names with one of these
+	// suffixes, lowercase and with their dot.
+	names []string
+	// refuse lists name suffixes the handler does not read although their
+	// bytes are of its type, lowercase and with their dot. Content refused by
+	// name is declined, not offered to a later entry.
+	refuse []string
 	// route is where claimed content goes; an empty MimeType is filled with
 	// the detected one.
 	route Route
@@ -55,7 +70,7 @@ type format struct {
 
 func (f format) claims(mt *mimetype.MIME, data []byte) bool {
 	for _, t := range f.types {
-		if is(mt, t) {
+		if f.exact && mt.Is(t) || !f.exact && is(mt, t) {
 			return true
 		}
 	}
@@ -73,10 +88,15 @@ var formats = []format{
 		route: Route{Subject: postgres.SubjectEmails, MimeType: "message/rfc822", DocType: "email"}},
 
 	// Archives go to the email worker: an archive is a container with no body
-	// text, and that worker already owns in-RAM container unrolling.
-	{match: func(mt *mimetype.MIME, _ []byte) bool { return is(mt, "application/zip") && !isOOXML(mt) },
+	// text, and that worker already owns in-RAM container unrolling. Only a
+	// plain zip is one. Formats built on zip — epub, jar, apk, OpenDocument —
+	// are detected as types of their own and are not archives of documents;
+	// those the detector cannot tell from a plain zip are refused by name.
+	{types: []string{"application/zip"}, exact: true, refuse: zipFormats,
 		route: Route{Subject: postgres.SubjectEmails, DocType: "archive"}},
-	{types: []string{"application/x-tar", "application/gzip", "application/x-7z-compressed", "application/x-bzip2"},
+	{types: []string{"application/x-tar", "application/x-7z-compressed", "application/x-bzip2"},
+		route: Route{Subject: postgres.SubjectEmails, DocType: "archive"}},
+	{types: []string{"application/gzip"}, refuse: gzipFormats,
 		route: Route{Subject: postgres.SubjectEmails, DocType: "archive"}},
 
 	{types: []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
@@ -93,7 +113,15 @@ var formats = []format{
 	{match: func(mt *mimetype.MIME, _ []byte) bool { return strings.HasPrefix(mt.String(), "image/") },
 		route: Route{Subject: postgres.SubjectImages, DocType: "image"}},
 
-	{types: []string{"text/plain", "text/markdown", "text/csv", "text/html"},
+	// Text is indexed when it is written for people to read. The detector
+	// names code and data formats it recognises, such as JSON, XML or Python,
+	// as types descending from text/plain, so only these exact types are
+	// claimed; what it cannot tell from prose is refused by name.
+	{types: []string{"text/plain", "text/markdown", "text/csv", "text/tab-separated-values", "text/html", "text/calendar", "text/vcard"},
+		exact: true, refuse: textFormats,
+		route: Route{Subject: postgres.SubjectEmbed, DocType: "text"}},
+	// XHTML is HTML written as XML, which the detector reports as XML.
+	{types: []string{"text/xml", "application/xhtml+xml"}, exact: true, names: []string{".html", ".htm", ".xhtml"},
 		route: Route{Subject: postgres.SubjectEmbed, DocType: "text"}},
 
 	// Legacy binary Office (CFBF) covers .doc/.xls/.ppt AND .msg. There is no
@@ -104,6 +132,66 @@ var formats = []format{
 		route: Route{DocType: "legacy-office", Declined: true}},
 }
 
+// textFormats are plain text that is not written for people to read: logs,
+// source code, and data and configuration formats. A rotated log keeps its
+// suffix ahead of the rotation number, as app.log.3 does.
+var textFormats = []string{
+	".log",
+	".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm",
+	".go", ".py", ".rb", ".pl", ".pm", ".php", ".java", ".kt", ".kts", ".scala",
+	".swift", ".cs", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".lua",
+	".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".sql", ".css", ".scss",
+	".sass", ".less", ".vue", ".r", ".dart", ".groovy", ".gradle", ".asm", ".s",
+	".json", ".jsonl", ".ndjson", ".xml", ".xsd", ".xsl", ".xslt", ".wsdl",
+	".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".plist", ".properties",
+	".lock", ".map", ".har",
+}
+
+// zipFormats are zip-based formats the detector reports as a plain zip: their
+// members are a format's parts — pages, chapters, classes — not documents.
+var zipFormats = []string{
+	".epub", ".pages", ".numbers", ".key", ".pkpass", ".jar", ".war", ".ear",
+	".apk", ".aab", ".ipa", ".xpi", ".crx", ".vsix", ".whl", ".nupkg", ".sketch",
+	".kmz", ".cbz", ".3mf", ".appx", ".msix", ".xap",
+}
+
+// gzipFormats are single compressed files of a format of their own:
+// compressed Windows metafiles and SVG.
+var gzipFormats = []string{".emz", ".wmz", ".svgz"}
+
+// hasSuffix reports whether name, ignoring case and a trailing rotation
+// number, ends in one of suffixes.
+func hasSuffix(name string, suffixes []string) bool {
+	if len(suffixes) == 0 {
+		return false
+	}
+	name = strings.ToLower(name)
+	for {
+		for _, s := range suffixes {
+			if strings.HasSuffix(name, s) {
+				return true
+			}
+		}
+		dot := strings.LastIndexByte(name, '.')
+		if dot < 0 || !isNumber(name[dot+1:]) {
+			return false
+		}
+		name = name[:dot]
+	}
+}
+
+func isNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func is(mt *mimetype.MIME, want string) bool {
 	for m := mt; m != nil; m = m.Parent() {
 		if m.Is(want) {
@@ -111,11 +199,6 @@ func is(mt *mimetype.MIME, want string) bool {
 		}
 	}
 	return false
-}
-
-func isOOXML(mt *mimetype.MIME) bool {
-	s := mt.String()
-	return strings.Contains(s, "openxmlformats") || strings.Contains(s, "opendocument")
 }
 
 // maxHeaderBlock bounds how far looksLikeEmail reads for the end of a header

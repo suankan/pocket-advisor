@@ -112,17 +112,20 @@ Ingestion is additive: it admits and processes, and never deletes. `--ingest-all
 
 ## 4. Routing and extraction
 
-Discovery classifies bytes rather than trusting extensions. The routes below are one declared table of the formats each handler reads, tried in order: the first entry that claims the detected type, or one of its ancestors, decides, so content no handler reads is declined rather than sent anywhere. An RFC 822 message that the type detector reads as plain text, as mail clients' exported `.eml` files often are, is still recognised from its header block — everything before the first blank line, read up to 64 KiB, since delivered mail's trace and signature chains push its fields past the first few kilobytes: it needs a From field, a Subject or Date field, and a Message-ID, Received or MIME-Version field, each at the start of a line.
+Discovery classifies bytes rather than trusting extensions. The routes below are one declared table of the formats each handler reads, tried in order: the first entry that claims the detected type, or one of its ancestors, decides, so content no handler reads is declined rather than sent anywhere. A file name never makes a claim, since extensions lie; it only narrows one, for the two families whose bytes say too little: text, where a log, source code or a data file is as much text as a letter, and zip, which many formats are built on. An RFC 822 message that the type detector reads as plain text, as mail clients' exported `.eml` files often are, is still recognised from its header block — everything before the first blank line, read up to 64 KiB, since delivered mail's trace and signature chains push its fields past the first few kilobytes: it needs a From field, a Subject or Date field, and a Message-ID, Received or MIME-Version field, each at the start of a line.
 
 | Detected content | Subject | Handler |
 | --- | --- | --- |
 | RFC 822 email | `ingest.emails.raw` | email worker |
-| ZIP, tar, and tar.gz archives | `ingest.emails.raw` | container unrolling |
+| plain ZIP, tar, and gzip archives | `ingest.emails.raw` | container unrolling |
+| zip-based formats: those detected as their own type, such as EPUB, JAR, APK and OpenDocument other than ODT, and those named as Apple iWork documents, Wallet passes, comic books, KMZ, or browser, IDE and app packages | none | `SKIPPED / UNSUPPORTED_FORMAT` |
+| gzip named as a compressed metafile or SVG (`.emz`, `.wmz`, `.svgz`) | none | `SKIPPED / UNSUPPORTED_FORMAT` |
 | detected 7z and bzip2 archives, and gzip holding no tar | `ingest.emails.raw` | `SKIPPED / UNSUPPORTED_FORMAT` during unrolling |
 | PDF | `ingest.pdfs.raw` | document worker |
 | DOCX, XLSX, PPTX, ODT, RTF | `ingest.docx.raw` | office worker |
 | image | `ingest.images.raw` | image viability and OCR |
-| plain text, Markdown, CSV, HTML | `ingest.text.embed` | direct indexing |
+| plain text, Markdown, CSV, TSV, HTML, iCalendar, vCard, and XHTML named `.html`, `.htm` or `.xhtml` | `ingest.text.embed` | direct indexing |
+| code and data formats the detector names, such as JSON, XML, JavaScript, Python, Perl and PHP, and plain text named as a log (rotated ones included), source code, or a data or configuration file | none | `SKIPPED / UNSUPPORTED_FORMAT` |
 | CFBF Office and Outlook MSG | none | `SKIPPED / UNSUPPORTED_FORMAT` |
 | other unsupported content | none | `SKIPPED / UNSUPPORTED_FORMAT` |
 

@@ -622,6 +622,37 @@ func TestTerminalFailureFailsImmediatelyWithItsReason(t *testing.T) {
 	}
 }
 
+// A named transient cause is retried like any other, and a job whose attempts
+// run out records that cause rather than UNCLASSIFIED, so recovery can select
+// it by a retryable reason.
+func TestNamedTransientFailureKeepsItsReason(t *testing.T) {
+	cause := func(context.Context, postgres.Job) error {
+		return WithDoc("doc", Retry(domain.ReasonEmbeddingUnavailable, errors.New("circuit open")))
+	}
+	q := &fakeQueue{}
+	settleOnce(t, q, newRuntime(q, 1), newJob(1), cause)
+	if v := q.only(t, "retry"); v.Reason != string(domain.ReasonEmbeddingUnavailable) {
+		t.Errorf("retry reason = %q", v.Reason)
+	}
+	q = &fakeQueue{}
+	settleOnce(t, q, newRuntime(q, 1), newJob(postgres.MaxAttempts), cause)
+	if v := q.only(t, "fail"); v.Reason != string(domain.ReasonEmbeddingUnavailable) {
+		t.Errorf("fail reason = %q", v.Reason)
+	}
+}
+
+// PostgreSQL refusing a value for its content refuses it on every attempt, so
+// the job fails on the first under STORE_REJECTED instead of retrying.
+func TestRejectedValueFailsAtOnce(t *testing.T) {
+	q := &fakeQueue{}
+	settleOnce(t, q, newRuntime(q, 1), newJob(1), func(context.Context, postgres.Job) error {
+		return WithDoc("doc", fmt.Errorf("save email text doc: %w", &pgconn.PgError{Code: "22021", Message: "invalid byte sequence"}))
+	})
+	if v := q.only(t, "fail"); v.Reason != string(domain.ReasonStoreRejected) {
+		t.Errorf("reason = %q", v.Reason)
+	}
+}
+
 // An exhausted claim authorizes failure bookkeeping, never a fourth execution.
 func TestExhaustedClaimFailsWithoutRunningTheHandler(t *testing.T) {
 	for name, tc := range map[string]struct {

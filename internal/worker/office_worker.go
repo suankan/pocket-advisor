@@ -49,6 +49,7 @@ func (w *OfficeWorker) Handle(ctx context.Context, job postgres.Job) error {
 		return WithDoc(meta.DocId, Fatal(domain.ReasonExtractionFailed, err))
 	}
 	telemetry.OfficeExtracted.WithLabelValues(cmd.Subtype).Inc()
+	text = withoutNUL(w.Log, text, meta.DocId)
 
 	if strings.TrimSpace(text) == "" {
 		// An office file that yields no text is a recorded outcome, not a
@@ -78,3 +79,17 @@ func (w *OfficeWorker) Handle(ctx context.Context, job postgres.Job) error {
 }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+// withoutNUL removes the NUL characters an extractor can carry over from a
+// binary format, such as an RTF control word or a PDF string: PostgreSQL text
+// cannot hold them, and in extracted text they stand for nothing a reader
+// sees. A plain text file is different — its own bytes are the canonical
+// text — so a NUL there declines it as NUL_BYTES instead.
+func withoutNUL(log *slog.Logger, text, docID string) string {
+	n := strings.Count(text, "\x00")
+	if n == 0 {
+		return text
+	}
+	log.Warn("removed NUL from extracted text", "doc_id", docID, "count", n)
+	return strings.ReplaceAll(text, "\x00", "")
+}

@@ -34,6 +34,21 @@ func Fatal(reason domain.FailureReason, err error) error {
 	return &Terminal{Reason: reason, Err: err}
 }
 
+// Transient marks an error worth retrying and names its cause: the work is
+// sound and something it depends on failed. Reason is what the job records
+// if its attempts run out, so a retryable cause stays retryable.
+type Transient struct {
+	Reason domain.FailureReason
+	Err    error
+}
+
+func (t *Transient) Error() string { return string(t.Reason) + ": " + t.Err.Error() }
+func (t *Transient) Unwrap() error { return t.Err }
+
+func Retry(reason domain.FailureReason, err error) error {
+	return &Transient{Reason: reason, Err: err}
+}
+
 // Declined marks work the system knowingly does not support. It is NOT a
 // failure: the document is recorded SKIPPED and the job completes. Mixing
 // "we can't parse this" with "this broke" makes failed work unactionable
@@ -559,6 +574,11 @@ func (r *Runtime) settle(workCtx context.Context, job postgres.Job, err, cause e
 		}
 	}
 
+	// PostgreSQL refusing a value for its content refuses the same value on
+	// every attempt, so it fails at once under its own reason.
+	if !isTerminal(err) && postgres.IsDataException(err) {
+		err = Fatal(domain.ReasonStoreRejected, err)
+	}
 	reason := reasonOf(err)
 	if isTerminal(err) || job.Attempts >= postgres.MaxAttempts {
 		if r.fail(workCtx, job, reason) {
@@ -698,6 +718,10 @@ func reasonOf(err error) domain.FailureReason {
 	var t *Terminal
 	if errors.As(err, &t) {
 		return t.Reason
+	}
+	var tr *Transient
+	if errors.As(err, &tr) {
+		return tr.Reason
 	}
 	// Deliberately not ReasonExtractionFailed. Defaulting to a real class makes
 	// every unclassified error indistinguishable from a genuine extraction

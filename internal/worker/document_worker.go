@@ -289,6 +289,7 @@ func (w *DocumentWorker) fetch(ctx context.Context, uri, docID string) ([]byte, 
 }
 
 func (w *DocumentWorker) emit(ctx context.Context, meta *ingestionv1.DocumentMetadata, text, docType string, pages int) error {
+	text = withoutNUL(w.Log, text, meta.DocId)
 	if err := w.Docs.SaveText(ctx, meta.DocId, text, docType); err != nil {
 		if errors.Is(err, postgres.ErrInvalidText) {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))

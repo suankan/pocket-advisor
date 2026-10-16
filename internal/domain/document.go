@@ -85,6 +85,15 @@ const (
 	ReasonPDFOpenFailed       FailureReason = "PDF_OPEN_FAILED"
 	ReasonEmailParseFailed    FailureReason = "EMAIL_PARSE_FAILED"
 	ReasonHandlerPanic        FailureReason = "HANDLER_PANIC"
+	// ReasonEmbeddingUnavailable marks text the embedding endpoint returned
+	// no vectors for: it was unreachable, timed out, answered with an error,
+	// or its circuit was open. The text is stored, so only embedding is
+	// retried once the endpoint is back.
+	ReasonEmbeddingUnavailable FailureReason = "EMBEDDING_UNAVAILABLE"
+	// ReasonStoreRejected marks a value PostgreSQL refused for its content
+	// (SQLSTATE class 22), such as an invalid byte sequence. The handler
+	// produces the same value on every attempt.
+	ReasonStoreRejected FailureReason = "STORE_REJECTED"
 
 	// ReasonDocumentPruned marks work whose document no longer exists.
 	//

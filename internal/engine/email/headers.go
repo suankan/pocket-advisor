@@ -35,6 +35,11 @@ const (
 	// WarnUndeclaredCharset marks a header value written as raw 8-bit text
 	// rather than encoded words, read under the body's charset or replaced.
 	WarnUndeclaredCharset WarningCode = "undeclared_charset"
+	// WarnUnstorableText marks text PostgreSQL cannot hold — a NUL, or a byte
+	// sequence that is not UTF-8 once encoded-words are decoded — that was
+	// removed or replaced with U+FFFD. Header names the header, and is empty
+	// for the body.
+	WarnUnstorableText WarningCode = "unstorable_text"
 )
 
 // ParseWarning is one defect found in one header. Value carries the offending

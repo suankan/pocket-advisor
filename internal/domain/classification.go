@@ -55,14 +55,16 @@ func ClassifyReason(r FailureReason) FailureClass {
 		ReasonEmptyExtraction,
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,
-		ReasonEmailParseFailed:
+		ReasonEmailParseFailed,
+		ReasonEmbeddingUnavailable:
 		return ClassRetryable
 
 	// Terminal input or parser failures.
 	case ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonMalformedCommand,
-		ReasonHandlerPanic:
+		ReasonHandlerPanic,
+		ReasonStoreRejected:
 		return ClassTerminal
 
 	// Unclassified — requires operator judgment.
@@ -121,6 +123,8 @@ func ProcessingFailureReasons() []FailureReason {
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
 		ReasonHandlerPanic,
+		ReasonEmbeddingUnavailable,
+		ReasonStoreRejected,
 		ReasonUnclassified,
 	}
 }

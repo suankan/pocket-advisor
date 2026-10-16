@@ -101,13 +101,22 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		return nil, err
 	}
 	warns := append(repairs, legacyHeaders(msg.Header, p.charsetHint)...)
+	warns = append(warns, storableHeaders(msg.Header)...)
+	decoded := func(name string) string {
+		s, changed := storable(decodeHeader(msg.Header.Get(name)))
+		if changed {
+			warns = append(warns, ParseWarning{Code: WarnUnstorableText, Header: name})
+		}
+		return s
+	}
 
-	p.Subject = decodeHeader(msg.Header.Get("Subject"))
-	p.From = decodeHeader(msg.Header.Get("From"))
-	p.To = decodeHeader(msg.Header.Get("To"))
+	p.Subject = decoded("Subject")
+	p.From = decoded("From")
+	p.To = decoded("To")
 	p.MessageID = strings.Trim(msg.Header.Get("Message-ID"), "<> ")
 	p.InReplyTo = strings.Trim(msg.Header.Get("In-Reply-To"), "<> ")
 	p.Headers = ParseHeaders(msg.Header)
+	warns = append(warns, storableNames(&p.Headers)...)
 	p.Headers.Warnings = append(p.Headers.Warnings, warns...)
 	if d, err := msg.Header.Date(); err == nil {
 		p.Date = d
@@ -122,7 +131,11 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		p.Children[i].Selector = fmt.Sprintf("mime-v1:%d", i)
 	}
 	resolveNames(p.Children, p.charsetHint)
-	p.BodyText = Compact(p.BodyText)
+	body, changed := storable(Compact(p.BodyText))
+	if changed {
+		p.Headers.Warnings = append(p.Headers.Warnings, ParseWarning{Code: WarnUnstorableText})
+	}
+	p.BodyText = body
 	return p, nil
 }
 

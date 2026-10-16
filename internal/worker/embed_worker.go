@@ -78,9 +78,10 @@ func (w *EmbedWorker) Handle(ctx context.Context, job postgres.Job) error {
 
 		vectors, err := w.Embedder.Embed(ctx, inputs)
 		if err != nil {
-			// Transient by default: a model restart should cost latency, not
-			// documents. The breaker keeps retries from hammering it.
-			return WithDoc(meta.DocId, err)
+			// Transient: a model restart should cost latency, not documents.
+			// The breaker keeps retries from hammering it, and the reason keeps
+			// a job whose attempts ran out where --recover finds it.
+			return WithDoc(meta.DocId, Retry(domain.ReasonEmbeddingUnavailable, err))
 		}
 
 		for i := range batchChunks {

@@ -27,6 +27,8 @@ func TestClassifyReasonCoversAllReasons(t *testing.T) {
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
 		ReasonHandlerPanic,
+		ReasonEmbeddingUnavailable,
+		ReasonStoreRejected,
 		ReasonDocumentPruned,
 		ReasonUnclassified,
 	}
@@ -52,6 +54,7 @@ func TestRetryable(t *testing.T) {
 		ReasonOCRFailed,
 		ReasonPDFOpenFailed,
 		ReasonEmailParseFailed,
+		ReasonEmbeddingUnavailable,
 	}
 	for _, r := range retryable {
 		if !Retryable(r) {
@@ -70,6 +73,7 @@ func TestRetryable(t *testing.T) {
 		ReasonUnknownEncoding,
 		ReasonMissingTraceContext,
 		ReasonHandlerPanic,
+		ReasonStoreRejected,
 		ReasonUnclassified,
 	}
 	for _, r := range notRetryable {
@@ -91,7 +95,7 @@ func TestProcessingFailureReasonsCoverTheNonDeclineVocabulary(t *testing.T) {
 		ReasonPDFEncrypted, ReasonPDFDamaged, ReasonImageUnreadable, ReasonArchiveEncrypted,
 		ReasonArchiveTooLarge, ReasonArchiveDamaged,
 		ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed,
-		ReasonHandlerPanic, ReasonDocumentPruned, ReasonUnclassified,
+		ReasonHandlerPanic, ReasonEmbeddingUnavailable, ReasonStoreRejected, ReasonDocumentPruned, ReasonUnclassified,
 	}
 	listed := map[FailureReason]bool{}
 	for _, r := range ProcessingFailureReasons() {
@@ -124,7 +128,7 @@ func TestRetryableReasonsAreExactlyTheRetryableClass(t *testing.T) {
 			t.Errorf("%s is listed retryable but classified %s", r, ClassifyReason(r))
 		}
 	}
-	for _, r := range []FailureReason{ReasonExtractionFailed, ReasonEmptyExtraction, ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed} {
+	for _, r := range []FailureReason{ReasonExtractionFailed, ReasonEmptyExtraction, ReasonOCRFailed, ReasonPDFOpenFailed, ReasonEmailParseFailed, ReasonEmbeddingUnavailable} {
 		if !got[r] {
 			t.Errorf("%s is retryable but missing from RetryableReasons", r)
 		}

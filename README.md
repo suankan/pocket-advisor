@@ -220,7 +220,7 @@ Each item is classified retryable, terminal, converged, or not recoverable, with
 ./bin/pocket-advisor --recover --workspace-id example --reason all --yes
 ```
 
-Each state contributes at most 500 documents to one plan; when a selection reaches that cap it says so, and applying the plan then running `--recover` again selects the next batch. A plan that fails validation is not applied, recovery refuses to run before the queue schema is current, and completed jobs always stay complete. An embedding endpoint that returns no vectors — unreachable, timed out, or failing — fails a job that runs out of attempts as `EMBEDDING_UNAVAILABLE`, which `--recover` retries once the endpoint is back. A value PostgreSQL refuses for its content fails the job at once as `STORE_REJECTED`.
+A stale `PENDING` or `PROCESSING` document whose jobs are all still queued is reported as needing no action, since there is nothing to reset. Each state contributes at most 500 documents to one plan; when a selection reaches that cap it says so, and applying the plan then running `--recover` again selects the next batch. A plan that fails validation is not applied, recovery refuses to run before the queue schema is current, and completed jobs always stay complete. An embedding endpoint that returns no vectors — unreachable, timed out, or failing — fails a job that runs out of attempts as `EMBEDDING_UNAVAILABLE`, which `--recover` retries once the endpoint is back. A value PostgreSQL refuses for its content fails the job at once as `STORE_REJECTED`.
 
 ## 7. Retrieve evidence
 

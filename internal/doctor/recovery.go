@@ -145,6 +145,16 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 		}
 	}
 
+	// Stale but already queued: every job it has is waiting, for a worker or
+	// for its source, and applying would leave them as they are. It is
+	// reported as such rather than as work recovery would redo.
+	if (doc.Status == domain.StatusPending || doc.Status == domain.StatusProcessing) && len(doc.Jobs) > 0 && !hasResettableJob(doc.Jobs) {
+		item.Classification = ClassConverged
+		item.Action = ActionSkip
+		item.Requeue = "already queued: its jobs wait for a worker or for their source, and recovery leaves them as they are"
+		return item
+	}
+
 	// Already converged: nothing to do.
 	if doc.Status == domain.StatusCompleted {
 		item.Classification = ClassConverged
@@ -221,6 +231,18 @@ func (p *RecoveryPlanner) classify(doc RecoveryItem) RecoveryItem {
 	item.Classification = ClassNotRecoverable
 	item.Action = ActionRefuse
 	return item
+}
+
+// hasResettableJob reports whether applying would reset one of jobs: a failed
+// job, or a RUNNING one whose lease has expired. A live one is refused before
+// this is asked.
+func hasResettableJob(jobs []JobRef) bool {
+	for _, j := range jobs {
+		if j.State == "FAILED" || j.State == "RUNNING" && !j.Live {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate checks the plan for safety before execution. It refuses broad

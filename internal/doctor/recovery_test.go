@@ -42,6 +42,32 @@ func TestClassifyStaleProcessing(t *testing.T) {
 	}
 }
 
+// A stale document whose jobs are all still queued has nothing for recovery
+// to reset, so it is reported as needing no action; one with a failed or
+// expired job is still retried.
+func TestClassifyAlreadyQueuedNeedsNoAction(t *testing.T) {
+	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
+		{DocID: "queued", Status: domain.StatusPending, Jobs: []JobRef{{ID: "j1", State: "READY"}}},
+		{DocID: "waiting", Status: domain.StatusProcessing, Jobs: []JobRef{{ID: "j2", State: "READY"}, {ID: "j3", State: "WAITING_SOURCE"}}},
+		{DocID: "failed", Status: domain.StatusPending, Jobs: []JobRef{{ID: "j4", State: "READY"}, {ID: "j5", State: "FAILED"}}},
+		{DocID: "expired", Status: domain.StatusProcessing, Jobs: []JobRef{{ID: "j6", State: "RUNNING"}}},
+	})
+	got := map[string]RecoveryItem{}
+	for _, item := range p.Plan(context.Background()).Items {
+		got[item.DocID] = item
+	}
+	for doc, want := range map[string]RecoveryAction{
+		"queued": ActionSkip, "waiting": ActionSkip, "failed": ActionRetryTransition, "expired": ActionResetProcessing,
+	} {
+		if got[doc].Action != want {
+			t.Errorf("%s: action %q, want %q", doc, got[doc].Action, want)
+		}
+	}
+	if got["queued"].Classification != ClassConverged || got["queued"].Requeue == "" {
+		t.Errorf("queued: %+v", got["queued"])
+	}
+}
+
 func TestClassifyRetryableFailed(t *testing.T) {
 	p := NewPlanner(RecoverConfig{WorkspaceID: "ws"}, []RecoveryItem{
 		{DocID: "doc-3", Status: domain.StatusFailed, Reason: domain.ReasonExtractionFailed},

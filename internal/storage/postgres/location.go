@@ -16,13 +16,17 @@ const locationColumns = `d.source_filename,
 // locationJoin picks, as c, a container that holds document d: one with an
 // available original first, the container d came from before any other its
 // containment records, then the first by path. c.doc_id identifies it.
+//
+// The candidates are one IN over a union rather than two conditions joined by
+// OR: with OR the planner cannot look containers up by key and scans every
+// document for each one named, seconds for a few hundred.
 const locationJoin = `LEFT JOIN LATERAL (
    SELECT doc_id, name, path FROM (
      SELECT k.doc_id, k.source_filename AS name,
             (SELECT min(o.display_path) FROM source_occurrences o WHERE o.doc_id = k.doc_id AND o.available) AS path
      FROM documents k
-     WHERE k.doc_id = d.parent_doc_id
-        OR k.doc_id IN (SELECT container_doc_id FROM document_placements WHERE contained_doc_id = d.doc_id)) k
+     WHERE k.doc_id IN (SELECT d.parent_doc_id
+                        UNION ALL SELECT container_doc_id FROM document_placements WHERE contained_doc_id = d.doc_id)) k
    ORDER BY path IS NULL, k.doc_id = d.parent_doc_id DESC, path, k.doc_id
    LIMIT 1) c ON true`
 

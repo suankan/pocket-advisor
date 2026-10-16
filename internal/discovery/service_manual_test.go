@@ -3,6 +3,8 @@
 package discovery
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"net/url"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -190,5 +193,90 @@ func TestScanDeclinesTextWithNULBytesAndCompletes(t *testing.T) {
 	ready, _, _, _, err := s.Jobs.Counts(ctx)
 	if err != nil || ready != 2 {
 		t.Fatalf("neighbouring text not admitted: ready=%d %v", ready, err)
+	}
+}
+
+// A scan settles known documents whose recorded route the formats no longer
+// agree with, staged files and container members alike: text no handler reads
+// any more is recorded as unsupported and loses its text, and content skipped
+// at routing that a handler now reads is sent to it. A handler's own decline
+// is left alone.
+func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
+	s, root := scanFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	prose := func(what string) []byte { return []byte("Notes about " + what + ", written to be read.\n") }
+	write := func(name string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// known records content as an earlier release did.
+	known := func(name string, data []byte, docType string, status domain.Status, reason domain.FailureReason) string {
+		t.Helper()
+		id, _, err := s.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex(data), SourceName: name, DocType: docType, MimeType: "text/plain"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if docType == "text" {
+			if err := s.Docs.SaveText(ctx, id, string(data), "text"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Docs.UpdateStatus(ctx, id, status, reason); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	logText, letter, declined := prose("the server"), prose("the matter"), prose("a decline")
+	write("server.log", logText)
+	write("letter.txt", letter)
+	write("handled.txt", declined)
+	oldLog := known("server.log", logText, "text", domain.StatusCompleted, "")
+	skipped := known("letter.txt", letter, "", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
+	handled := known("handled.txt", declined, "", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
+	if err := s.Jobs.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: &ingestionv1.DocumentMetadata{DocId: handled}}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A member settles too: the archive is known and complete, and its log
+	// was indexed as text.
+	memberLog := prose("a nested server")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("app.log")
+	_, _ = w.Write(memberLog)
+	_ = zw.Close()
+	write("bundle.zip", buf.Bytes())
+	known("bundle.zip", buf.Bytes(), "archive", domain.StatusCompleted, "")
+	member := known("app.log", memberLog, "text", domain.StatusCompleted, "")
+
+	if _, err := s.Scan(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]struct {
+		status domain.Status
+		reason string
+		text   bool
+	}{
+		oldLog:  {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
+		member:  {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
+		skipped: {domain.StatusPending, "", true},
+		handled: {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
+	} {
+		var status, reason string
+		var text bool
+		if err := s.DB.Pool.QueryRow(ctx, `SELECT processing_status::text, COALESCE(metadata_headers->>'reason', ''), normalized_text IS NOT NULL
+		 FROM documents WHERE doc_id = $1`, id).Scan(&status, &reason, &text); err != nil {
+			t.Fatal(err)
+		}
+		if domain.Status(status) != want.status || reason != want.reason || text != want.text {
+			t.Errorf("%s: %s/%q text %v, want %s/%q text %v", id, status, reason, text, want.status, want.reason, want.text)
+		}
+	}
+	var embeds int
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ingestion_jobs WHERE doc_id = $1 AND state = 'READY'`, skipped).Scan(&embeds); err != nil || embeds != 1 {
+		t.Fatalf("newly supported content: %d ready jobs, %v", embeds, err)
 	}
 }

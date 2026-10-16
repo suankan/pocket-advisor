@@ -96,30 +96,20 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 		// scan must not queue behind it. Its stub committed with its job, and
 		// ResumeLegacy re-admits a reachable row that has lost one.
 		//
-		// The one exception is content indexed as plain text that the sniffer
-		// now reads as something with a handler of its own — an email whose
-		// header block outgrew an earlier, shorter look. Its raw source was
-		// indexed as prose, so it is rerouted, but never by waiting: a row a
-		// handler holds is left for the next scan.
+		// The exception is a document whose recorded route the current
+		// formats disagree with (settle), which is corrected, but never by
+		// waiting: a row a handler holds is left for the next scan.
 		if !created {
-			st, docType, err := s.Docs.KnownRoute(ctx, id)
+			k, err := s.Docs.Known(ctx, id)
 			if err != nil {
 				return err
 			}
-			if misread(docType, route) {
-				rerouted, err := s.Docs.Reroute(ctx, id, route.DocType, route.MimeType)
-				if err != nil || !rerouted {
-					return err
-				}
-				if s.Log != nil {
-					s.Log.Info("rerouted content once indexed as plain text", "doc_id", id, "file", f.DisplayPath, "doc_type", route.DocType)
-				}
-				tp := trace.NewTraceparent()
-				meta := &ingestionv1.DocumentMetadata{DocId: id, SourceFilename: f.Filename, MimeType: route.MimeType, RawSha256: f.SHA256, Traceparent: tp}
-				return s.dispatch(ctx, route, meta, source.Ref(id), data, tp)
+			settled, err := s.settle(ctx, id, data, k, route, f.DisplayPath, "", 0)
+			if err != nil || settled {
+				return err
 			}
-			if st == domain.StatusCompleted || st == domain.StatusSkipped || st == domain.StatusFailed {
-				return s.backfill(ctx, id, data, route, f.Filename, 0)
+			if k.Status == domain.StatusCompleted || k.Status == domain.StatusSkipped || k.Status == domain.StatusFailed {
+				return s.backfill(ctx, id, data, route, f.Filename, 0, true)
 			}
 			return nil
 		}
@@ -132,19 +122,62 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 	})
 }
 
-// misread reports whether content stored as plain text now routes to a
-// handler of its own.
-func misread(storedType string, route Route) bool {
-	return storedType == "text" && !route.Declined && route.Subject != postgres.SubjectEmbed
+// settle corrects a known document whose recorded route the current formats
+// disagree with, judged under the name it was admitted under so that the same
+// bytes seen under two names do not flip between routes:
+//
+//   - content stored as plain text that now reads as something with a handler
+//     of its own, such as an email whose header block an earlier, shorter look
+//     missed, is rerouted to that handler;
+//   - content skipped at routing as an unsupported format that a handler now
+//     reads is routed to it. A handler that declined content it was sent
+//     records the same reason, but under the job it ran: rerouting that would
+//     repeat the decline on every scan;
+//   - text or an archive no handler reads any more is recorded as unsupported,
+//     losing its text, passages and members.
+//
+// It reports whether it changed the document. parent and depth place a
+// container member; a staged file has neither.
+func (s *Service) settle(ctx context.Context, id string, data []byte, k postgres.Known, route Route, where, parent string, depth int) (bool, error) {
+	if k.Name != "" {
+		route = Classify(data, k.Name)
+	}
+	switch {
+	case k.DocType == "text" && !route.Declined && route.Subject != postgres.SubjectEmbed,
+		k.Status == domain.StatusSkipped && k.Reason == domain.ReasonUnsupportedFormat && k.Jobless && !route.Declined:
+		rerouted, err := s.Docs.Reroute(ctx, id, route.DocType, route.MimeType)
+		if err != nil || !rerouted {
+			return false, err
+		}
+		if s.Log != nil {
+			s.Log.Info("rerouted content to the handler that now reads it", "doc_id", id, "file", where, "doc_type", route.DocType)
+		}
+		tp := trace.NewTraceparent()
+		meta := &ingestionv1.DocumentMetadata{DocId: id, ParentDocId: parent, SourceFilename: k.Name, MimeType: route.MimeType,
+			RawSha256: domain.SHA256Hex(data), Traceparent: tp, Depth: int32(depth)}
+		return true, s.dispatch(ctx, route, meta, source.Ref(id), data, tp)
+
+	case (k.DocType == "text" || k.DocType == "archive") && route.Declined && k.Status != domain.StatusSkipped:
+		refused, err := s.Docs.Refuse(ctx, id, route.MimeType)
+		if err != nil || !refused {
+			return false, err
+		}
+		if s.Log != nil {
+			s.Log.Info("no handler reads this format any more; recorded as unsupported", "doc_id", id, "file", where, "mime_type", route.MimeType)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
-// Backfill records replay recipes for already indexed containers without
-// replacing their text, identities, or annotations.
-func (s *Service) backfill(ctx context.Context, id string, data []byte, route Route, name string, depth int) error {
+// backfill replays a known container's members, recording containment the
+// store lacks. With settling, each known member is also settled, as a staged
+// file is; without, nothing but containment is written.
+func (s *Service) backfill(ctx context.Context, id string, data []byte, route Route, name string, depth int, settling bool) error {
 	budget := source.MaxReplayBytes - int64(len(data))
-	return s.backfillBounded(ctx, id, data, route, name, depth, &budget)
+	return s.backfillBounded(ctx, id, data, route, name, depth, settling, &budget)
 }
-func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, route Route, name string, depth int, budget *int64) error {
+func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, route Route, name string, depth int, settling bool, budget *int64) error {
 	if route.Subject != postgres.SubjectEmails || depth >= 8 {
 		return nil
 	}
@@ -176,7 +209,21 @@ func (s *Service) backfillBounded(ctx context.Context, id string, data []byte, r
 		if err := s.Docs.RecordPlacement(ctx, id, child); err != nil {
 			return err
 		}
-		if err := s.backfillBounded(ctx, child, c.Data, Classify(c.Data, c.Filename), c.Filename, depth+1, budget); err != nil {
+		childRoute := Classify(c.Data, c.Filename)
+		if settling {
+			k, err := s.Docs.Known(ctx, child)
+			if err != nil {
+				return err
+			}
+			settled, err := s.settle(ctx, child, c.Data, k, childRoute, name+" member "+c.Filename, id, depth+1)
+			if err != nil {
+				return err
+			}
+			if settled {
+				continue
+			}
+		}
+		if err := s.backfillBounded(ctx, child, c.Data, childRoute, c.Filename, depth+1, settling, budget); err != nil {
 			return err
 		}
 	}
@@ -255,7 +302,7 @@ func (s *Service) BindExisting(ctx context.Context) error {
 			if err := s.Inventory.Observe(ctx, scan, id, f); err != nil {
 				return err
 			}
-			return s.backfill(ctx, id, data, Classify(data, f.Filename), f.Filename, 0)
+			return s.backfill(ctx, id, data, Classify(data, f.Filename), f.Filename, 0, false)
 		})
 	})
 	if err != nil {

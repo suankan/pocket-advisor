@@ -90,24 +90,77 @@ func (r *DocumentRepo) Status(ctx context.Context, docID string) (domain.Status,
 	return domain.Status(s), nil
 }
 
-// KnownRoute reads a known document's status and the type it was routed as.
-func (r *DocumentRepo) KnownRoute(ctx context.Context, docID string) (domain.Status, string, error) {
-	var s, docType string
+// Known is what the store recorded about a document's route: its status and
+// the reason for it, the type it was routed as, and the name it was admitted
+// under, which a later sighting under another name does not change.
+type Known struct {
+	Status  domain.Status
+	Reason  domain.FailureReason
+	DocType string
+	Name    string
+	// Jobless is true when the document has no job: one declined at routing
+	// never had one, while a handler's decline completes the job it ran.
+	Jobless bool
+}
+
+// Known reads what the store recorded about a known document's route.
+func (r *DocumentRepo) Known(ctx context.Context, docID string) (Known, error) {
+	var k Known
+	var status, reason string
 	err := r.db.executor(ctx).QueryRow(ctx,
-		`SELECT processing_status::text, COALESCE(doc_type, '') FROM documents WHERE doc_id = $1`, docID).Scan(&s, &docType)
-	return domain.Status(s), docType, err
+		`SELECT processing_status::text, COALESCE(metadata_headers->>'reason', ''), COALESCE(doc_type, ''), source_filename,
+                NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id)
+         FROM documents WHERE doc_id = $1`, docID).Scan(&status, &reason, &k.DocType, &k.Name, &k.Jobless)
+	k.Status, k.Reason = domain.Status(status), domain.FailureReason(reason)
+	return k, err
 }
 
 // Reroute turns a document indexed as one type back into a pending document
 // of another, ready for that type's handler: its text, passages and jobs go,
 // its identity, locations and containment stay. It is how content the sniffer
-// once misread is corrected without changing what the document is.
+// once misread, or a format that has since gained a handler, is processed
+// without changing what the document is.
 //
 // It never waits for or races a handler. A document row a handler holds is
 // skipped, as is one with a running job, and reports false: the next scan
 // tries again. The caller dispatches the new route's work in the same
 // transaction.
 func (r *DocumentRepo) Reroute(ctx context.Context, docID, docType, mimeType string) (bool, error) {
+	return r.reset(ctx, docID, resetStep{`UPDATE documents
+          SET doc_type = $2, mime_type = $3, normalized_text = NULL,
+              extraction_hash = '', extraction_version = '',
+              processing_status = 'PENDING', metadata_headers = metadata_headers - 'reason',
+              updated_at = now()
+          WHERE doc_id = $1`, []any{docID, docType, mimeType}})
+}
+
+// Refuse records a document no handler reads any more as SKIPPED with
+// UNSUPPORTED_FORMAT, as it would be recorded if admitted now: its text,
+// passages and jobs go, and so does what it held as a container, since its
+// members were a format's parts rather than documents. A member nothing else
+// holds is then unreachable, for the sweep to remove. Like Reroute, it never
+// waits for or races a handler.
+func (r *DocumentRepo) Refuse(ctx context.Context, docID, mimeType string) (bool, error) {
+	return r.reset(ctx, docID,
+		resetStep{`DELETE FROM document_placements WHERE container_doc_id = $1`, []any{docID}},
+		resetStep{`DELETE FROM source_members WHERE parent_id = $1`, []any{docID}},
+		resetStep{`UPDATE documents
+          SET doc_type = '', mime_type = $2, normalized_text = NULL,
+              extraction_hash = '', extraction_version = '',
+              processing_status = 'SKIPPED',
+              metadata_headers = metadata_headers || jsonb_build_object('reason', $3::text),
+              updated_at = now()
+          WHERE doc_id = $1`, []any{docID, mimeType, string(domain.ReasonUnsupportedFormat)}})
+}
+
+type resetStep struct {
+	sql  string
+	args []any
+}
+
+// reset removes a document's jobs and passages and then applies final, unless
+// a handler holds the document's row or runs one of its jobs.
+func (r *DocumentRepo) reset(ctx context.Context, docID string, final ...resetStep) (bool, error) {
 	ex := r.db.executor(ctx)
 	var locked string
 	err := ex.QueryRow(ctx, `SELECT doc_id::text FROM documents WHERE doc_id = $1 FOR UPDATE SKIP LOCKED`, docID).Scan(&locked)
@@ -115,32 +168,29 @@ func (r *DocumentRepo) Reroute(ctx context.Context, docID, docType, mimeType str
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("reroute %s: %w", docID, err)
+		return false, fmt.Errorf("reset %s: %w", docID, err)
 	}
 	rows, err := ex.Query(ctx, `SELECT state FROM ingestion_jobs WHERE doc_id = $1 FOR UPDATE`, docID)
 	if err != nil {
-		return false, fmt.Errorf("reroute %s: %w", docID, err)
+		return false, fmt.Errorf("reset %s: %w", docID, err)
 	}
 	running := false
 	for rows.Next() {
 		var state string
 		if err := rows.Scan(&state); err != nil {
 			rows.Close()
-			return false, fmt.Errorf("reroute %s: %w", docID, err)
+			return false, fmt.Errorf("reset %s: %w", docID, err)
 		}
 		running = running || state == "RUNNING"
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("reroute %s: %w", docID, err)
+		return false, fmt.Errorf("reset %s: %w", docID, err)
 	}
 	if running {
 		return false, nil
 	}
-	for _, step := range []struct {
-		sql  string
-		args []any
-	}{
+	steps := append([]resetStep{
 		{`DELETE FROM ingestion_jobs WHERE doc_id = $1`, []any{docID}},
 		// The statement sees document_chunks as it was, so the document's
 		// own placements are excluded by hand when asking who else holds a
@@ -148,15 +198,10 @@ func (r *DocumentRepo) Reroute(ctx context.Context, docID, docType, mimeType str
 		{`WITH released AS (DELETE FROM document_chunks WHERE doc_id = $1 RETURNING chunk_id)
           DELETE FROM chunks c WHERE c.chunk_id IN (SELECT chunk_id FROM released)
             AND NOT EXISTS (SELECT 1 FROM document_chunks p WHERE p.chunk_id = c.chunk_id AND p.doc_id <> $1)`, []any{docID}},
-		{`UPDATE documents
-          SET doc_type = $2, mime_type = $3, normalized_text = NULL,
-              extraction_hash = '', extraction_version = '',
-              processing_status = 'PENDING', metadata_headers = metadata_headers - 'reason',
-              updated_at = now()
-          WHERE doc_id = $1`, []any{docID, docType, mimeType}},
-	} {
+	}, final...)
+	for _, step := range steps {
 		if _, err := ex.Exec(ctx, step.sql, step.args...); err != nil {
-			return false, fmt.Errorf("reroute %s: %w", docID, err)
+			return false, fmt.Errorf("reset %s: %w", docID, err)
 		}
 	}
 	return true, nil

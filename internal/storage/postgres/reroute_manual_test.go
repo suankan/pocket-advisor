@@ -44,9 +44,9 @@ func TestRerouteResetsMisreadText(t *testing.T) {
 	}); err != nil || !rerouted {
 		t.Fatalf("rerouted %v, err %v", rerouted, err)
 	}
-	status, docType, err := docs.KnownRoute(ctx, misread)
-	if err != nil || status != domain.StatusPending || docType != "email" {
-		t.Fatalf("after reroute: %s %q %v", status, docType, err)
+	k, err := docs.Known(ctx, misread)
+	if err != nil || k.Status != domain.StatusPending || k.DocType != "email" || !k.Jobless {
+		t.Fatalf("after reroute: %+v %v", k, err)
 	}
 	if n := count(t, db, `SELECT count(*) FROM ingestion_jobs WHERE doc_id = $1`, misread); n != 0 {
 		t.Errorf("%d jobs left", n)
@@ -80,4 +80,61 @@ func count(t *testing.T, db *DB, sql string, args ...any) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// A document no handler reads any more is recorded as unsupported: its jobs,
+// text and passages go, and so does what it held as a container, while the
+// members themselves stay for the sweep to judge.
+func TestRefuseRecordsUnsupportedAndReleasesMembers(t *testing.T) {
+	db, docs, jobs := queueSetup(t)
+	ctx := context.Background()
+	chunks := NewChunkRepo(db)
+	vec := make([]float32, stageBDim)
+	vec[0] = 1
+
+	book, _ := addJob(t, db, docs, jobs, SubjectEmbed)
+	if k, err := docs.Known(ctx, book); err != nil || k.Jobless {
+		t.Fatalf("a document with a job read as jobless: %+v %v", k, err)
+	}
+	chapter, _ := addJob(t, db, docs, jobs, SubjectEmbed)
+	if err := docs.SaveText(ctx, book, "chapter one", "text"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Run(ctx, claimOne(t, jobs, SubjectEmbed), func(ctx context.Context) error {
+		return chunks.ReplaceChunks(ctx, book, []domain.Chunk{{ChunkID: domain.NewChunkID(), DocID: book, Text: "chapter one", EmbedModel: "m", Embedding: vec}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.RecordPlacement(ctx, book, chapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewSourceRepo(db).RecordMember(ctx, book, chapter, "zip:OEBPS/1.xhtml"); err != nil {
+		t.Fatal(err)
+	}
+
+	var refused bool
+	if err := db.Transaction(ctx, func(ctx context.Context) error {
+		var err error
+		refused, err = docs.Refuse(ctx, book, "application/epub+zip")
+		return err
+	}); err != nil || !refused {
+		t.Fatalf("refused %v, err %v", refused, err)
+	}
+	k, err := docs.Known(ctx, book)
+	if err != nil || k.Status != domain.StatusSkipped || k.Reason != domain.ReasonUnsupportedFormat || k.DocType != "" || !k.Jobless {
+		t.Fatalf("after refuse: %+v %v", k, err)
+	}
+	for what, sql := range map[string]string{
+		"passages":   `SELECT count(*) FROM document_chunks WHERE doc_id = $1`,
+		"placements": `SELECT count(*) FROM document_placements WHERE container_doc_id = $1`,
+		"members":    `SELECT count(*) FROM source_members WHERE parent_id = $1`,
+		"text":       `SELECT count(*) FROM documents WHERE doc_id = $1 AND normalized_text IS NOT NULL`,
+	} {
+		if n := count(t, db, sql, book); n != 0 {
+			t.Errorf("%d %s left", n, what)
+		}
+	}
+	if n := count(t, db, `SELECT count(*) FROM documents WHERE doc_id = $1`, chapter); n != 1 {
+		t.Error("the member itself was deleted; only the sweep deletes documents")
+	}
 }

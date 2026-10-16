@@ -1,13 +1,17 @@
 package retention
 
 import (
+	"archive/zip"
+	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"testing"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
-	"testing"
 )
 
 func quietLogger() *slog.Logger {
@@ -144,5 +148,57 @@ func TestStagedContentsCountsUnopenableContainersAndKeepsWalking(t *testing.T) {
 	// And the walk carried on far enough to open the message that was fine.
 	if _, ok := st.contents[domain.SHA256Hex([]byte(attachment))]; !ok {
 		t.Error("a later container's members were skipped after an earlier failure")
+	}
+}
+
+// A member the ignore rules exclude by name is not staged content: its bytes
+// are recorded as ignored and nothing inside it is expanded, while its
+// siblings and a copy staged under another name stay staged.
+func TestStagedContentsLeavesOutIgnoredMembers(t *testing.T) {
+	root := t.TempDir()
+	book, letter := []byte("a synthetic book, chapter one"), []byte("a synthetic letter")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, data := range map[string][]byte{"Book.FB2": book, "letter.txt": letter} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bundle.zip"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	isBook := func(name string) bool { return strings.HasSuffix(strings.ToLower(name), ".fb2") }
+
+	st, err := stagedContentsContext(context.Background(), []string{root}, nil, isBook, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.contents[domain.SHA256Hex(letter)]; !ok {
+		t.Error("the kept member is not staged")
+	}
+	if _, ok := st.contents[domain.SHA256Hex(book)]; ok {
+		t.Error("the ignored member is staged")
+	}
+	if _, ok := st.ignored[domain.SHA256Hex(book)]; !ok {
+		t.Error("the ignored member is not recorded as ignored")
+	}
+
+	// The same book also staged as a file of its own, under a kept name.
+	if err := os.WriteFile(filepath.Join(root, "book.txt"), book, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = stagedContentsContext(context.Background(), []string{root}, nil, isBook, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.contents[domain.SHA256Hex(book)]; !ok {
+		t.Error("a copy staged under a kept name is not staged")
 	}
 }

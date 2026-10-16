@@ -37,6 +37,12 @@ import (
 //
 // Order decides: the last rule that matches a path wins, so a negation only
 // undoes the rules written above it.
+//
+// The rules that name a file without a slash also apply to members of
+// containers — an email's attachments and an archive's entries — by the
+// member's own name (MatchName): "*.fb2" means a book wherever it arrives.
+// Path and directory rules describe the layout of a configured directory,
+// which a member does not have, so they apply to staged files only.
 type Ignore struct {
 	rules []ignoreRule
 }
@@ -116,6 +122,19 @@ func (ig Ignore) Match(rel string) bool {
 		// Later rules override earlier ones, so a rule that agrees with the
 		// verdict so far still has to be evaluated to know it agrees.
 		if r.matches(segs, base) {
+			ignored = !r.negate
+		}
+	}
+	return ignored
+}
+
+// MatchName reports whether a container member called name is excluded from
+// the corpus. Only the rules without a slash apply, in order, so a "!" among
+// them still re-includes.
+func (ig Ignore) MatchName(name string) bool {
+	ignored := false
+	for _, r := range ig.rules {
+		if r.name && !r.directory && matchSegment(r.segs[0], name) {
 			ignored = !r.negate
 		}
 	}

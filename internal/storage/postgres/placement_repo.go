@@ -104,10 +104,14 @@ type PruneCandidate struct {
 // something staged answers the whole graph at once, and a UNION recursive term
 // terminates on its own even if malformed lineage ever produced a cycle.
 //
+// ignoredSHAs is content seen only as members the workspace's ignore rules
+// exclude by name. Recorded containment is not followed into them, so a
+// container that is still staged no longer holds them.
+//
 // The staged set arrives as a temporary table rather than a parameter list
 // because a real workspace stages tens of thousands of files, and a query with
 // 60,000 bind parameters is not a query.
-func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []string) ([]PruneCandidate, error) {
+func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs, ignoredSHAs []string) ([]PruneCandidate, error) {
 	tx, err := r.db.executor(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin sweep: %w", err)
@@ -115,7 +119,8 @@ func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []st
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `
-        CREATE TEMP TABLE staged_sha (sha VARCHAR PRIMARY KEY) ON COMMIT DROP`); err != nil {
+        CREATE TEMP TABLE staged_sha (sha VARCHAR PRIMARY KEY) ON COMMIT DROP;
+        CREATE TEMP TABLE ignored_sha (sha VARCHAR PRIMARY KEY) ON COMMIT DROP`); err != nil {
 		return nil, fmt.Errorf("stage content set: %w", err)
 	}
 	rows := make([][]any, 0, len(stagedSHAs))
@@ -131,6 +136,18 @@ func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []st
 		pgx.CopyFromRows(rows)); err != nil {
 		return nil, fmt.Errorf("load staged content set: %w", err)
 	}
+	ignored := make([][]any, 0, len(ignoredSHAs))
+	for _, s := range ignoredSHAs {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		ignored = append(ignored, []any{s})
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"ignored_sha"}, []string{"sha"},
+		pgx.CopyFromRows(ignored)); err != nil {
+		return nil, fmt.Errorf("load ignored content set: %w", err)
+	}
 
 	result, err := tx.Query(ctx, `
         WITH RECURSIVE retained AS (
@@ -141,6 +158,8 @@ func (r *DocumentRepo) UnreachableDocuments(ctx context.Context, stagedSHAs []st
             SELECT p.contained_doc_id
             FROM document_placements p
             JOIN retained r ON p.container_doc_id = r.doc_id
+            JOIN documents c ON c.doc_id = p.contained_doc_id
+            WHERE NOT EXISTS (SELECT 1 FROM ignored_sha i WHERE i.sha = c.raw_sha256)
         )
         SELECT d.doc_id::text, d.raw_sha256, d.doc_type,
                COALESCE(d.metadata_headers->>'source_path', ''), d.source_filename

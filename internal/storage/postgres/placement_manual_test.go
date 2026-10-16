@@ -82,7 +82,7 @@ func TestPlacementKeepsAttachmentsSharedWithASurvivingEmail(t *testing.T) {
 	}
 
 	// EmailB's own file is no longer staged; EmailA's still is.
-	got, err := repo.UnreachableDocuments(ctx, []string{"aaaa"})
+	got, err := repo.UnreachableDocuments(ctx, []string{"aaaa"}, nil)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPlacementSweepsNestedContainmentTransitively(t *testing.T) {
 	}
 
 	// Still staged: everything stays.
-	got, err := repo.UnreachableDocuments(ctx, []string{"eeee"})
+	got, err := repo.UnreachableDocuments(ctx, []string{"eeee"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,12 +132,56 @@ func TestPlacementSweepsNestedContainmentTransitively(t *testing.T) {
 	}
 
 	// No longer staged: the whole chain goes, not just the first link.
-	got, err = repo.UnreachableDocuments(ctx, []string{"unrelated"})
+	got, err = repo.UnreachableDocuments(ctx, []string{"unrelated"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 4 {
 		t.Errorf("swept %d of 4; a nested subtree must go with its container", len(got))
+	}
+}
+
+// A member the ignore rules exclude by name is not held by the staged
+// container that carries it, nor is anything inside it; content staged under
+// another name is.
+func TestPlacementSweepStopsAtIgnoredMembers(t *testing.T) {
+	db, _ := scratch(t, "placement_ignored")
+	defer db.Close()
+	if err := db.ApplySchema(context.Background(), stageBMeta()); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	ctx := context.Background()
+	repo := &DocumentRepo{db: db}
+
+	email := stageDoc(t, repo, "eeee", "email", "mail/e.eml")
+	book := stageDoc(t, repo, "bbbb", "archive", "")
+	chapter := stageDoc(t, repo, "cccc", "text", "")
+	letter := stageDoc(t, repo, "llll", "pdf", "")
+	for _, p := range [][2]string{{email, book}, {book, chapter}, {email, letter}} {
+		if err := repo.RecordPlacement(ctx, p[0], p[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := repo.UnreachableDocuments(ctx, []string{"eeee"}, []string{"bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	swept := map[string]bool{}
+	for _, c := range got {
+		swept[c.DocID] = true
+	}
+	if len(got) != 2 || !swept[book] || !swept[chapter] {
+		t.Fatalf("swept %v; want the ignored book and its chapter, and nothing else", got)
+	}
+
+	// The same bytes staged under a name the rules keep are still held.
+	got, err = repo.UnreachableDocuments(ctx, []string{"eeee", "bbbb"}, []string{"bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("swept %d although the book is also staged", len(got))
 	}
 }
 

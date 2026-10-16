@@ -179,3 +179,21 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// A container member has a name but no place in a configured directory, so
+// only the rules without a slash judge it, in order and case-insensitive in
+// their suffix as for files.
+func TestMatchNameAppliesOnlyBareNameRules(t *testing.T) {
+	ig, err := CompileIgnore([]string{"*.fb2", "build/*.log", "caches/", "*.epub", "!keep.epub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"Book.FB2": true, "novel.epub": true, "keep.epub": false,
+		"app.log": false, "caches": false, "letter.pdf": false,
+	} {
+		if got := ig.MatchName(name); got != want {
+			t.Errorf("MatchName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

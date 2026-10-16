@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 
 	"github.com/suankan/pocket-advisor/internal/domain"
@@ -29,5 +30,22 @@ func TestArchiveDeclineNamesTheCause(t *testing.T) {
 	}
 	if got, ok := archiveDecline(errors.New("something else")); ok {
 		t.Errorf("an unclassified error was declined as %q", got)
+	}
+}
+
+// Members the workspace's ignore rules exclude by name are never admitted; the
+// rest keep their order, and no rules admit everything.
+func TestWithoutIgnoredDropsExcludedMembers(t *testing.T) {
+	children := []email.Child{{Filename: "letter.pdf"}, {Filename: "Book.FB2"}, {Filename: "notes.txt"}}
+	w := &EmailWorker{Log: slog.New(slog.DiscardHandler), Ignore: func(name string) bool { return name == "Book.FB2" }}
+	got := w.withoutIgnored("doc", children)
+	if len(got) != 2 || got[0].Filename != "letter.pdf" || got[1].Filename != "notes.txt" {
+		t.Fatalf("kept %+v", got)
+	}
+	if len(children) != 3 {
+		t.Fatal("the caller's members were changed")
+	}
+	if got := (&EmailWorker{}).withoutIgnored("doc", children); len(got) != 3 {
+		t.Fatalf("no rules kept %d of 3", len(got))
 	}
 }

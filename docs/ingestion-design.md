@@ -138,6 +138,7 @@ The email worker parses RFC 822 messages and supported archives in memory. It:
 - gives every member a valid UTF-8 name without NUL (below);
 - admits members in content-hash order, creating stubs and downstream job intents only for content it is first to admit (§3), all committed with the parent stage;
 - reads an archive's format from its bytes, never its name: ZIP and gzip by their signatures, anything else as a tar;
+- leaves out members the workspace's ignore rules exclude by name, recording nothing about them;
 - enforces nesting and expansion bounds for hostile containers; and
 - declines an archive it cannot unroll, logging the unrolling error, since the verified bytes fail the same way on every attempt.
 
@@ -240,7 +241,7 @@ Each finding carries a stable code, a severity of info, warning, error or critic
 
 A workspace-scoped advisory maintenance lock serializes ingestion, binding, recovery, forgetting, and destructive sweeps.
 
-`--reconcile-deletions` is the only sweep, and it runs as its own command, never inside ingestion. With no worker running, nothing can add a document or a containment edge while a plan is judged. It refreshes known source locations, prepares the containment backfill if necessary, inventories the hashes of current originals and of their expanded members, and removes documents unreachable from that inventory through all `document_placements` edges. Duplicate originals and shared or nested members survive while any configured route retains them. Processing status is not a retention mark: a failed or waiting job neither protects its document nor blocks the sweep, and an unreachable document's jobs go with it.
+`--reconcile-deletions` is the only sweep, and it runs as its own command, never inside ingestion. With no worker running, nothing can add a document or a containment edge while a plan is judged. It refreshes known source locations, prepares the containment backfill if necessary, inventories the hashes of current originals and of their expanded members, and removes documents unreachable from that inventory through all `document_placements` edges. Members the workspace's bare-name ignore rules exclude are not expanded or inventoried, and an edge into content seen only as such a member is not followed, so a staged message no longer holds an ignored attachment or anything inside it; the same bytes staged under a kept name are still held. Duplicate originals and shared or nested members survive while any configured route retains them. Processing status is not a retention mark: a failed or waiting job neither protects its document nor blocks the sweep, and an unreachable document's jobs go with it.
 
 The sweep requires a complete root traversal, a nonempty source set, and complete containment backfill. Missing or unreadable roots fail it. The preview may refresh derived state but never deletes documents or writes originals. Applying requires `--yes` and a typed confirmation of the displayed plan. There is no percentage limit: the operator's review of the plan is the check against a directory that failed to mount or a sync that has not finished, beyond the refusal of an empty source set.
 

@@ -19,7 +19,12 @@ var errReplayBudget = errors.New("replay byte budget exhausted")
 // staged is one traversal of the configured directories.
 type staged struct {
 	contents map[string]struct{}
-	files    int
+	// ignored is the content of members the ignore rules exclude by name. A
+	// recorded placement does not hold content seen only here: a container
+	// still staged keeps its other members, not the ones the workspace now
+	// leaves out. Content staged under another name stays in contents too.
+	ignored map[string]struct{}
+	files   int
 	// Unexpandable counts containers whose members could not be re-derived —
 	// a malformed multipart, an unknown charset, a corrupt archive, a replay
 	// budget exhausted by one pathological file.
@@ -37,17 +42,20 @@ type staged struct {
 }
 
 func stagedContents(roots []string, ignore func(string) bool) (staged, error) {
-	return stagedContentsContext(context.Background(), roots, ignore, nil)
+	return stagedContentsContext(context.Background(), roots, ignore, nil, nil)
 }
 
-func stagedContentsContext(ctx context.Context, roots []string, ignore func(string) bool, log *slog.Logger) (staged, error) {
+// stagedContentsContext walks the configured directories, expanding
+// containers into their members. ignoreMember, when set, excludes members by
+// their own name: their content is recorded as ignored and not expanded.
+func stagedContentsContext(ctx context.Context, roots []string, ignore, ignoreMember func(string) bool, log *slog.Logger) (staged, error) {
 	r, err := source.New(roots, ignore, nil)
 	if err != nil {
 		return staged{}, err
 	}
 	defer r.Close()
 
-	s := staged{contents: map[string]struct{}{}}
+	s := staged{contents: map[string]struct{}{}, ignored: map[string]struct{}{}}
 	var expand func([]byte, string, int, string, *int64) error
 	expand = func(data []byte, name string, depth int, origin string, budget *int64) error {
 		if err := ctx.Err(); err != nil {
@@ -80,6 +88,10 @@ func stagedContentsContext(ctx context.Context, roots []string, ignore func(stri
 			return nil
 		}
 		for _, c := range children {
+			if ignoreMember != nil && ignoreMember(c.Filename) {
+				s.ignored[domain.SHA256Hex(c.Data)] = struct{}{}
+				continue
+			}
 			if err := expand(c.Data, c.Filename, depth+1, origin, budget); err != nil {
 				return err
 			}

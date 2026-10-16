@@ -32,6 +32,9 @@ type EmailWorker struct {
 	// what a message is, rather than where a document came from.
 	Emails *postgres.EmailRepo
 	Bus    *postgres.Jobs
+	// Ignore reports whether a member is excluded by the workspace's ignore
+	// rules, by its own name. Nil admits every member.
+	Ignore func(name string) bool
 	Log    *slog.Logger
 }
 
@@ -128,6 +131,7 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 		}
 	}
 
+	children = w.withoutIgnored(meta.DocId, children)
 	for _, a := range admissionOrder(children) {
 		if err := w.dispatchChild(ctx, meta, a); err != nil {
 			// All child intents must commit before the parent can acknowledge.
@@ -139,6 +143,24 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 		"doc_id", meta.DocId, "children", len(children),
 		"trace_id", trace.TraceID(meta.Traceparent))
 	return nil
+}
+
+// withoutIgnored drops the members the workspace's ignore rules exclude by
+// name. They are not documents of this workspace, so nothing about them is
+// recorded: no stub, no replay selector, no containment.
+func (w *EmailWorker) withoutIgnored(docID string, children []email.Child) []email.Child {
+	if w.Ignore == nil {
+		return children
+	}
+	kept := children[:0:0]
+	for _, c := range children {
+		if w.Ignore(c.Filename) {
+			w.Log.Info("member ignored", "doc_id", docID, "member", c.Filename)
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept
 }
 
 // admission is a member about to be admitted, with its content hash.

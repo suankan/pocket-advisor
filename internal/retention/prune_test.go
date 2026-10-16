@@ -25,7 +25,7 @@ type fakePruneStore struct {
 func (f *fakePruneStore) PlacementsBackfilledAt(context.Context) (time.Time, error) {
 	return f.backfilledAt, nil
 }
-func (f *fakePruneStore) UnreachableDocuments(context.Context, []string) ([]postgres.PruneCandidate, error) {
+func (f *fakePruneStore) UnreachableDocuments(context.Context, []string, []string) ([]postgres.PruneCandidate, error) {
 	return f.unreachable, nil
 }
 func (f *fakePruneStore) CountDocuments(context.Context) (int, error) { return f.total, nil }

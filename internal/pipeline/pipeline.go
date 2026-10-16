@@ -85,7 +85,7 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 
 	email := &worker.EmailWorker{
 		Sources: a.Sources, Inventory: a.Inventory, Docs: a.Docs, Emails: a.Emails, Bus: a.Jobs,
-		Log: a.Logger(telemetry.RoleEmail),
+		Ignore: a.IgnoreMember, Log: a.Logger(telemetry.RoleEmail),
 	}
 	docs := &worker.DocumentWorker{
 		Sources: a.Sources, Docs: a.Docs, Bus: a.Jobs,

@@ -68,7 +68,7 @@ type PruneReport struct {
 // PruneStore is the database half of a sweep.
 type PruneStore interface {
 	PlacementsBackfilledAt(ctx context.Context) (time.Time, error)
-	UnreachableDocuments(ctx context.Context, stagedSHAs []string) ([]postgres.PruneCandidate, error)
+	UnreachableDocuments(ctx context.Context, stagedSHAs, ignoredSHAs []string) ([]postgres.PruneCandidate, error)
 	CountDocuments(ctx context.Context) (int, error)
 	DeleteDocuments(ctx context.Context, ids []string) (int64, error)
 }
@@ -91,6 +91,10 @@ type PruneOptions struct {
 	// added, or keep what was just excluded.
 	AbsPaths []string
 	Ignore   func(rel string) bool
+	// IgnoreMember excludes container members by their own name, as
+	// admission does, so a member the rules now leave out is no longer held
+	// by the container that carries it.
+	IgnoreMember func(name string) bool
 }
 
 // Plan reports what a sweep would remove, and writes nothing.
@@ -103,7 +107,7 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 		return nil, ErrPlacementsIncomplete
 	}
 
-	st, err := stagedContentsContext(ctx, o.AbsPaths, o.Ignore, p.log)
+	st, err := stagedContentsContext(ctx, o.AbsPaths, o.Ignore, o.IgnoreMember, p.log)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +125,14 @@ func (p *Pruner) Plan(ctx context.Context, o PruneOptions) (*PruneReport, error)
 		shas = append(shas, sha)
 	}
 
-	candidates, err := p.docs.UnreachableDocuments(ctx, shas)
+	ignored := make([]string, 0, len(st.ignored))
+	for sha := range st.ignored {
+		if _, kept := st.contents[sha]; !kept {
+			ignored = append(ignored, sha)
+		}
+	}
+
+	candidates, err := p.docs.UnreachableDocuments(ctx, shas, ignored)
 	if err != nil {
 		return nil, err
 	}

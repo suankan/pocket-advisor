@@ -62,8 +62,9 @@ func runReconcileDeletions(o *Options, cfg *config.Config, logs *telemetry.Logs)
 	pruner := retention.NewPruner(a.Docs, log)
 
 	report, err := pruner.Plan(ctx, retention.PruneOptions{
-		AbsPaths: ws.AbsPaths,
-		Ignore:   ws.Ignore.Match,
+		AbsPaths:     ws.AbsPaths,
+		Ignore:       ws.Ignore.Match,
+		IgnoreMember: ws.Ignore.MatchName,
 	})
 	if err != nil {
 		return err

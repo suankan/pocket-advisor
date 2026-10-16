@@ -24,9 +24,12 @@ type App struct {
 	Logs *telemetry.Logs
 	Log  *slog.Logger
 
-	Sources   *source.Resolver
-	Inventory *postgres.SourceRepo
-	Jobs      *postgres.Jobs
+	Sources *source.Resolver
+	// IgnoreMember reports whether a container member, by its own name, is
+	// excluded by the workspace's ignore rules.
+	IgnoreMember func(name string) bool
+	Inventory    *postgres.SourceRepo
+	Jobs         *postgres.Jobs
 
 	DB     *postgres.DB
 	Docs   *postgres.DocumentRepo
@@ -111,6 +114,7 @@ func New(ctx context.Context, cfg *config.Config, logs *telemetry.Logs, needs Ne
 			a.Close()
 			return nil, err
 		}
+		a.IgnoreMember = ws.Ignore.MatchName
 		a.stopFns = append(a.stopFns, a.Sources.Close)
 	}
 

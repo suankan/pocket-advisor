@@ -95,10 +95,28 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 		// midway through a long stage transaction on its row, and this serial
 		// scan must not queue behind it. Its stub committed with its job, and
 		// ResumeLegacy re-admits a reachable row that has lost one.
+		//
+		// The one exception is content indexed as plain text that the sniffer
+		// now reads as something with a handler of its own — an email whose
+		// header block outgrew an earlier, shorter look. Its raw source was
+		// indexed as prose, so it is rerouted, but never by waiting: a row a
+		// handler holds is left for the next scan.
 		if !created {
-			st, err := s.Docs.Status(ctx, id)
+			st, docType, err := s.Docs.KnownRoute(ctx, id)
 			if err != nil {
 				return err
+			}
+			if misread(docType, route) {
+				rerouted, err := s.Docs.Reroute(ctx, id, route.DocType, route.MimeType)
+				if err != nil || !rerouted {
+					return err
+				}
+				if s.Log != nil {
+					s.Log.Info("rerouted content once indexed as plain text", "doc_id", id, "file", f.DisplayPath, "doc_type", route.DocType)
+				}
+				tp := trace.NewTraceparent()
+				meta := &ingestionv1.DocumentMetadata{DocId: id, SourceFilename: f.Filename, MimeType: route.MimeType, RawSha256: f.SHA256, Traceparent: tp}
+				return s.dispatch(ctx, route, meta, source.Ref(id), data, tp)
 			}
 			if st == domain.StatusCompleted || st == domain.StatusSkipped || st == domain.StatusFailed {
 				return s.backfill(ctx, id, data, route, f.Filename, 0)
@@ -112,6 +130,12 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 		meta := &ingestionv1.DocumentMetadata{DocId: id, SourceFilename: f.Filename, MimeType: route.MimeType, RawSha256: f.SHA256, Traceparent: tp}
 		return s.dispatch(ctx, route, meta, source.Ref(id), data, tp)
 	})
+}
+
+// misread reports whether content stored as plain text now routes to a
+// handler of its own.
+func misread(storedType string, route Route) bool {
+	return storedType == "text" && !route.Declined && route.Subject != postgres.SubjectEmbed
 }
 
 // Backfill records replay recipes for already indexed containers without

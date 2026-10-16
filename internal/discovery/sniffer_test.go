@@ -38,6 +38,26 @@ func TestClassifyEmail(t *testing.T) {
 	}
 }
 
+// A client's own status lines and a delivered message's trace and signature
+// chains come before From and Subject, often past the first few kilobytes; a
+// message with no subject still has a date. Either is still an email. Header
+// lookalikes after the first blank line are body, not headers.
+func TestClassifyEmailReadsTheWholeHeaderBlock(t *testing.T) {
+	trace := "X-Mozilla-Status: 0001\r\n" + strings.Repeat("Received: by relay.example.com with SMTP id synthetic;\r\n", 120)
+	for name, eml := range map[string]string{
+		"long trace chain": trace + "From: a@example.com\r\nSubject: hello\r\n\r\nbody\r\n",
+		"no subject":       "Received: from mx.example.com\r\nFrom: a@example.com\r\nDate: Mon, 1 Jan 2018 10:00:00 +0000\r\n\r\nbody\r\n",
+	} {
+		if got := Classify([]byte(eml), "1.eml"); got.Subject != postgres.SubjectEmails {
+			t.Errorf("%s: routed to %q (mime %s)", name, got.Subject, got.MimeType)
+		}
+	}
+	notes := "Meeting notes\n\nFrom: a@example.com\nSubject: hello\nMessage-ID: <a@b>\n"
+	if got := Classify([]byte(notes), "notes.txt"); got.Subject == postgres.SubjectEmails {
+		t.Error("text quoting headers after its first line was read as an email")
+	}
+}
+
 func TestClassifyArchiveRoutesToEmailWorker(t *testing.T) {
 	// An archive is a container with no body text, and the email worker
 	// already owns in-RAM container unrolling (§5.2).

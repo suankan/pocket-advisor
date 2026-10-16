@@ -85,23 +85,38 @@ func isOOXML(mt *mimetype.MIME) bool {
 	return strings.Contains(s, "openxmlformats") || strings.Contains(s, "opendocument")
 }
 
+// maxHeaderBlock bounds how far looksLikeEmail reads for the end of a header
+// block. Delivered mail carries long trace and signature chains — Received,
+// DKIM, ARC — that routinely push Subject past the first few kilobytes.
+const maxHeaderBlock = 64 << 10
+
 // looksLikeEmail catches RFC822 messages that mimetype reports as text/plain,
-// which is common for .eml exported by mail clients.
+// which is common for .eml exported by mail clients. It reads the header block
+// — everything before the first blank line, at most maxHeaderBlock — and wants
+// a From field there, a Subject or Date field, since a message may have no
+// subject, and a Message-ID, Received or MIME-Version field, each at the
+// start of a line.
 func looksLikeEmail(data []byte) bool {
 	head := data
-	if len(head) > 4096 {
-		head = head[:4096]
+	if len(head) > maxHeaderBlock {
+		head = head[:maxHeaderBlock]
 	}
-	lower := bytes.ToLower(head)
-	required := [][]byte{[]byte("from:"), []byte("subject:")}
-	hits := 0
-	for _, r := range required {
-		if bytes.Contains(lower, r) {
-			hits++
+	fields := map[string]bool{}
+	for len(head) > 0 {
+		line := head
+		if i := bytes.IndexByte(head, '\n'); i >= 0 {
+			line, head = head[:i], head[i+1:]
+		} else {
+			head = nil
+		}
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if len(line) == 0 {
+			break // the blank line that ends the header block
+		}
+		if name, _, ok := bytes.Cut(line, []byte(":")); ok && len(name) > 0 && !bytes.ContainsAny(name, " \t") {
+			fields[strings.ToLower(string(name))] = true
 		}
 	}
-	return hits == len(required) &&
-		(bytes.Contains(lower, []byte("message-id:")) ||
-			bytes.Contains(lower, []byte("received:")) ||
-			bytes.Contains(lower, []byte("mime-version:")))
+	return fields["from"] && (fields["subject"] || fields["date"]) &&
+		(fields["message-id"] || fields["received"] || fields["mime-version"])
 }

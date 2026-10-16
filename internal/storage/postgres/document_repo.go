@@ -90,6 +90,78 @@ func (r *DocumentRepo) Status(ctx context.Context, docID string) (domain.Status,
 	return domain.Status(s), nil
 }
 
+// KnownRoute reads a known document's status and the type it was routed as.
+func (r *DocumentRepo) KnownRoute(ctx context.Context, docID string) (domain.Status, string, error) {
+	var s, docType string
+	err := r.db.executor(ctx).QueryRow(ctx,
+		`SELECT processing_status::text, COALESCE(doc_type, '') FROM documents WHERE doc_id = $1`, docID).Scan(&s, &docType)
+	return domain.Status(s), docType, err
+}
+
+// Reroute turns a document indexed as one type back into a pending document
+// of another, ready for that type's handler: its text, passages and jobs go,
+// its identity, locations and containment stay. It is how content the sniffer
+// once misread is corrected without changing what the document is.
+//
+// It never waits for or races a handler. A document row a handler holds is
+// skipped, as is one with a running job, and reports false: the next scan
+// tries again. The caller dispatches the new route's work in the same
+// transaction.
+func (r *DocumentRepo) Reroute(ctx context.Context, docID, docType, mimeType string) (bool, error) {
+	ex := r.db.executor(ctx)
+	var locked string
+	err := ex.QueryRow(ctx, `SELECT doc_id::text FROM documents WHERE doc_id = $1 FOR UPDATE SKIP LOCKED`, docID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reroute %s: %w", docID, err)
+	}
+	rows, err := ex.Query(ctx, `SELECT state FROM ingestion_jobs WHERE doc_id = $1 FOR UPDATE`, docID)
+	if err != nil {
+		return false, fmt.Errorf("reroute %s: %w", docID, err)
+	}
+	running := false
+	for rows.Next() {
+		var state string
+		if err := rows.Scan(&state); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("reroute %s: %w", docID, err)
+		}
+		running = running || state == "RUNNING"
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("reroute %s: %w", docID, err)
+	}
+	if running {
+		return false, nil
+	}
+	for _, step := range []struct {
+		sql  string
+		args []any
+	}{
+		{`DELETE FROM ingestion_jobs WHERE doc_id = $1`, []any{docID}},
+		// The statement sees document_chunks as it was, so the document's
+		// own placements are excluded by hand when asking who else holds a
+		// passage.
+		{`WITH released AS (DELETE FROM document_chunks WHERE doc_id = $1 RETURNING chunk_id)
+          DELETE FROM chunks c WHERE c.chunk_id IN (SELECT chunk_id FROM released)
+            AND NOT EXISTS (SELECT 1 FROM document_chunks p WHERE p.chunk_id = c.chunk_id AND p.doc_id <> $1)`, []any{docID}},
+		{`UPDATE documents
+          SET doc_type = $2, mime_type = $3, normalized_text = NULL,
+              extraction_hash = '', extraction_version = '',
+              processing_status = 'PENDING', metadata_headers = metadata_headers - 'reason',
+              updated_at = now()
+          WHERE doc_id = $1`, []any{docID, docType, mimeType}},
+	} {
+		if _, err := ex.Exec(ctx, step.sql, step.args...); err != nil {
+			return false, fmt.Errorf("reroute %s: %w", docID, err)
+		}
+	}
+	return true, nil
+}
+
 // UpdateStatus moves a document to a terminal or intermediate state. reason is
 // recorded in metadata_headers so SKIPPED and FAILED rows stay auditable.
 func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.Status, reason domain.FailureReason) error {

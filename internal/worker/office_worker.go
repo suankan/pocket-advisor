@@ -42,8 +42,6 @@ func (w *OfficeWorker) Handle(ctx context.Context, job postgres.Job) error {
 		return WithDoc(meta.DocId, err)
 	}
 
-	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
-
 	text, err := office.Extract(data, cmd.Subtype)
 	if err != nil {
 		return WithDoc(meta.DocId, Fatal(domain.ReasonExtractionFailed, err))
@@ -57,6 +55,13 @@ func (w *OfficeWorker) Handle(ctx context.Context, job postgres.Job) error {
 		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
 
+	// The document row is written only once extraction is done. A handler's
+	// transaction holds every row it writes until it commits, and anything
+	// else that writes this row would wait through the whole extraction for
+	// it; the write is invisible until commit either way.
+	if err := w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, ""); err != nil {
+		return WithDoc(meta.DocId, err)
+	}
 	if err := w.Docs.SaveText(ctx, meta.DocId, text, "office/"+cmd.Subtype); err != nil {
 		if errors.Is(err, postgres.ErrInvalidText) {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))

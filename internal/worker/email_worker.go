@@ -58,8 +58,6 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 		return WithDoc(meta.DocId, err) // transient: an offline source may return
 	}
 
-	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
-
 	var children []email.Child
 	var bodyText string
 	var headers domain.EmailHeaders
@@ -101,9 +99,24 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 		}
 	}
 
-	// Body text first: the embed command carries a reference, so the text has
-	// to be durable before the command goes out (§4.1).
+	// Members first, the message's own row last. A handler's transaction
+	// holds every row it writes until it commits, and anything else writing
+	// this row would wait through every member's admission for it; all of it
+	// commits together either way.
+	children = w.withoutIgnored(meta.DocId, children)
+	for _, a := range admissionOrder(children) {
+		if err := w.dispatchChild(ctx, meta, a); err != nil {
+			// All child intents must commit before the parent can acknowledge.
+			return WithDoc(meta.DocId, err)
+		}
+	}
+
+	// The embed command carries a reference, so the text has to be durable
+	// before the command goes out (§4.1); both commit together.
 	if bodyText != "" {
+		if err := w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, ""); err != nil {
+			return WithDoc(meta.DocId, err)
+		}
 		if err := w.Docs.SaveEmailText(ctx, meta.DocId, bodyText, headers); err != nil {
 			return WithDoc(meta.DocId, err)
 		}
@@ -127,14 +140,6 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 			}
 		}
 		if err := w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusCompleted, ""); err != nil {
-			return WithDoc(meta.DocId, err)
-		}
-	}
-
-	children = w.withoutIgnored(meta.DocId, children)
-	for _, a := range admissionOrder(children) {
-		if err := w.dispatchChild(ctx, meta, a); err != nil {
-			// All child intents must commit before the parent can acknowledge.
 			return WithDoc(meta.DocId, err)
 		}
 	}

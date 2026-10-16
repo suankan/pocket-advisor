@@ -53,7 +53,6 @@ func (w *DocumentWorker) HandlePDF(ctx context.Context, job postgres.Job) error 
 	if err != nil {
 		return err
 	}
-	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
 
 	doc, err := w.PDF.Open(ctx, data)
 	if err != nil {
@@ -258,7 +257,6 @@ func (w *DocumentWorker) HandleImage(ctx context.Context, job postgres.Job) erro
 	if err != nil {
 		return err
 	}
-	_ = w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, "")
 
 	text, err := w.OCR.Bytes(ctx, data)
 	if err != nil {
@@ -290,6 +288,13 @@ func (w *DocumentWorker) fetch(ctx context.Context, uri, docID string) ([]byte, 
 
 func (w *DocumentWorker) emit(ctx context.Context, meta *ingestionv1.DocumentMetadata, text, docType string, pages int) error {
 	text = withoutNUL(w.Log, text, meta.DocId)
+	// The document row is written only once extraction is done. A handler's
+	// transaction holds every row it writes until it commits, and anything
+	// else that writes this row would wait through the whole extraction for
+	// it; the write is invisible until commit either way.
+	if err := w.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusProcessing, ""); err != nil {
+		return WithDoc(meta.DocId, err)
+	}
 	if err := w.Docs.SaveText(ctx, meta.DocId, text, docType); err != nil {
 		if errors.Is(err, postgres.ErrInvalidText) {
 			return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, err))

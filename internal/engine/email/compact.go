@@ -16,9 +16,10 @@ import (
 	"golang.org/x/text/encoding/htmlindex"
 )
 
-// ErrUnknownCharset marks a body whose charset could not be determined with
-// confidence — not declared, or declared but unrecognized.
-var ErrUnknownCharset = errors.New("unknown charset")
+// errUnknownCharset marks a body whose charset could not be determined with
+// confidence — not declared, or declared but unrecognized. ParseEmail reads
+// such a body with its undecodable bytes replaced (readText).
+var errUnknownCharset = errors.New("unknown charset")
 
 func newBase64Reader(r io.Reader) io.Reader {
 	// Mail clients wrap base64 at 76 columns; the decoder rejects newlines, so
@@ -90,15 +91,15 @@ func decodeText(raw []byte, charset string) (string, error) {
 		if utf8.Valid(raw) {
 			return string(raw), nil
 		}
-		return "", fmt.Errorf("%w: charset %q but body is not valid UTF-8", ErrUnknownCharset, charset)
+		return "", fmt.Errorf("%w: charset %q but body is not valid UTF-8", errUnknownCharset, charset)
 	}
 	enc, err := htmlindex.Get(label)
 	if err != nil {
-		return "", fmt.Errorf("%w: unrecognized charset %q", ErrUnknownCharset, charset)
+		return "", fmt.Errorf("%w: unrecognized charset %q", errUnknownCharset, charset)
 	}
 	decoded, err := io.ReadAll(enc.NewDecoder().Reader(bytes.NewReader(raw)))
 	if err != nil {
-		return "", fmt.Errorf("%w: charset %q: %v", ErrUnknownCharset, charset, err)
+		return "", fmt.Errorf("%w: charset %q: %v", errUnknownCharset, charset, err)
 	}
 	return string(decoded), nil
 }

@@ -67,6 +67,25 @@ type Parsed struct {
 	// for undeclared 8-bit header values and attachment names in the same
 	// message.
 	charsetHint string
+	// unreadable lists the charsets declared by body parts that did not
+	// decode under them (readText).
+	unreadable []string
+}
+
+// readText decodes a text part under the charset it declares. A part whose
+// bytes do not match that charset, or that declares one nothing reads, is
+// read as UTF-8 with each byte sequence that is not replaced by U+FFFD, and
+// noted. Mailers routinely label Windows-1252 quotes and accents as ASCII or
+// UTF-8. The replacement marks exactly the bytes that could not be read,
+// where reading the part under a guessed charset would turn them into
+// plausible wrong letters, silently.
+func (p *Parsed) readText(raw []byte, charset string) string {
+	text, err := decodeText(raw, charset)
+	if err == nil {
+		return text
+	}
+	p.unreadable = append(p.unreadable, charset)
+	return strings.ToValidUTF8(string(raw), "\uFFFD")
 }
 
 // Child is a decoded member with a deterministic, versioned replay selector.
@@ -101,6 +120,9 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		return nil, err
 	}
 	warns := append(repairs, legacyHeaders(msg.Header, p.charsetHint)...)
+	for _, charset := range p.unreadable {
+		warns = append(warns, ParseWarning{Code: WarnUnreadableBody, Value: charset})
+	}
 	warns = append(warns, storableHeaders(msg.Header)...)
 	decoded := func(name string) string {
 		s, changed := storable(decodeHeader(msg.Header.Get(name)))
@@ -144,8 +166,8 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 		return fmt.Errorf("mime nesting exceeds depth %d", MaxDepth)
 	}
 
-	mediaType, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
+	mediaType, params, ok := parseMediaType(contentType)
+	if !ok {
 		mediaType = "text/plain"
 		params = map[string]string{}
 	}
@@ -205,18 +227,10 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 
 	switch {
 	case mediaType == "text/plain":
-		text, terr := decodeText(raw, params["charset"])
-		if terr != nil {
-			return terr
-		}
-		p.BodyText += "\n" + text
+		p.BodyText += "\n" + p.readText(raw, params["charset"])
 	case mediaType == "text/html":
 		if strings.TrimSpace(p.BodyText) == "" {
-			text, terr := decodeText(raw, params["charset"])
-			if terr != nil {
-				return terr
-			}
-			p.BodyText += "\n" + StripHTML(text)
+			p.BodyText += "\n" + StripHTML(p.readText(raw, params["charset"]))
 		}
 	default:
 		name := decodeHeader(params["name"])
@@ -240,7 +254,7 @@ func walkPart(encoding, contentType string, body io.Reader, p *Parsed, depth int
 // or "" if it is body structure.
 func attachmentName(disposition, contentType string) string {
 	if disposition != "" {
-		if disp, dp, err := mime.ParseMediaType(disposition); err == nil {
+		if disp, dp, ok := parseMediaType(disposition); ok {
 			if fn := dp["filename"]; fn != "" {
 				return decodeHeader(fn)
 			}
@@ -260,9 +274,38 @@ func attachmentName(disposition, contentType string) string {
 	return typeName(contentType)
 }
 
+// parseMediaType reads a Content-Type or Content-Disposition value. Mailers
+// write parameters the standard parser refuses — a name with spaces left
+// unquoted, as in "application/pdf; name=Meeting Minutes" — and refusing the
+// whole value would turn an attachment into body text. When only a parameter
+// is malformed, the media type stands and the parameters are read leniently:
+// each key=value up to the next semicolon, quotes trimmed, the first of a
+// repeated key kept. ok is false only when the media type itself is unreadable.
+func parseMediaType(v string) (string, map[string]string, bool) {
+	mediaType, params, err := mime.ParseMediaType(v)
+	switch {
+	case err == nil:
+		return mediaType, params, true
+	case errors.Is(err, mime.ErrInvalidMediaParameter):
+		params = map[string]string{}
+		for _, part := range strings.Split(v, ";")[1:] {
+			k, val, found := strings.Cut(part, "=")
+			k = strings.ToLower(strings.TrimSpace(k))
+			if !found || k == "" {
+				continue
+			}
+			if _, seen := params[k]; !seen {
+				params[k] = strings.Trim(strings.TrimSpace(val), `"`)
+			}
+		}
+		return mediaType, params, true
+	}
+	return "", nil, false
+}
+
 // typeName returns the name parameter of a Content-Type, decoded.
 func typeName(contentType string) string {
-	if _, cp, err := mime.ParseMediaType(contentType); err == nil {
+	if _, cp, ok := parseMediaType(contentType); ok {
 		if n := cp["name"]; n != "" {
 			return decodeHeader(n)
 		}

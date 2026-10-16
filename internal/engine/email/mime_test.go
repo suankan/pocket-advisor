@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"maps"
@@ -98,51 +99,66 @@ func TestParseEmailPreservesUndeclaredUTF8(t *testing.T) {
 	}
 }
 
-// TestParseEmailRejectsUndeclaredNonUTF8Charset is the core of this change:
-// a body with no charset param that isn't valid UTF-8 either is genuinely
-// ambiguous (it could be Windows-1252, Windows-1251, KOI8-R, ...). Guessing
-// wrong would silently corrupt the indexed text, so ParseEmail must fail
-// loudly instead — the caller routes this to the DLQ for manual review.
-func TestParseEmailRejectsUndeclaredNonUTF8Charset(t *testing.T) {
-	raw := "From: sender@example.com\r\n" +
-		"To: recipient@example.com\r\n" +
-		"Subject: No charset, not UTF-8\r\n" +
-		"Date: Sun, 19 Apr 2026 09:52:00 +1000\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/plain\r\n" +
-		"\r\n" +
-		"That\x92s all for now.\r\n"
-
-	_, err := ParseEmail([]byte(raw))
-	if !errors.Is(err, ErrUnknownCharset) {
-		t.Fatalf("expected ErrUnknownCharset, got: %v", err)
+// A body whose bytes do not match the charset it declares, or that declares
+// one nothing reads, is never read under a guessed charset: a wrong guess
+// yields plausible wrong letters. It is read as UTF-8 with each byte that does
+// not decode replaced by U+FFFD, the rest intact, and the message notes it.
+func TestParseEmailReplacesWhatTheDeclaredCharsetCannotRead(t *testing.T) {
+	for declared, contentType := range map[string]string{
+		"":                  "text/plain",
+		"us-ascii":          "text/plain; charset=us-ascii",
+		"utf-8":             "text/plain; charset=utf-8",
+		"x-made-up-charset": `text/plain; charset="x-made-up-charset"`,
+	} {
+		raw := "From: sender@example.com\r\n" +
+			"To: recipient@example.com\r\n" +
+			"Subject: Mislabeled body\r\n" +
+			"Date: Sun, 19 Apr 2026 09:52:00 +1000\r\n" +
+			"MIME-Version: 1.0\r\n" +
+			"Content-Type: " + contentType + "\r\n" +
+			"\r\n" +
+			"That\x92s all from the Caf\xe9 for now.\r\n"
+		p, err := ParseEmail([]byte(raw))
+		if err != nil {
+			t.Fatalf("charset %q: %v", declared, err)
+		}
+		if !strings.Contains(p.BodyText, "That\uFFFDs all from the Caf\uFFFD for now.") {
+			t.Errorf("charset %q: body %q", declared, p.BodyText)
+		}
+		var noted []string
+		for _, w := range p.Headers.Warnings {
+			if w.Code == WarnUnreadableBody {
+				noted = append(noted, w.Value)
+			}
+		}
+		if len(noted) != 1 || noted[0] != strings.Trim(strings.TrimPrefix(strings.TrimPrefix(contentType, "text/plain"), "; charset="), `"`) {
+			t.Errorf("charset %q: unreadable_body warnings %q", declared, noted)
+		}
 	}
 }
 
-// TestParseEmailRejectsUnrecognizedCharsetLabel covers a declared but
-// unrecognized charset label — equally ambiguous, so it gets the same
-// treatment as no declaration at all.
-func TestParseEmailRejectsUnrecognizedCharsetLabel(t *testing.T) {
-	raw := "From: sender@example.com\r\n" +
-		"To: recipient@example.com\r\n" +
-		"Subject: Bogus charset label\r\n" +
-		"Date: Sun, 19 Apr 2026 09:52:00 +1000\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/plain; charset=\"x-made-up-charset\"\r\n" +
-		"\r\n" +
-		"That\x92s all for now.\r\n"
-
-	_, err := ParseEmail([]byte(raw))
-	if !errors.Is(err, ErrUnknownCharset) {
-		t.Fatalf("expected ErrUnknownCharset, got: %v", err)
+// A body its declared charset reads carries no such note.
+func TestParseEmailNotesNothingForAReadableBody(t *testing.T) {
+	raw := "From: sender@example.com\r\nSubject: Fine\r\nContent-Type: text/plain; charset=windows-1252\r\n\r\nThat\x92s fine.\r\n"
+	p, err := ParseEmail([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range p.Headers.Warnings {
+		if w.Code == WarnUnreadableBody {
+			t.Errorf("a readable body was noted: %+v", w)
+		}
+	}
+	if !strings.Contains(p.BodyText, "That\u2019s fine.") {
+		t.Errorf("body %q", p.BodyText)
 	}
 }
 
 func TestDecodeTextRejectsUndeclaredNonUTF8(t *testing.T) {
 	raw := []byte("\x93quoted\x94 \x96 dash")
 	_, err := decodeText(raw, "")
-	if !errors.Is(err, ErrUnknownCharset) {
-		t.Fatalf("expected ErrUnknownCharset, got: %v", err)
+	if !errors.Is(err, errUnknownCharset) {
+		t.Fatalf("expected errUnknownCharset, got: %v", err)
 	}
 }
 
@@ -156,7 +172,7 @@ func TestDecodeTextReadsCharsetAliases(t *testing.T) {
 		}
 	}
 	for _, charset := range []string{"ISO646-US", "ANSI_X3.4-1968"} {
-		if _, err := decodeText([]byte("\x93quoted\x94"), charset); !errors.Is(err, ErrUnknownCharset) {
+		if _, err := decodeText([]byte("\x93quoted\x94"), charset); !errors.Is(err, errUnknownCharset) {
 			t.Errorf("charset %s read 8-bit bytes: %v", charset, err)
 		}
 	}
@@ -313,4 +329,40 @@ func zipOf(t *testing.T, name string, data []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// An attachment whose name was left unquoted, spaces and all, is still an
+// attachment of its declared type, never body text.
+func TestParseEmailKeepsAnAttachmentWithAnUnquotedName(t *testing.T) {
+	pdf := "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< >>\nendobj\n"
+	raw := "From: sender@example.com\r\n" +
+		"Subject: Minutes\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=\"b\"\r\n" +
+		"\r\n" +
+		"--b\r\n" +
+		"Content-Type: text/plain; charset=\"UTF-8\"\r\n" +
+		"\r\n" +
+		"Minutes attached.\r\n" +
+		"--b\r\n" +
+		"Content-Type: application/pdf; name=Meeting Minutes August\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"\r\n" +
+		base64.StdEncoding.EncodeToString([]byte(pdf)) + "\r\n" +
+		"--b--\r\n"
+	p, err := ParseEmail([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(p.BodyText, "PDF") || !strings.Contains(p.BodyText, "Minutes attached.") {
+		t.Errorf("body %q", p.BodyText)
+	}
+	if len(p.Children) != 1 || p.Children[0].Filename != "Meeting Minutes August" || string(p.Children[0].Data) != pdf {
+		t.Fatalf("children %+v", p.Children)
+	}
+	for _, w := range p.Headers.Warnings {
+		if w.Code == WarnUnreadableBody {
+			t.Errorf("the attachment was read as body: %+v", w)
+		}
+	}
 }

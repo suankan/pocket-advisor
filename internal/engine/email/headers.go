@@ -40,6 +40,11 @@ const (
 	// removed or replaced with U+FFFD. Header names the header, and is empty
 	// for the body.
 	WarnUnstorableText WarningCode = "unstorable_text"
+	// WarnUnreadableBody marks a body part whose bytes do not match the
+	// charset it declares, or that declares one nothing reads. It was read as
+	// UTF-8, with every byte sequence that is not replaced by U+FFFD. Value
+	// carries the declared charset, empty when none was declared.
+	WarnUnreadableBody WarningCode = "unreadable_body"
 )
 
 // ParseWarning is one defect found in one header. Value carries the offending

@@ -76,9 +76,6 @@ func (w *EmailWorker) Handle(ctx context.Context, job postgres.Job) error {
 	} else {
 		p, perr := email.ParseEmail(data)
 		if perr != nil {
-			if errors.Is(perr, email.ErrUnknownCharset) {
-				return WithDoc(meta.DocId, Fatal(domain.ReasonUnknownEncoding, perr))
-			}
 			return WithDoc(meta.DocId, Fatal(domain.ReasonEmailParseFailed, perr))
 		}
 		parsed = p

@@ -255,6 +255,20 @@ func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
 	known("bundle.zip", buf.Bytes(), "archive", domain.StatusCompleted, "")
 	member := known("app.log", memberLog, "text", domain.StatusCompleted, "")
 
+	// A container already refused that holds a member again, as a placement
+	// seeded back from a parent link would, is refused once more.
+	var pass bytes.Buffer
+	pw := zip.NewWriter(&pass)
+	f, _ := pw.Create("pass.json")
+	_, _ = f.Write([]byte(`{"synthetic": true}`))
+	_ = pw.Close()
+	write("ticket.pkpass", pass.Bytes())
+	refused := known("ticket.pkpass", pass.Bytes(), "", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
+	part := known("pass.json", []byte(`{"synthetic": true}`), "text", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
+	if err := s.Docs.RecordPlacement(ctx, refused, part); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := s.Scan(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +292,10 @@ func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
 		if domain.Status(status) != want.status || reason != want.reason || text != want.text {
 			t.Errorf("%s: %s/%q text %v, want %s/%q text %v", id, status, reason, text, want.status, want.reason, want.text)
 		}
+	}
+	var held int
+	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM document_placements WHERE container_doc_id = $1`, refused).Scan(&held); err != nil || held != 0 {
+		t.Errorf("a refused container still holds %d documents, %v", held, err)
 	}
 	var embeds int
 	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ingestion_jobs WHERE doc_id = $1 AND state = 'READY'`, skipped).Scan(&embeds); err != nil || embeds != 1 {

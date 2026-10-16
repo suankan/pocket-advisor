@@ -205,8 +205,15 @@ CREATE INDEX IF NOT EXISTS document_placements_contained_idx
 -- it seeds the table. This is a floor, not the truth: it reproduces exactly
 -- the single-parent under-counting described above, which is why pruning
 -- additionally requires the backfill below to have re-derived the rest.
+--
+-- It seeds an empty table only, the upgrade it exists for. Every admission
+-- since records its own placement, and an edge removed on purpose — a
+-- container refused as a format no handler reads releases what it held —
+-- keeps the parent link it no longer means, so seeding on every start would
+-- restore it.
 INSERT INTO document_placements (container_doc_id, contained_doc_id)
-SELECT parent_doc_id, doc_id FROM documents WHERE parent_doc_id IS NOT NULL
+SELECT parent_doc_id, doc_id FROM documents
+WHERE parent_doc_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM document_placements)
 ON CONFLICT DO NOTHING;
 
 -- Deleting a container must not delete what it contains — that is the whole

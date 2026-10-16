@@ -256,3 +256,50 @@ func TestRecordPlacementIsIdempotent(t *testing.T) {
 		t.Errorf("%d placement rows after three identical records, want 1", n)
 	}
 }
+
+// Parent links seed an empty placements table, the upgrade the seed exists
+// for, and never again: a placement removed on purpose, as refusing a
+// container removes what it held, stays removed when the schema is applied at
+// the next start, although the member still names the container as its parent.
+func TestPlacementSeedFillsOnlyAnEmptyTable(t *testing.T) {
+	db, _ := scratch(t, "placement_seed")
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.ApplySchema(ctx, stageBMeta()); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	repo := &DocumentRepo{db: db}
+	parent := stageDoc(t, repo, "pppp", "archive", "docs/a.zip")
+	child := stageDoc(t, repo, "cccc", "text", "")
+	if _, err := db.Pool.Exec(ctx, `UPDATE documents SET parent_doc_id = $1 WHERE doc_id = $2`, parent, child); err != nil {
+		t.Fatal(err)
+	}
+	placed := func() int {
+		t.Helper()
+		var n int
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM document_placements WHERE container_doc_id = $1`, parent).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if err := db.ApplyPlacementSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if placed() != 1 {
+		t.Fatal("an empty table was not seeded from parent links")
+	}
+	other := stageDoc(t, repo, "oooo", "email", "mail/o.eml")
+	if err := repo.RecordPlacement(ctx, other, child); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM document_placements WHERE container_doc_id = $1`, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ApplyPlacementSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := placed(); n != 0 {
+		t.Errorf("a removed placement came back from its parent link (%d rows)", n)
+	}
+}

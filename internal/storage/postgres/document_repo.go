@@ -101,6 +101,8 @@ type Known struct {
 	// Jobless is true when the document has no job: one declined at routing
 	// never had one, while a handler's decline completes the job it ran.
 	Jobless bool
+	// Holds is true when the document holds others as a container.
+	Holds bool
 }
 
 // Known reads what the store recorded about a known document's route.
@@ -109,8 +111,9 @@ func (r *DocumentRepo) Known(ctx context.Context, docID string) (Known, error) {
 	var status, reason string
 	err := r.db.executor(ctx).QueryRow(ctx,
 		`SELECT processing_status::text, COALESCE(metadata_headers->>'reason', ''), COALESCE(doc_type, ''), source_filename,
-                NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id)
-         FROM documents WHERE doc_id = $1`, docID).Scan(&status, &reason, &k.DocType, &k.Name, &k.Jobless)
+                NOT EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.doc_id = documents.doc_id),
+                EXISTS (SELECT 1 FROM document_placements p WHERE p.container_doc_id = documents.doc_id)
+         FROM documents WHERE doc_id = $1`, docID).Scan(&status, &reason, &k.DocType, &k.Name, &k.Jobless, &k.Holds)
 	k.Status, k.Reason = domain.Status(status), domain.FailureReason(reason)
 	return k, err
 }

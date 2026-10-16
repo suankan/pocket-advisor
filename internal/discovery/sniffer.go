@@ -22,53 +22,86 @@ type Route struct {
 //
 // Extensions in an email corpus lie routinely: .pdf attachments that are
 // actually .docx, extensionless ATT00001 parts. Discovery deliberately does
-// not sniff, so this is the single place format knowledge lives (§5.1, §5.2).
+// not sniff, so this is the single place format knowledge lives (§5.1, §5.2):
+// the first entry of formats that claims the detected type decides, and
+// content no entry claims is declined.
 func Classify(data []byte, filename string) Route {
 	mt := mimetype.Detect(data)
-	mime := mt.String()
+	for _, f := range formats {
+		if !f.claims(mt, data) {
+			continue
+		}
+		route := f.route
+		if route.MimeType == "" {
+			route.MimeType = mt.String()
+		}
+		return route
+	}
+	return Route{MimeType: mt.String(), Declined: true}
+}
 
-	switch {
-	case is(mt, "application/pdf"):
-		return Route{Subject: postgres.SubjectPDFs, MimeType: mime, DocType: "pdf"}
+// format is one handler's claim on content: the detected types it reads, and
+// the route they take to it.
+type format struct {
+	// types are detected MIME types, each matching its descendants too, as
+	// text/csv descends from text/plain.
+	types []string
+	// match, when set, claims content types cannot describe.
+	match func(mt *mimetype.MIME, data []byte) bool
+	// route is where claimed content goes; an empty MimeType is filled with
+	// the detected one.
+	route Route
+}
 
-	case is(mt, "message/rfc822"), looksLikeEmail(data):
-		return Route{Subject: postgres.SubjectEmails, MimeType: "message/rfc822", DocType: "email"}
+func (f format) claims(mt *mimetype.MIME, data []byte) bool {
+	for _, t := range f.types {
+		if is(mt, t) {
+			return true
+		}
+	}
+	return f.match != nil && f.match(mt, data)
+}
+
+// formats is every format a handler reads, in the order they are tried: an
+// email that the detector reads as text must be claimed before text is, and a
+// zip-based Office document before the archives.
+var formats = []format{
+	{types: []string{"application/pdf"},
+		route: Route{Subject: postgres.SubjectPDFs, DocType: "pdf"}},
+
+	{types: []string{"message/rfc822"}, match: func(_ *mimetype.MIME, data []byte) bool { return looksLikeEmail(data) },
+		route: Route{Subject: postgres.SubjectEmails, MimeType: "message/rfc822", DocType: "email"}},
 
 	// Archives go to the email worker: an archive is a container with no body
 	// text, and that worker already owns in-RAM container unrolling.
-	case is(mt, "application/zip") && !isOOXML(mt):
-		return Route{Subject: postgres.SubjectEmails, MimeType: mime, DocType: "archive"}
-	case is(mt, "application/x-tar"), is(mt, "application/gzip"),
-		is(mt, "application/x-7z-compressed"), is(mt, "application/x-bzip2"):
-		return Route{Subject: postgres.SubjectEmails, MimeType: mime, DocType: "archive"}
+	{match: func(mt *mimetype.MIME, _ []byte) bool { return is(mt, "application/zip") && !isOOXML(mt) },
+		route: Route{Subject: postgres.SubjectEmails, DocType: "archive"}},
+	{types: []string{"application/x-tar", "application/gzip", "application/x-7z-compressed", "application/x-bzip2"},
+		route: Route{Subject: postgres.SubjectEmails, DocType: "archive"}},
 
-	case is(mt, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"):
-		return Route{Subject: postgres.SubjectDocx, MimeType: mime, DocType: "office", Subtype: "docx"}
-	case is(mt, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
-		return Route{Subject: postgres.SubjectDocx, MimeType: mime, DocType: "office", Subtype: "xlsx"}
-	case is(mt, "application/vnd.openxmlformats-officedocument.presentationml.presentation"):
-		return Route{Subject: postgres.SubjectDocx, MimeType: mime, DocType: "office", Subtype: "pptx"}
-	case is(mt, "application/vnd.oasis.opendocument.text"):
-		return Route{Subject: postgres.SubjectDocx, MimeType: mime, DocType: "office", Subtype: "odt"}
-	case is(mt, "text/rtf"), is(mt, "application/rtf"):
-		return Route{Subject: postgres.SubjectDocx, MimeType: mime, DocType: "office", Subtype: "rtf"}
+	{types: []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+		route: Route{Subject: postgres.SubjectDocx, DocType: "office", Subtype: "docx"}},
+	{types: []string{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+		route: Route{Subject: postgres.SubjectDocx, DocType: "office", Subtype: "xlsx"}},
+	{types: []string{"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+		route: Route{Subject: postgres.SubjectDocx, DocType: "office", Subtype: "pptx"}},
+	{types: []string{"application/vnd.oasis.opendocument.text"},
+		route: Route{Subject: postgres.SubjectDocx, DocType: "office", Subtype: "odt"}},
+	{types: []string{"text/rtf", "application/rtf"},
+		route: Route{Subject: postgres.SubjectDocx, DocType: "office", Subtype: "rtf"}},
 
-	case strings.HasPrefix(mime, "image/"):
-		return Route{Subject: postgres.SubjectImages, MimeType: mime, DocType: "image"}
+	{match: func(mt *mimetype.MIME, _ []byte) bool { return strings.HasPrefix(mt.String(), "image/") },
+		route: Route{Subject: postgres.SubjectImages, DocType: "image"}},
 
-	case is(mt, "text/plain"), is(mt, "text/markdown"), is(mt, "text/csv"), is(mt, "text/html"):
-		return Route{Subject: postgres.SubjectEmbed, MimeType: mime, DocType: "text"}
-	}
+	{types: []string{"text/plain", "text/markdown", "text/csv", "text/html"},
+		route: Route{Subject: postgres.SubjectEmbed, DocType: "text"}},
 
 	// Legacy binary Office (CFBF) covers .doc/.xls/.ppt AND .msg. There is no
 	// credible pure-Go parser and the alternatives are a CGo LibreOffice
 	// dependency or a subprocess, the latter prohibited by Core Pillar 1
-	// (§5.5). Declined, not failed.
-	if is(mt, "application/x-ole-storage") || is(mt, "application/vnd.ms-outlook") {
-		return Route{MimeType: mime, DocType: "legacy-office", Declined: true}
-	}
-
-	return Route{MimeType: mime, Declined: true}
+	// (§5.5). Declined, not failed, under a type of its own.
+	{types: []string{"application/x-ole-storage", "application/vnd.ms-outlook"},
+		route: Route{DocType: "legacy-office", Declined: true}},
 }
 
 func is(mt *mimetype.MIME, want string) bool {

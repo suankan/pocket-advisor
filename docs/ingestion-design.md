@@ -112,7 +112,7 @@ Ingestion is additive: it admits and processes, and never deletes. `--ingest-all
 
 ## 4. Routing and extraction
 
-Discovery classifies bytes rather than trusting extensions. An RFC 822 message that the type detector reads as plain text, as mail clients' exported `.eml` files often are, is still recognised from its header block — everything before the first blank line, read up to 64 KiB, since delivered mail's trace and signature chains push its fields past the first few kilobytes: it needs a From field, a Subject or Date field, and a Message-ID, Received or MIME-Version field, each at the start of a line.
+Discovery classifies bytes rather than trusting extensions. The routes below are one declared table of the formats each handler reads, tried in order: the first entry that claims the detected type, or one of its ancestors, decides, so content no handler reads is declined rather than sent anywhere. An RFC 822 message that the type detector reads as plain text, as mail clients' exported `.eml` files often are, is still recognised from its header block — everything before the first blank line, read up to 64 KiB, since delivered mail's trace and signature chains push its fields past the first few kilobytes: it needs a From field, a Subject or Date field, and a Message-ID, Received or MIME-Version field, each at the start of a line.
 
 | Detected content | Subject | Handler |
 | --- | --- | --- |

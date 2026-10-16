@@ -31,9 +31,19 @@ func (r *SourceRepo) Observe(ctx context.Context, scan, docID string, f source.F
 		f.RootKey, f.RelativePath, f.DisplayPath, docID, f.Size, f.ModifiedAt, scan)
 	return err
 }
+
+// FinishScan proves the absence of every original the complete scan did not
+// observe, marks the scan complete, and refreshes the display fields derived
+// from current occurrences.
+//
+// The refresh writes only the documents whose fields change, and skips any
+// row a handler holds: handlers keep their document's row locked through
+// extraction and model work, and an update over every row would wait on the
+// slowest of them while holding every row it had already locked, stalling
+// all the others behind it. A skipped document is refreshed by the next scan.
 func (r *SourceRepo) FinishScan(ctx context.Context, scan string) error {
 	return r.db.Transaction(ctx, func(ctx context.Context) error {
-		_, err := r.db.executor(ctx).Exec(ctx, `UPDATE source_occurrences SET available=false WHERE scan_id<>$1`, scan)
+		_, err := r.db.executor(ctx).Exec(ctx, `UPDATE source_occurrences SET available=false WHERE scan_id<>$1 AND available`, scan)
 		if err != nil {
 			return err
 		}
@@ -41,11 +51,18 @@ func (r *SourceRepo) FinishScan(ctx context.Context, scan string) error {
 		if err != nil {
 			return err
 		}
-		// Compatibility display fields are derived from all current occurrences.
-		_, err = r.db.executor(ctx).Exec(ctx, `UPDATE documents d SET source_ref='source:'||d.doc_id::text,
-   metadata_headers=(d.metadata_headers-'source_path') || CASE WHEN s.path IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('source_path',s.path) END
-   FROM (SELECT d2.doc_id,min(o.display_path) AS path FROM documents d2 LEFT JOIN source_occurrences o ON o.doc_id=d2.doc_id AND o.available GROUP BY d2.doc_id) s
-   WHERE d.doc_id=s.doc_id`)
+		_, err = r.db.executor(ctx).Exec(ctx, `WITH s AS (
+   SELECT d2.doc_id, min(o.display_path) AS path
+   FROM documents d2 LEFT JOIN source_occurrences o ON o.doc_id=d2.doc_id AND o.available
+   GROUP BY d2.doc_id),
+ stale AS (
+   SELECT d.doc_id, s.path FROM documents d JOIN s USING (doc_id)
+   WHERE d.source_ref IS DISTINCT FROM 'source:'||d.doc_id::text
+      OR d.metadata_headers->>'source_path' IS DISTINCT FROM s.path
+   FOR UPDATE OF d SKIP LOCKED)
+ UPDATE documents d SET source_ref='source:'||d.doc_id::text,
+   metadata_headers=(d.metadata_headers-'source_path') || CASE WHEN stale.path IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('source_path',stale.path) END
+ FROM stale WHERE d.doc_id=stale.doc_id`)
 		return err
 	})
 }

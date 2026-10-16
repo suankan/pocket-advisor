@@ -100,3 +100,67 @@ func TestSourceWipeRemovesInventoryAndJobs(t *testing.T) {
 		}
 	}
 }
+
+// Finishing a scan never waits on a document a handler holds: it refreshes
+// the others' display fields, leaves the held one for the next scan, and
+// rewrites no row whose fields are already current.
+func TestFinishScanSkipsDocumentsAHandlerHolds(t *testing.T) {
+	db, docs, _, id, _ := setupSourceJob(t)
+	ctx := context.Background()
+	held := stageDoc(t, docs, "held", "text", "")
+	inventory := NewSourceRepo(db)
+	scan, err := inventory.BeginScan(ctx, []string{"opaque-binding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for doc, path := range map[string]string{id: "file.pdf", held: "held.txt"} {
+		if err := inventory.Observe(ctx, scan, doc, source.File{RootKey: "opaque-binding", RelativePath: path, DisplayPath: path, ModifiedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Rollback(ctx)
+	if _, err := handler.Exec(ctx, `SELECT 1 FROM documents WHERE doc_id = $1 FOR UPDATE`, held); err != nil {
+		t.Fatal(err)
+	}
+	finish, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := inventory.FinishScan(finish, scan); err != nil {
+		t.Fatalf("finishing waited on a held document: %v", err)
+	}
+	path := func(doc string) string {
+		t.Helper()
+		var p string
+		if err := db.Pool.QueryRow(ctx, `SELECT COALESCE(metadata_headers->>'source_path', '') FROM documents WHERE doc_id = $1`, doc).Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if path(id) != "file.pdf" || path(held) != "" {
+		t.Fatalf("after a held finish: %q, %q", path(id), path(held))
+	}
+	if err := handler.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	version := func(doc string) string {
+		t.Helper()
+		var v string
+		if err := db.Pool.QueryRow(ctx, `SELECT xmin::text FROM documents WHERE doc_id = $1`, doc).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	current := version(id)
+	if err := inventory.FinishScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if path(held) != "held.txt" {
+		t.Fatalf("the next finish left %q", path(held))
+	}
+	if version(id) != current {
+		t.Error("a document whose fields were current was rewritten")
+	}
+}

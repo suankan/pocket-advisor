@@ -62,6 +62,8 @@ type Checks struct {
 	// only the owner can resolve, those behind a password.
 	FailedDocs map[string]NamedDocs
 	LockedDocs map[string]NamedDocs
+	// Unsupported groups the SKIPPED rows no handler reads by type.
+	Unsupported []TypeGroup
 
 	// Job queue. QueueSchemaChecked is false when PostgreSQL could not be
 	// probed; QueueSchemaReady is false on the pre-upgrade layout, whose job
@@ -229,14 +231,21 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	for reason, count := range d.checks.SkippedByReason {
 		action := "expected decline — no action needed unless these should be processed"
 		named, locked := d.checks.LockedDocs[reason]
-		if locked {
+		unsupported := reason == string(domain.ReasonUnsupportedFormat) && len(d.checks.Unsupported) > 0
+		switch {
+		case locked:
 			action = "password-protected — only you can unlock them: save an unlocked copy under a configured root"
+		case unsupported:
+			action = "no handler reads these formats yet — add support for a type you need, or an ignore rule for one you do not want"
 		}
 		code := "SKIPPED_REASON_" + strings.ToUpper(reason)
 		addFinding(&findings, code, SeverityInfo, count,
 			fmt.Sprintf("SKIPPED documents with reason %s", reason), action)
 		if locked {
 			nameDocuments(findings, code, named)
+		}
+		if n := len(findings); unsupported && n > 0 && findings[n-1].Code == code {
+			findings[n-1].Types = d.checks.Unsupported
 		}
 	}
 

@@ -58,3 +58,31 @@ func TestPrintRunSummary(t *testing.T) {
 		t.Errorf("a quiet run:\n%s", out)
 	}
 }
+
+// Unsupported files are listed by type, largest first, with one example each
+// and the rest of the list capped.
+func TestPrintRunSummaryListsUnsupportedTypes(t *testing.T) {
+	groups := []postgres.TypeGroup{
+		{MimeType: "application/x-ole-storage", Extension: ".doc", Count: 4, Locations: []string{"docs/old.doc"}},
+		{MimeType: "application/octet-stream", Count: 2, Locations: []string{"ATT00001 in mail/c.eml"}},
+	}
+	for i := 0; i < maxTypes; i++ {
+		groups = append(groups, postgres.TypeGroup{MimeType: "audio/mpeg", Extension: ".mp3", Count: 1})
+	}
+	var b bytes.Buffer
+	printRunSummary(&b, "synthetic", time.Second, postgres.RunSummary{Files: 1, Unsupported: groups})
+	out := b.String()
+	for _, want := range []string{
+		"unsupported 21 files skipped, by type, across all runs",
+		"4  application/x-ole-storage (.doc)",
+		"e.g. docs/old.doc",
+		"2  application/octet-stream (no extension)",
+		"e.g. ATT00001 in mail/c.eml",
+		"... and 2 more types",
+		"--doctor --json lists every unsupported file",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

@@ -28,6 +28,18 @@ type Finding struct {
 	// Documents names the documents behind the finding by location, the most
 	// recently updated first. It may name fewer than Count.
 	Documents []string `json:"documents,omitempty"`
+	// Types breaks the finding down by detected type and file extension, the
+	// largest group first.
+	Types []TypeGroup `json:"types,omitempty"`
+}
+
+// TypeGroup is the documents of one detected type and file extension, named
+// as Documents are.
+type TypeGroup struct {
+	MimeType  string   `json:"mime_type"`
+	Extension string   `json:"extension"`
+	Count     int      `json:"count"`
+	Documents []string `json:"documents,omitempty"`
 }
 
 // Report is the complete output of a doctor run.

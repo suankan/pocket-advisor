@@ -102,7 +102,26 @@ func printReport(r *doctor.Report) {
 		if more := f.Count - len(f.Documents); len(f.Documents) > 0 && more > 0 {
 			fmt.Printf("      ... and %d more (--json lists all)\n", more)
 		}
+		printTypes(f.Types)
 		fmt.Printf("    → %s\n\n", f.NextAction)
+	}
+}
+
+// printTypes breaks a finding down by type, naming a few documents of each.
+func printTypes(groups []doctor.TypeGroup) {
+	truncated := false
+	for _, g := range groups {
+		fmt.Printf("      %6d  %s\n", g.Count, typeLabel(g.MimeType, g.Extension))
+		for _, doc := range g.Documents {
+			fmt.Printf("              %s\n", doc)
+		}
+		if more := g.Count - len(g.Documents); len(g.Documents) > 0 && more > 0 {
+			fmt.Printf("              ... and %d more\n", more)
+			truncated = true
+		}
+	}
+	if truncated {
+		fmt.Printf("      (--json lists every document)\n")
 	}
 }
 
@@ -197,6 +216,10 @@ func fillSchemaChecks(ctx context.Context, db *postgres.DB, cfg *config.Config, 
 // --json names all of them.
 const doctorNamed = 10
 
+// doctorTypeExamples is how many documents of each unsupported type the text
+// report names; there are many types, and --json lists every document.
+const doctorTypeExamples = 3
+
 // fillDocumentChecks queries document state counts, and names up to named
 // documents per failure reason and password-protected reason, or all of them
 // when named is 0.
@@ -230,6 +253,19 @@ func fillDocumentChecks(ctx context.Context, db *postgres.DB, checks *doctor.Che
 		log.Warn("skipped by reason failed", "error", err)
 	} else {
 		checks.SkippedByReason = sr
+	}
+
+	examples := doctorTypeExamples
+	if named == 0 {
+		examples = 0 // all of them
+	}
+	if groups, err := q.UnsupportedByType(ctx, examples); err != nil {
+		log.Warn("grouping unsupported documents failed", "error", err)
+	} else {
+		for _, g := range groups {
+			checks.Unsupported = append(checks.Unsupported, doctor.TypeGroup{
+				MimeType: g.MimeType, Extension: g.Extension, Count: g.Count, Documents: g.Locations})
+		}
 	}
 
 	// Naming reads the job table, which only the current layout can answer.

@@ -48,6 +48,10 @@ type RunSummary struct {
 	// Locked counts documents skipped for a password; LockedThisRun those this
 	// run settled.
 	Locked, LockedThisRun int
+	// Unsupported groups every document skipped as an unsupported format by
+	// type, across the store rather than this run, naming one of each: what
+	// the corpus holds that no handler reads yet.
+	Unsupported []TypeGroup
 	// Attention names the failed documents and this run's password skips, at
 	// most MaxAttention of them, this run's first; AttentionTotal is how many
 	// there are in all.
@@ -133,6 +137,10 @@ func (r *Jobs) RunSummary(ctx context.Context, since time.Time) (RunSummary, err
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		return s, err
+	}
+
+	if s.Unsupported, err = unsupportedByType(ctx, r.db, 1); err != nil {
 		return s, err
 	}
 

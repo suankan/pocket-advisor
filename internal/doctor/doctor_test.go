@@ -160,6 +160,33 @@ func TestReasonFindingsNameTheirDocuments(t *testing.T) {
 	}
 }
 
+// The unsupported-format finding is broken down by type, so the report says
+// which formats the corpus holds that no handler reads.
+func TestUnsupportedFindingGroupsByType(t *testing.T) {
+	groups := []TypeGroup{
+		{MimeType: "application/x-ole-storage", Extension: ".doc", Count: 2, Documents: []string{"docs/old.doc"}},
+		{MimeType: "audio/mpeg", Extension: ".mp3", Count: 1},
+	}
+	d := New("test-ws", Checks{
+		RegistryOK: true, CredsOK: true, PGRaw: true, SourcesRaw: true,
+		PGSchemaOK: true, PGHNSWOK: true, PGBM25OK: true,
+		SkippedByReason: map[string]int{"UNSUPPORTED_FORMAT": 3, "IMAGE_NOT_VIABLE": 9},
+		Unsupported:     groups,
+	})
+	for _, f := range d.Run(nil).Findings {
+		switch f.Code {
+		case "SKIPPED_REASON_UNSUPPORTED_FORMAT":
+			if len(f.Types) != 2 || f.Types[0].Extension != ".doc" || !strings.HasPrefix(f.NextAction, "no handler reads these formats yet") {
+				t.Errorf("unsupported finding: types %+v, action %q", f.Types, f.NextAction)
+			}
+		case "SKIPPED_REASON_IMAGE_NOT_VIABLE":
+			if len(f.Types) != 0 {
+				t.Errorf("another skip carries types %+v", f.Types)
+			}
+		}
+	}
+}
+
 func TestReportJSON(t *testing.T) {
 	r := &Report{
 		WorkspaceID: "test-ws",

@@ -65,6 +65,8 @@ func printRunSummary(w io.Writer, workspaceID string, elapsed time.Duration, s p
 		fmt.Fprintf(w, "             %d password-protected, %d of them found this run\n", s.Locked, s.LockedThisRun)
 	}
 
+	printUnsupported(w, s.Unsupported)
+
 	if len(s.Attention) == 0 {
 		return
 	}
@@ -82,6 +84,44 @@ func printRunSummary(w io.Writer, workspaceID string, elapsed time.Duration, s p
 	if sum(s.FailedThisRun)+sum(s.FailedEarlier) > 0 {
 		fmt.Fprintf(w, "  --doctor lists failures by reason; --recover retries those that can be.\n")
 	}
+}
+
+// maxTypes bounds how many unsupported types a run summary lists.
+const maxTypes = 15
+
+// printUnsupported lists what the store holds that no handler reads, by type
+// and largest first, with one example of each: the formats support could be
+// added for, or ignore rules written for.
+func printUnsupported(w io.Writer, groups []postgres.TypeGroup) {
+	if len(groups) == 0 {
+		return
+	}
+	total := 0
+	for _, g := range groups {
+		total += g.Count
+	}
+	fmt.Fprintf(w, "  unsupported %d %s skipped, by type, across all runs\n", total, plural(total, "file", "files"))
+	for i, g := range groups {
+		if i == maxTypes {
+			fmt.Fprintf(w, "    ... and %d more %s\n", len(groups)-maxTypes, plural(len(groups)-maxTypes, "type", "types"))
+			break
+		}
+		line := fmt.Sprintf("%8d  %s", g.Count, typeLabel(g.MimeType, g.Extension))
+		if len(g.Locations) > 0 {
+			line = fmt.Sprintf("%-52s e.g. %s", line, g.Locations[0])
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintf(w, "  --doctor --json lists every unsupported file; ignore rules keep out what you do not want.\n")
+}
+
+// typeLabel names a group of unsupported files: its detected type and the
+// extension its files carry.
+func typeLabel(mimeType, ext string) string {
+	if ext == "" {
+		ext = "no extension"
+	}
+	return mimeType + " (" + ext + ")"
 }
 
 func sum(tallies []postgres.Tally) int {

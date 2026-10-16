@@ -224,7 +224,7 @@ The five subjects name the stage queues; they are values of `ingestion_jobs.subj
 
 A refund happens only in the fenced transition that leaves RUNNING, so it cannot happen twice. Complete scans resume WAITING_SOURCE to READY with the charged attempts retained; partial scans do not. Explicit recovery resets only selected jobs to a fresh cycle of zero attempts. Completed jobs stay complete.
 
-The handler transaction is held through extraction and model work, bounded by the one-hour handler deadline. That favours atomicity and requires watching long transactions and vacuum pressure. A process-wide gate of `max_conns − 3` slots bounds open stage transactions independently of lane count: one reserved connection holds the maintenance lock, two serve scanning, claims, renewals, verdicts and depth samples, and the listener sits outside the pool. Ingestion therefore requires at least four connections. Moving expensive work outside the stage transaction remains a future design concern and must preserve the same commit guarantees.
+The handler transaction is held through extraction work, bounded by the one-hour handler deadline. That favours atomicity and requires watching long transactions and vacuum pressure. Embedding is split in two: the embedding stage reads its text, chunks it and obtains every vector before its transaction opens, holding neither a connection nor its gate slot, then stores the passages and completes the document and the job in a short transaction behind the same ownership fence. A handler whose lease expired while embedding commits nothing, and an expired handler and the one that reclaimed its job may both embed, of which only one commits. The text cannot change meanwhile: it is written before the embed job is published, and rerouting or refusing a document leaves one with a running job alone. A process-wide gate of `max_conns − 3` slots bounds open stage transactions independently of lane count: one reserved connection holds the maintenance lock, two serve scanning, claims, renewals, verdicts and depth samples, and the listener sits outside the pool. Ingestion therefore requires at least four connections. Moving extraction work outside the stage transaction remains a future design concern and must preserve the same commit guarantees.
 
 ### 6.2 Failures and recovery
 
@@ -263,7 +263,7 @@ The indexer loads `normalized_text` by `doc_id`, then:
 1. splits it into approximately 512-token windows with 64-token overlap;
 2. prefers paragraph, line, sentence, then word boundaries in the final 40% of a window;
 3. preserves UTF-8 byte offsets so `normalized_text[start:end] == chunk_text`;
-4. batches after chunking, with at most 64 chunks or approximately 16,000 tokens per embedding request;
+4. batches after chunking, with at most 64 chunks and 16,000 tokens per embedding request. Characters per token vary by an order of magnitude — near four in English prose, two in Cyrillic, and nearer one in encoded data — so a document's first request assumes the densest, 1.3 characters a token, and each request after it is sized by the token count the endpoint reported for the one before, never larger than four characters a token allows;
 5. embeds exactly `chunk_text`, without subject, filename, or parent context; and
 6. replaces all chunks for the document transactionally.
 
@@ -282,7 +282,7 @@ One process constructs shared store clients, model clients, logging, metrics, an
 | embedding | `2 × CPU` |
 | rasterisation and OCR CPU semaphore | `CPU` shared slots |
 
-Embedding concurrency is separately configurable because it is a capacity limit of the model endpoint rather than the host CPU. The database job gate limits concurrent stage transactions independently of lane count.
+Embedding concurrency is separately configurable because it is a capacity limit of the model endpoint rather than the host CPU. Embedding lanes beyond it wait for a request slot without a transaction or a gate slot. The database job gate limits concurrent stage transactions independently of lane count.
 
 PDFium uses the wazero WebAssembly backend. Its instance pool is lazy and sized to the document lanes. Tesseract uses CGo. PDF rasterisation remains serial per document, while page OCR can run concurrently under the shared semaphore and stores results by page index.
 
@@ -347,4 +347,4 @@ Synthetic integration checks cover concurrent admission of shared content, stage
 - Measure long-transaction contention, query latency during ingestion, and container replay costs before increasing concurrency.
 - Define a source-version retention and coordinated database/source backup policy. One local replica is not a backup.
 - Watcher acceleration and configurable scan intervals can follow measured freshness and I/O needs.
-- Define log rotation and measure whether expensive handler work should move outside stage transactions while preserving the queue's commit guarantees.
+- Define log rotation and measure whether extraction work should also move outside stage transactions while preserving the queue's commit guarantees.

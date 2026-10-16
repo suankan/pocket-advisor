@@ -67,6 +67,19 @@ func Decline(docID string, reason domain.FailureReason) error {
 // Handler processes one claimed job. Returning nil completes it.
 type Handler func(ctx context.Context, job postgres.Job) error
 
+// Preparer is the first half of a two-phase handler: work that needs no
+// database transaction, such as model calls that take minutes, done before
+// the job's transaction opens. It returns the Handler that commits the result
+// inside that transaction.
+//
+// Holding a transaction through such work keeps a connection, a gate slot and
+// any row the handler has written locked while it waits on a service it does
+// not control. What it prepares is committed only through the job's ownership
+// fence, so an expired handler's result is discarded as it is for one-phase
+// handlers; the cost of the split is that an expired handler and the one that
+// reclaimed its job may both prepare, and only one commits.
+type Preparer func(ctx context.Context, job postgres.Job) (Handler, error)
+
 // Queue is the half of the job repository the runtime needs, narrowed to an
 // interface so every verdict path is testable without a database.
 // *postgres.Jobs is the only production implementation.
@@ -135,6 +148,12 @@ type Runtime struct {
 
 	// Lanes is how many jobs this pool handles at once.
 	Lanes int
+
+	// Prepare, when set, runs before the job's transaction and supplies the
+	// handler that runs inside it, in place of the one Consume was given. Its
+	// gate slot is returned while it runs and taken back before the
+	// transaction opens.
+	Prepare Preparer
 
 	// Stats tracks this subject's active lanes for drain detection. Optional:
 	// nil leaves the subject out of it.
@@ -417,6 +436,19 @@ func (r *Runtime) invoke(ctx context.Context, job postgres.Job, h Handler) (err 
 			err = Fatal(domain.ReasonHandlerPanic, fmt.Errorf("%v\n%s", p, debug.Stack()))
 		}
 	}()
+	if r.Prepare != nil {
+		prepared, perr := r.prepare(ctx, job)
+		switch {
+		case perr == nil:
+			h = prepared
+		case isDeclined(perr):
+			// A decline is recorded in the job's transaction, as one a handler
+			// returns there is.
+			h = func(context.Context, postgres.Job) error { return perr }
+		default:
+			return perr
+		}
+	}
 	var declined error
 	err = r.Queue.Run(ctx, job, func(ctx context.Context) error {
 		err := h(ctx, job)
@@ -434,6 +466,33 @@ func (r *Runtime) invoke(ctx context.Context, job postgres.Job, h Handler) (err 
 		return declined
 	}
 	return err
+}
+
+// prepare runs Prepare without the job's gate slot, and takes the slot back
+// however it ends, panics included.
+func (r *Runtime) prepare(ctx context.Context, job postgres.Job) (h Handler, err error) {
+	r.Gate.Release(1)
+	defer r.reacquire()
+	defer func() {
+		if p := recover(); p != nil {
+			err = Fatal(domain.ReasonHandlerPanic, fmt.Errorf("%v\n%s", p, debug.Stack()))
+		}
+	}()
+	return r.Prepare(ctx, job)
+}
+
+// reacquire takes back the gate slot a preparing handler returned. It waits
+// even through shutdown: Consume releases the slot after the handler, and
+// releasing one never taken back would admit a transaction past the bound.
+// Every slot is held by a handler bounded by its deadline, so one frees.
+func (r *Runtime) reacquire() {
+	for {
+		released := r.Gate.Wait()
+		if r.Gate.TryReserve(1) == 1 {
+			return
+		}
+		<-released
+	}
 }
 
 func (r *Runtime) handle(workCtx context.Context, job postgres.Job, h Handler) {

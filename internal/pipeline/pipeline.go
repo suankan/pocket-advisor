@@ -30,6 +30,9 @@ type role struct {
 	subject string
 	lanes   int
 	handler worker.Handler
+	// prepare, when set, does the handler's model work before its
+	// transaction opens (worker.Preparer).
+	prepare worker.Preparer
 	queue   *telemetry.Queue
 	runtime *worker.Runtime
 }
@@ -109,7 +112,7 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 		{name: telemetry.RoleDocument, subject: postgres.SubjectImages,
 			lanes: limits.DocumentLanes(), handler: docs.HandleImage},
 		{name: telemetry.RoleEmbed, subject: postgres.SubjectEmbed,
-			lanes: limits.EmbedLanes(), handler: embed.Handle},
+			lanes: limits.EmbedLanes(), handler: embed.Handle, prepare: embed.Prepare},
 	}
 	for _, r := range specs {
 		r.queue = stats.RegisterQueue(r.name, r.subject, r.lanes)
@@ -122,6 +125,7 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 			Subject: r.subject,
 			Lanes:   r.lanes,
 			Stats:   r.queue,
+			Prepare: r.prepare,
 		}
 		p.roles = append(p.roles, r)
 	}

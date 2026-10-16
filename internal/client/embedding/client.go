@@ -73,6 +73,10 @@ type response struct {
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
 	Model string `json:"model"`
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -80,8 +84,15 @@ type response struct {
 
 // Embed returns one vector per input, in input order.
 func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
+	vectors, _, err := c.EmbedCounted(ctx, inputs)
+	return vectors, err
+}
+
+// EmbedCounted is Embed that also returns how many tokens the endpoint
+// counted for the inputs, or 0 when it reports none.
+func (c *Client) EmbedCounted(ctx context.Context, inputs []string) ([][]float32, int, error) {
 	if len(inputs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// Bound before the breaker check, not after: a caller queued behind the
@@ -90,22 +101,22 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	select {
 	case c.sem <- struct{}{}:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 	defer func() { <-c.sem }()
 
 	if err := c.breaker.Allow(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	body, err := json.Marshal(request{Model: c.model, Input: inputs})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -115,32 +126,32 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.breaker.Fail()
-		return nil, fmt.Errorf("embedding request: %w", err)
+		return nil, 0, fmt.Errorf("embedding request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		c.breaker.Fail()
-		return nil, err
+		return nil, 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		c.breaker.Fail()
-		return nil, fmt.Errorf("embedding endpoint %d: %s", resp.StatusCode, truncate(string(raw), 300))
+		return nil, 0, fmt.Errorf("embedding endpoint %d: %s", resp.StatusCode, truncate(string(raw), 300))
 	}
 
 	var out response
 	if err := json.Unmarshal(raw, &out); err != nil {
 		c.breaker.Fail()
-		return nil, fmt.Errorf("decode embedding response: %w", err)
+		return nil, 0, fmt.Errorf("decode embedding response: %w", err)
 	}
 	if out.Error != nil {
 		c.breaker.Fail()
-		return nil, fmt.Errorf("embedding endpoint error: %s", out.Error.Message)
+		return nil, 0, fmt.Errorf("embedding endpoint error: %s", out.Error.Message)
 	}
 	if len(out.Data) != len(inputs) {
 		c.breaker.Fail()
-		return nil, fmt.Errorf("expected %d embeddings, got %d", len(inputs), len(out.Data))
+		return nil, 0, fmt.Errorf("expected %d embeddings, got %d", len(inputs), len(out.Data))
 	}
 
 	c.breaker.Success()
@@ -148,16 +159,20 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	vectors := make([][]float32, len(inputs))
 	for _, d := range out.Data {
 		if d.Index < 0 || d.Index >= len(vectors) {
-			return nil, fmt.Errorf("embedding index %d out of range", d.Index)
+			return nil, 0, fmt.Errorf("embedding index %d out of range", d.Index)
 		}
 		vectors[d.Index] = d.Embedding
 	}
 	for i, v := range vectors {
 		if len(v) == 0 {
-			return nil, fmt.Errorf("embedding %d is empty", i)
+			return nil, 0, fmt.Errorf("embedding %d is empty", i)
 		}
 	}
-	return vectors, nil
+	tokens := out.Usage.PromptTokens
+	if tokens == 0 {
+		tokens = out.Usage.TotalTokens
+	}
+	return vectors, tokens, nil
 }
 
 // ModelInfo is what the schema bootstrap needs to size the vector column.

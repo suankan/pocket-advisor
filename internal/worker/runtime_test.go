@@ -1064,3 +1064,65 @@ func TestHandlerBudgetClearsTheSlowestKnownDocument(t *testing.T) {
 		t.Errorf("lease %v leaves too little margin for a %v renewal cadence", postgres.LeaseDuration, renewEvery)
 	}
 }
+
+// A preparing handler works outside the job's transaction and without its gate
+// slot, then commits inside the transaction holding the slot again. A decline
+// it returns is still recorded in the transaction; any other error, or a
+// panic, settles without one. The slot is taken back however it ends.
+func TestPrepareRunsOutsideTheTransaction(t *testing.T) {
+	prepared := func(prepare func(*Runtime) Preparer) (*fakeQueue, *fakeDocs) {
+		t.Helper()
+		q, docs := &fakeQueue{}, &fakeDocs{}
+		rt := newRuntime(q, 1)
+		rt.Docs, rt.Prepare = docs, prepare(rt)
+		if rt.Gate.TryReserve(1) != 1 {
+			t.Fatal("no slot to claim with")
+		}
+		settleOnce(t, q, rt, newJob(1), nil)
+		if free := rt.Gate.Free(); free != 0 {
+			t.Errorf("%d slots free after the handler; the claim's slot must be held again", free)
+		}
+		return q, docs
+	}
+
+	freeWhilePreparing, runsWhilePreparing, committed := -1, int64(-1), false
+	q, _ := prepared(func(rt *Runtime) Preparer {
+		return func(context.Context, postgres.Job) (Handler, error) {
+			freeWhilePreparing, runsWhilePreparing = rt.Gate.Free(), rt.Queue.(*fakeQueue).runs.Load()
+			return func(context.Context, postgres.Job) error {
+				committed = rt.Gate.Free() == 0
+				return nil
+			}, nil
+		}
+	})
+	if freeWhilePreparing != 1 || runsWhilePreparing != 0 || !committed || q.runs.Load() != 1 {
+		t.Errorf("prepare saw %d free slots and %d transactions; commit held the slot %v; %d transactions",
+			freeWhilePreparing, runsWhilePreparing, committed, q.runs.Load())
+	}
+	q.none(t)
+
+	q, docs := prepared(func(*Runtime) Preparer {
+		return func(context.Context, postgres.Job) (Handler, error) {
+			return nil, Decline("doc", domain.ReasonEmptyExtraction)
+		}
+	})
+	if q.runs.Load() != 1 || docs.statuses.Load() != 1 {
+		t.Errorf("a prepared decline: %d transactions, %d status writes", q.runs.Load(), docs.statuses.Load())
+	}
+
+	q, _ = prepared(func(*Runtime) Preparer {
+		return func(context.Context, postgres.Job) (Handler, error) {
+			return nil, WithDoc("doc", Retry(domain.ReasonEmbeddingUnavailable, errors.New("timeout")))
+		}
+	})
+	if v := q.only(t, "retry"); v.Reason != string(domain.ReasonEmbeddingUnavailable) || q.runs.Load() != 0 {
+		t.Errorf("a prepared failure: %+v after %d transactions", v, q.runs.Load())
+	}
+
+	q, _ = prepared(func(*Runtime) Preparer {
+		return func(context.Context, postgres.Job) (Handler, error) { panic("synthetic") }
+	})
+	if v := q.only(t, "fail"); v.Reason != string(domain.ReasonHandlerPanic) {
+		t.Errorf("a panic while preparing: %+v", v)
+	}
+}

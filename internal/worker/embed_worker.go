@@ -24,81 +24,109 @@ type EmbedWorker struct {
 	Log      *slog.Logger
 }
 
+// Handle embeds a document's text and commits its passages in one step. The
+// pipeline runs the two halves apart, Prepare outside the job's transaction
+// and its result inside it.
 func (w *EmbedWorker) Handle(ctx context.Context, job postgres.Job) error {
+	commit, err := w.Prepare(ctx, job)
+	if err != nil {
+		return err
+	}
+	return commit(ctx, job)
+}
+
+// Prepare reads, chunks and embeds a document's text, and returns the handler
+// that stores the passages and completes the document.
+//
+// It holds no transaction: embedding a large document takes minutes against
+// an endpoint that serves one request at a time, and an open transaction
+// would hold a connection and a gate slot for all of it. The text cannot
+// change underneath: it is written before this job is published, and a
+// reroute or refusal leaves a document with a running job alone.
+func (w *EmbedWorker) Prepare(ctx context.Context, job postgres.Job) (Handler, error) {
 	var cmd ingestionv1.EmbedTextCommand
 	if err := proto.Unmarshal(job.Payload, &cmd); err != nil {
-		return Fatal(domain.ReasonMalformedCommand, err)
+		return nil, Fatal(domain.ReasonMalformedCommand, err)
 	}
 	meta := cmd.Metadata
 	if meta == nil || meta.Traceparent == "" {
-		return Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
+		return nil, Fatal(domain.ReasonMissingTraceContext, fmt.Errorf("command carries no traceparent"))
 	}
 
 	// The command carries a reference, not the text (§4.1).
 	loaded, err := w.Docs.LoadText(ctx, meta.DocId)
 	if err != nil {
-		return WithDoc(meta.DocId, err)
+		return nil, WithDoc(meta.DocId, err)
 	}
 	if strings.TrimSpace(loaded.Text) == "" {
-		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
+		return nil, Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
 
 	// Chunk first, then batch: the token budget must bound what leaves the
 	// process, and the chunker is what multiplies token count (§2.4).
 	pieces := embed.Split(loaded.Text)
 	if len(pieces) == 0 {
-		return Decline(meta.DocId, domain.ReasonEmptyExtraction)
+		return nil, Decline(meta.DocId, domain.ReasonEmptyExtraction)
 	}
 
 	model := w.Embedder.Model()
 	chunks := make([]domain.Chunk, 0, len(pieces))
+	chunkOf := func(c embed.Chunk, vector []float32) domain.Chunk {
+		return domain.Chunk{
+			ChunkID:    domain.NewChunkID(),
+			DocID:      meta.DocId,
+			Index:      c.Index,
+			StartChar:  c.Start,
+			EndChar:    c.End,
+			Text:       c.Text,
+			EmbedModel: model,
+			Embedding:  vector,
+		}
+	}
 
-	for _, batch := range embed.Batches(pieces) {
+	batches := embed.NewBatcher(pieces)
+	for batch := batches.Next(); batch != nil; batch = batches.Next() {
 		// A chunk is embedded as exactly its own text — no subject, no
 		// filename, nothing borrowed from the document or thread it belongs
 		// to. Sharing a prefix across every chunk of a container pulls them
 		// into one neighbourhood and blunts the distinctions a query needs;
 		// what a chunk is part of is recovered at retrieval by doc_id, which
 		// is an exact lookup rather than a lossy encoding (§5.6).
-		batchChunks := make([]domain.Chunk, len(batch))
 		inputs := make([]string, len(batch))
 		for i, c := range batch {
-			batchChunks[i] = domain.Chunk{
-				ChunkID:    domain.NewChunkID(),
-				DocID:      meta.DocId,
-				Index:      c.Index,
-				StartChar:  c.Start,
-				EndChar:    c.End,
-				Text:       c.Text,
-				EmbedModel: model,
-			}
 			inputs[i] = c.Text
-			telemetry.EmbeddingTokens.Add(float64(len(c.Text) / embed.CharsPerToken))
 		}
 
-		vectors, err := w.Embedder.Embed(ctx, inputs)
+		vectors, tokens, err := w.Embedder.EmbedCounted(ctx, inputs)
 		if err != nil {
 			// Transient: a model restart should cost latency, not documents.
 			// The breaker keeps retries from hammering it, and the reason keeps
 			// a job whose attempts ran out where --recover finds it.
-			return WithDoc(meta.DocId, Retry(domain.ReasonEmbeddingUnavailable, err))
+			return nil, WithDoc(meta.DocId, Retry(domain.ReasonEmbeddingUnavailable, err))
 		}
+		batches.Observe(batch, tokens)
+		if tokens == 0 {
+			for _, in := range inputs {
+				tokens += len(in) / embed.CharsPerToken
+			}
+		}
+		telemetry.EmbeddingTokens.Add(float64(tokens))
 
-		for i := range batchChunks {
-			batchChunks[i].Embedding = vectors[i]
-			chunks = append(chunks, batchChunks[i])
+		for i, c := range batch {
+			chunks = append(chunks, chunkOf(c, vectors[i]))
 		}
 	}
 
-	// One transaction for every chunk plus the status update: a document whose
-	// chunk count exceeds the batch budget is split across several embedding
-	// requests but is never half-indexed (§2.4).
-	if err := w.Chunks.ReplaceChunks(ctx, meta.DocId, chunks); err != nil {
-		return WithDoc(meta.DocId, err)
-	}
-
-	w.Log.Info("indexed",
-		"doc_id", meta.DocId, "chunks", len(chunks), "model", model,
-		"trace_id", trace.TraceID(meta.Traceparent))
-	return nil
+	return func(ctx context.Context, _ postgres.Job) error {
+		// One transaction for every chunk plus the status update: a document
+		// whose chunk count exceeds the batch budget is split across several
+		// embedding requests but is never half-indexed (§2.4).
+		if err := w.Chunks.ReplaceChunks(ctx, meta.DocId, chunks); err != nil {
+			return WithDoc(meta.DocId, err)
+		}
+		w.Log.Info("indexed",
+			"doc_id", meta.DocId, "chunks", len(chunks), "model", model,
+			"trace_id", trace.TraceID(meta.Traceparent))
+		return nil
+	}, nil
 }

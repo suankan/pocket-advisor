@@ -163,25 +163,63 @@ func alignRune(s string, i int) int {
 const (
 	MaxBatchChunks = 64
 	MaxBatchTokens = 16_000
+
+	// DensestCharsPerToken is the fewest characters a token was measured to
+	// cover, in base64-like encoded data. A document's first request assumes
+	// it, so it stays within budget whatever the document holds.
+	DensestCharsPerToken = 1.3
 )
 
-// Batches splits chunks into embedding requests obeying both limits.
-func Batches(chunks []Chunk) [][]Chunk {
-	var out [][]Chunk
-	var cur []Chunk
-	tokens := 0
+// Batcher hands out a document's chunks as embedding requests under both
+// limits.
+//
+// Characters per token vary by an order of magnitude: English prose runs near
+// four, Cyrillic near two, and encoded data nearer one. A fixed ratio lets a
+// batch of dense text run several times over budget, and so several times
+// longer than intended, past the endpoint's timeout. The first batch assumes
+// the densest text; each batch the endpoint counts then sets the ratio for
+// the next, never above CharsPerToken, so a batch is never larger than the
+// fixed estimate allows.
+type Batcher struct {
+	chunks        []Chunk
+	next          int
+	charsPerToken float64
+}
 
-	for _, c := range chunks {
-		t := utf8.RuneCountInString(c.Text) / CharsPerToken
-		if len(cur) > 0 && (len(cur) >= MaxBatchChunks || tokens+t > MaxBatchTokens) {
-			out = append(out, cur)
-			cur, tokens = nil, 0
+// NewBatcher batches chunks in order.
+func NewBatcher(chunks []Chunk) *Batcher {
+	return &Batcher{chunks: chunks, charsPerToken: DensestCharsPerToken}
+}
+
+// Next returns the next batch, or nil once every chunk has been handed out. A
+// chunk over the budget on its own is a batch of one.
+func (b *Batcher) Next() []Chunk {
+	start := b.next
+	tokens := 0.0
+	for b.next < len(b.chunks) {
+		t := float64(utf8.RuneCountInString(b.chunks[b.next].Text)) / b.charsPerToken
+		if b.next > start && (b.next-start >= MaxBatchChunks || tokens+t > MaxBatchTokens) {
+			break
 		}
-		cur = append(cur, c)
 		tokens += t
+		b.next++
 	}
-	if len(cur) > 0 {
-		out = append(out, cur)
+	if b.next == start {
+		return nil
 	}
-	return out
+	return b.chunks[start:b.next]
+}
+
+// Observe records how many tokens the endpoint counted for batch, which sizes
+// the batches after it. A count of zero, from an endpoint that reports none,
+// changes nothing.
+func (b *Batcher) Observe(batch []Chunk, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	chars := 0
+	for _, c := range batch {
+		chars += utf8.RuneCountInString(c.Text)
+	}
+	b.charsPerToken = min(max(float64(chars)/float64(tokens), 0.5), CharsPerToken)
 }

@@ -92,25 +92,67 @@ func TestSplitOffsetsPointIntoSource(t *testing.T) {
 	}
 }
 
+// batchAll drains a batcher that observes tokens at charsPerToken.
+func batchAll(chunks []Chunk, charsPerToken float64) [][]Chunk {
+	b := NewBatcher(chunks)
+	var out [][]Chunk
+	for batch := b.Next(); batch != nil; batch = b.Next() {
+		out = append(out, batch)
+		chars := 0
+		for _, c := range batch {
+			chars += utf8.RuneCountInString(c.Text)
+		}
+		b.Observe(batch, int(float64(chars)/charsPerToken))
+	}
+	return out
+}
+
+// Whatever the text's density, a batch of several chunks stays within both
+// limits by the tokens the endpoint counts, and none is larger than the fixed
+// four-characters estimate allows.
 func TestBatchesRespectBothLimits(t *testing.T) {
 	var chunks []Chunk
 	for i := 0; i < 200; i++ {
 		chunks = append(chunks, Chunk{Index: i, Text: strings.Repeat("w", 400)})
 	}
+	for _, density := range []float64{1.35, 2, 4, 7} {
+		for _, b := range batchAll(chunks, density) {
+			if len(b) > MaxBatchChunks {
+				t.Errorf("density %v: batch exceeds chunk limit: %d", density, len(b))
+			}
+			chars := 0
+			for _, c := range b {
+				chars += utf8.RuneCountInString(c.Text)
+			}
+			if tokens := float64(chars) / density; tokens > MaxBatchTokens && len(b) > 1 {
+				t.Errorf("density %v: batch of %d counts %.0f tokens", density, len(b), tokens)
+			}
+			if chars/CharsPerToken > MaxBatchTokens && len(b) > 1 {
+				t.Errorf("density %v: batch larger than the fixed estimate allows", density)
+			}
+		}
+	}
+}
 
-	for _, b := range Batches(chunks) {
-		if len(b) > MaxBatchChunks {
-			t.Errorf("batch exceeds chunk limit: %d", len(b))
-		}
-		tokens := 0
-		for _, c := range b {
-			tokens += utf8.RuneCountInString(c.Text) / CharsPerToken
-		}
-		// One oversized chunk may exceed the budget alone; a batch of several
-		// must not.
-		if tokens > MaxBatchTokens && len(b) > 1 {
-			t.Errorf("batch exceeds token budget: %d", tokens)
-		}
+// The first batch assumes the densest text; once the endpoint counts sparse
+// prose, the batches grow to what the fixed estimate allows.
+func TestBatcherLearnsFromTheEndpointsCount(t *testing.T) {
+	var chunks []Chunk
+	for i := 0; i < 100; i++ {
+		chunks = append(chunks, Chunk{Index: i, Text: strings.Repeat("w", 2048)})
+	}
+	batches := batchAll(chunks, 7)
+	if first := len(batches[0]); first != 10 {
+		t.Errorf("first batch %d chunks, want 10 at the densest ratio", first)
+	}
+	if second := len(batches[1]); second != 31 {
+		t.Errorf("second batch %d chunks, want 31 at four characters a token", second)
+	}
+	b := NewBatcher(chunks)
+	first := b.Next()
+	b.Observe(first, 0)
+	if len(b.Next()) != len(first) {
+		t.Error("an endpoint reporting no count changed the batch size")
 	}
 }
 
@@ -120,7 +162,7 @@ func TestBatchesCoverEveryChunkOnce(t *testing.T) {
 		chunks = append(chunks, Chunk{Index: i, Text: strings.Repeat("w", 1000)})
 	}
 	seen := map[int]int{}
-	for _, b := range Batches(chunks) {
+	for _, b := range batchAll(chunks, 2) {
 		for _, c := range b {
 			seen[c.Index]++
 		}

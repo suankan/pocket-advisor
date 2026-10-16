@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -21,7 +22,9 @@ type EmbedWorker struct {
 	Docs     *postgres.DocumentRepo
 	Chunks   *postgres.ChunkRepo
 	Embedder *embedding.Client
-	Log      *slog.Logger
+	// Cache, when set, keeps vectors across a document's attempts.
+	Cache *VectorCache
+	Log   *slog.Logger
 }
 
 // Handle embeds a document's text and commits its passages in one step. The
@@ -84,7 +87,17 @@ func (w *EmbedWorker) Prepare(ctx context.Context, job postgres.Job) (Handler, e
 		}
 	}
 
-	batches := embed.NewBatcher(pieces)
+	// Passages an earlier attempt already embedded are not sent again.
+	var todo []embed.Chunk
+	for _, c := range pieces {
+		if v, ok := w.Cache.Get(model, c.Text); ok {
+			chunks = append(chunks, chunkOf(c, v))
+			continue
+		}
+		todo = append(todo, c)
+	}
+
+	batches := embed.NewBatcher(todo)
 	for batch := batches.Next(); batch != nil; batch = batches.Next() {
 		// A chunk is embedded as exactly its own text — no subject, no
 		// filename, nothing borrowed from the document or thread it belongs
@@ -113,9 +126,11 @@ func (w *EmbedWorker) Prepare(ctx context.Context, job postgres.Job) (Handler, e
 		telemetry.EmbeddingTokens.Add(float64(tokens))
 
 		for i, c := range batch {
+			w.Cache.Put(model, c.Text, vectors[i])
 			chunks = append(chunks, chunkOf(c, vectors[i]))
 		}
 	}
+	slices.SortFunc(chunks, func(a, b domain.Chunk) int { return a.Index - b.Index })
 
 	return func(ctx context.Context, _ postgres.Job) error {
 		// One transaction for every chunk plus the status update: a document

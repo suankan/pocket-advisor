@@ -263,7 +263,7 @@ The indexer loads `normalized_text` by `doc_id`, then:
 1. splits it into approximately 512-token windows with 64-token overlap;
 2. prefers paragraph, line, sentence, then word boundaries in the final 40% of a window;
 3. preserves UTF-8 byte offsets so `normalized_text[start:end] == chunk_text`;
-4. batches after chunking, with at most 64 chunks and 16,000 tokens per embedding request. Characters per token vary by an order of magnitude — near four in English prose, two in Cyrillic, and nearer one in encoded data — so a document's first request assumes the densest, 1.3 characters a token, and each request after it is sized by the token count the endpoint reported for the one before, never larger than four characters a token allows;
+4. batches after chunking, with at most 64 chunks and 16,000 tokens per embedding request. Characters per token vary by an order of magnitude — near four in English prose, two in Cyrillic, and nearer one in encoded data — so a document's first request assumes the densest, 1.3 characters a token, and each request after it is sized by the token count the endpoint reported for the one before, never larger than four characters a token allows. Vectors are also kept in a process-local cache of 128 MiB, keyed by model and passage text, oldest out first: a document's passages are stored only once every one has a vector, so a retry after a failure part-way sends only the passages still missing, and a document needing more than one handler's deadline still finishes across its attempts;
 5. embeds exactly `chunk_text`, without subject, filename, or parent context; and
 6. replaces all chunks for the document transactionally.
 

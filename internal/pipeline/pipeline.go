@@ -24,6 +24,11 @@ import (
 	"github.com/suankan/pocket-advisor/internal/worker"
 )
 
+// embedCacheBytes bounds the vectors kept across a document's embedding
+// attempts: about 32,000 vectors of 1,024 dimensions, every passage of a
+// document of tens of millions of characters.
+const embedCacheBytes = 128 << 20
+
 // role binds one subject to its pool.
 type role struct {
 	name    string
@@ -95,7 +100,8 @@ func New(ctx context.Context, a *app.App, stats *telemetry.Stats, embedder *embe
 		PDF: pdfEngine, OCR: p.ocrEngine, Log: a.Logger(telemetry.RoleDocument),
 	}
 	office := &worker.OfficeWorker{Sources: a.Sources, Docs: a.Docs, Bus: a.Jobs, Log: a.Logger(telemetry.RoleOffice)}
-	embed := &worker.EmbedWorker{Docs: a.Docs, Chunks: a.Chunks, Embedder: embedder, Log: a.Logger(telemetry.RoleEmbed)}
+	embed := &worker.EmbedWorker{Docs: a.Docs, Chunks: a.Chunks, Embedder: embedder,
+		Cache: worker.NewVectorCache(embedCacheBytes), Log: a.Logger(telemetry.RoleEmbed)}
 
 	// Roles follow the pipeline rather than the alphabet.
 	specs := []*role{

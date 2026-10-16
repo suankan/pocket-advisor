@@ -202,3 +202,42 @@ func TestStagedContentsLeavesOutIgnoredMembers(t *testing.T) {
 		t.Error("a copy staged under a kept name is not staged")
 	}
 }
+
+// A zip-based format the formats refuse is not unrolled, so its parts are not
+// staged and its container no longer holding them lets the sweep remove them.
+// A plain zip still is.
+func TestStagedContentsLeavesOutPartsOfRefusedFormats(t *testing.T) {
+	root := t.TempDir()
+	zipOf := func(name string, data []byte) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	part, letter := []byte(`{"synthetic": "pass"}`), []byte("a synthetic letter")
+	for name, data := range map[string][]byte{"ticket.pkpass": zipOf("pass.json", part), "bundle.zip": zipOf("letter.txt", letter)} {
+		if err := os.WriteFile(filepath.Join(root, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := stagedContentsContext(context.Background(), []string{root}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.contents[domain.SHA256Hex(part)]; ok {
+		t.Error("a part of a refused format is staged")
+	}
+	if _, ok := st.contents[domain.SHA256Hex(letter)]; !ok {
+		t.Error("a member of a plain zip is not staged")
+	}
+}

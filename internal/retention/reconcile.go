@@ -69,7 +69,14 @@ func stagedContentsContext(ctx context.Context, roots []string, ignore, ignoreMe
 		if depth >= 8 {
 			return nil
 		}
+		// Only what the formats unroll is expanded: a zip-based format they
+		// refuse, such as an iWork document or a Wallet pass, is detected as a
+		// zip, but its parts are not documents and nothing admits them, so
+		// counting them as staged would keep them past their container.
 		route := discovery.Classify(data, name)
+		if route.Declined {
+			return nil
+		}
 		switch route.MimeType {
 		case "message/rfc822", "application/zip", "application/x-tar", "application/gzip", "application/x-gzip":
 		default:

@@ -290,23 +290,28 @@ func (r *DocumentRepo) SaveEmailText(
 	return nil
 }
 
-// LoadedText is what the embedding indexer needs to chunk a document.
-// Deliberately just the text: a chunk carries nothing borrowed from the
-// document it came from (§5.6).
+// LoadedText is what the embedding indexer needs to chunk a document: its
+// text, and the type and name it was admitted under, which say whether the
+// text is still a format the indexer reads. A chunk carries nothing borrowed
+// from the document it came from (§5.6).
 type LoadedText struct {
-	Text string
+	Text    string
+	DocType string
+	Name    string
 }
 
 // LoadText reads normalized_text back for the embedding indexer.
 func (r *DocumentRepo) LoadText(ctx context.Context, docID string) (LoadedText, error) {
 	var text *string
+	var loaded LoadedText
 	err := r.db.executor(ctx).QueryRow(ctx,
-		`SELECT normalized_text FROM documents WHERE doc_id = $1`,
-		docID).Scan(&text)
+		`SELECT normalized_text, COALESCE(doc_type, ''), source_filename FROM documents WHERE doc_id = $1`,
+		docID).Scan(&text, &loaded.DocType, &loaded.Name)
 	if err != nil {
 		return LoadedText{}, fmt.Errorf("load text %s: %w", docID, err)
 	}
-	return LoadedText{Text: deref(text)}, nil
+	loaded.Text = deref(text)
+	return loaded, nil
 }
 
 // ClaimStalePending returns documents stuck PENDING past the threshold, for

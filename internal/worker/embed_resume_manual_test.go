@@ -5,6 +5,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -108,5 +109,58 @@ func TestEmbeddingResumesFromTheBatchesItHas(t *testing.T) {
 	}
 	if stored != total || ordered != total {
 		t.Fatalf("stored %d passages, %d in sequence; want %d", stored, ordered, total)
+	}
+}
+
+// Text the formats now route elsewhere is declined unembedded, for the scan to
+// settle: an email misread as plain text, and a log. Prose is embedded.
+func TestEmbeddingDeclinesTextTheFormatsRouteElsewhere(t *testing.T) {
+	db, _, _ := admissionFixture(t)
+	ctx := context.Background()
+	docs := postgres.NewDocumentRepo(db)
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var req struct{ Input []string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var data []map[string]any
+		for i := range req.Input {
+			data = append(data, map[string]any{"index": i, "embedding": []float32{1, 0, 0, 0, 0, 0, 0, 0}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer srv.Close()
+	w := &EmbedWorker{
+		Docs: docs, Chunks: postgres.NewChunkRepo(db),
+		Embedder: embedding.New(config.Embedding{Endpoint: srv.URL, Model: "synthetic", Timeout: 5 * time.Second, Concurrency: 1}),
+		Log:      quietLogger(),
+	}
+	email := "Received: from mx.example.com\r\nFrom: a@example.com\r\nSubject: hello\r\nMessage-ID: <a@b>\r\n\r\nbody\r\n"
+	prose := "Notes from the meeting about the schedule and the budget.\n"
+	for _, tc := range []struct {
+		name, text string
+		declined   bool
+	}{
+		{"1781.eml", email, true},
+		{"server.log", prose, true},
+		{"notes.txt", prose, false},
+	} {
+		id, _, err := docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex([]byte(tc.name)), SourceName: tc.name, DocType: "text"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.SaveText(ctx, id, tc.text, "text"); err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := proto.Marshal(&ingestionv1.EmbedTextCommand{Metadata: &ingestionv1.DocumentMetadata{DocId: id, Traceparent: "synthetic"}})
+		before := requests.Load()
+		_, err = w.Prepare(ctx, postgres.Job{ID: "synthetic", DocID: id, Payload: payload})
+		var d *Declined
+		if declined := errors.As(err, &d) && d.Reason == domain.ReasonUnsupportedFormat; declined != tc.declined {
+			t.Errorf("%s: declined %v (%v), want %v", tc.name, declined, err, tc.declined)
+		}
+		if sent := requests.Load() - before; tc.declined && sent != 0 {
+			t.Errorf("%s: %d embedding requests for text that was declined", tc.name, sent)
+		}
 	}
 }

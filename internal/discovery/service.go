@@ -134,7 +134,9 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 //     records the same reason, but under the job it ran: rerouting that would
 //     repeat the decline on every scan;
 //   - text or an archive no handler reads any more is recorded as unsupported,
-//     losing its text, passages and members.
+//     losing its text, passages and members, whatever it was recorded as:
+//     the embedding indexer declines such text it finds still queued, and
+//     leaves it for this to refuse.
 //
 // It reports whether it changed the document. parent and depth place a
 // container member; a staged file has neither.
@@ -157,7 +159,7 @@ func (s *Service) settle(ctx context.Context, id string, data []byte, k postgres
 			RawSha256: domain.SHA256Hex(data), Traceparent: tp, Depth: int32(depth)}
 		return true, s.dispatch(ctx, route, meta, source.Ref(id), data, tp)
 
-	case (k.DocType == "text" || k.DocType == "archive") && route.Declined && k.Status != domain.StatusSkipped:
+	case (k.DocType == "text" || k.DocType == "archive") && route.Declined:
 		refused, err := s.Docs.Refuse(ctx, id, route.MimeType)
 		if err != nil || !refused {
 			return false, err

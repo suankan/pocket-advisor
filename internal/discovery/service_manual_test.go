@@ -229,11 +229,14 @@ func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
 		}
 		return id
 	}
-	logText, letter, declined := prose("the server"), prose("the matter"), prose("a decline")
+	logText, letter, declined, left := prose("the server"), prose("the matter"), prose("a decline"), prose("a queued log")
 	write("server.log", logText)
+	write("queued.log", left)
 	write("letter.txt", letter)
 	write("handled.txt", declined)
 	oldLog := known("server.log", logText, "text", domain.StatusCompleted, "")
+	// As the embedding indexer leaves text it declined: skipped, text kept.
+	leftLog := known("queued.log", left, "text", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
 	skipped := known("letter.txt", letter, "", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
 	handled := known("handled.txt", declined, "", domain.StatusSkipped, domain.ReasonUnsupportedFormat)
 	if err := s.Jobs.Publish(ctx, postgres.SubjectEmbed, &ingestionv1.EmbedTextCommand{Metadata: &ingestionv1.DocumentMetadata{DocId: handled}}, ""); err != nil {
@@ -261,6 +264,7 @@ func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
 		text   bool
 	}{
 		oldLog:  {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
+		leftLog: {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
 		member:  {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},
 		skipped: {domain.StatusPending, "", true},
 		handled: {domain.StatusSkipped, string(domain.ReasonUnsupportedFormat), false},

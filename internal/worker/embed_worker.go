@@ -11,6 +11,7 @@ import (
 
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/client/embedding"
+	"github.com/suankan/pocket-advisor/internal/discovery"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/engine/embed"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
@@ -63,6 +64,21 @@ func (w *EmbedWorker) Prepare(ctx context.Context, job postgres.Job) (Handler, e
 	}
 	if strings.TrimSpace(loaded.Text) == "" {
 		return nil, Decline(meta.DocId, domain.ReasonEmptyExtraction)
+	}
+
+	// Text stored as plain text is its file's own bytes, so the formats can
+	// still judge it. One they no longer send here — an email misread as
+	// text, or a format no handler reads any more — is not embedded. The scan
+	// reroutes or refuses such a document, but leaves one whose job is running,
+	// and a job left running by an interrupted run is claimed again before the
+	// scan reaches its file. Declining completes the job, so the next scan
+	// settles the document.
+	if loaded.DocType == "text" {
+		if route := discovery.Classify([]byte(loaded.Text), loaded.Name); route.Declined || route.Subject != postgres.SubjectEmbed {
+			w.Log.Info("not embedding text the formats now route elsewhere",
+				"doc_id", meta.DocId, "doc_type", route.DocType, "mime_type", route.MimeType)
+			return nil, Decline(meta.DocId, domain.ReasonUnsupportedFormat)
+		}
 	}
 
 	// Chunk first, then batch: the token budget must bound what leaves the

@@ -58,6 +58,20 @@ type RecoveryItem struct {
 	Action          RecoveryAction         `json:"action"`
 	ObjectOperation string                 `json:"object_operation,omitempty"`
 	Requeue         string                 `json:"requeue,omitempty"`
+	// Location and Email say where to find the document: the original's
+	// path, or the member's name and the file holding it, and for an email,
+	// or a member of one, which message.
+	Location string    `json:"location,omitempty"`
+	Email    *EmailRef `json:"email,omitempty"`
+}
+
+// EmailRef names a message by what its reader sees. Container is true when it
+// is the email holding the document rather than the document itself.
+type EmailRef struct {
+	From      string `json:"from,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Date      string `json:"date,omitempty"`
+	Container bool   `json:"container,omitempty"`
 }
 
 // RecoveryPlan is the complete output of the planner.

@@ -49,3 +49,20 @@ func TestParseEmailMakesTextStorable(t *testing.T) {
 		}
 	}
 }
+
+// A message is named from its header alone, whatever its body holds.
+func TestSummarizeNamesAMessageFromItsHeader(t *testing.T) {
+	raw := "From: =?utf-8?Q?Ann_Lee?= <ann@example.com>\r\n" +
+		"Subject: =?utf-8?B?" + base64.StdEncoding.EncodeToString([]byte("Счёт за май")) + "?=\r\n" +
+		"Date: Mon, 5 Nov 2018 10:18:08 +1000\r\n" +
+		"Content-Type: text/plain; charset=x-unknown-synthetic\r\n" +
+		"\r\n" +
+		"\xff\xfe body\r\n"
+	s, err := Summarize([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.From != "Ann Lee <ann@example.com>" || s.Subject != "Счёт за май" || s.Date.Year() != 2018 {
+		t.Errorf("summary %+v", s)
+	}
+}

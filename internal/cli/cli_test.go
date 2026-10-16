@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/suankan/pocket-advisor/internal/doctor"
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 )
 
 func TestParseAcceptsTheDocumentedInvocations(t *testing.T) {
@@ -164,5 +169,58 @@ func TestParseRejectsBareWords(t *testing.T) {
 	_, err := Parse([]string{"--recover", "all", "--yes", "--workspace-id", "test"})
 	if err == nil || !strings.Contains(err.Error(), `"all"`) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A message is named by date, sender and subject, leaving out what it lacks.
+func TestEmailLineNamesAMessage(t *testing.T) {
+	for want, e := range map[string]*doctor.EmailRef{
+		"2018-11-05, from a@example.com: Policy": {Date: "2018-11-05", From: "a@example.com", Subject: "Policy "},
+		"from a@example.com":                     {From: "a@example.com"},
+		"Policy":                                 {Subject: "Policy"},
+	} {
+		if got := emailLine(e); got != want {
+			t.Errorf("emailLine(%+v) = %q, want %q", e, got, want)
+		}
+	}
+}
+
+// An item names its file, and its email from what the store holds or, for an
+// email whose header was never stored, from its original; a member of an
+// email is named by the message holding it.
+func TestApplyDescriptionsNamesFilesAndMessages(t *testing.T) {
+	plan := &doctor.RecoveryPlan{Items: []doctor.RecoveryItem{{DocID: "stored"}, {DocID: "unread"}, {DocID: "member"}, {DocID: "file"}, {DocID: "gone"}}}
+	described := map[string]postgres.Description{
+		"stored": {Location: "mail/1.eml", DocType: "email", From: "a@example.com", Subject: "Hello", Date: time.Date(2018, 11, 5, 0, 0, 0, 0, time.UTC)},
+		"unread": {Location: "mail/2.eml", DocType: "email", SHA256: "sha"},
+		"member": {Location: "bill.pdf in mail/3.eml", DocType: "pdf", From: "b@example.com", Subject: "Bill", InEmail: true},
+		"file":   {Location: "docs/report.pdf", DocType: "pdf"},
+	}
+	read := func(_ context.Context, ref, sha string) ([]byte, error) {
+		if ref != "source:unread" || sha != "sha" {
+			return nil, fmt.Errorf("unexpected read of %s", ref)
+		}
+		return []byte("From: c@example.com\r\nSubject: Unreadable body\r\nDate: Tue, 10 Mar 2011 11:09:24 -0800\r\n\r\nbody\r\n"), nil
+	}
+	applyDescriptions(context.Background(), plan, described, read)
+	want := map[string]struct {
+		location, line string
+		container      bool
+	}{
+		"stored": {"mail/1.eml", "2018-11-05, from a@example.com: Hello", false},
+		"unread": {"mail/2.eml", "2011-03-10, from c@example.com: Unreadable body", false},
+		"member": {"bill.pdf in mail/3.eml", "from b@example.com: Bill", true},
+		"file":   {"docs/report.pdf", "", false},
+		"gone":   {"", "", false},
+	}
+	for _, item := range plan.Items {
+		w := want[item.DocID]
+		line, container := "", false
+		if item.Email != nil {
+			line, container = emailLine(item.Email), item.Email.Container
+		}
+		if item.Location != w.location || line != w.line || container != w.container {
+			t.Errorf("%s: %q / %q (in email %v), want %q / %q (%v)", item.DocID, item.Location, line, container, w.location, w.line, w.container)
+		}
 	}
 }

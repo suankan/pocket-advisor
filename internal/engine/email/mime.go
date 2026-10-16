@@ -444,3 +444,27 @@ func sanitize(name string) string {
 	parts := strings.Split(name, "/")
 	return parts[len(parts)-1]
 }
+
+// Summary is what a reader sees of a message before opening it: its sender,
+// subject and date.
+type Summary struct {
+	From, Subject string
+	Date          time.Time
+}
+
+// Summarize reads only a message's header. It names a message ParseEmail
+// failed on: a broken body leaves the header, encoded words and all,
+// readable.
+func Summarize(data []byte) (Summary, error) {
+	msg, _, err := readMessage(data)
+	if err != nil {
+		return Summary{}, fmt.Errorf("read message: %w", err)
+	}
+	var s Summary
+	s.From, _ = storable(decodeHeader(msg.Header.Get("From")))
+	s.Subject, _ = storable(decodeHeader(msg.Header.Get("Subject")))
+	if d, err := msg.Header.Date(); err == nil {
+		s.Date = d
+	}
+	return s, nil
+}

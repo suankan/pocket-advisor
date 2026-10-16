@@ -134,3 +134,57 @@ func TestFAILEDWithReasonsSelectsOnlyThoseReasons(t *testing.T) {
 		t.Fatalf("every failure: %d selected, %v", len(all), err)
 	}
 }
+
+// A document is described by where its file is, and an email, or a member of
+// one, by the message's sender, subject and date.
+func TestDescribeNamesFilesAndMessages(t *testing.T) {
+	db, docs, _ := queueSetup(t)
+	ctx := context.Background()
+	inventory := NewSourceRepo(db)
+	scan, err := inventory.BeginScan(ctx, []string{"root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := func(name, docType string) string {
+		t.Helper()
+		id, _, err := docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex([]byte(name)), SourceName: name, DocType: docType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	message := stub("1.eml", "email")
+	if err := inventory.Observe(ctx, scan, message, source.File{RootKey: "root", RelativePath: "mail/1.eml", DisplayPath: "root/mail/1.eml", ModifiedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	sent := time.Date(2018, 11, 5, 10, 0, 0, 0, time.UTC)
+	if err := docs.SaveEmailText(ctx, message, "body", domain.EmailHeaders{From: "a@example.com", Subject: "Policy", Date: sent}); err != nil {
+		t.Fatal(err)
+	}
+	attachment := stub("policy.pdf", "pdf")
+	if err := docs.RecordPlacement(ctx, message, attachment); err != nil {
+		t.Fatal(err)
+	}
+	report := stub("report.pdf", "pdf")
+	if err := inventory.Observe(ctx, scan, report, source.File{RootKey: "root", RelativePath: "docs/report.pdf", DisplayPath: "root/docs/report.pdf", ModifiedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := NewDoctorQueries(db).Describe(ctx, []string{message, attachment, report, domain.NewDocID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]Description{
+		message:    {Location: "root/mail/1.eml", From: "a@example.com", Subject: "Policy", Date: sent},
+		attachment: {Location: "policy.pdf in root/mail/1.eml", From: "a@example.com", Subject: "Policy", Date: sent, InEmail: true},
+		report:     {Location: "root/docs/report.pdf"},
+	} {
+		d := got[id]
+		if d.Location != want.Location || d.From != want.From || d.Subject != want.Subject || !d.Date.Equal(want.Date) || d.InEmail != want.InEmail {
+			t.Errorf("%s described %+v, want %+v", id, d, want)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("described %d documents, want the 3 that exist", len(got))
+	}
+}

@@ -13,8 +13,11 @@ import (
 	"github.com/suankan/pocket-advisor/internal/config"
 	"github.com/suankan/pocket-advisor/internal/doctor"
 	"github.com/suankan/pocket-advisor/internal/domain"
+	"github.com/suankan/pocket-advisor/internal/engine/email"
+	"github.com/suankan/pocket-advisor/internal/source"
 	"github.com/suankan/pocket-advisor/internal/storage/postgres"
 	"github.com/suankan/pocket-advisor/internal/telemetry"
+	"github.com/suankan/pocket-advisor/internal/workspace"
 )
 
 // recoverySelectionCap bounds how many documents each state contributes to one
@@ -118,6 +121,9 @@ func runRecover(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 
 	plan := planner.Plan(ctx)
 	validation := planner.Validate(ctx, plan)
+	read, closeOriginals := originals(o, cfg, db, log)
+	defer closeOriginals()
+	describeItems(ctx, q, plan, read, log)
 
 	// Output
 	if o.JSON {
@@ -226,6 +232,69 @@ func selectByReasons(ctx context.Context, q *postgres.DoctorQueries, reasons []d
 	return docs, nil
 }
 
+// originalReader reads a document's original bytes back, verified by hash.
+type originalReader func(ctx context.Context, ref, sha string) ([]byte, error)
+
+// originals reads the workspace's configured originals, read-only, or returns
+// nil when they cannot be opened: describing a plan never depends on them.
+// The caller closes what it opened.
+func originals(o *Options, cfg *config.Config, db *postgres.DB, log *slog.Logger) (originalReader, func()) {
+	ws, err := workspace.Load(cfg.WorkspacesConfigPath, o.WorkspaceID)
+	if err != nil {
+		log.Warn("originals unavailable to describe recovery items", "error", err)
+		return nil, func() {}
+	}
+	r, err := source.New(ws.AbsPaths, ws.Ignore.Match, postgres.NewSourceRepo(db))
+	if err != nil {
+		log.Warn("originals unavailable to describe recovery items", "error", err)
+		return nil, func() {}
+	}
+	return r.Read, r.Close
+}
+
+// describeItems says where each planned document is, so the operator can
+// find the file behind it. A description that cannot be read leaves the plan
+// as it is.
+func describeItems(ctx context.Context, q *postgres.DoctorQueries, plan *doctor.RecoveryPlan, read originalReader, log *slog.Logger) {
+	ids := make([]string, 0, len(plan.Items))
+	for _, item := range plan.Items {
+		ids = append(ids, item.DocID)
+	}
+	described, err := q.Describe(ctx, ids)
+	if err != nil {
+		log.Warn("describing recovery items failed", "error", err)
+		return
+	}
+	applyDescriptions(ctx, plan, described, read)
+}
+
+// applyDescriptions sets each item's location and email. An email whose
+// header was never stored, because its body could not be read, is named
+// from its original's header when read is set.
+func applyDescriptions(ctx context.Context, plan *doctor.RecoveryPlan, described map[string]postgres.Description, read originalReader) {
+	for i, item := range plan.Items {
+		d, ok := described[item.DocID]
+		if !ok {
+			continue
+		}
+		plan.Items[i].Location = d.Location
+		if d.From == "" && d.Subject == "" && d.DocType == "email" && read != nil {
+			if data, err := read(ctx, source.Ref(item.DocID), d.SHA256); err == nil {
+				if s, err := email.Summarize(data); err == nil {
+					d.From, d.Subject, d.Date = s.From, s.Subject, s.Date
+				}
+			}
+		}
+		if d.From != "" || d.Subject != "" {
+			e := &doctor.EmailRef{From: d.From, Subject: d.Subject, Container: d.InEmail}
+			if !d.Date.IsZero() {
+				e.Date = d.Date.Format(time.DateOnly)
+			}
+			plan.Items[i].Email = e
+		}
+	}
+}
+
 // printPlan renders the plan in human-readable form.
 func printPlan(plan *doctor.RecoveryPlan) {
 	fmt.Printf("recovery plan for workspace %s\n", plan.WorkspaceID)
@@ -243,6 +312,16 @@ func printPlan(plan *doctor.RecoveryPlan) {
 
 	for _, item := range plan.Items {
 		fmt.Printf("  %s [%s] %s\n", item.DocID, item.Classification, item.Action)
+		if item.Location != "" {
+			fmt.Printf("    file: %s\n", item.Location)
+		}
+		if e := item.Email; e != nil {
+			label := "email"
+			if e.Container {
+				label = "in email"
+			}
+			fmt.Printf("    %s: %s\n", label, emailLine(e))
+		}
 		if item.Reason != "" {
 			fmt.Printf("    reason: %s\n", item.Reason)
 		}
@@ -290,4 +369,24 @@ func executeRecovery(ctx context.Context, q *postgres.DoctorQueries, plan *docto
 
 	fmt.Printf("\napplied: %d, refused: %d, failed: %d, total: %d\n", applied, refused, failed, len(plan.Items))
 	return nil
+}
+
+// emailLine names a message as "date, from sender: subject", leaving out what
+// it lacks.
+func emailLine(e *doctor.EmailRef) string {
+	var parts []string
+	if e.Date != "" {
+		parts = append(parts, e.Date)
+	}
+	if e.From != "" {
+		parts = append(parts, "from "+e.From)
+	}
+	line := strings.Join(parts, ", ")
+	if e.Subject != "" {
+		if line != "" {
+			line += ": "
+		}
+		line += strings.TrimSpace(e.Subject)
+	}
+	return line
 }

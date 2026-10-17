@@ -204,7 +204,7 @@ kubectl exec postgres-0 -n pocket-advisor -- \
 ./bin/pocket-advisor --doctor --workspace-id example --json
 ```
 
-Each finding has a stable code, a severity, a count, a summary containing no content or credentials, and one next action. The exit status is 0 when healthy, 1 when unhealthy but diagnosed, and 2 when the run itself failed.
+Each finding has a stable code, a severity, a count, a summary containing no content or credentials, and one next action. A workspace is healthy when no finding is above `info`: expected declines, such as files no handler reads, are information and never make it unhealthy. The exit status is 0 when healthy, 1 when unhealthy but diagnosed, and 2 when the run itself failed.
 
 `--recover` classifies documents instead of describing the workspace, and prints the plan without changing anything unless `--yes` is supplied:
 

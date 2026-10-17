@@ -75,11 +75,14 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 	if o.JSON {
 		b, err := report.JSON()
 		if err != nil {
-			return fmt.Errorf("marshal report: %w", err)
+			return &ExitError{Code: 2, Err: fmt.Errorf("marshal report: %w", err)}
 		}
 		fmt.Println(string(b))
 	} else {
 		printReport(report)
+	}
+	if code := report.ExitCode(); code != 0 {
+		return &ExitError{Code: code}
 	}
 
 	return nil
@@ -88,11 +91,15 @@ func runDoctor(o *Options, cfg *config.Config, logs *telemetry.Logs) error {
 // printReport renders the report in human-readable form.
 func printReport(r *doctor.Report) {
 	defer printQueue(r)
-	if r.Healthy {
+	switch {
+	case r.Healthy && len(r.Findings) == 0:
 		fmt.Printf("workspace %s: healthy\n", r.WorkspaceID)
 		return
+	case r.Healthy:
+		fmt.Printf("workspace %s: healthy (%d %s, information only)\n\n", r.WorkspaceID, len(r.Findings), plural(len(r.Findings), "finding", "findings"))
+	default:
+		fmt.Printf("workspace %s: UNHEALTHY (%d findings)\n\n", r.WorkspaceID, len(r.Findings))
 	}
-	fmt.Printf("workspace %s: UNHEALTHY (%d findings)\n\n", r.WorkspaceID, len(r.Findings))
 	for _, f := range r.Findings {
 		fmt.Printf("  [%s] %s (×%d)\n", f.Severity, f.Code, f.Count)
 		fmt.Printf("    %s\n", f.Summary)

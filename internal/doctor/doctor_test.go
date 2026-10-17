@@ -403,3 +403,24 @@ func TestScopeMismatchReportsOnlyTheMismatch(t *testing.T) {
 		t.Errorf("findings = %+v, want only the mismatch: nothing else may describe another workspace's database", r.Findings)
 	}
 }
+
+// Information is not a concern: a store whose only findings are expected
+// declines is healthy, and exits 0, while a warning makes it unhealthy, and
+// exits 1.
+func TestOnlyConcernsMakeAWorkspaceUnhealthy(t *testing.T) {
+	base := Checks{
+		RegistryOK: true, CredsOK: true, PGRaw: true, SourcesRaw: true,
+		EmbedModelOK: true, EmbedDimOK: true, PGVectorExtOK: true,
+		PGSchemaOK: true, PGHNSWOK: true, PGBM25OK: true,
+		SkippedByReason: map[string]int{"IMAGE_NOT_VIABLE": 9, "UNSUPPORTED_FORMAT": 3},
+	}
+	r := New("test-ws", base).Run(nil)
+	if !r.Healthy || len(r.Findings) != 2 || r.ExitCode() != 0 {
+		t.Fatalf("info only: healthy %v, %d findings, exit %d", r.Healthy, len(r.Findings), r.ExitCode())
+	}
+	base.StalePending = 1
+	r = New("test-ws", base).Run(nil)
+	if r.Healthy || r.ExitCode() != 1 {
+		t.Fatalf("with a warning: healthy %v, exit %d", r.Healthy, r.ExitCode())
+	}
+}

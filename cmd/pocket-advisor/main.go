@@ -30,6 +30,13 @@ func main() {
 	}
 
 	if err := cli.Run(opts); err != nil {
+		var exit *cli.ExitError
+		if errors.As(err, &exit) {
+			if exit.Err != nil {
+				fmt.Fprintf(os.Stderr, "pocket-advisor: %v\n", exit.Err)
+			}
+			os.Exit(exit.Code)
+		}
 		fmt.Fprintf(os.Stderr, "pocket-advisor: %v\n", err)
 		os.Exit(1)
 	}

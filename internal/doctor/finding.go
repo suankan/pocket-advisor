@@ -59,7 +59,8 @@ func (r *Report) JSON() ([]byte, error) {
 }
 
 // ExitCode returns the CLI exit code. 0 = healthy, 1 = unhealthy but
-// diagnosed, 2 = doctor execution failure.
+// diagnosed, 2 = doctor execution failure. A report is healthy when no
+// finding is above info.
 func (r *Report) ExitCode() int {
 	if r == nil {
 		return 2

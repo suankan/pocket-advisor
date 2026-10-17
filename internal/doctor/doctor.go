@@ -257,7 +257,7 @@ func (d *Doctor) Run(ctx context.Context) *Report {
 	}
 
 	r.Findings = findings
-	r.Healthy = len(findings) == 0
+	r.Healthy = !hasConcern(findings)
 	if len(d.checks.JobsByState) > 0 {
 		r.Queue = d.checks.JobsByState
 	}
@@ -284,4 +284,16 @@ func classifyAction(reason string) string {
 	default:
 		return "operator judgment required — inspect the failed job and its document"
 	}
+}
+
+// hasConcern reports whether any finding is more than information. Expected
+// declines are info: a corpus always holds files no handler reads, and
+// counting them would leave no store ever healthy.
+func hasConcern(findings []Finding) bool {
+	for _, f := range findings {
+		if f.Severity != SeverityInfo {
+			return true
+		}
+	}
+	return false
 }

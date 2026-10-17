@@ -17,7 +17,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
-	"unicode/utf8"
 )
 
 type Service struct {
@@ -130,9 +129,10 @@ func (s *Service) admit(ctx context.Context, scan string, f source.File, data []
 //     of its own, such as an email whose header block an earlier, shorter look
 //     missed, is rerouted to that handler;
 //   - content skipped at routing as an unsupported format that a handler now
-//     reads is routed to it. A handler that declined content it was sent
-//     records the same reason, but under the job it ran: rerouting that would
-//     repeat the decline on every scan;
+//     reads is routed to it, and so is text skipped at admission as an
+//     unknown encoding, which admission now always reads (SaveText). A
+//     handler that declined content it was sent records its reason under the
+//     job it ran: rerouting that would repeat the decline on every scan;
 //   - text or an archive no handler reads any more is recorded as unsupported,
 //     losing its text, passages and members, whatever it was recorded as:
 //     the embedding indexer declines such text it finds still queued, and
@@ -147,7 +147,8 @@ func (s *Service) settle(ctx context.Context, id string, data []byte, k postgres
 	}
 	switch {
 	case k.DocType == "text" && !route.Declined && route.Subject != postgres.SubjectEmbed,
-		k.Status == domain.StatusSkipped && k.Reason == domain.ReasonUnsupportedFormat && k.Jobless && !route.Declined:
+		k.Status == domain.StatusSkipped && k.Jobless && !route.Declined &&
+			(k.Reason == domain.ReasonUnsupportedFormat || k.Reason == domain.ReasonUnknownEncoding):
 		rerouted, err := s.Docs.Reroute(ctx, id, route.DocType, route.MimeType)
 		if err != nil || !rerouted {
 			return false, err
@@ -260,22 +261,19 @@ func (s *Service) dispatch(ctx context.Context, route Route, meta *ingestionv1.D
 		// be written before the command goes out: the command carries a
 		// reference, not the text (§4.1).
 		//
-		// Bytes the canonical column cannot hold are one skipped document, not
-		// a failed scan. The sniffer routes anything text-shaped here, and it
-		// labels a non-UTF-8 file iso-8859-1 by assumption rather than by
-		// declaration, so decoding it would be a guess (§6.3). NUL is valid
-		// UTF-8 that PostgreSQL text still refuses.
-		if !utf8.Valid(data) {
-			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonUnknownEncoding)
-		}
-		if bytes.IndexByte(data, 0) >= 0 {
-			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, domain.ReasonNULBytes)
-		}
-		if err := s.Docs.SaveText(ctx, meta.DocId, string(data), route.DocType); err != nil {
+		// Text the canonical column cannot hold is one skipped document, not a
+		// failed scan. The sniffer labels a non-UTF-8 file iso-8859-1 by
+		// assumption rather than declaration, so the bytes are decoded by what
+		// they show, not by that label (§6.3).
+		text, declined, err := SaveText(ctx, s.Docs, meta.DocId, data, route.DocType)
+		if err != nil {
 			return err
 		}
+		if declined != "" {
+			return s.Docs.UpdateStatus(ctx, meta.DocId, domain.StatusSkipped, declined)
+		}
 		return s.Jobs.Publish(ctx, route.Subject, &ingestionv1.EmbedTextCommand{
-			Metadata: meta, TextLength: int64(len(data)),
+			Metadata: meta, TextLength: int64(len(text)),
 		}, tp)
 	}
 	return fmt.Errorf("no route for subject %q", route.Subject)

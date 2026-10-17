@@ -45,6 +45,10 @@ const (
 	// UTF-8, with every byte sequence that is not replaced by U+FFFD. Value
 	// carries the declared charset, empty when none was declared.
 	WarnUnreadableBody WarningCode = "unreadable_body"
+	// WarnDetectedCharset marks a body part whose bytes did not match the
+	// charset it declares, read instead as Russian in the charset its letters
+	// showed unmistakably (charset.Russian). Value carries that charset.
+	WarnDetectedCharset WarningCode = "detected_charset"
 )
 
 // ParseWarning is one defect found in one header. Value carries the offending

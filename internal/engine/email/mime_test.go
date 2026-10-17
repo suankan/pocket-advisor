@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/text/encoding/charmap"
 	"unicode/utf8"
 )
 
@@ -364,5 +366,36 @@ func TestParseEmailKeepsAnAttachmentWithAnUnquotedName(t *testing.T) {
 		if w.Code == WarnUnreadableBody {
 			t.Errorf("the attachment was read as body: %+v", w)
 		}
+	}
+}
+
+// Old Russian mail declares no charset, or ASCII, and writes KOI8-R or
+// Windows-1251. Its letters show which, so the body is read as Russian and the
+// message notes the charset it was read under.
+func TestParseEmailReadsUndeclaredRussian(t *testing.T) {
+	body := "Добрый день! Высылаю договор и счёт за май. Прошу подтвердить получение письма до пятницы.\r\n"
+	koi8, err := charmap.KOI8R.NewEncoder().Bytes([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "From: sender@example.com\r\nSubject: Letter\r\nContent-Type: text/plain\r\n\r\n" + string(koi8)
+	p, err := ParseEmail([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.BodyText, "Высылаю договор и счёт за май") {
+		t.Errorf("body %q", p.BodyText)
+	}
+	var noted []string
+	for _, w := range p.Headers.Warnings {
+		switch w.Code {
+		case WarnDetectedCharset:
+			noted = append(noted, w.Value)
+		case WarnUnreadableBody:
+			t.Errorf("a Russian body was noted unreadable")
+		}
+	}
+	if len(noted) != 1 || noted[0] != "koi8-r" {
+		t.Errorf("detected_charset warnings %q", noted)
 	}
 }

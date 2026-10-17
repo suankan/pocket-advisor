@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/encoding/charmap"
+
 	ingestionv1 "github.com/suankan/pocket-advisor/api/proto/v1/gen"
 	"github.com/suankan/pocket-advisor/internal/domain"
 	"github.com/suankan/pocket-advisor/internal/source"
@@ -300,5 +302,50 @@ func TestScanSettlesRoutesTheFormatsNoLongerAgreeWith(t *testing.T) {
 	var embeds int
 	if err := s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ingestion_jobs WHERE doc_id = $1 AND state = 'READY'`, skipped).Scan(&embeds); err != nil || embeds != 1 {
 		t.Fatalf("newly supported content: %d ready jobs, %v", embeds, err)
+	}
+}
+
+// Plain text in an old Russian charset is admitted as text, read under the
+// charset its letters show and noted with it, and text a release skipped as an
+// unknown encoding is sent again; text holding NUL is still declined.
+func TestScanReadsTextInLegacyCharsets(t *testing.T) {
+	s, root := scanFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	russian := "Добрый день! Высылаю договор и счёт за май. Прошу подтвердить получение письма до пятницы.\n"
+	koi8, err := charmap.KOI8R.NewEncoder().Bytes([]byte(russian))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp1251, err := charmap.Windows1251.NewEncoder().Bytes([]byte(russian + "Ещё раз спасибо.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"letter.txt": koi8, "earlier.txt": cp1251} {
+		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// As an earlier release left it: skipped at admission, with no job.
+	earlier, _, err := s.Docs.CreateStub(ctx, &domain.Document{DocID: domain.NewDocID(), RawSHA256: domain.SHA256Hex(cp1251), SourceName: "earlier.txt", DocType: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Docs.UpdateStatus(ctx, earlier, domain.StatusSkipped, domain.ReasonUnknownEncoding); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Scan(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"letter.txt": "detected:koi8-r", "earlier.txt": "detected:windows-1251"} {
+		var status, note, text string
+		if err := s.DB.Pool.QueryRow(ctx, `SELECT d.processing_status::text, COALESCE(d.metadata_headers->>'text_decoding', ''), COALESCE(d.normalized_text, '')
+		 FROM documents d JOIN source_occurrences o USING (doc_id) WHERE o.relative_path = $1`, name).Scan(&status, &note, &text); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(domain.StatusPending) || note != want || !strings.Contains(text, "Высылаю договор") {
+			t.Errorf("%s: %s, note %q, text %q", name, status, note, text)
+		}
 	}
 }

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 
@@ -276,20 +274,17 @@ func (w *EmailWorker) dispatchChild(ctx context.Context, parent *ingestionv1.Doc
 			Metadata: meta, SourceRef: uri, ByteSize: int64(len(c.Data)),
 		}, tp)
 	case postgres.SubjectEmbed:
-		// Same line as discovery draws on a staged text file: an attachment
-		// whose bytes are not valid UTF-8 is declined, not dead-lettered under
-		// a driver-level error nobody can classify.
-		if !utf8.Valid(c.Data) {
-			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonUnknownEncoding)
-		}
-		if bytes.IndexByte(c.Data, 0) >= 0 {
-			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, domain.ReasonNULBytes)
-		}
-		if err := w.Docs.SaveText(ctx, childID, string(c.Data), route.DocType); err != nil {
+		// The same path discovery takes for a staged text file, so an
+		// attachment and a file with the same bytes read alike.
+		text, declined, err := discovery.SaveText(ctx, w.Docs, childID, c.Data, route.DocType)
+		if err != nil {
 			return err
 		}
+		if declined != "" {
+			return w.Docs.UpdateStatus(ctx, childID, domain.StatusSkipped, declined)
+		}
 		return w.Bus.Publish(ctx, route.Subject, &ingestionv1.EmbedTextCommand{
-			Metadata: meta, TextLength: int64(len(c.Data)),
+			Metadata: meta, TextLength: int64(len(text)),
 		}, tp)
 	}
 	return fmt.Errorf("no route for %q", route.Subject)

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/suankan/pocket-advisor/internal/engine/charset"
 )
 
 // Archive unrolling errors. Each names why an archive is declined; the bytes
@@ -68,23 +70,30 @@ type Parsed struct {
 	// message.
 	charsetHint string
 	// unreadable lists the charsets declared by body parts that did not
-	// decode under them (readText).
+	// decode under them, and detected the charsets read instead (readText).
 	unreadable []string
+	detected   []string
 }
 
 // readText decodes a text part under the charset it declares. A part whose
 // bytes do not match that charset, or that declares one nothing reads, is
-// read as UTF-8 with each byte sequence that is not replaced by U+FFFD, and
-// noted. Mailers routinely label Windows-1252 quotes and accents as ASCII or
-// UTF-8. The replacement marks exactly the bytes that could not be read,
-// where reading the part under a guessed charset would turn them into
-// plausible wrong letters, silently.
-func (p *Parsed) readText(raw []byte, charset string) string {
-	text, err := decodeText(raw, charset)
+// read as Russian when its letters show Windows-1251 or KOI8-R unmistakably,
+// as old Russian mail without a declaration does; otherwise as UTF-8 with
+// each byte sequence that is not replaced by U+FFFD. Either is noted.
+// Mailers routinely label Windows-1252 quotes and accents as ASCII or UTF-8.
+// The replacement marks exactly the bytes that could not be read, where
+// reading the part under a guessed charset would turn them into plausible
+// wrong letters, silently.
+func (p *Parsed) readText(raw []byte, declared string) string {
+	text, err := decodeText(raw, declared)
 	if err == nil {
 		return text
 	}
-	p.unreadable = append(p.unreadable, charset)
+	if d, ok := charset.Russian(raw); ok {
+		p.detected = append(p.detected, d.Charset)
+		return d.Text
+	}
+	p.unreadable = append(p.unreadable, declared)
 	return strings.ToValidUTF8(string(raw), "\uFFFD")
 }
 
@@ -120,8 +129,11 @@ func ParseEmail(data []byte) (*Parsed, error) {
 		return nil, err
 	}
 	warns := append(repairs, legacyHeaders(msg.Header, p.charsetHint)...)
-	for _, charset := range p.unreadable {
-		warns = append(warns, ParseWarning{Code: WarnUnreadableBody, Value: charset})
+	for _, declared := range p.unreadable {
+		warns = append(warns, ParseWarning{Code: WarnUnreadableBody, Value: declared})
+	}
+	for _, detected := range p.detected {
+		warns = append(warns, ParseWarning{Code: WarnDetectedCharset, Value: detected})
 	}
 	warns = append(warns, storableHeaders(msg.Header)...)
 	decoded := func(name string) string {

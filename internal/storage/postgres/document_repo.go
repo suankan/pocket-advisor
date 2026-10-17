@@ -210,6 +210,21 @@ func (r *DocumentRepo) reset(ctx context.Context, docID string, final ...resetSt
 	return true, nil
 }
 
+// NoteTextDecoding records how a document's text was decoded from bytes that
+// were not plain UTF-8, such as "detected:koi8-r" or "replaced", under
+// metadata_headers.text_decoding.
+func (r *DocumentRepo) NoteTextDecoding(ctx context.Context, docID, note string) error {
+	_, err := r.db.executor(ctx).Exec(ctx, `
+        UPDATE documents
+        SET metadata_headers = metadata_headers || jsonb_build_object('text_decoding', $2::text),
+            updated_at = now()
+        WHERE doc_id = $1`, docID, note)
+	if err != nil {
+		return fmt.Errorf("note text decoding %s: %w", docID, err)
+	}
+	return nil
+}
+
 // UpdateStatus moves a document to a terminal or intermediate state. reason is
 // recorded in metadata_headers so SKIPPED and FAILED rows stay auditable.
 func (r *DocumentRepo) UpdateStatus(ctx context.Context, docID string, s domain.Status, reason domain.FailureReason) error {
